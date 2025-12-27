@@ -110,6 +110,12 @@ public sealed unsafe partial class RocketEngine {
         }
     }
 
+    private static io_uring* CreatePRing(uint flags, int sqThreadCpu, uint sqThreadIdleMs, out int err) {
+        if(flags == 0)
+            return shim_create_ring((uint)s_ringEntries, out err);
+        return shim_create_ring_ex((uint)s_ringEntries, flags, sqThreadCpu, sqThreadIdleMs, out err);
+    }
+
     // TODO: This seems to be causing Segmentation fault (core dumped) when sqe is null
     private static io_uring_sqe* SqeGet(io_uring* pring) {
         io_uring_sqe* sqe = shim_get_sqe(pring);

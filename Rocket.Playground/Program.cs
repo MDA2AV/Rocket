@@ -12,7 +12,7 @@ internal static class Program {
     internal static async Task Main() {
         var builder = RocketEngine
             .CreateBuilder()
-            .ReactorQuant(() => Environment.ProcessorCount/4)
+            .ReactorQuant(() => Environment.ProcessorCount / 32)
             .Backlog(16 * 1024)
             .Port(8080)
             .RecvBufferSize(32 * 1024);
@@ -34,7 +34,7 @@ internal static class Program {
                 await connection.ReadAsync();
                 unsafe {
                     var span = new ReadOnlySpan<byte>(connection.InPtr, connection.InLength);
-                    var s = Encoding.UTF8.GetString(span);
+                    //var s = Encoding.UTF8.GetString(span);
                 }
                 
                 unsafe {
