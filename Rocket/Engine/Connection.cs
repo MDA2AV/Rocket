@@ -58,10 +58,10 @@ public sealed unsafe class Connection : IValueTaskSource<bool>
         _readSignal.Reset();
 
         // Clear "current read" metadata (optional but helps avoid misuse)
-        InPtr = null;
-        InLength = 0;
-        HasBuffer = false;
-        BufferId = 0;
+        //InPtr = null;
+        //InLength = 0;
+        //HasBuffer = false;
+        //BufferId = 0;
     }
 
     public void Clear() {

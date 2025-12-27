@@ -1,8 +1,24 @@
-# Spring
-C# io_uring Socket like library
+## Rocket - R(ing)(S)ocket
 
- - S - Socket like
- - p - unsafe context, can use with pointers
- - ring - io_uring 
+Rocket is an experimental, low-level HTTP server built in C# on top of Linux **io_uring**. The goal of the project is not to abstract the system away, but to expose it: Rocket intentionally avoids “magic” layers and instead gives the developer direct control over sockets, buffers, queues, and scheduling. It is designed as a learning and benchmarking platform for understanding what modern Linux I/O can look like when combined with a managed runtime.
 
-## Project under development, do not use :)
+At a high level, Rocket follows a split architecture: a single **acceptor** thread is responsible for listening and accepting new TCP connections using `io_uring` multishot accept, while a configurable number of **reactor** threads handle all receive and send operations. Each reactor owns its own `io_uring` instance, its own buffer ring, and its own connection table. This ownership model avoids cross-thread contention and makes memory and lifetime rules explicit and predictable.
+
+Rocket makes heavy use of **multishot operations** and **buffer selection**. Incoming data is received via `recv_multishot` with a registered buffer ring, allowing the kernel to select a pre-allocated buffer and return its identifier in the completion event. This removes the need for per-read allocations or temporary buffers and keeps data movement minimal. Buffers are returned to the ring only after the application finishes processing them, making buffer lifetime a first-class concept in the API.
+
+The project also replaces high-level async primitives with reusable, allocation-free signaling mechanisms. Instead of `TaskCompletionSource`, Rocket uses `ValueTask` and `ManualResetValueTaskSourceCore` to signal readiness between worker threads and application code. This enforces a strict “one read at a time” contract per connection and mirrors how low-level event-driven systems operate, while still integrating cleanly with `async/await`.
+
+Rocket is intentionally minimal and unapologetically opinionated. It does not yet include a full HTTP parser, protocol state machines, or safety nets you would expect from a production framework. Instead, it serves as a foundation for experimentation: exploring kernel features like SQPOLL, studying CQE batching strategies, testing buffer ring sizing, and understanding how far C# can be pushed toward the metal without abandoning correctness or maintainability.
+
+
+## What is io_uring and how does it work?
+
+**io_uring** is a modern Linux kernel interface for asynchronous I/O that replaces the traditional “syscall per operation” model with a shared-memory, ring-buffer based design. Instead of calling `read`, `write`, `accept`, or `epoll_wait` repeatedly, an application submits I/O requests by writing descriptors into a **Submission Queue (SQ)** that lives in memory shared between user space and the kernel. The kernel processes these requests asynchronously and reports their completion by writing entries into a **Completion Queue (CQ)**, which is also shared memory. Once the ring is set up, most I/O operations require no syscalls at all, dramatically reducing overhead.
+
+The core idea behind io_uring is **decoupling submission from completion**. An application can batch many I/O operations into the submission queue, notify the kernel once, and later consume completions in batches. Each completion entry (CQE) contains the result of the operation (such as number of bytes read or a negative errno) and an opaque 64-bit `user_data` value supplied by the application. This allows applications to associate completions with their own state without kernel involvement or lookup costs.
+
+io_uring introduces several features that go beyond earlier async models like `epoll`. **Multishot operations** allow a single submission to produce multiple completion events over time, such as repeated `accept` or `recv` results, removing the need to resubmit after every event. **Buffer selection** allows applications to pre-register a pool of buffers and let the kernel choose which one to use for each receive, returning only a small buffer identifier instead of copying data. Together, these features reduce both syscall overhead and memory management complexity in high-throughput servers.
+
+Internally, the kernel processes io_uring requests using worker threads or direct execution depending on the operation type. For many network operations, the kernel can complete requests inline without waking extra threads. Optional modes like **SQPOLL** allow a dedicated kernel thread to poll the submission queue, eliminating even the submit syscall at the cost of dedicating a CPU core. The result is an I/O model that scales cleanly with core count and minimizes latency spikes caused by scheduler interactions.
+
+In practice, io_uring enables application designs that look closer to explicit event loops found in high-performance C or Rust systems, while remaining usable from higher-level languages. By combining shared memory queues, batching, multishot semantics, and explicit buffer lifetimes, io_uring provides a foundation for building extremely efficient networking and storage systems—exactly the kind of workload Rocket is designed to explore.
