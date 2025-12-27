@@ -36,10 +36,66 @@ internal static class Program
         {
             while (true)
             {
+                // 1) Wait for worker to signal bytes are ready
+                await connection.ReadAsync();
+
+                // 2) Consume bytes BEFORE resetting anything
+                unsafe
+                {
+                    var span = new ReadOnlySpan<byte>(connection.InPtr, connection.InLength);
+                    // Avoid decoding for perf; just showing correctness
+                    var s = Encoding.UTF8.GetString(span);
+                }
+
+                // 3) Return buf-ring buffer (important!)
+                unsafe
+                {
+                    if (connection.HasBuffer)
+                    {
+                        var worker = RocketEngine.s_Workers[connection.WorkerIndex];
+                        worker.ReturnBufferRing(connection.InPtr, connection.BufferId);
+                    }
+                }
+
+                // 4) Now reset the read cycle so you can arm the next ReadAsync()
+                connection.ResetRead();
+
+                // 5) Send response
+                unsafe
+                {
+                    connection.OutPtr  = RocketEngine.OK_PTR;
+                    connection.OutHead = 0;
+                    connection.OutTail = RocketEngine.OK_LEN;
+
+                    RocketEngine.SubmitSend(
+                        RocketEngine.s_Workers[connection.WorkerIndex].PRing,
+                        connection.Fd,
+                        connection.OutPtr,
+                        connection.OutHead,
+                        connection.OutTail);
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine(e);
+        }
+
+        Console.WriteLine("end");
+    }
+
+    
+    internal static async ValueTask HandleAsync2(Connection connection)
+    {
+        try
+        {
+            while (true)
+            {
                 // Read request
                 await connection.ReadAsync();
                 //connection.Tcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
-                connection.Tcs = new(); // reset tcs
+                //connection.Tcs = new(); // reset tcs
+                connection.ResetRead();
 
                 unsafe
                 {
@@ -63,7 +119,6 @@ internal static class Program
                     connection.OutPtr  = okPtr;
                     connection.OutHead = 0;
                     connection.OutTail = okLen;
-                    connection.Sending = true;
                     
                     RocketEngine.SubmitSend(
                         RocketEngine.s_Workers[connection.WorkerIndex].PRing,

@@ -113,7 +113,7 @@ public sealed unsafe partial class RocketEngine {
                                 connection.BufferId = bufferId;
                                 connection.InPtr = worker.BufferRingSlab + (nuint)connection.BufferId * (nuint)s_recvBufferSize;
                                 connection.InLength = res;
-                                connection.Tcs.TrySetResult(true);
+                                connection.SignalReadReady();
                                 
                                 if (!hasMore) ArmRecvMultishot(worker.PRing, fd, c_bufferRingGID);
                             }
@@ -126,8 +126,6 @@ public sealed unsafe partial class RocketEngine {
                             connection.OutHead += (nuint)res;
                             if (connection.OutHead < connection.OutTail)
                                 SubmitSend(worker.PRing, connection.Fd, connection.OutPtr, connection.OutHead, connection.OutTail);
-                            else
-                                connection.Sending = false;
                         }
                     }
                     shim_cqe_seen(worker.PRing, cqe);

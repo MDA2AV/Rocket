@@ -14,7 +14,6 @@ public sealed unsafe partial class RocketEngine {
         io_uring* pring = null;
         try {
             pring = shim_create_ring(256, out int err);
-            
             // SQPOLL
             /*const uint flags = IORING_SETUP_SQPOLL;
             // Pin SQPOLL thread to CPU 0 (for example) and let it idle 2000ms before sleeping.
@@ -22,19 +21,19 @@ public sealed unsafe partial class RocketEngine {
             uint sqThreadIdleMs  = 2000;
             pring = shim_create_ring_ex(256, flags, sqThreadCpu, sqThreadIdleMs, out int err);*/
             
-            var ringFlags = shim_get_ring_flags(pring);
+            uint ringFlags = shim_get_ring_flags(pring);
             Console.WriteLine($"[acceptor] ring flags = 0x{ringFlags:x} " +
                               $"(SQPOLL={(ringFlags & IORING_SETUP_SQPOLL) != 0}, " +
                               $"SQ_AFF={(ringFlags & IORING_SETUP_SQ_AFF) != 0})");
             if (pring == null || err < 0) { Console.Error.WriteLine($"[acceptor] create_ring failed: {err}"); return; }
             // Start multishot accept
-            var sqe = SqeGet(pring);
+            io_uring_sqe* sqe = SqeGet(pring);
             shim_prep_multishot_accept(sqe, lfd, SOCK_NONBLOCK);
             shim_sqe_set_data64(sqe, PackUd(UdKind.Accept, lfd));
             shim_submit(pring);
             Console.WriteLine("[acceptor] Multishot accept armed");
             
-            var cqes = new io_uring_cqe*[32];
+            io_uring_cqe*[] cqes = new io_uring_cqe*[32];
             int nextWorker = 0;
             int one = 1;
             Console.WriteLine($"[acceptor] Load balancing across {workerCount} workers");
@@ -52,9 +51,9 @@ public sealed unsafe partial class RocketEngine {
                 }
 
                 for (int i = 0; i < got; i++) {
-                    var cqe = cqes[i];
+                    io_uring_cqe* cqe = cqes[i];
                     ulong ud = shim_cqe_get_data64(cqe);
-                    var kind = UdKindOf(ud);
+                    UdKind kind = UdKindOf(ud);
                     int res = cqe->res;
 
                     if (kind == UdKind.Accept) {
@@ -65,17 +64,15 @@ public sealed unsafe partial class RocketEngine {
                             setsockopt(clientFd, IPPROTO_TCP, TCP_NODELAY, &one, (uint)sizeof(int));
 
                             // Round-robin to next worker
-                            var targetWorker = nextWorker;
+                            int targetWorker = nextWorker;
                             nextWorker = (nextWorker + 1) % workerCount;
 
                             WorkerQueues[targetWorker].Enqueue(clientFd);
                             Connections[targetWorker][clientFd] = ConnectionPool.Get().SetFd(clientFd).SetWorkerIndex(targetWorker);
                             
-                            var connectionAdded = ConnectionQueues.Writer.TryWrite(new ConnectionItem(targetWorker, clientFd));
-                            if (!connectionAdded)
-                            {
-                                Console.WriteLine("Failed to write connection!!");
-                            }
+                            bool connectionAdded = ConnectionQueues.Writer.TryWrite(new ConnectionItem(targetWorker, clientFd));
+                            if (!connectionAdded) Console.WriteLine("Failed to write connection!!");
+                            
                         }else { Console.WriteLine($"[acceptor] Accept error: {res}"); }
                     }
                     shim_cqe_seen(pring, cqe);
@@ -115,7 +112,7 @@ public sealed unsafe partial class RocketEngine {
 
     // TODO: This seems to be causing Segmentation fault (core dumped) when sqe is null
     private static io_uring_sqe* SqeGet(io_uring* pring) {
-        var sqe = shim_get_sqe(pring);
+        io_uring_sqe* sqe = shim_get_sqe(pring);
         if (sqe == null) {
             Console.WriteLine("S4");
             shim_submit(pring); 
@@ -125,13 +122,13 @@ public sealed unsafe partial class RocketEngine {
     }
 
     public static void SubmitSend(io_uring* pring, int fd, byte* buf, nuint off, nuint len) {
-        var sqe = SqeGet(pring);
+        io_uring_sqe* sqe = SqeGet(pring);
         shim_prep_send(sqe, fd, buf + off, (uint)(len - off), 0);
         shim_sqe_set_data64(sqe, PackUd(UdKind.Send, fd));
     }
 
     private static void ArmRecvMultishot(io_uring* pring, int fd, uint bgid) {
-        var sqe = SqeGet(pring);
+        io_uring_sqe* sqe = SqeGet(pring);
         shim_prep_recv_multishot_select(sqe, fd, bgid, 0);
         shim_sqe_set_data64(sqe, PackUd(UdKind.Recv, fd));
     }
@@ -147,9 +144,8 @@ public sealed unsafe partial class RocketEngine {
         addr.sin_family = (ushort)AF_INET;
         addr.sin_port = Htons(port);
 
-        var ipb = Encoding.UTF8.GetBytes(ip + "\0");
-        fixed (byte* pip = ipb)
-            inet_pton(AF_INET, (sbyte*)pip, &addr.sin_addr);
+        byte[] ipb = Encoding.UTF8.GetBytes(ip + "\0");
+        fixed (byte* pip = ipb) inet_pton(AF_INET, (sbyte*)pip, &addr.sin_addr);
 
         bind(lfd, &addr, (uint)sizeof(sockaddr_in));
         listen(lfd, s_backlog);
