@@ -9,17 +9,17 @@ namespace Rocket.Engine;
 // (var is avoided intentionally in this project so that concrete types are visible at call sites.)
 
 public sealed unsafe partial class RocketEngine {
-    public static void AcceptorLoop(string ip, ushort port, int workerCount) {
+    public static void AcceptorLoop(string ip, ushort port, int reactorCount) {
         int lfd = CreateListen(ip, port);
         io_uring* pring = null;
         try {
-            pring = shim_create_ring(256, out int err);
+            //pring = shim_create_ring(256, out int err);
             // SQPOLL
-            /*const uint flags = IORING_SETUP_SQPOLL;
+            const uint flags = IORING_SETUP_SQPOLL;
             // Pin SQPOLL thread to CPU 0 (for example) and let it idle 2000ms before sleeping.
             int  sqThreadCpu     = 0;
             uint sqThreadIdleMs  = 2000;
-            pring = shim_create_ring_ex(256, flags, sqThreadCpu, sqThreadIdleMs, out int err);*/
+            pring = shim_create_ring_ex(256, flags, sqThreadCpu, sqThreadIdleMs, out int err);
             
             uint ringFlags = shim_get_ring_flags(pring);
             Console.WriteLine($"[acceptor] ring flags = 0x{ringFlags:x} " +
@@ -34,9 +34,9 @@ public sealed unsafe partial class RocketEngine {
             Console.WriteLine("[acceptor] Multishot accept armed");
             
             io_uring_cqe*[] cqes = new io_uring_cqe*[32];
-            int nextWorker = 0;
+            int nextReactor = 0;
             int one = 1;
-            Console.WriteLine($"[acceptor] Load balancing across {workerCount} workers");
+            Console.WriteLine($"[acceptor] Load balancing across {reactorCount} reactors");
 
             while (!StopAll) {
                 int got;
@@ -63,14 +63,14 @@ public sealed unsafe partial class RocketEngine {
                             // TCP_NODELAY
                             setsockopt(clientFd, IPPROTO_TCP, TCP_NODELAY, &one, (uint)sizeof(int));
 
-                            // Round-robin to next worker
-                            int targetWorker = nextWorker;
-                            nextWorker = (nextWorker + 1) % workerCount;
+                            // Round-robin to next reactor
+                            int targetReactor = nextReactor;
+                            nextReactor = (nextReactor + 1) % reactorCount;
 
-                            WorkerQueues[targetWorker].Enqueue(clientFd);
-                            Connections[targetWorker][clientFd] = ConnectionPool.Get().SetFd(clientFd).SetWorkerIndex(targetWorker);
+                            ReactorQueues[targetReactor].Enqueue(clientFd);
+                            Connections[targetReactor][clientFd] = ConnectionPool.Get().SetFd(clientFd).SetReactorId(targetReactor);
                             
-                            bool connectionAdded = ConnectionQueues.Writer.TryWrite(new ConnectionItem(targetWorker, clientFd));
+                            bool connectionAdded = ConnectionQueues.Writer.TryWrite(new ConnectionItem(targetReactor, clientFd));
                             if (!connectionAdded) Console.WriteLine("Failed to write connection!!");
                             
                         }else { Console.WriteLine($"[acceptor] Accept error: {res}"); }

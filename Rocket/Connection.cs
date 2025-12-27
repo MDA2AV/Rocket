@@ -1,7 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks.Sources;
 
-namespace Rocket.Engine;
+namespace Rocket;
 
 [SkipLocalsInit]
 public sealed unsafe class Connection : IValueTaskSource<bool>
@@ -10,9 +10,9 @@ public sealed unsafe class Connection : IValueTaskSource<bool>
     public ushort BufferId;
 
     public int Fd;
-    public int WorkerIndex;
+    public int ReactorId;
 
-    // In buffer (points into worker's buffer-ring slab)
+    // In buffer (points into reactor's buffer-ring slab)
     public byte* InPtr;
     public int InLength;
 
@@ -31,7 +31,7 @@ public sealed unsafe class Connection : IValueTaskSource<bool>
     public Connection() { }
 
     /// <summary>
-    /// Await until the worker signals that new bytes are available in InPtr/InLength.
+    /// Await until the reactor signals that new bytes are available in InPtr/InLength.
     /// One outstanding await is supported at a time.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -42,7 +42,7 @@ public sealed unsafe class Connection : IValueTaskSource<bool>
     }
 
     /// <summary>
-    /// Called by the worker thread when it has produced readable bytes for this connection.
+    /// Called by the reactor thread when it has produced readable bytes for this connection.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void SignalReadReady() { _readSignal.SetResult(true); }
@@ -78,17 +78,13 @@ public sealed unsafe class Connection : IValueTaskSource<bool>
         InLength = 0;
         HasBuffer = false;
         BufferId = 0;
-
-        // Keep Fd/WorkerIndex as caller may set them explicitly after pooling
     }
 
     public Connection SetFd(int fd) { Fd = fd; return this; }
 
-    public Connection SetWorkerIndex(int workerIndex) { WorkerIndex = workerIndex; return this; }
-
-    // -------------------------------
+    public Connection SetReactorId(int reactorId) { ReactorId = reactorId; return this; }
+    
     // IValueTaskSource<bool> plumbing
-    // -------------------------------
     bool IValueTaskSource<bool>.GetResult(short token) => _readSignal.GetResult(token);
     ValueTaskSourceStatus IValueTaskSource<bool>.GetStatus(short token) => _readSignal.GetStatus(token);
     void IValueTaskSource<bool>.OnCompleted(
