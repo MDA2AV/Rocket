@@ -9,26 +9,31 @@ namespace URocket.Engine;
 
 public sealed unsafe partial class RocketEngine {
     public class Acceptor {
-        public io_uring* Ring;
-        public AcceptorConfig Config { get; }
+        private io_uring_sqe* _sqe;
+        private readonly AcceptorConfig _config;
+        
+        public io_uring* Ring { get; private set; }
         public int ListenFd { get; }
 
         public Acceptor() : this(new  AcceptorConfig()) { }
-        public Acceptor(AcceptorConfig config) { Config = config; ListenFd = CreateListen(c_ip, s_port); }
+        public Acceptor(AcceptorConfig config) { _config = config; ListenFd = CreateListenerSocket(c_ip, s_port); }
 
         public void InitRing() {
-            Ring = CreatePRing(Config.RingFlags, Config.SqCpuThread, Config.SqThreadIdleMs, out int err, Config.RingEntries);
-            uint ringFlags = shim_get_ring_flags(Ring);
-            Console.WriteLine($"[acceptor] ring flags = 0x{ringFlags:x} " +
-                              $"(SQPOLL={(ringFlags & IORING_SETUP_SQPOLL) != 0}, " +
-                              $"SQ_AFF={(ringFlags & IORING_SETUP_SQ_AFF) != 0})");
+            Ring = CreateRing(_config.RingFlags, _config.SqCpuThread, _config.SqThreadIdleMs, out int err, _config.RingEntries);
+            CheckRingFlags(shim_get_ring_flags(Ring));
             if (Ring == null || err < 0) { Console.Error.WriteLine($"[acceptor] create_ring failed: {err}"); return; }
             // Start multishot accept
-            io_uring_sqe* sqe = SqeGet(Ring);
-            shim_prep_multishot_accept(sqe, ListenFd, SOCK_NONBLOCK);
-            shim_sqe_set_data64(sqe, PackUd(UdKind.Accept, ListenFd));
+            _sqe = SqeGet(Ring);
+            shim_prep_multishot_accept(_sqe, ListenFd, SOCK_NONBLOCK);
+            shim_sqe_set_data64(_sqe, PackUd(UdKind.Accept, ListenFd));
             shim_submit(Ring);
             Console.WriteLine("[acceptor] Multishot accept armed");
+        }
+
+        private void CheckRingFlags(uint flags) {
+            Console.WriteLine($"[acceptor] ring flags = 0x{flags:x} " +
+                              $"(SQPOLL={(flags & IORING_SETUP_SQPOLL) != 0}, " +
+                              $"SQ_AFF={(flags & IORING_SETUP_SQ_AFF) != 0})");
         }
     }
 }

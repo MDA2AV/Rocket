@@ -93,7 +93,7 @@ public sealed unsafe partial class RocketEngine {
         }
     }
 
-    private static io_uring* CreatePRing(uint flags, int sqThreadCpu, uint sqThreadIdleMs, out int err, uint ringEntries) {
+    private static io_uring* CreateRing(uint flags, int sqThreadCpu, uint sqThreadIdleMs, out int err, uint ringEntries) {
         if(flags == 0)
             return shim_create_ring(ringEntries, out err);
         return shim_create_ring_ex(ringEntries, flags, sqThreadCpu, sqThreadIdleMs, out err);
@@ -122,7 +122,7 @@ public sealed unsafe partial class RocketEngine {
         shim_sqe_set_data64(sqe, PackUd(UdKind.Recv, fd));
     }
     
-    private static int CreateListen(string ip, ushort port) {
+    private static int CreateListenerSocket(string ip, ushort port) {
         int lfd = socket(AF_INET, SOCK_STREAM, 0);
         int one = 1;
 

@@ -40,7 +40,7 @@ public sealed unsafe partial class RocketEngine {
 
         public void InitRing()
         {
-            Ring = CreatePRing(Config.RingFlags, Config.SqCpuThread, Config.SqThreadIdleMs, out int err, Config.RingEntries);
+            Ring = CreateRing(Config.RingFlags, Config.SqCpuThread, Config.SqThreadIdleMs, out int err, Config.RingEntries);
             uint ringFlags = shim_get_ring_flags(Ring);
             Console.WriteLine($"[w{ReactorId}] ring flags = 0x{ringFlags:x} " +
                               $"(SQPOLL={(ringFlags & IORING_SETUP_SQPOLL) != 0}, " +
