@@ -1,4 +1,4 @@
-namespace URocket.Engine.Builder;
+namespace URocket.Engine.Configs;
 
 public sealed record AcceptorConfig(
     uint RingFlags = 0,

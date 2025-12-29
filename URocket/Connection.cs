@@ -1,6 +1,5 @@
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks.Sources;
-using URocket.Engine;
 
 namespace URocket;
 
@@ -8,29 +7,25 @@ namespace URocket;
 public sealed unsafe class Connection : IValueTaskSource<bool>
 {
     public bool HasBuffer;
-    public ushort BufferId;
+    public ushort BufferId { get; set; }
 
-    public int Fd;
-    public int ReactorId;
-    public Engine.Engine.Reactor Reactor;
+    public int Fd { get; private set; }
+    public Engine.Engine.Reactor Reactor { get; private set; } = null!;
 
     // In buffer (points into reactor's buffer-ring slab)
-    public byte* InPtr;
-    public int InLength;
+    public byte* InPtr { get; internal set; }
+    public int InLength  { get; internal set; }
 
     // Out buffer
-    public nuint OutHead, OutTail;
-    public byte* OutPtr;
+    public nuint OutHead { get; set; }
+    public nuint OutTail { get; set; }
+    public byte* OutPtr { get; set; }
 
     // Reusable completion primitive (no Task/TCS allocations per read)
     private ManualResetValueTaskSourceCore<bool> _readSignal;
 
     // Debug guard: enforces "one outstanding ReadAsync at a time"
     private bool _readArmed;
-
-    public Connection(int fd) => Fd = fd;
-
-    public Connection() { }
 
     /// <summary>
     /// Await until the reactor signals that new bytes are available in InPtr/InLength.
@@ -84,7 +79,6 @@ public sealed unsafe class Connection : IValueTaskSource<bool>
 
     // Setters for pooled connections
     public Connection SetFd(int fd) { Fd = fd; return this; }
-    public Connection SetReactorId(int reactorId) { ReactorId = reactorId; return this; }
     public Connection SetReactor(Engine.Engine.Reactor reactor) { Reactor = reactor; return this; }
     
     // IValueTaskSource<bool> plumbing

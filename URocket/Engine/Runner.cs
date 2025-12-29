@@ -69,7 +69,7 @@ public sealed partial class Engine {
         
         Console.WriteLine($"Server started with {_nReactors} reactors + 1 acceptor");
         
-        try { AcceptorHandler(SingleAcceptor, _nReactors); }
+        try { SingleAcceptor.Handle(SingleAcceptor, _nReactors); }
         catch (Exception ex) { Console.Error.WriteLine($"[acceptor] crash: {ex}"); }
         
         foreach (var t in reactorThreads) t.Join();

@@ -1,7 +1,7 @@
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.ObjectPool;
-using URocket.Engine.Builder;
+using URocket.Engine.Configs;
 using static URocket.ABI.ABI;
 
 // ReSharper disable always CheckNamespace
@@ -11,7 +11,7 @@ using static URocket.ABI.ABI;
 namespace URocket.Engine;
 
 public sealed unsafe partial class Engine {
-    private static readonly ObjectPool<Connection> ConnectionPool =
+    private readonly ObjectPool<Connection> ConnectionPool =
         new DefaultObjectPool<Connection>(new ConnectionPoolPolicy(), 1024 * 32);
 
     private class ConnectionPoolPolicy : PooledObjectPolicy<Connection> {
@@ -23,11 +23,11 @@ public sealed unsafe partial class Engine {
     public Dictionary<int, Connection>[] Connections = null!;
     
     public class Reactor {
-        private int _counter = 0;
+        private int _counter;
         private readonly int _id;
         private io_uring_buf_ring* _bufferRing;
         private byte* _bufferRingSlab;
-        private uint _bufferRingIndex = 0;
+        private uint _bufferRingIndex;
         private uint _bufferRingMask;
 
         private readonly Engine _engine;
@@ -108,7 +108,7 @@ public sealed unsafe partial class Engine {
                                     shim_buf_ring_advance(_bufferRing, 1);
                                 }
                                 if (connections.TryGetValue(fd, out var connection)) {
-                                    ConnectionPool.Return(connection);
+                                    _engine.ConnectionPool.Return(connection);
                                     close(fd);
                                 }
                             } else {
@@ -230,7 +230,7 @@ public sealed unsafe partial class Engine {
                                 if (connections.TryGetValue(fd, out Connection? connection)) {
                                     connections.Remove(fd);
 
-                                    ConnectionPool.Return(connection);
+                                    _engine.ConnectionPool.Return(connection);
                                     close(fd);
                                 }
                             }else {
@@ -281,7 +281,7 @@ public sealed unsafe partial class Engine {
                                         connection.HasBuffer = false;
                                     }
 
-                                    ConnectionPool.Return(connection);
+                                    _engine.ConnectionPool.Return(connection);
                                     close(fd);
                                 } else {
                                     connection.OutHead += (nuint)res;
@@ -333,11 +333,11 @@ public sealed unsafe partial class Engine {
                 Console.WriteLine($"[w{_id}] Shutdown complete. (SQPOLL={isSqPoll})");
             }
         }
-    }
-    
-    private static void CloseAll(Dictionary<int, Connection> connections) {
-        foreach (var connection in connections) {
-            try { close(connection.Value.Fd); ConnectionPool.Return(connection.Value); } catch { /* ignore */ }
+        
+        private void CloseAll(Dictionary<int, Connection> connections) {
+            foreach (var connection in connections) {
+                try { close(connection.Value.Fd); _engine.ConnectionPool.Return(connection.Value); } catch { /* ignore */ }
+            }
         }
     }
 }

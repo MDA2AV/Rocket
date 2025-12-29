@@ -9,9 +9,9 @@ public sealed partial class Engine {
     private const int c_bufferRingGID = 1;
     
     // Socket
-    internal string Ip { get; private set; } = "0.0.0.0";
-    internal ushort Port { get; private set; } = 8080;
-    internal int Backlog { get; private set; } = 65535;
+    public string Ip { get; private set; } = "0.0.0.0";
+    public ushort Port { get; private set; } = 8080;
+    public int Backlog { get; private set; } = 65535;
     
     // Reactor
     private int _nReactors;

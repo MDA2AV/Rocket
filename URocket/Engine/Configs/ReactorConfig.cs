@@ -1,4 +1,4 @@
-namespace URocket.Engine.Builder;
+namespace URocket.Engine.Configs;
 
 public sealed record ReactorConfig(
     uint RingFlags = 0,

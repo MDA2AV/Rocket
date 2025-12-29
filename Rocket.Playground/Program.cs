@@ -13,21 +13,19 @@ internal static class Program {
     internal static async Task Main() {
         InitOk();
         var engine = new Engine();
-        
         _ = Task.Run(() => engine.Run());
 
         try {
             while (true) {
                 var conn = await engine.AcceptAsync();
                 Console.WriteLine($"Connection: {conn.Fd}");
-
                 _ = HandleAsync(conn);
             }
-        }
-        finally {
-            FreeOk();
-        }
+        } finally { FreeOk(); }
     }
+    
+    // TODO : Check bug - run wrk pipeline with InitOK (only 1 response flushed) and then run wrk pipeline again
+    // TODO : Possibly related with Clear()
     
     private static async ValueTask HandleAsync(Connection connection) {
         try {
@@ -36,7 +34,7 @@ internal static class Program {
                 await connection.ReadAsync();
                 unsafe {
                     var span = new ReadOnlySpan<byte>(connection.InPtr, connection.InLength);
-                    //var s = Encoding.UTF8.GetString(span);
+                    var s = Encoding.UTF8.GetString(span);
                 }
                 
                 unsafe {
@@ -59,15 +57,55 @@ internal static class Program {
                         connection.OutTail);
                 }
             }
-        }catch (Exception e) { Console.WriteLine(e); }
+        } catch (Exception e) { Console.WriteLine(e); }
         Console.WriteLine("end");
     }
-    
-    public static unsafe byte* OK_PTR;
-    public static nuint OK_LEN;
 
-    private static unsafe void InitOk() {
-        var s = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: keep-alive\r\nContent-Type: text/plain\r\n\r\nHello, World!";
+    private static unsafe byte* OK_PTR;
+    private static nuint OK_LEN;
+
+    private static unsafe void InitPipelineOk(int pipeline = 16)
+    {
+        const string response =
+            "HTTP/1.1 200 OK\r\n" +
+            "Content-Length: 13\r\n" +
+            "Connection: keep-alive\r\n" +
+            "Content-Type: text/plain\r\n" +
+            "\r\n" +
+            "Hello, World!";
+
+        // Encode once
+        byte[] one = Encoding.ASCII.GetBytes(response); // ASCII is enough here
+        nuint oneLen = (nuint)one.Length;
+
+        OK_LEN = oneLen * (nuint)pipeline;
+        OK_PTR = (byte*)NativeMemory.Alloc(OK_LEN);
+
+        // Copy first response
+        fixed (byte* src = one)
+        {
+            Buffer.MemoryCopy(src, OK_PTR, OK_LEN, oneLen);
+
+            // Exponentially double-copy: O(log N) memcpy calls
+            nuint filled = oneLen;
+            while (filled < OK_LEN)
+            {
+                nuint copy = (filled <= (OK_LEN - filled)) ? filled : (OK_LEN - filled);
+                Buffer.MemoryCopy(OK_PTR, OK_PTR + filled, OK_LEN - filled, copy);
+                filled += copy;
+            }
+        }
+    }
+    
+    private static unsafe void InitOk()
+    {
+        var s =
+            "HTTP/1.1 200 OK\r\n" +
+            "Content-Length: 13\r\n" +
+            "Connection: keep-alive\r\n" +
+            "Content-Type: text/plain\r\n" +
+            "\r\n" +
+            "Hello, World!";
         var a = Encoding.UTF8.GetBytes(s);
         OK_LEN = (nuint)a.Length;
         OK_PTR = (byte*)NativeMemory.Alloc(OK_LEN);
