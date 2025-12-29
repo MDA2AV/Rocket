@@ -19,7 +19,7 @@ public sealed partial class Engine {
     private int _nReactors;
     
     public Engine() {
-        _nReactors = 32;
+        _nReactors = 16;
 
         ReactorQueues = new ConcurrentQueue<int>[_nReactors];
         ReactorConnectionCounts = new long[_nReactors];
