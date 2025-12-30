@@ -19,7 +19,7 @@ internal static class Program {
             
         while (engine.ServerRunning) {
             var conn = await engine.AcceptAsync();
-            Console.WriteLine($"Connection: {conn.Fd}");
+            Console.WriteLine($"Connection: {conn.ClientFd}");
             _ = HandleAsync(conn);
         }
     }

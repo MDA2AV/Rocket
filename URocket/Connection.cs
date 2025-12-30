@@ -9,7 +9,7 @@ public sealed unsafe class Connection : IValueTaskSource<bool>
     public bool HasBuffer;
     public ushort BufferId { get; set; }
 
-    public int Fd { get; private set; }
+    public int ClientFd { get; private set; }
     public Engine.Engine.Reactor Reactor { get; private set; } = null!;
 
     // In buffer (points into reactor's buffer-ring slab)
@@ -33,8 +33,10 @@ public sealed unsafe class Connection : IValueTaskSource<bool>
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public ValueTask<bool> ReadAsync() {
-        if (_readArmed) throw new InvalidOperationException("ReadAsync() already armed. Call ResetRead() after consuming the buffer.");
+        if (_readArmed) 
+            throw new InvalidOperationException("ReadAsync() already armed. Call ResetRead() after consuming the buffer.");
         _readArmed = true;
+        Console.WriteLine($"{Reactor.Id} _readArmed TRUE");
         return new ValueTask<bool>(this, _readSignal.Version);
     }
 
@@ -52,7 +54,9 @@ public sealed unsafe class Connection : IValueTaskSource<bool>
         _readArmed = false;
 
         // Prepare for next await cycle
+        Console.WriteLine($"{Reactor.Id} Resetting..");
         _readSignal.Reset();
+        Console.WriteLine($"{Reactor.Id} _readArmed FALSE");
 
         // Clear "current read" metadata (optional but helps avoid misuse)
         //InPtr = null;
@@ -78,7 +82,7 @@ public sealed unsafe class Connection : IValueTaskSource<bool>
     }
 
     // Setters for pooled connections
-    public Connection SetFd(int fd) { Fd = fd; return this; }
+    public Connection SetFd(int fd) { ClientFd = fd; return this; }
     public Connection SetReactor(Engine.Engine.Reactor reactor) { Reactor = reactor; return this; }
     
     // IValueTaskSource<bool> plumbing

@@ -14,6 +14,9 @@ public class HttpResponse
             var reactor = connection.Reactor;
             while (true) {
                 await connection.ReadAsync();
+
+                Console.WriteLine($"{connection.Reactor.Id} Request received");
+                
                 unsafe {
                     var span = new ReadOnlySpan<byte>(connection.InPtr, connection.InLength);
                     //var s = Encoding.UTF8.GetString(span);
@@ -24,6 +27,8 @@ public class HttpResponse
                         reactor.ReturnBufferRing(connection.InPtr, connection.BufferId);
                     }
                 }
+                
+                Console.WriteLine($"{connection.Reactor.Id} Calling reset..");
                 connection.ResetRead();
                 unsafe {
                     connection.OutPtr  = OK_PTR;
@@ -32,7 +37,7 @@ public class HttpResponse
                     
                     reactor.SubmitSend(
                         reactor.Ring,
-                        connection.Fd,
+                        connection.ClientFd,
                         connection.OutPtr,
                         connection.OutHead,
                         connection.OutTail);

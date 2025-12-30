@@ -24,7 +24,6 @@ public sealed unsafe partial class Engine {
     
     public class Reactor {
         private int _counter;
-        private readonly int _id;
         private io_uring_buf_ring* _bufferRing;
         private byte* _bufferRingSlab;
         private uint _bufferRingIndex;
@@ -33,22 +32,22 @@ public sealed unsafe partial class Engine {
         private readonly Engine _engine;
 
         public Reactor(int id, ReactorConfig config, Engine engine) {
-            _id = id; 
+            Id = id; 
             Config = config; 
             _engine = engine;
         }
+        public int Id { get; }
         public Reactor(int id, Engine engine) : this(id, new ReactorConfig(), engine) { }
-        
         public ReactorConfig Config { get; }
         public io_uring* Ring { get; private set; }
 
         public void InitRing() {
             Ring = CreateRing(Config.RingFlags, Config.SqCpuThread, Config.SqThreadIdleMs, out int err, Config.RingEntries);
             uint ringFlags = shim_get_ring_flags(Ring);
-            Console.WriteLine($"[w{_id}] ring flags = 0x{ringFlags:x} " +
+            Console.WriteLine($"[w{Id}] ring flags = 0x{ringFlags:x} " +
                               $"(SQPOLL={(ringFlags & IORING_SETUP_SQPOLL) != 0}, " +
                               $"SQ_AFF={(ringFlags & IORING_SETUP_SQ_AFF) != 0})");
-            if (Ring == null || err < 0) { Console.Error.WriteLine($"[w{_id}] create_ring failed: {err}"); return; }
+            if (Ring == null || err < 0) { Console.Error.WriteLine($"[w{Id}] create_ring failed: {err}"); return; }
             
             _bufferRing = shim_setup_buf_ring(Ring, (uint)Config.BufferRingEntries, c_bufferRingGID, 0, out var ret);
             if (_bufferRing == null || ret < 0) throw new Exception($"setup_buf_ring failed: ret={ret}");
@@ -70,8 +69,8 @@ public sealed unsafe partial class Engine {
         }
         
         internal void Handle() {
-            Dictionary<int,Connection> connections = _engine.Connections[_id];
-            ConcurrentQueue<int> reactorQueue = ReactorQueues[_id];     // new FDs from acceptor
+            Dictionary<int,Connection> connections = _engine.Connections[Id];
+            ConcurrentQueue<int> reactorQueue = ReactorQueues[Id];     // new FDs from acceptor
             io_uring_cqe*[] cqes = new io_uring_cqe*[Config.BatchCqes];
 
             try {
@@ -97,7 +96,7 @@ public sealed unsafe partial class Engine {
                             bool hasMore   = (cqe->flags & IORING_CQE_F_MORE) != 0;
 
                             if (res <= 0) {
-                                Console.WriteLine($"{_id} {_counter}");
+                                Console.WriteLine($"{Id} {_counter}");
                                 if (hasBuffer) {
                                     ushort bufferId = (ushort)shim_cqe_buffer_id(cqe);
                                     byte* addr = _bufferRingSlab + (nuint)bufferId * (nuint)Config.RecvBufferSize;
@@ -111,6 +110,7 @@ public sealed unsafe partial class Engine {
                             } else {
                                 var bufferId = (ushort)shim_cqe_buffer_id(cqe);
 
+                                // TODO: Issue found, what if this triggers again before the client handles it, data is lost
                                 if (connections.TryGetValue(fd, out var connection)) {
                                     connection.HasBuffer = hasBuffer;
                                     connection.BufferId = bufferId;
@@ -128,7 +128,7 @@ public sealed unsafe partial class Engine {
                                 // Advance send progress.
                                 connection.OutHead += (nuint)res;
                                 if (connection.OutHead < connection.OutTail)
-                                    SubmitSend(Ring, connection.Fd, connection.OutPtr, connection.OutHead, connection.OutTail);
+                                    SubmitSend(Ring, connection.ClientFd, connection.OutPtr, connection.OutHead, connection.OutTail);
                             }
                         }
                         shim_cqe_seen(Ring, cqe);
@@ -146,14 +146,14 @@ public sealed unsafe partial class Engine {
                 if (Ring != null) { shim_destroy_ring(Ring); Ring = null; }
                 // Free slab memory used by buf ring
                 if (_bufferRingSlab != null) { NativeMemory.AlignedFree(_bufferRingSlab); _bufferRingSlab = null; }
-                Console.WriteLine($"[w{_id}] Shutdown complete.");
+                Console.WriteLine($"[w{Id}] Shutdown complete.");
             }
         }
         
         // Experimental
         private void HandleSQPoll() {
-            Dictionary<int, Connection> connections = _engine.Connections[_id];
-            ConcurrentQueue<int> myQueue = ReactorQueues[_id]; // new FDs from acceptor
+            Dictionary<int, Connection> connections = _engine.Connections[Id];
+            ConcurrentQueue<int> myQueue = ReactorQueues[Id]; // new FDs from acceptor
             io_uring_cqe*[] cqes = new io_uring_cqe*[Config.BatchCqes];
             
             __kernel_timespec ts; ts.tv_sec = 0; ts.tv_nsec = Config.CqTimeout;
@@ -286,7 +286,7 @@ public sealed unsafe partial class Engine {
                                     {
                                         SubmitSend(
                                             Ring,
-                                            connection.Fd,
+                                            connection.ClientFd,
                                             connection.OutPtr,
                                             connection.OutHead,
                                             connection.OutTail);
@@ -326,7 +326,7 @@ public sealed unsafe partial class Engine {
                     _bufferRingSlab = null;
                 }
 
-                Console.WriteLine($"[w{_id}] Shutdown complete. (SQPOLL={isSqPoll})");
+                Console.WriteLine($"[w{Id}] Shutdown complete. (SQPOLL={isSqPoll})");
             }
         }
         
@@ -338,7 +338,7 @@ public sealed unsafe partial class Engine {
         
         private void CloseAll(Dictionary<int, Connection> connections) {
             foreach (var connection in connections) {
-                try { close(connection.Value.Fd); _engine.ConnectionPool.Return(connection.Value); } catch { /* ignore */ }
+                try { close(connection.Value.ClientFd); _engine.ConnectionPool.Return(connection.Value); } catch { /* ignore */ }
             }
         }
     }
