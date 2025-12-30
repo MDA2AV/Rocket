@@ -22,22 +22,10 @@ public class HttpResponse
                         var span = new ReadOnlySpan<byte>(item.Ptr, item.Length);
 
                         // ... parse / handle request here ...
-
-                        // Return the buffer to the ring AFTER you are done with it
-                        reactor.ReturnBufferRing(item.Ptr, item.BufferId);
+                        
+                        reactor.EnqueueReturn(item.BufferId);
                     }
                 }
-
-                /*unsafe {
-                    var span = new ReadOnlySpan<byte>(connection.InPtr, connection.InLength);
-                    //var s = Encoding.UTF8.GetString(span);
-                }
-                
-                unsafe {
-                    if (connection.HasBuffer) {
-                        reactor.ReturnBufferRing(connection.InPtr, connection.BufferId);
-                    }
-                }*/
                 
                 connection.ResetRead();
                 unsafe {

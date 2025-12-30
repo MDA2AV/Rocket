@@ -63,10 +63,13 @@ public sealed unsafe partial class Engine {
             shim_buf_ring_advance(_bufferRing, (uint)Config.BufferRingEntries);
         }
 
-        public void ReturnBufferRing(byte* addr, ushort bid) {
+        private void ReturnBufferRing(byte* addr, ushort bid) {
             shim_buf_ring_add(_bufferRing, addr, (uint)Config.RecvBufferSize, bid, (ushort)_bufferRingMask, _bufferRingIndex++);
             shim_buf_ring_advance(_bufferRing, 1);
         }
+        
+        private readonly ConcurrentQueue<ushort> _returns = new();
+        public void EnqueueReturn(ushort bid) => _returns.Enqueue(bid);
         
         internal void Handle() {
             Dictionary<int,Connection> connections = _engine.Connections[Id];
@@ -75,13 +78,19 @@ public sealed unsafe partial class Engine {
 
             try {
                 while (_engine.ServerRunning) {
+                    // Drain new connections
                     while (reactorQueue.TryDequeue(out int newFd)) { ArmRecvMultishot(Ring, newFd, c_bufferRingGID); }
+                    // Drain rings returns
+                    while (_returns.TryDequeue(out ushort bid)) {
+                        byte* addr = _bufferRingSlab + (nuint)bid * (nuint)Config.RecvBufferSize;
+                        shim_buf_ring_add(_bufferRing, addr, (uint)Config.RecvBufferSize, bid, (ushort)_bufferRingMask, _bufferRingIndex++);
+                        shim_buf_ring_advance(_bufferRing, 1);
+                    }
                     if (shim_sq_ready(Ring) > 0) shim_submit(Ring);
+                    
                     io_uring_cqe* cqe; __kernel_timespec ts; ts.tv_sec  = 0; ts.tv_nsec = Config.CqTimeout; // 1 ms timeout
                     int rc = shim_wait_cqes(Ring, &cqe, (uint)1, &ts); int got;
-                    
                     if (rc is -62 or < 0) { _counter++; continue; }
-
                     fixed (io_uring_cqe** pC = cqes) got = shim_peek_batch_cqe(Ring, pC, (uint)Config.BatchCqes);
 
                     for (int i = 0; i < got; i++) {
@@ -97,7 +106,6 @@ public sealed unsafe partial class Engine {
 
                             if (res <= 0) {
                                 Console.WriteLine($"[w{Id}] recv res={res} fd={fd}");
-
                                 // Return the CQE's provided buffer (if any)
                                 if (hasBuffer) {
                                     ushort bufferId = (ushort)shim_cqe_buffer_id(cqe);
@@ -105,49 +113,18 @@ public sealed unsafe partial class Engine {
                                     shim_buf_ring_add(_bufferRing, addr, (uint)Config.RecvBufferSize, bufferId, (ushort)_bufferRingMask, _bufferRingIndex++);
                                     shim_buf_ring_advance(_bufferRing, 1);
                                 }
-
                                 // REMOVE the connection mapping so we don't process this fd again,
                                 // and so fd reuse won't hit a stale Connection.
                                 if (connections.Remove(fd, out var connection)) {
                                     // Return any queued buffers that the handler never consumed
-                                    while (connection.TryDequeueRecv(out var item)) {
-                                        shim_buf_ring_add(_bufferRing, item.Ptr, (uint)Config.RecvBufferSize, item.BufferId, (ushort)_bufferRingMask, _bufferRingIndex++);
-                                        shim_buf_ring_advance(_bufferRing, 1);
-                                    }
+                                    while (connection.TryDequeueRecv(out var item)) { EnqueueReturn(item.BufferId); }
                                     _engine.ConnectionPool.Return(connection);
                                     // Close once (only if we owned this connection)
                                     close(fd);
-                                } else {
-                                    // Already closed/removed it earlier; just ignore this late CQE.
-                                    // Must not close(fd) again.
-                                }
+                                } 
                                 shim_cqe_seen(Ring, cqe);
                                 continue;
-                            }
-                            /*if (res <= 0) {
-                                Console.WriteLine($" - {Id} {_counter}");
-                                if (hasBuffer) {
-                                    ushort bufferId = (ushort)shim_cqe_buffer_id(cqe);
-                                    byte* addr = _bufferRingSlab + (nuint)bufferId * (nuint)Config.RecvBufferSize;
-                                    shim_buf_ring_add(_bufferRing, addr, (uint)Config.RecvBufferSize, bufferId, (ushort)_bufferRingMask, _bufferRingIndex++);
-                                    shim_buf_ring_advance(_bufferRing, 1);
-                                }
-                                if (connections.TryGetValue(fd, out var connection)) {
-                                    // Return all buffers that were received earlier but not yet consumed by the handler.
-                                    while (connection.TryDequeueRecv(out var item)) {
-                                        // Return the buffer back to the buf_ring
-                                        shim_buf_ring_add(_bufferRing, item.Ptr, (uint)Config.RecvBufferSize, item.BufferId, (ushort)_bufferRingMask, _bufferRingIndex++);
-                                        shim_buf_ring_advance(_bufferRing, 1);
-                                    }
-                                    
-                                    // Remove from map so future CQEs don't find a stale connection
-                                    // TODO: Investigate this
-                                    //connections.Remove(fd);
-                                    _engine.ConnectionPool.Return(connection);
-                                }
-                                close(fd);
-                                //continue;
-                            }*/ else {
+                            } else {
                                 var bufferId = (ushort)shim_cqe_buffer_id(cqe);
                                 var ptr = _bufferRingSlab + (nuint)bufferId * (nuint)Config.RecvBufferSize;
                                 
@@ -155,21 +132,7 @@ public sealed unsafe partial class Engine {
                                     // With buf_ring, you *should* have hasBuffer=true here; if not, handle separately.
                                     connection.EnqueueRecv(ptr, res, bufferId);
                                     if (!hasMore) ArmRecvMultishot(Ring, fd, c_bufferRingGID);
-                                } else {
-                                    // Late CQE for a dead/untracked fd: return buffer immediately
-                                    ReturnBufferRing(ptr, bufferId);
-                                }
-
-                                /*// TODO: Issue found, what if this triggers again before the client handles it, data is lost
-                                if (connections.TryGetValue(fd, out var connection)) {
-                                    connection.HasBuffer = hasBuffer;
-                                    connection.BufferId = bufferId;
-                                    connection.InPtr = _bufferRingSlab + (nuint)connection.BufferId * (nuint)Config.RecvBufferSize;
-                                    connection.InLength = res;
-                                    connection.SignalReadReady();
-                                    
-                                    if (!hasMore) ArmRecvMultishot(Ring, fd, c_bufferRingGID);
-                                }*/
+                                } else { ReturnBufferRing(ptr, bufferId); }
                             }
                         }
                         else if (kind == UdKind.Send) {
