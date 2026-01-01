@@ -16,6 +16,12 @@ internal static class Program {
     private static async Task Execute() {
         var engine = new Engine();
         engine.Listen();
+
+        _ = Task.Run(() =>
+        {
+            Console.ReadLine();
+            engine.Stop();
+        });
             
         while (engine.ServerRunning) {
             var conn = await engine.AcceptAsync();

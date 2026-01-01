@@ -29,9 +29,35 @@ public sealed partial class Engine {
     private readonly Channel<ConnectionItem> ConnectionQueues =
         Channel.CreateUnbounded<ConnectionItem>(new UnboundedChannelOptions());
     
-    public async ValueTask<Connection> AcceptAsync(CancellationToken cancellationToken = default) {
+    private readonly Channel<Connection> _accepted =
+        Channel.CreateUnbounded<Connection>(new UnboundedChannelOptions {
+            SingleReader = true,
+            SingleWriter = false
+        });
+    
+    /*
+    public ValueTask<Connection> AcceptAsync(CancellationToken ct = default)
+        => _accepted.Reader.ReadAsync(ct);
+    */
+    
+    public async ValueTask<Connection> AcceptAsync2(CancellationToken cancellationToken = default) {
         var item = await ConnectionQueues.Reader.ReadAsync(cancellationToken);
         return Connections[item.ReactorId][item.ClientFd];
+    }
+    
+    public async ValueTask<Connection> AcceptAsync(CancellationToken cancellationToken = default)
+    {
+        while (true)
+        {
+            var item = await ConnectionQueues.Reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+
+            var dict = Connections[item.ReactorId];
+            if (dict.TryGetValue(item.ClientFd, out var conn))
+                return conn;
+
+            // The fd was closed/removed before we got here (recv res<=0 path).
+            // Just skip it and wait for the next accepted connection.
+        }
     }
     
     public Engine() {
