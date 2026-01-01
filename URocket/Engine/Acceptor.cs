@@ -119,7 +119,7 @@ public sealed unsafe partial class Engine {
                         }
                         shim_cqe_seen(acceptor._ring, cqe);
                     }
-                    if (shim_sq_ready(acceptor._ring) > 0) { Console.WriteLine("Submitting3"); shim_submit(acceptor._ring); }
+                    if (shim_sq_ready(acceptor._ring) > 0) { Console.WriteLine("S3"); shim_submit(acceptor._ring); }
                 }
             }
             finally {

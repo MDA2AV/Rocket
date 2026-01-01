@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Runtime.InteropServices;
 using System.Text;
 using URocket;
@@ -13,8 +14,26 @@ public class HttpResponse
         try {
             var reactor = connection.Reactor;
             while (true) {
-                await connection.ReadAsync();
+                var result = await connection.ReadAsync();
+                if (result.IsClosed)
+                    break;
+
                 unsafe
+                {
+                    while (connection.TryDequeueBatch(result.TailSnapshot, out var item))
+                    {
+                        var span = new ReadOnlySpan<byte>(item.Ptr, item.Length);
+                        // parse...
+
+                        // Return buffer after you’re done with that segment
+                        connection.Reactor.EnqueueReturnQ(item.BufferId);
+                    }
+                }
+
+                //var data = result.Buffer.ToArray();
+                //Console.WriteLine(Encoding.UTF8.GetString(data));
+                
+                /*unsafe
                 {
                     while (connection.TryDequeueRecv(out var item))
                     {
@@ -23,9 +42,10 @@ public class HttpResponse
 
                         // ... parse / handle request here ...
                         
-                        reactor.EnqueueReturn(item.BufferId);
+                        //reactor.EnqueueReturn(item.BufferId);
+                        reactor.EnqueueReturnQ(item.BufferId);
                     }
-                }
+                }*/
                 
                 connection.ResetRead();
                 unsafe {

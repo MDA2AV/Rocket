@@ -331,3 +331,8 @@ int shim_wait_cqe_timeout_in(struct io_uring* ring,
 
     return io_uring_wait_cqe_timeout(ring, cqe, &ts);
 }
+
+void shim_prep_cancel64(struct io_uring_sqe* sqe, unsigned long long user_data, int flags)
+{
+    io_uring_prep_cancel64(sqe, user_data, flags);
+}

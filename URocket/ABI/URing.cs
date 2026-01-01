@@ -129,6 +129,8 @@ public static unsafe partial class ABI{
     /// <paramref name="flags"/> maps to <c>send</c> flags (e.g., <c>MSG_MORE</c>).
     /// </summary>
     [DllImport("uringshim")] internal static extern void shim_prep_send(io_uring_sqe* sqe, int fd, void* buf, uint nbytes, int flags);
+    // SHIM: PREP OPS (SQE FILLERS)
+    [DllImport("uringshim")] internal static extern void shim_prep_cancel64(io_uring_sqe* sqe, ulong user_data, int flags);
     // ------------------------------------------------------------------------------------
     //  SHIM: USERDATA HELPERS
     // ------------------------------------------------------------------------------------
@@ -203,7 +205,8 @@ public static unsafe partial class ABI{
     internal enum UdKind : uint {
         Accept = 1,
         Recv   = 2,
-        Send   = 3
+        Send   = 3,
+        Cancel = 4
     }
     /// <summary>
     /// Packs a kind + fd into a single 64-bit token suitable for <see cref="io_uring_sqe"/>.
@@ -226,4 +229,6 @@ public static unsafe partial class ABI{
     internal const uint IORING_SETUP_SQ_AFF  = 1u << 2;
     
     internal const uint IORING_CQE_F_MORE = (1U << 1);
+    
+    internal const int IORING_ASYNC_CANCEL_ALL = 1 << 0; // commonly this value
 }

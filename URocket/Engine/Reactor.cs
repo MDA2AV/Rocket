@@ -1,7 +1,9 @@
 using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.ObjectPool;
 using URocket.Engine.Configs;
+using URocket.Utils;
 using static URocket.ABI.ABI;
 
 // ReSharper disable always CheckNamespace
@@ -68,8 +70,34 @@ public sealed unsafe partial class Engine {
             shim_buf_ring_advance(_bufferRing, 1);
         }
         
-        private readonly ConcurrentQueue<ushort> _returns = new();
-        public void EnqueueReturn(ushort bid) => _returns.Enqueue(bid);
+        //private readonly ConcurrentQueue<ushort> _returns = new();
+        //public void EnqueueReturn(ushort bid) => _returns.Enqueue(bid);
+        
+        private readonly MpscUshortQueue _returnQ = new(1 << 16); // 65536 slots (pick a power-of-two)
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void EnqueueReturnQ2(ushort bid) => _returnQ.EnqueueSpin(bid);
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void EnqueueReturnQ(ushort bid) {
+            if (!_returnQ.TryEnqueue(bid)) {
+                SpinWait sw = default;
+                while (!_returnQ.TryEnqueue(bid)) {
+                    sw.SpinOnce();
+                    if (sw.Count > 50) {
+                        if (!_engine.ServerRunning) return; // only bail out after trying
+                        Thread.Yield();
+                        sw.Reset();
+                    }
+                }
+            }
+        }
+
+        private void DrainReturnQ() {
+            while (_returnQ.TryDequeue(out ushort bid)) {
+                byte* addr = _bufferRingSlab + (nuint)bid * (nuint)Config.RecvBufferSize;
+                shim_buf_ring_add(_bufferRing, addr, (uint)Config.RecvBufferSize, bid, (ushort)_bufferRingMask, _bufferRingIndex++);
+                shim_buf_ring_advance(_bufferRing, 1);
+            }
+        }
         
         internal void Handle() {
             Dictionary<int,Connection> connections = _engine.Connections[Id];
@@ -81,11 +109,12 @@ public sealed unsafe partial class Engine {
                     // Drain new connections
                     while (reactorQueue.TryDequeue(out int newFd)) { ArmRecvMultishot(Ring, newFd, c_bufferRingGID); }
                     // Drain rings returns
-                    while (_returns.TryDequeue(out ushort bid)) {
+                    /*while (_returns.TryDequeue(out ushort bid)) {
                         byte* addr = _bufferRingSlab + (nuint)bid * (nuint)Config.RecvBufferSize;
                         shim_buf_ring_add(_bufferRing, addr, (uint)Config.RecvBufferSize, bid, (ushort)_bufferRingMask, _bufferRingIndex++);
                         shim_buf_ring_advance(_bufferRing, 1);
-                    }
+                    }*/
+                    DrainReturnQ();
                     if (shim_sq_ready(Ring) > 0) shim_submit(Ring);
                     
                     io_uring_cqe* cqe; __kernel_timespec ts; ts.tv_sec  = 0; ts.tv_nsec = Config.CqTimeout; // 1 ms timeout
@@ -110,21 +139,33 @@ public sealed unsafe partial class Engine {
                                 if (hasBuffer) {
                                     ushort bufferId = (ushort)shim_cqe_buffer_id(cqe);
                                     byte* addr = _bufferRingSlab + (nuint)bufferId * (nuint)Config.RecvBufferSize;
-                                    shim_buf_ring_add(_bufferRing, addr, (uint)Config.RecvBufferSize, bufferId, (ushort)_bufferRingMask, _bufferRingIndex++);
-                                    shim_buf_ring_advance(_bufferRing, 1);
+                                    ReturnBufferRing(addr, bufferId);
                                 }
                                 // REMOVE the connection mapping so we don't process this fd again,
                                 // and so fd reuse won't hit a stale Connection.
                                 if (connections.Remove(fd, out var connection)) {
                                     // Return any queued buffers that the handler never consumed
-                                    while (connection.TryDequeueRecv(out var item)) { EnqueueReturn(item.BufferId); }
+                                    /*while (connection.TryDequeueRecv(out var item)) {
+                                        //EnqueueReturn(item.BufferId);
+                                        EnqueueReturnQ(item.BufferId);
+                                    }*/
+                                    connection.MarkClosed(res);
                                     _engine.ConnectionPool.Return(connection);
+                                    SubmitCancelRecv(Ring, fd);   // Cancel the multishot recv
+                                    if (shim_sq_ready(Ring) > 0) shim_submit(Ring);
                                     // Close once (only if we owned this connection)
                                     close(fd);
                                 } 
                                 shim_cqe_seen(Ring, cqe);
                                 continue;
                             } else {
+
+                                // This should never happen?
+                                if (!hasBuffer) {
+                                    shim_cqe_seen(Ring, cqe);
+                                    continue;
+                                }
+                                
                                 var bufferId = (ushort)shim_cqe_buffer_id(cqe);
                                 var ptr = _bufferRingSlab + (nuint)bufferId * (nuint)Config.RecvBufferSize;
                                 
@@ -132,7 +173,7 @@ public sealed unsafe partial class Engine {
                                     // With buf_ring, you *should* have hasBuffer=true here; if not, handle separately.
                                     connection.EnqueueRecv(ptr, res, bufferId);
                                     if (!hasMore) ArmRecvMultishot(Ring, fd, c_bufferRingGID);
-                                } else { ReturnBufferRing(ptr, bufferId); }
+                                }else { ReturnBufferRing(ptr, bufferId); } // Immediately return, no need to enqueue
                             }
                         }
                         else if (kind == UdKind.Send) {
@@ -144,6 +185,10 @@ public sealed unsafe partial class Engine {
                                     SubmitSend(Ring, connection.ClientFd, connection.OutPtr, connection.OutHead, connection.OutTail);
                             }
                         }
+                        else if (kind == UdKind.Cancel) {
+                            Console.WriteLine("Cancel");
+                            // ignore; res==0 means cancel succeeded, res<0 often means it was already gone
+                        }
                         shim_cqe_seen(Ring, cqe);
                     }
                 }
@@ -152,6 +197,7 @@ public sealed unsafe partial class Engine {
                 CloseAll(connections);
                 // Free buffer ring BEFORE destroying the ring
                 if (Ring != null && _bufferRing != null) {
+                    DrainReturnQ();
                     shim_free_buf_ring(Ring, _bufferRing, (uint)Config.BufferRingEntries, c_bufferRingGID);
                     _bufferRing = null;
                 }
@@ -169,10 +215,58 @@ public sealed unsafe partial class Engine {
             shim_sqe_set_data64(sqe, PackUd(UdKind.Send, fd));
         }
         
-        private void CloseAll(Dictionary<int, Connection> connections) {
+        private void SubmitCancelRecv(io_uring* ring, int fd) {
+            io_uring_sqe* sqe = shim_get_sqe(ring);
+            if (sqe == null) return; // or handle SQ full
+
+            ulong target = PackUd(UdKind.Recv, fd);
+
+            shim_prep_cancel64(sqe, target, /*flags*/ 0 /* or IORING_ASYNC_CANCEL_ALL */);
+            shim_sqe_set_data64(sqe, PackUd(UdKind.Cancel, fd));
+        }
+
+        
+        private void CloseAll2(Dictionary<int, Connection> connections) {
             foreach (var connection in connections) {
                 try { close(connection.Value.ClientFd); _engine.ConnectionPool.Return(connection.Value); } catch { /* ignore */ }
             }
+        }
+        /*private void CloseAll(Dictionary<int, Connection> connections) {
+            foreach (var kv in connections) {
+                var conn = kv.Value;
+
+                // Return any queued buffers
+                while (conn.TryDequeueRecv(out var item))
+                    EnqueueReturnQ(item.BufferId);
+
+                try { close(conn.ClientFd); } catch {  }
+                _engine.ConnectionPool.Return(conn);
+            }
+            connections.Clear();
+        }*/
+        
+        private void CloseAll(Dictionary<int, Connection> connections)
+        {
+            foreach (var kv in connections)
+            {
+                var conn = kv.Value;
+
+                // 1) Mark closed to wake any waiter.
+                conn.MarkClosed(error: 0);
+
+                // 2) Remove mapping first (so late CQEs won't find it).
+                // (You're already doing remove on res<=0 path; do same here if needed.)
+
+                // 3) Close fd
+                try { close(conn.ClientFd); } catch { /* ignore */ }
+
+                // 4) Pool it. Safe only because:
+                //   - ReadAsync uses generation/closed => will return Closed for stale handlers
+                //   - We did NOT return any recv buffers here
+                _engine.ConnectionPool.Return(conn);
+            }
+
+            connections.Clear();
         }
     }
 }
