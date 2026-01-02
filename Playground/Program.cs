@@ -17,8 +17,7 @@ internal static class Program {
         var engine = new Engine();
         engine.Listen();
 
-        _ = Task.Run(() =>
-        {
+        _ = Task.Run(() => {
             Console.ReadLine();
             engine.Stop();
         });

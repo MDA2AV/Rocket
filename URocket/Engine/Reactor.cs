@@ -3,6 +3,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.ObjectPool;
 using URocket.Engine.Configs;
+using URocket.MultiProducerSingleConsumer;
 using URocket.Utils;
 using static URocket.ABI.ABI;
 
@@ -26,6 +27,7 @@ public sealed unsafe partial class Engine {
     
     public class Reactor {
         private int _counter;
+        public int RingCounter;
         private io_uring_buf_ring* _bufferRing;
         private byte* _bufferRingSlab;
         private uint _bufferRingIndex;
@@ -66,6 +68,7 @@ public sealed unsafe partial class Engine {
         }
 
         private void ReturnBufferRing(byte* addr, ushort bid) {
+            RingCounter++;
             shim_buf_ring_add(_bufferRing, addr, (uint)Config.RecvBufferSize, bid, (ushort)_bufferRingMask, _bufferRingIndex++);
             shim_buf_ring_advance(_bufferRing, 1);
         }
@@ -94,8 +97,9 @@ public sealed unsafe partial class Engine {
         private void DrainReturnQ() {
             while (_returnQ.TryDequeue(out ushort bid)) {
                 byte* addr = _bufferRingSlab + (nuint)bid * (nuint)Config.RecvBufferSize;
-                shim_buf_ring_add(_bufferRing, addr, (uint)Config.RecvBufferSize, bid, (ushort)_bufferRingMask, _bufferRingIndex++);
-                shim_buf_ring_advance(_bufferRing, 1);
+                ReturnBufferRing(addr, bid);
+                //shim_buf_ring_add(_bufferRing, addr, (uint)Config.RecvBufferSize, bid, (ushort)_bufferRingMask, _bufferRingIndex++);
+                //shim_buf_ring_advance(_bufferRing, 1);
             }
         }
         
@@ -107,9 +111,18 @@ public sealed unsafe partial class Engine {
             try {
                 while (_engine.ServerRunning) {
                     // Drain new connections
-                    while (reactorQueue.TryDequeue(out int newFd)) { ArmRecvMultishot(Ring, newFd, c_bufferRingGID); }
-                    // Drain rings returns
-                    DrainReturnQ();
+                    while (reactorQueue.TryDequeue(out int newFd)) {
+                        connections[newFd] = _engine.ConnectionPool.Get()
+                            .SetFd(newFd)
+                            .SetReactor(_engine.Reactors[Id]);
+                        
+                        ArmRecvMultishot(Ring, newFd, c_bufferRingGID); 
+                        bool connectionAdded = _engine.ConnectionQueues.Writer.TryWrite(new ConnectionItem(Id, newFd));
+                        if (!connectionAdded) Console.WriteLine("Failed to write connection!!");
+                    }
+                    
+                    DrainReturnQ(); // Drain rings returns
+                    
                     if (shim_sq_ready(Ring) > 0) shim_submit(Ring);
                     
                     io_uring_cqe* cqe; __kernel_timespec ts; ts.tv_sec  = 0; ts.tv_nsec = Config.CqTimeout; // 1 ms timeout
@@ -195,7 +208,7 @@ public sealed unsafe partial class Engine {
                 if (Ring != null) { shim_destroy_ring(Ring); Ring = null; }
                 // Free slab memory used by buf ring
                 if (_bufferRingSlab != null) { NativeMemory.AlignedFree(_bufferRingSlab); _bufferRingSlab = null; }
-                Console.WriteLine($"[w{Id}] Shutdown complete.");
+                Console.WriteLine($"Reactor[{Id}] Shutdown complete.");
             }
         }
         
@@ -216,8 +229,8 @@ public sealed unsafe partial class Engine {
         }
         
         private void CloseAll(Dictionary<int, Connection> connections) {
-
-            Console.WriteLine($"Remaining connections: {connections.Count}");
+            Console.WriteLine($"Reactor[{Id}] Connection leakage -- [{connections.Count}] " +
+                              $"Ring leakage -- [{RingCounter + Config.BufferRingEntries - _bufferRingIndex}]");
             
             foreach (var kv in connections) {
                 var conn = kv.Value;

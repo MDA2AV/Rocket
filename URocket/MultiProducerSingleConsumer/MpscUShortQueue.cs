@@ -1,12 +1,11 @@
 using System.Runtime.CompilerServices;
 
-namespace URocket.Utils;
+namespace URocket.MultiProducerSingleConsumer;
 
 /// <summary>
 /// ushort Multi Producer Single Consumer Queue
 /// </summary>
-public sealed class MpscUshortQueue
-{
+public sealed class MpscUshortQueue {
     // Capacity must be a power of two
     private readonly int _capacity;
     private readonly int _mask;
@@ -18,8 +17,7 @@ public sealed class MpscUshortQueue
     private long _tail;
     private long _head;
 
-    public MpscUshortQueue(int capacityPowerOfTwo)
-    {
+    public MpscUshortQueue(int capacityPowerOfTwo) {
         if (capacityPowerOfTwo < 2 || (capacityPowerOfTwo & (capacityPowerOfTwo - 1)) != 0)
             throw new ArgumentException("Capacity must be a power of two >= 2.", nameof(capacityPowerOfTwo));
 
@@ -39,8 +37,7 @@ public sealed class MpscUshortQueue
     /// Multi-producer safe.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool TryEnqueue(ushort value)
-    {
+    public bool TryEnqueue(ushort value) {
         // Reserve a ticket (unique position) among all producers
         long ticket = Interlocked.Increment(ref _tail) - 1;
         int  idx    = (int)(ticket & _mask);
@@ -64,8 +61,7 @@ public sealed class MpscUshortQueue
     /// Use this when dropping is not acceptable.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void EnqueueSpin(ushort value)
-    {
+    public void EnqueueSpin(ushort value) {
         SpinWait sw = default;
         while (!TryEnqueue(value))
             sw.SpinOnce();
@@ -76,8 +72,7 @@ public sealed class MpscUshortQueue
     /// Single-consumer only.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool TryDequeue(out ushort value)
-    {
+    public bool TryDequeue(out ushort value) {
         long head = _head;
         int  idx  = (int)(head & _mask);
 
@@ -100,8 +95,7 @@ public sealed class MpscUshortQueue
     }
 
     /// <summary>Drain up to 'max' items. Returns number drained.</summary>
-    public int Drain(Action<ushort> consume, int max = int.MaxValue)
-    {
+    public int Drain(Action<ushort> consume, int max = int.MaxValue) {
         int n = 0;
         while (n < max && TryDequeue(out ushort v))
         {

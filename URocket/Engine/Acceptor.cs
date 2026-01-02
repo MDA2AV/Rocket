@@ -108,12 +108,13 @@ public sealed unsafe partial class Engine {
                                 nextReactor = (nextReactor + 1) % reactorCount;
 
                                 ReactorQueues[targetReactor].Enqueue(clientFd);
-                                _engine.Connections[targetReactor][clientFd] = _engine.ConnectionPool.Get()
+                                
+                                /*_engine.Connections[targetReactor][clientFd] = _engine.ConnectionPool.Get()
                                     .SetFd(clientFd)
                                     .SetReactor(_engine.Reactors[targetReactor]);
                                 
                                 bool connectionAdded = _engine.ConnectionQueues.Writer.TryWrite(new ConnectionItem(targetReactor, clientFd));
-                                if (!connectionAdded) Console.WriteLine("Failed to write connection!!");
+                                if (!connectionAdded) Console.WriteLine("Failed to write connection!!");*/
                                 
                             }else { Console.WriteLine($"[acceptor] Accept error: {res}"); }
                         }
