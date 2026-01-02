@@ -7,6 +7,7 @@ public sealed unsafe class MpscRecvRing
     private readonly RecvItem[] _items;
     private readonly int _mask;
 
+    // TODO: Should be long
     private int _tail; // producer-reserved count
     private int _head; // consumer position
 

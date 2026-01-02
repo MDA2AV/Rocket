@@ -56,7 +56,7 @@ public sealed partial class Engine {
                 return conn;
 
             // The fd was closed/removed before we got here (recv res<=0 path).
-            // Just skip it and wait for the next accepted connection.
+            // Skip it and wait for the next accepted connection.
         }
     }
     
