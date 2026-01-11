@@ -2,6 +2,11 @@ using System.Runtime.CompilerServices;
 
 namespace URocket.Utils;
 
+// Next steps
+// TODO ReadResult should also contain a ReadOnlySequence<byte> by draining _recv everytime
+// TODO need to think how to avoid allocating the data? Might not be possible.
+
+// TODO Best scenario is drain, add to ReadOnlySequence<byte> and return the ring, everything transparent to the user
 
 public readonly struct ReadResult
 {

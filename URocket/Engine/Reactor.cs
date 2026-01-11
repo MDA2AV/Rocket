@@ -22,9 +22,6 @@ public sealed unsafe partial class Engine {
         public override bool Return(Connection connection) { connection.Clear(); return true; }
     }
     
-    public Reactor[] Reactors = null!;
-    public Dictionary<int, Connection>[] Connections = null!;
-    
     public class Reactor {
         private int _counter;
         private int _ringCounter;
@@ -376,13 +373,13 @@ public sealed unsafe partial class Engine {
             }
         }
         
-        public void SubmitSend(io_uring* pring, int fd, byte* buf, nuint off, nuint len) {
+        public static void SubmitSend(io_uring* pring, int fd, byte* buf, nuint off, nuint len) {
             io_uring_sqe* sqe = SqeGet(pring);
             shim_prep_send(sqe, fd, buf + off, (uint)(len - off), 0);
             shim_sqe_set_data64(sqe, PackUd(UdKind.Send, fd));
         }
         
-        private void SubmitCancelRecv(io_uring* ring, int fd) {
+        private static void SubmitCancelRecv(io_uring* ring, int fd) {
             io_uring_sqe* sqe = shim_get_sqe(ring);
             if (sqe == null) return; // or handle SQ full
 

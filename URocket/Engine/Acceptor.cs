@@ -9,7 +9,6 @@ using static URocket.ABI.ABI;
 namespace URocket.Engine;
 
 public sealed unsafe partial class Engine {
-    public Acceptor SingleAcceptor { get; set; } = null!;
     public class Acceptor {
         private io_uring* _ring;
         private io_uring_sqe* _sqe;
@@ -108,13 +107,6 @@ public sealed unsafe partial class Engine {
                                 nextReactor = (nextReactor + 1) % reactorCount;
 
                                 ReactorQueues[targetReactor].Enqueue(clientFd);
-                                
-                                /*_engine.Connections[targetReactor][clientFd] = _engine.ConnectionPool.Get()
-                                    .SetFd(clientFd)
-                                    .SetReactor(_engine.Reactors[targetReactor]);
-                                
-                                bool connectionAdded = _engine.ConnectionQueues.Writer.TryWrite(new ConnectionItem(targetReactor, clientFd));
-                                if (!connectionAdded) Console.WriteLine("Failed to write connection!!");*/
                                 
                             }else { Console.WriteLine($"[acceptor] Accept error: {res}"); }
                         }

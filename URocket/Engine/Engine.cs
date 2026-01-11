@@ -8,47 +8,45 @@ using System.Threading.Channels;
 namespace URocket.Engine;
 
 public sealed partial class Engine {
-    
     private const int c_bufferRingGID = 1;
-    public int NReactors { get; set; }
-
+    
     public bool ServerRunning { get; private set; }
     
-    // Lock-free queues for passing accepted fds to reactors
+    public Acceptor SingleAcceptor { get; set; } = null!;
+    
+    public int NReactors { get; set; }
+    public Reactor[] Reactors { get; set; } = null!;
+    public Dictionary<int, Connection>[] Connections { get; set; } = null!;
+    
     private static ConcurrentQueue<int>[] ReactorQueues = null!; // TODO: Use Channels?
-    // Stats tracking
+                                                                 // Lock-free queues for passing accepted fds to reactors
     private static long[] ReactorConnectionCounts = null!;
-    private static long[] ReactorRequestCounts = null!;
     
     // Socket
-    public string Ip { get; private set; } = "0.0.0.0";
-    public ushort Port { get; private set; } = 8080;
-    public int Backlog { get; private set; } = 65535;
+    public string Ip { get; set; } = "0.0.0.0";
+    public ushort Port { get; set; } = 8080;
+    public int Backlog { get; set; } = 65535;
     
-    
-    private readonly Channel<ConnectionItem> ConnectionQueues =
-        Channel.CreateUnbounded<ConnectionItem>(new UnboundedChannelOptions());
-    
+    /*
     private readonly Channel<Connection> _accepted =
         Channel.CreateUnbounded<Connection>(new UnboundedChannelOptions {
             SingleReader = true,
             SingleWriter = false
         });
-    
-    /*
     public ValueTask<Connection> AcceptAsync(CancellationToken ct = default)
         => _accepted.Reader.ReadAsync(ct);
-    */
     
     public async ValueTask<Connection> AcceptAsync2(CancellationToken cancellationToken = default) {
         var item = await ConnectionQueues.Reader.ReadAsync(cancellationToken);
         return Connections[item.ReactorId][item.ClientFd];
     }
+    */
     
-    public async ValueTask<Connection> AcceptAsync(CancellationToken cancellationToken = default)
-    {
-        while (true)
-        {
+    private readonly Channel<ConnectionItem> ConnectionQueues =
+        Channel.CreateUnbounded<ConnectionItem>(new UnboundedChannelOptions());
+    
+    public async ValueTask<Connection> AcceptAsync(CancellationToken cancellationToken = default) {
+        while (true) {
             var item = await ConnectionQueues.Reader.ReadAsync(cancellationToken).ConfigureAwait(false);
 
             var dict = Connections[item.ReactorId];
@@ -64,7 +62,6 @@ public sealed partial class Engine {
         NReactors = 12;
         ReactorQueues = new ConcurrentQueue<int>[NReactors];
         ReactorConnectionCounts = new long[NReactors];
-        ReactorRequestCounts = new long[NReactors];
     }
     
     public struct ConnectionItem {
@@ -87,10 +84,8 @@ public sealed partial class Engine {
         for (var i = 0; i < NReactors; i++) {
             ReactorQueues[i] = new ConcurrentQueue<int>();
             ReactorConnectionCounts[i] = 0;
-            ReactorRequestCounts[i] = 0;
             
             Reactors[i] = new Reactor(i,this); // TODO: How to pass a config
-            //Reactors[i].InitRing();
             Connections[i] = new Dictionary<int, Connection>(Reactors[i].Config.MaxConnectionsPerReactor);
         }
         

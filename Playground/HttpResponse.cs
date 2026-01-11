@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Runtime.InteropServices;
 using System.Text;
 using URocket;
+using URocket.Engine;
 
 namespace Playground;
 
@@ -33,7 +34,7 @@ public class HttpResponse
                     connection.OutHead = 0;
                     connection.OutTail = OK_LEN;
                     
-                    reactor.SubmitSend(
+                    Engine.Reactor.SubmitSend(
                         reactor.Ring,
                         connection.ClientFd,
                         connection.OutPtr,
