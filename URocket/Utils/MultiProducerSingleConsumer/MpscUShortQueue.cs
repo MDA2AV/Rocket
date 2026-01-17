@@ -1,6 +1,6 @@
 using System.Runtime.CompilerServices;
 
-namespace URocket.MultiProducerSingleConsumer;
+namespace URocket.Utils.MultiProducerSingleConsumer;
 
 /// <summary>
 /// ushort Multi Producer Single Consumer Queue

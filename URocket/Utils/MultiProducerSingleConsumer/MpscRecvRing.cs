@@ -1,15 +1,14 @@
 using System.Runtime.CompilerServices;
 
-namespace URocket.MultiProducerSingleConsumer;
+namespace URocket.Utils.MultiProducerSingleConsumer;
 
 public sealed unsafe class MpscRecvRing
 {
     private readonly RecvItem[] _items;
     private readonly int _mask;
-
-    // TODO: Should be long
-    private int _tail; // producer-reserved count
-    private int _head; // consumer position
+    
+    private long _tail; // producer-reserved count
+    private long _head; // consumer position
 
     public MpscRecvRing(int capacityPow2) {
         if (capacityPow2 <= 0 || (capacityPow2 & (capacityPow2 - 1)) != 0)
@@ -22,12 +21,12 @@ public sealed unsafe class MpscRecvRing
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool TryEnqueue(in RecvItem item) {
         // Fast full check (approx) using current head/tail
-        int head = Volatile.Read(ref _head);
-        int tail = Volatile.Read(ref _tail);
+        long head = Volatile.Read(ref _head);
+        long tail = Volatile.Read(ref _tail);
         if (tail - head >= _items.Length) return false; // full
 
         // Reserve a unique slot
-        int slot = Interlocked.Increment(ref _tail) - 1;
+        long slot = Interlocked.Increment(ref _tail) - 1;
 
         // Store item
         _items[slot & _mask] = item;
@@ -37,11 +36,11 @@ public sealed unsafe class MpscRecvRing
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public int SnapshotTail() => Volatile.Read(ref _tail);
+    public long SnapshotTail() => Volatile.Read(ref _tail);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool TryDequeueUntil(int tailSnapshot, out RecvItem item) {
-        int head = _head;
+    public bool TryDequeueUntil(long tailSnapshot, out RecvItem item) {
+        long head = _head;
         if (head >= tailSnapshot)
         {
             item = default;
@@ -52,6 +51,13 @@ public sealed unsafe class MpscRecvRing
         Volatile.Write(ref _head, head + 1);
         return true;
     }
+
+    public void DequeueSingle(out RecvItem item) {
+        item = _items[_head & _mask];
+        Volatile.Write(ref _head, _head + 1);
+    }
+
+    public long GetTailHeadDiff() => _tail - _head;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool IsEmpty()

@@ -2,7 +2,12 @@ using System.Buffers;
 using System.Runtime.InteropServices;
 using System.Text;
 using URocket;
+using URocket.Connection;
 using URocket.Engine;
+using URocket.Utils;
+using URocket.Utils.ReadOnlySequence;
+using URocket.Utils.ReadOnlySpan;
+using URocket.Utils.UnmanagedMemoryManager;
 
 namespace Playground;
 
@@ -10,44 +15,90 @@ public class HttpResponse
 {
     internal static async ValueTask HandleAsync(Connection connection) {
         try {
-            var reactor = connection.Reactor;
             while (true) {
                 var result = await connection.ReadAsync();
                 if (result.IsClosed)
                     break;
+                
+                /*
+                if (connection.RingCount == 1) {
+                    connection.TryDequeueBatch(result.TailSnapshot, out var item);
+                    
+                    var mem = item.AsUnmanagedMemoryManager();
+                    var idx = mem.GetSpan().IndexOf("\r\n\r\n"u8);
+                    if(idx == -1)
+                        Console.WriteLine("-1");
 
-                unsafe
-                {
-                    while (connection.TryDequeueBatch(result.TailSnapshot, out var item))
-                    {
-                        var span = new ReadOnlySpan<byte>(item.Ptr, item.Length);
-                        // parse...
+                    // Return buffer after you’re done with that segment
+                    connection.Reactor.EnqueueReturnQ(item.BufferId);
+                    
+                } else {
+                    while (connection.TryDequeueBatch(result.TailSnapshot, out var item)) {
+                        var mem = item.AsUnmanagedMemoryManager();
+                        var idx = mem.GetSpan().IndexOf("\r\n\r\n"u8);
+                        if(idx == -1)
+                            Console.WriteLine("-1");
 
                         // Return buffer after you’re done with that segment
                         connection.Reactor.EnqueueReturnQ(item.BufferId);
                     }
                 }
-                
-                connection.ResetRead();
-                unsafe {
-                    connection.OutPtr  = OK_PTR;
-                    connection.OutHead = 0;
-                    connection.OutTail = OK_LEN;
+                */
+
+                var mems = Extract(connection, result);
+                var seq = mems.ToReadOnlySequence();
+                var reader = new SequenceReader<byte>(seq);
+
+                if (reader.TryReadTo(out ReadOnlySequence<byte> headers, "\r\n\r\n"u8)) {
+                    // parse request
                     
-                    Engine.Reactor.SubmitSend(
-                        reactor.Ring,
-                        connection.ClientFd,
-                        connection.OutPtr,
-                        connection.OutHead,
-                        connection.OutTail);
+                    if(reader.End)
+                        mems.ReturnRingBuffers(connection.Reactor);
+                    else
+                    {
+                        
+                    }
+                } else {
+                    Console.WriteLine("665123");
+                    // Not enough data, wait for more
+
+                    connection.ResetRead();
+                    continue;
                 }
+                
+                var msg = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\nContent-Type: text/plain\r\n\r\nHello, World!"u8;
+                if (!connection.Reactor.TryEnqueueWrite(new WriteItem(msg.ToUnmanagedMemoryManager(),
+                        connection.ClientFd))) 
+                {
+                    throw new InvalidOperationException("Failed to write response");
+                }
+                
+                connection.Flushable = true;
+                connection.ResetRead();
             }
         } catch (Exception e) { Console.WriteLine(e); }
         Console.WriteLine("end");
     }
 
+    private static UnmanagedMemoryManager[] Extract(Connection connection, ReadResult readResult) {
+        var count = connection.RingCount;
+
+        if (count == 1) {
+            connection.TryDequeueBatch(readResult.TailSnapshot, out var item);
+            return [item.AsUnmanagedMemoryManager()];
+        }
+        
+        var mems = new UnmanagedMemoryManager[count];
+        for (int i = 0; i < count; i++) {
+            connection.TryDequeueBatch(readResult.TailSnapshot, out var item);
+            mems[i] = item.AsUnmanagedMemoryManager();
+        }
+        
+        return mems;
+    }
+
     private static unsafe byte* OK_PTR;
-    private static nuint OK_LEN;
+    private static uint OK_LEN;
 
     private static unsafe void InitPipelineOk(int pipeline = 16)
     {
@@ -61,9 +112,9 @@ public class HttpResponse
 
         // Encode once
         byte[] one = Encoding.ASCII.GetBytes(response); // ASCII is enough here
-        nuint oneLen = (nuint)one.Length;
+        uint oneLen = (uint)one.Length;
 
-        OK_LEN = oneLen * (nuint)pipeline;
+        OK_LEN = oneLen * (uint)pipeline;
         OK_PTR = (byte*)NativeMemory.Alloc(OK_LEN);
 
         // Copy first response
@@ -92,7 +143,7 @@ public class HttpResponse
             "\r\n" +
             "Hello, World!";
         var a = Encoding.UTF8.GetBytes(s);
-        OK_LEN = (nuint)a.Length;
+        OK_LEN = (uint)a.Length;
         OK_PTR = (byte*)NativeMemory.Alloc(OK_LEN);
         for (int i = 0; i < a.Length; i++)
             OK_PTR[i] = a[i];

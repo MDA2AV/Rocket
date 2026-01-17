@@ -1,32 +1,16 @@
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks.Sources;
-using URocket.MultiProducerSingleConsumer;
 using URocket.Utils;
+using URocket.Utils.MultiProducerSingleConsumer;
+using ReadResult = URocket.Utils.ReadResult;
 
-namespace URocket;
-
-public readonly unsafe struct RecvItem {
-    public readonly byte* Ptr;
-    public readonly int Length;
-    public readonly ushort BufferId;
-
-    public RecvItem(byte* ptr, int length, ushort bufferId) {
-        Ptr = ptr;
-        Length = length;
-        BufferId = bufferId;
-    }
-}
+namespace URocket.Connection;
 
 [SkipLocalsInit]
-public sealed unsafe class Connection : IValueTaskSource<ReadResult>
+public sealed unsafe partial class Connection : IValueTaskSource<ReadResult>
 {
     public int ClientFd { get; private set; }
     public Engine.Engine.Reactor Reactor { get; private set; } = null!;
-
-    // Out buffer
-    public nuint OutHead { get; set; }
-    public nuint OutTail { get; set; }
-    public byte* OutPtr  { get; set; }
 
     // Read completion primitive
     private ManualResetValueTaskSourceCore<ReadResult> _readSignal;
@@ -43,6 +27,8 @@ public sealed unsafe class Connection : IValueTaskSource<ReadResult>
     private readonly MpscRecvRing _recv = new(capacityPow2: 1024);
 
     // --- Reactor thread API -------------------------------------------------
+
+    public long RingCount => _recv.GetTailHeadDiff();
 
     /// <summary>
     /// Called by reactor thread: enqueue recv buffer and wake if there is a waiter.
@@ -74,7 +60,7 @@ public sealed unsafe class Connection : IValueTaskSource<ReadResult>
         if (Interlocked.Exchange(ref _armed, 0) == 1)
         {
             // Provide a tail snapshot for this batch boundary
-            int snap = _recv.SnapshotTail();
+            long snap = _recv.SnapshotTail();
             _readSignal.SetResult(new ReadResult(snap, isClosed: false));
         }
         else
@@ -105,8 +91,9 @@ public sealed unsafe class Connection : IValueTaskSource<ReadResult>
     /// Returns a tail snapshot that defines the batch boundary.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public ValueTask<ReadResult> ReadAsync()
-    {
+    public ValueTask<ReadResult> ReadAsync() {
+        //ResetRead();
+        
         // If already closed (or reused), complete synchronously as closed.
         if (Volatile.Read(ref _closed) != 0)
             return new ValueTask<ReadResult>(ReadResult.Closed());
@@ -120,14 +107,14 @@ public sealed unsafe class Connection : IValueTaskSource<ReadResult>
             if (Volatile.Read(ref _closed) != 0)
                 return new ValueTask<ReadResult>(ReadResult.Closed());
 
-            int snap = _recv.SnapshotTail();
+            long snap = _recv.SnapshotTail();
             return new ValueTask<ReadResult>(new ReadResult(snap, isClosed: false));
         }
 
         // Only one waiter is allowed
         if (Interlocked.Exchange(ref _armed, 1) == 1)
             throw new InvalidOperationException("ReadAsync already armed.");
-
+ 
         // Capture generation to guard pooled reuse
         int gen = Volatile.Read(ref _generation);
 
@@ -139,13 +126,14 @@ public sealed unsafe class Connection : IValueTaskSource<ReadResult>
         }
 
         return new ValueTask<ReadResult>(this, (short)gen);
+        //return new ValueTask<ReadResult>(this, _readSignal.Version);
     }
 
     /// <summary>
     /// Drain one batch (bounded by the tail snapshot you got from ReadAsync).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool TryDequeueBatch(int tailSnapshot, out RecvItem item)
+    public bool TryDequeueBatch(long tailSnapshot, out RecvItem item)
         => _recv.TryDequeueUntil(tailSnapshot, out item);
 
     /// <summary>
@@ -175,10 +163,11 @@ public sealed unsafe class Connection : IValueTaskSource<ReadResult>
         // Mark closed so any late handler calls don't wait
         Volatile.Write(ref _closed, 1);
 
+        ResetWriteBuffer();
+        
         // Reset send state
-        OutPtr = null;
-        OutHead = 0;
-        OutTail = 0;
+        WriteHead = 0;
+        WriteTail = 0;
 
         // Reset read state
         Volatile.Write(ref _armed, 0);
@@ -213,6 +202,7 @@ public sealed unsafe class Connection : IValueTaskSource<ReadResult>
             return ReadResult.Closed();
 
         return _readSignal.GetResult(_readSignal.Version);
+        //return _readSignal.GetResult(token);
     }
 
     ValueTaskSourceStatus IValueTaskSource<ReadResult>.GetStatus(short token)

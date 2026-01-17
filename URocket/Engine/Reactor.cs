@@ -3,8 +3,8 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.ObjectPool;
 using URocket.Engine.Configs;
-using URocket.MultiProducerSingleConsumer;
 using URocket.Utils;
+using URocket.Utils.MultiProducerSingleConsumer;
 using static URocket.ABI.ABI;
 
 // ReSharper disable always CheckNamespace
@@ -14,12 +14,12 @@ using static URocket.ABI.ABI;
 namespace URocket.Engine;
 
 public sealed unsafe partial class Engine {
-    private readonly ObjectPool<Connection> ConnectionPool =
-        new DefaultObjectPool<Connection>(new ConnectionPoolPolicy(), 1024 * 32);
+    private readonly ObjectPool<Connection.Connection> ConnectionPool =
+        new DefaultObjectPool<Connection.Connection>(new ConnectionPoolPolicy(), 1024 * 32);
 
-    private class ConnectionPoolPolicy : PooledObjectPolicy<Connection> {
-        public override Connection Create() => new();
-        public override bool Return(Connection connection) { connection.Clear(); return true; }
+    private class ConnectionPoolPolicy : PooledObjectPolicy<Connection.Connection> {
+        public override Connection.Connection Create() => new();
+        public override bool Return(Connection.Connection connection) { connection.Clear(); return true; }
     }
     
     public class Reactor {
@@ -108,9 +108,53 @@ public sealed unsafe partial class Engine {
             return count;
         }
         
+        private readonly MpscWriteItem _write = new(capacityPow2: 1024);
+
+        public bool TryEnqueueWrite(WriteItem item) {
+            return _write.TryEnqueue(item);
+        }
+
+        public bool TryDequeueWrite(out WriteItem item) {
+            if (_write.TryDequeue(out item))
+                return true;
+
+            return false;
+        }
+
+        private readonly HashSet<int> _flushableFds = [];
+        
+        private void DrainWriteQ() {
+            //Console.WriteLine("Draining WriteQ");
+            _flushableFds.Clear();
+            
+            while (_write.TryDequeue(out WriteItem item))
+            {
+                if (_engine.Connections[Id].TryGetValue(item.ClientFd, out var connection))
+                {
+                    if (connection.Flushable)
+                    {
+                        // Write buffer and free it
+                        connection.Write(item.Buffer.Ptr, item.Buffer.Length);
+                        item.Buffer.Free();
+                        
+                        _flushableFds.Add(connection.ClientFd);
+                    }
+                }
+            }
+
+            foreach (int fd in _flushableFds)
+            {
+                if (_engine.Connections[Id].TryGetValue(fd, out var connection))
+                {
+                    connection.Flush();
+                    connection.Flushable = false;
+                }
+            }
+        }
+        
         internal void HandleSubmitAndWaitSingleCall()
         {
-            Dictionary<int, Connection> connections = _engine.Connections[Id];
+            Dictionary<int, Connection.Connection> connections = _engine.Connections[Id];
             ConcurrentQueue<int> reactorQueue = ReactorQueues[Id];
             io_uring_cqe*[] cqes = new io_uring_cqe*[Config.BatchCqes];
 
@@ -132,6 +176,8 @@ public sealed unsafe partial class Engine {
 
                     // Return provided buffers back into the buf_ring (queues SQEs; flushed below)
                     DrainReturnQ();
+                    
+                    DrainWriteQ();
 
                     // One call that:
                     //  - flushes queued SQEs (liburing)
@@ -218,15 +264,20 @@ public sealed unsafe partial class Engine {
                                 // No connection mapping => immediately return buffer
                                 ReturnBufferRing(ptr, bid); // queues SQE (flush next loop)
                             }
-                        }
-                        else if (kind == UdKind.Send) {
+                        } else if (kind == UdKind.Send) {
                             int fd = UdFdOf(ud);
                             if (connections.TryGetValue(fd, out var connection)) {
-                                connection.OutHead += (nuint)res;
-                                if (connection.OutHead < connection.OutTail) {
-                                    SubmitSend(Ring, connection.ClientFd, connection.OutPtr, connection.OutHead, connection.OutTail);
+                                connection.WriteHead += res;
+                                
+                                if (connection.WriteHead < connection.WriteTail) {
+                                    Console.WriteLine("Oddness");
+                                    SubmitSend(Ring, connection.ClientFd, connection.WriteBuffer, (uint)connection.WriteHead, (uint)connection.WriteTail);
+                                    continue;
                                     // queued SQE; flushed next loop
                                 }
+                                
+                                connection.ResetWriteBuffer();
+                                //connection.ResetRead();
                             }
                         } else if (kind == UdKind.Cancel) {
                             Console.WriteLine("Cancel");
@@ -260,8 +311,9 @@ public sealed unsafe partial class Engine {
             }
         }
         
+        /*
         internal void HandleSubmitAndWaitCqe() {
-            Dictionary<int,Connection> connections = _engine.Connections[Id];
+            Dictionary<int,Connection.Connection> connections = _engine.Connections[Id];
             ConcurrentQueue<int> reactorQueue = ReactorQueues[Id];     // new FDs from acceptor
             io_uring_cqe*[] cqes = new io_uring_cqe*[Config.BatchCqes];
 
@@ -344,9 +396,9 @@ public sealed unsafe partial class Engine {
                             int fd = UdFdOf(ud);
                             if (connections.TryGetValue(fd, out var connection)) {
                                 // Advance send progress.
-                                connection.OutHead += (nuint)res;
-                                if (connection.OutHead < connection.OutTail)
-                                    SubmitSend(Ring, connection.ClientFd, connection.OutPtr, connection.OutHead, connection.OutTail);
+                                connection.WriteHead += res;
+                                if (connection.WriteHead < connection.WriteTail)
+                                    SubmitSend(Ring, connection.ClientFd, connection.WriteBuffer, (uint)connection.WriteHead, (uint)connection.WriteTail);
                             }
                         }
                         else if (kind == UdKind.Cancel) {
@@ -372,6 +424,13 @@ public sealed unsafe partial class Engine {
                 Console.WriteLine($"Reactor[{Id}] Shutdown complete.");
             }
         }
+        */
+
+        public void Send(int clientFd, byte* buf, nuint off, nuint len) {
+            io_uring_sqe* sqe = SqeGet(Ring);
+            shim_prep_send(sqe, clientFd, buf + off, (uint)(len - off), 0);
+            shim_sqe_set_data64(sqe, PackUd(UdKind.Send, clientFd)); 
+        }
         
         public static void SubmitSend(io_uring* pring, int fd, byte* buf, nuint off, nuint len) {
             io_uring_sqe* sqe = SqeGet(pring);
@@ -389,7 +448,7 @@ public sealed unsafe partial class Engine {
             shim_sqe_set_data64(sqe, PackUd(UdKind.Cancel, fd));
         }
         
-        private void CloseAll(Dictionary<int, Connection> connections) {
+        private void CloseAll(Dictionary<int, Connection.Connection> connections) {
             Console.WriteLine($"Reactor[{Id}] Connection leakage -- [{connections.Count}] " +
                               $"Ring leakage -- [{_ringCounter + Config.BufferRingEntries - _bufferRingIndex}]");
             

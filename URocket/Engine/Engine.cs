@@ -16,7 +16,7 @@ public sealed partial class Engine {
     
     public int NReactors { get; set; }
     public Reactor[] Reactors { get; set; } = null!;
-    public Dictionary<int, Connection>[] Connections { get; set; } = null!;
+    public Dictionary<int, Connection.Connection>[] Connections { get; set; } = null!;
     
     private static ConcurrentQueue<int>[] ReactorQueues = null!; // TODO: Use Channels?
                                                                  // Lock-free queues for passing accepted fds to reactors
@@ -45,7 +45,7 @@ public sealed partial class Engine {
     private readonly Channel<ConnectionItem> ConnectionQueues =
         Channel.CreateUnbounded<ConnectionItem>(new UnboundedChannelOptions());
     
-    public async ValueTask<Connection> AcceptAsync(CancellationToken cancellationToken = default) {
+    public async ValueTask<Connection.Connection> AcceptAsync(CancellationToken cancellationToken = default) {
         while (true) {
             var item = await ConnectionQueues.Reader.ReadAsync(cancellationToken).ConfigureAwait(false);
 
@@ -80,13 +80,13 @@ public sealed partial class Engine {
         
         // Init Reactors
         Reactors = new Reactor[NReactors];
-        Connections = new Dictionary<int, Connection>[NReactors];
+        Connections = new Dictionary<int, Connection.Connection>[NReactors];
         for (var i = 0; i < NReactors; i++) {
             ReactorQueues[i] = new ConcurrentQueue<int>();
             ReactorConnectionCounts[i] = 0;
             
             Reactors[i] = new Reactor(i,this); // TODO: How to pass a config
-            Connections[i] = new Dictionary<int, Connection>(Reactors[i].Config.MaxConnectionsPerReactor);
+            Connections[i] = new Dictionary<int, Connection.Connection>(Reactors[i].Config.MaxConnectionsPerReactor);
         }
         
         var reactorThreads = new Thread[NReactors];
