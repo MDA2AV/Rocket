@@ -52,9 +52,23 @@ public sealed unsafe class MpscRecvRing
         return true;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void DequeueSingle(out RecvItem item) {
         item = _items[_head & _mask];
         Volatile.Write(ref _head, _head + 1);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool TryPeekUntil(long tailSnapshot, out RecvItem item) {
+        long head = _head;
+        if (head >= tailSnapshot)
+        {
+            item = default;
+            return false;
+        }
+
+        item = _items[head & _mask];
+        return true;
     }
 
     public long GetTailHeadDiff() => _tail - _head;

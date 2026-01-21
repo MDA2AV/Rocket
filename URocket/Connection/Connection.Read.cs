@@ -137,6 +137,10 @@ public sealed unsafe partial class Connection : IValueTaskSource<ReadResult>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool TryGetRing(long tailSnapshot, out RecvItem item)
         => _recv.TryDequeueUntil(tailSnapshot, out item);
+    
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool TryPeekRing(long tailSnapshot, out RecvItem item)
+        => _recv.TryPeekUntil(tailSnapshot, out item);
 
     /// <summary>
     /// Prepare for next wait cycle (call after finishing draining the batch).
