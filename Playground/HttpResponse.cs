@@ -46,7 +46,7 @@ public class HttpResponse
                 }
                 */
                 
-                var mems = connection.GetRings(result);
+                var mems = connection.GetAllRings(result);
                 var seq = mems.ToReadOnlySequence();
                 var reader = new SequenceReader<byte>(seq);
 

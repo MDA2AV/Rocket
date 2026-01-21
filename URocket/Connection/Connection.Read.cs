@@ -135,7 +135,7 @@ public sealed unsafe partial class Connection : IValueTaskSource<ReadResult>
     /// Drain one batch (bounded by the tail snapshot you got from ReadAsync).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool TryDequeueBatch(long tailSnapshot, out RecvItem item)
+    public bool TryGetRing(long tailSnapshot, out RecvItem item)
         => _recv.TryDequeueUntil(tailSnapshot, out item);
 
     /// <summary>
@@ -226,20 +226,20 @@ public sealed unsafe partial class Connection : IValueTaskSource<ReadResult>
         _readSignal.OnCompleted(continuation, state, _readSignal.Version, flags);
     }
     
-    public UnmanagedMemoryManager[] GetRings(ReadResult readResult) 
+    public UnmanagedMemoryManager[] GetAllRings(ReadResult readResult) 
     {
         var count = RingCount;
 
         if (count == 1) 
         {
-            TryDequeueBatch(readResult.TailSnapshot, out var item);
+            TryGetRing(readResult.TailSnapshot, out var item);
             return [item.AsUnmanagedMemoryManager()];
         }
         
         var mems = new UnmanagedMemoryManager[count];
         for (int i = 0; i < count; i++) 
         {
-            TryDequeueBatch(readResult.TailSnapshot, out var item);
+            TryGetRing(readResult.TailSnapshot, out var item);
             mems[i] = item.AsUnmanagedMemoryManager();
         }
         
