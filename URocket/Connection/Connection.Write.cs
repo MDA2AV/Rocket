@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using URocket.Utils;
 using URocket.Utils.UnmanagedMemoryManager;
 
 namespace URocket.Connection;
@@ -67,6 +68,9 @@ public unsafe partial class Connection : IBufferWriter<byte>, IDisposable {
         source.CopyTo(new Span<byte>(WriteBuffer + WriteTail, len));
         WriteTail += len;
     }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool Write(WriteItem item) => Reactor.TryEnqueueWrite(item);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Flush() => CanWrite = true;
