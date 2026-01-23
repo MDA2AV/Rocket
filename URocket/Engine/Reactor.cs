@@ -23,7 +23,6 @@ public sealed unsafe partial class Engine {
     }
     
     public class Reactor {
-        private int _counter;
         private int _ringCounter;
         private io_uring_buf_ring* _bufferRing;
         private byte* _bufferRingSlab;
@@ -197,7 +196,8 @@ public sealed unsafe partial class Engine {
                             int rc = shim_submit_and_wait_timeout(Ring, pC, 1u, &ts);
                             
                             // Hmm, I think this condition should be enough for now
-                            if (rc < 0) { _counter++; continue; }
+                            if (rc < 0) {
+                                continue; }
                             //if (rc == -62 || rc < 0 && rc != -17) { _counter++; continue; }
                             //if (rc is -62 or < 0) { _counter++; continue; }
 
