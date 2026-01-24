@@ -44,6 +44,7 @@ internal class Program
             Console.WriteLine("Signaled to stop");
         }
 
+        cts.Dispose();
         Console.WriteLine("Main loop finished.");
     }
 }
