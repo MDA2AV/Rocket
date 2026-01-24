@@ -6,6 +6,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "URocket", "URocket\URocket.
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Examples", "Examples\Examples.csproj", "{CD553753-D396-4AB9-A24B-7DBD0C6E2408}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Benchmarkings", "Benchmarkings", "{C01321B0-2480-4F0A-BF79-20A543A4DA2C}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ColdBoot", "Benchmarkings\ColdBoot\ColdBoot.csproj", "{E89BB48C-AA01-4FF6-8F3F-4E25FC9BAF92}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -24,5 +28,12 @@ Global
 		{CD553753-D396-4AB9-A24B-7DBD0C6E2408}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{CD553753-D396-4AB9-A24B-7DBD0C6E2408}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{CD553753-D396-4AB9-A24B-7DBD0C6E2408}.Release|Any CPU.Build.0 = Release|Any CPU
+		{E89BB48C-AA01-4FF6-8F3F-4E25FC9BAF92}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E89BB48C-AA01-4FF6-8F3F-4E25FC9BAF92}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E89BB48C-AA01-4FF6-8F3F-4E25FC9BAF92}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E89BB48C-AA01-4FF6-8F3F-4E25FC9BAF92}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{E89BB48C-AA01-4FF6-8F3F-4E25FC9BAF92} = {C01321B0-2480-4F0A-BF79-20A543A4DA2C}
 	EndGlobalSection
 EndGlobal

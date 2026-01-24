@@ -40,5 +40,5 @@ public class EngineOptions
     /// Must contain at least ReactorCount entries.
     /// Each reactor uses the config at its index.
     /// </summary>
-    public List<ReactorConfig> ReactorConfigs { get; init; } = null!;
+    public ReactorConfig[] ReactorConfigs { get; set; } = null!;
 }

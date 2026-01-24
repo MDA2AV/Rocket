@@ -48,17 +48,19 @@ public sealed partial class Engine
     /// </summary>
     public EngineOptions Options { get; }
     
-    public Engine() : this(new EngineOptions
-    {
-        ReactorConfigs =
-        {
-            new ReactorConfig()
-        }
-    }) { }
+    public Engine() : this(new EngineOptions()) { }
 
     public Engine(EngineOptions options) 
     {
         Options = options;
+        if (options.ReactorConfigs == null!)
+        {
+            options.ReactorConfigs = new ReactorConfig[Options.ReactorCount];
+            for (int i = 0; i < Options.ReactorCount; i++)
+            {
+                options.ReactorConfigs[i] = new ReactorConfig();
+            }
+        }
         ReactorQueues = new ConcurrentQueue<int>[options.ReactorCount];
         ReactorConnectionCounts = new long[options.ReactorCount];
     }
