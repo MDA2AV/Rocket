@@ -1,6 +1,3 @@
-using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
-using System.Text;
 using URocket.Engine.Configs;
 using static URocket.ABI.ABI;
 
@@ -12,25 +9,60 @@ namespace URocket.Engine;
 
 public sealed unsafe partial class Engine 
 {
-    public class Acceptor 
+    public partial class Acceptor 
     {
+        /// <summary>
+        /// The acceptor's io_uring instance used to receive CQEs for accepted sockets.
+        /// This ring is dedicated to accepting connections (separate from per-reactor rings).
+        /// </summary>
         private io_uring* _io_uring;
+        /// <summary>
+        /// Cached SQE used during initialization to arm multishot accept.
+        /// (After arming, accepts arrive as CQEs without re-submitting an SQE each time.)
+        /// </summary>
         private io_uring_sqe* _sqe;
+        /// <summary>
+        /// Back-reference to the owning engine. Provides configuration (Ip/Port/Backlog),
+        /// reactor queues, and the global ServerRunning flag.
+        /// </summary>
         private readonly Engine _engine;
+        /// <summary>
+        /// Acceptor configuration (ring flags, ring size, CQ wait timeout, batch size, etc.).
+        /// </summary>
         private readonly AcceptorConfig _acceptorConfig;
+        /// <summary>
+        /// Scratch array used to batch CQE pointers returned by shim_peek_batch_cqe().
+        /// Reused every loop to avoid allocations.
+        /// </summary>
         private readonly io_uring_cqe*[] _cqes;
+        /// <summary>
+        /// Listening socket file descriptor. This is the fd passed to multishot accept.
+        /// The listener may be IPv4-only or IPv6 dual-stack depending on configuration.
+        /// </summary>
         private readonly int _listenFd;
 
         public Acceptor(Engine engine) : this(new AcceptorConfig(), engine) { }
-
+        /// <summary>
+        /// Creates an acceptor that owns:
+        ///  - a listening socket (IPv4-only or IPv6 dual-stack)
+        ///  - a CQE batch buffer for the accept loop
+        /// The io_uring itself is created later in InitRing().
+        /// </summary>
         public Acceptor(AcceptorConfig acceptorConfig, Engine engine) 
         {
             _acceptorConfig = acceptorConfig; 
             _engine = engine;
-            _listenFd = CreateListenerSocket(_engine.Ip, _engine.Port); 
+            _listenFd = acceptorConfig.IPVersion == IPVersion.IPv4Only 
+                ? CreateIPv4ListenerSocket(_engine.Ip, _engine.Port) 
+                : CreateListenerSocketDualStack(_engine.Ip, _engine.Port);
             _cqes = new io_uring_cqe*[_acceptorConfig.BatchSqes];
         }
-
+        /// <summary>
+        /// Initializes the acceptor io_uring and arms multishot accept on the listening socket.
+        ///
+        /// After this runs successfully, accepted client sockets arrive as CQEs of kind UdKind.Accept,
+        /// with cqe->res containing the accepted client fd (or a negative errno on failure).
+        /// </summary>
         public void InitRing() 
         {
             _io_uring = CreateRing(_acceptorConfig.RingFlags, _acceptorConfig.SqCpuThread, _acceptorConfig.SqThreadIdleMs, out int err, _acceptorConfig.RingEntries);
@@ -49,66 +81,6 @@ public sealed unsafe partial class Engine
             Console.WriteLine($"[acceptor] ring flags = 0x{flags:x} " +
                               $"(SQPOLL={(flags & IORING_SETUP_SQPOLL) != 0}, " +
                               $"SQ_AFF={(flags & IORING_SETUP_SQ_AFF) != 0})");
-        }
-        
-        private int CreateListenerSocket(string ip, ushort port)
-        {
-            int lfd = socket(AF_INET, SOCK_STREAM, 0);
-            if (lfd < 0) ThrowErrno("socket");
-
-            try
-            {
-                int one = 1;
-
-                if (setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, (uint)sizeof(int)) < 0)
-                    ThrowErrno("setsockopt(SO_REUSEADDR)");
-
-                // Linux only; great for multi-reactor accept, but fails on some platforms/kernels/configs.
-                if (setsockopt(lfd, SOL_SOCKET, SO_REUSEPORT, &one, (uint)sizeof(int)) < 0)
-                    ThrowErrno("setsockopt(SO_REUSEPORT)");
-
-                // TCP_NODELAY on a listening socket is not useful.
-                // Remove it here; set it on accepted sockets instead.
-
-                sockaddr_in addr = default;
-                addr.sin_family = (ushort)AF_INET;
-                addr.sin_port = Htons(port);
-
-                // Better: use ASCII bytes, not UTF8.
-                byte[] ipb = Encoding.ASCII.GetBytes(ip + "\0");
-                fixed (byte* pip = ipb)
-                {
-                    int rc = inet_pton(AF_INET, (sbyte*)pip, &addr.sin_addr);
-                    if (rc == 0) throw new ArgumentException($"Invalid IPv4 address: {ip}", nameof(ip));
-                    if (rc < 0) ThrowErrno("inet_pton");
-                }
-
-                if (bind(lfd, &addr, (uint)sizeof(sockaddr_in)) < 0)
-                    ThrowErrno("bind");
-
-                if (listen(lfd, _engine.Backlog) < 0)
-                    ThrowErrno("listen");
-
-                int fl = fcntl(lfd, F_GETFL, 0);
-                if (fl < 0) ThrowErrno("fcntl(F_GETFL)");
-
-                if (fcntl(lfd, F_SETFL, fl | O_NONBLOCK) < 0)
-                    ThrowErrno("fcntl(F_SETFL,O_NONBLOCK)");
-
-                return lfd;
-            }
-            catch
-            {
-                close(lfd);
-                throw;
-            }
-        }
-        
-        [MethodImpl(MethodImplOptions.NoInlining)]
-        private static void ThrowErrno(string op)
-        {
-            int err = Marshal.GetLastPInvokeError();
-            throw new InvalidOperationException($"{op} failed, errno={err}");
         }
         
         public void Handle(Acceptor acceptor, int reactorCount) 
@@ -174,31 +146,5 @@ public sealed unsafe partial class Engine
                 Console.WriteLine($"[acceptor] Shutdown complete.");
             }
         }
-    }
-    
-    private static io_uring* CreateRing(uint flags, int sqThreadCpu, uint sqThreadIdleMs, out int err, uint ringEntries) 
-    {
-        if(flags == 0)
-            return shim_create_ring(ringEntries, out err);
-        return shim_create_ring_ex(ringEntries, flags, sqThreadCpu, sqThreadIdleMs, out err);
-    }
-
-    // TODO: This seems to be causing segfault when sqe is null
-    private static io_uring_sqe* SqeGet(io_uring* pring) 
-    {
-        io_uring_sqe* sqe = shim_get_sqe(pring);
-        if (sqe == null) {
-            Console.WriteLine("S4");
-            shim_submit(pring); 
-            sqe = shim_get_sqe(pring); 
-        }
-        return sqe;
-    }
-
-    private static void ArmRecvMultishot(io_uring* pring, int fd, uint bgid) 
-    {
-        io_uring_sqe* sqe = SqeGet(pring);
-        shim_prep_recv_multishot_select(sqe, fd, bgid, 0);
-        shim_sqe_set_data64(sqe, PackUd(UdKind.Recv, fd));
     }
 }

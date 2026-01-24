@@ -21,6 +21,11 @@ public static unsafe partial class ABI{
     /// </summary>
     [DllImport("libc")] internal static extern int bind(int fd, sockaddr_in* addr, uint len);
     /// <summary>
+    /// Binds a socket to the given address (IPv6).
+    /// Returns 0 on success, -1 on error (check errno).
+    /// </summary>
+    [DllImport("libc", SetLastError = true)] internal static extern int bind(int fd, sockaddr_in6* addr, uint len);
+    /// <summary>
     /// Marks socket as passive (listening). <paramref name="backlog"/> is the pending queue size.
     /// Returns 0 on success, -1 on error.
     /// </summary>
@@ -45,6 +50,11 @@ public static unsafe partial class ABI{
     internal const int SOL_SOCKET   = 1;
     internal const int SO_REUSEADDR = 2;
     internal const int SO_REUSEPORT = 15;
+    // ----- IPv6 constants -----
+    internal const int AF_INET6     = 10;  // Linux: 10
+    internal const int IPPROTO_IPV6 = 41;  // Linux: 41
+    // IPv6 socket options
+    internal const int IPV6_V6ONLY  = 26;  // from <netinet/in.h>
 
     internal const int IPPROTO_TCP  = 6;
     internal const int TCP_NODELAY  = 1;
@@ -74,6 +84,33 @@ public static unsafe partial class ABI{
         public ushort  sin_port;               // big-endian (use Htons)
         public in_addr sin_addr;               // address in network byte order
         public fixed byte sin_zero[8];         // padding to match C layout
+    }
+    /// <summary>
+    /// IPv6 address storage (network byte order).
+    /// Matches Linux struct in6_addr (16 bytes).
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential)]
+    internal unsafe struct in6_addr
+    {
+        public fixed byte s6_addr[16];
+    }
+    /// <summary>
+    /// IPv6 socket address.
+    /// Layout matches Linux struct sockaddr_in6:
+    ///   sin6_family (2)
+    ///   sin6_port   (2)
+    ///   sin6_flowinfo (4)
+    ///   sin6_addr   (16)
+    ///   sin6_scope_id (4)
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential)]
+    internal unsafe struct sockaddr_in6
+    {
+        public ushort  sin6_family;   // AF_INET6
+        public ushort  sin6_port;     // big-endian (Htons)
+        public uint    sin6_flowinfo; // usually 0
+        public in6_addr sin6_addr;    // IPv6 address
+        public uint    sin6_scope_id; // usually 0
     }
     /// <summary>
     /// Converts a 16-bit host-order value to network byte order (big-endian).

@@ -72,5 +72,7 @@ public sealed record AcceptorConfig(
     /// Acts as a low-latency sleep when no completions are available.
     /// Smaller values reduce tail latency but increase CPU usage.
     /// </summary>
-    long CqTimeout = 100_000_000
+    long CqTimeout = 100_000_000,
+    
+    IPVersion IPVersion = IPVersion.IPv6DualStack
 );
