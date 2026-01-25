@@ -64,7 +64,6 @@ internal class Program
             client.NoDelay = true;
 
             // fire-and-forget per connection
-            //_ = HandleAsyncPipe(new NetworkStream(client, true));
             _ = HandleSocketAsync(client);
         }
     }
