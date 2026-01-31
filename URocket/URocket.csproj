@@ -13,9 +13,9 @@
         <Authors>Diogo Martins</Authors>
         <RepositoryUrl>https://github.com/MDA2AV/uRocket</RepositoryUrl>
         <RepositoryType>git</RepositoryType>
-        <AssemblyVersion>10.4.1</AssemblyVersion>
-        <FileVersion>10.4.1</FileVersion>
-        <Version>10.4.1</Version>
+        <AssemblyVersion>10.5.0</AssemblyVersion>
+        <FileVersion>10.5.0</FileVersion>
+        <Version>10.5.0</Version>
         <PackageReadmeFile>README.md</PackageReadmeFile>
         <PackageTags>io_uring</PackageTags>
         <PackageLicenseFile>LICENSE</PackageLicenseFile>
