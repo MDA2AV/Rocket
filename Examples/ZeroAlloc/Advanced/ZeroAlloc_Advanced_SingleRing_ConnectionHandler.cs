@@ -162,13 +162,6 @@ internal sealed class ZeroAlloc_Advanced_SingleRing_ConnectionHandler
         var msg =
             "HTTP/1.1 200 OK\r\nContent-Length: 13\r\nContent-Type: text/plain\r\n\r\nHello, World!"u8;
 
-        WriteDirect(connection, msg);
-    }
-    
-    private static void WriteDirect(Connection connection, ReadOnlySpan<byte> msg)
-    {
-        Span<byte> dst = connection.GetSpan(msg.Length);
-        msg.CopyTo(dst);
-        connection.Advance(msg.Length);
+        connection.InnerWrite(msg);
     }
 }

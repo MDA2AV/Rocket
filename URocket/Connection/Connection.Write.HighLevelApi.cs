@@ -40,11 +40,6 @@ public partial class Connection
         source.CopyTo(new Span<byte>(WriteBuffer + WriteTail, len));
         WriteTail += len;
     }
-
-    public override async Task FlushAsync(CancellationToken token)
-    {
-        await InnerFlushAsync();
-    }
     
     /// <summary>
     /// Arms a flush and returns a ValueTask that completes when the reactor has flushed the current batch.

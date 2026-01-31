@@ -9,15 +9,16 @@ namespace Playground;
 
 public class HttpResponse
 {
-    internal static async Task HandleConnectionStreamAsync(Stream connection)
+    internal static async Task HandleConnectionStreamAsync(Connection connection)
     {
-        var reader = PipeReader.Create(connection);
-        var writer = PipeWriter.Create(connection);
+        var stream = new ConnectionStream(connection);
+        var reader = PipeReader.Create(stream);
+        var writer = PipeWriter.Create(stream);
         
         while (true)
         {
             var result = await reader.ReadAsync();
-            ((Connection)connection).ResetRead();
+            connection.ResetRead();
             
             var buffer = result.Buffer;
             var isCompleted = result.IsCompleted;
@@ -36,14 +37,10 @@ public class HttpResponse
             
             writer.Write("HTTP/1.1 200 OK\r\nContent-Length: 13\r\nContent-Type: text/plain\r\n\r\nHello, World!"u8);
             await writer.FlushAsync();
-            
-            //connection.Write("HTTP/1.1 200 OK\r\nContent-Length: 13\r\nContent-Type: text/plain\r\n\r\nHello, World!"u8);
-            //await connection.FlushAsync();
-            //((Connection)connection).ResetRead();
         }
     }
     
-    internal static async Task HandleConnectionStreamAsync(Connection connection)
+    internal static async Task HandleConnectionAsync(Connection connection)
     {
         while (true)
         {
@@ -65,7 +62,7 @@ public class HttpResponse
             ReadOnlySpan<byte> msg =
                 "HTTP/1.1 200 OK\r\nContent-Length: 13\r\nContent-Type: text/plain\r\n\r\nHello, World!"u8;
 
-            WriteDirect(connection, msg);
+            connection.InnerWrite(msg);
 
             // New: async flush barrier (wait until fully flushed to kernel)
             await connection.InnerFlushAsync();
@@ -75,12 +72,5 @@ public class HttpResponse
         }
 
         Console.WriteLine("HandleConnectionAsync exited.");
-    }
-    
-    private static void WriteDirect(Connection connection, ReadOnlySpan<byte> msg)
-    {
-        Span<byte> dst = connection.GetSpan(msg.Length);
-        msg.CopyTo(dst);
-        connection.Advance(msg.Length);
     }
 }

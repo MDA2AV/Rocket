@@ -28,19 +28,12 @@ internal sealed class Rings_as_ReadOnlySpan
             var msg =
                 "HTTP/1.1 200 OK\r\nContent-Length: 13\r\nContent-Type: text/plain\r\n\r\nHello, World!"u8;
 
-            WriteDirect(connection, msg);
+            connection.InnerWrite(msg);
             
             // Signal that written data can be flushed
             await connection.InnerFlushAsync();
             // Signal we are ready for a new read
             connection.ResetRead();
         }
-    }
-    
-    private static void WriteDirect(Connection connection, ReadOnlySpan<byte> msg)
-    {
-        Span<byte> dst = connection.GetSpan(msg.Length);
-        msg.CopyTo(dst);
-        connection.Advance(msg.Length);
     }
 }

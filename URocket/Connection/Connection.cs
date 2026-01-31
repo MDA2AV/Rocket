@@ -5,10 +5,10 @@ using URocket.Utils;
 namespace URocket.Connection;
 
 public sealed partial class Connection : 
-    Stream, 
     IBufferWriter<byte>,
     IValueTaskSource<ReadResult>, 
-    IValueTaskSource /* flush */
+    IValueTaskSource, /* flush */
+    IDisposable
 {
     /// <summary>
     /// OS socket/file descriptor (assumed to exist elsewhere in your partial class).
@@ -118,38 +118,12 @@ public sealed partial class Connection :
         return this;
     }
     
-    private int _disposed;
-
-    protected override void Dispose(bool disposing)
+    public void Dispose()
     {
-        // Make disposal idempotent (important with pooling / multiple call sites).
-        if (Interlocked.Exchange(ref _disposed, 1) != 0)
-        {
-            base.Dispose(disposing);
-            return;
-        }
-
-        // If disposing mid-read, release any held segment so we don't leak buffers.
-        // (Only safe if Reactor is still valid; if not, you may need a fallback policy.)
-        if (Volatile.Read(ref _streamHasItem) != 0)
-        {
-            try
-            {
-                ReleaseCurrentSegment();
-            }
-            catch
-            {
-                // Don't throw from Dispose. Worst case: buffer leak.
-                // If you prefer, remove try/catch and let it crash in Debug.
-            }
-        }
-
         // Free the unmanaged slab (AlignedFree)
         _manager.Free();
 
         // No-op for your implementation, but fine to keep for correctness/future changes.
         ((IDisposable)_manager).Dispose();
-
-        base.Dispose(disposing);
     }
 }

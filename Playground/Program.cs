@@ -20,7 +20,7 @@ internal static class Program
         var engine = new Engine(new EngineOptions
         {
             Port = 8080,
-            ReactorCount = 12
+            ReactorCount = 16
         });
         engine.Listen();
         
@@ -42,6 +42,7 @@ internal static class Program
                 Console.WriteLine($"Connection: {conn.ClientFd}");
                 
                 _ = HandleConnectionStreamAsync(conn);
+                //_ = HandleConnectionAsync(conn);
             }
         }
         catch (OperationCanceledException)
