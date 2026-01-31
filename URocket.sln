@@ -16,7 +16,7 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AspNetColdBootAot", "Benchm
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "TechEmpower", "TechEmpower", "{21CD88A2-4B4A-48B6-9CBB-59FC9EE7B682}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "BenchmarkApp", "BenchmarkApp\BenchmarkApp.csproj", "{FC2302BE-3C35-421F-AFEE-233AC87305C2}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "BenchmarkApp", "TechEmpower\BenchmarkApp\BenchmarkApp.csproj", "{FC2302BE-3C35-421F-AFEE-233AC87305C2}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
