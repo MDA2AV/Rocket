@@ -29,14 +29,14 @@ jobs:
 
       # Restore dependencies
       - name: Restore dependencies
-        run: dotnet restore URocket/URocket.csproj
+        run: dotnet restore zerg/zerg.csproj
 
       # Build the project
       - name: Build project
-        run: dotnet build URocket/URocket.csproj --configuration Release --no-restore
+        run: dotnet build zerg/zerg.csproj --configuration Release --no-restore
         
       - name: Pack NuGet package
-        run: dotnet pack URocket/URocket.csproj --configuration Release --output ./artifacts
+        run: dotnet pack zerg/zerg.csproj --configuration Release --output ./artifacts
 
       # Run tests only for .NET 9
       #- name: Run tests (only for .NET 9)
