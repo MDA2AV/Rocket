@@ -11,7 +11,7 @@ namespace URocket.Connection;
 /// Concurrency model:
 /// - Reactor thread produces inbound buffers by calling <see cref="EnqueueRingItem"/> and <see cref="MarkClosed"/>.
 /// - A single handler/consumer awaits inbound data via <see cref="ReadAsync"/> and drains using
-///   <see cref="TryGetRing"/> / <see cref="TryPeekRing"/> bounded by a tail snapshot.
+///   <see cref="TryGetRing"/> bounded by a tail snapshot.
 /// - The connection can be reused (pooled). <see cref="_generation"/> guards ValueTask tokens against reuse.
 ///
 /// Key invariants:

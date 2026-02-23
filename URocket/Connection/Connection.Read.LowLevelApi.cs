@@ -20,32 +20,6 @@ public sealed unsafe partial class Connection
     public RingItem GetRing() => _recv.DequeueSingle();
     
     /// <summary>
-    /// Peek one item from the ring without consuming it, bounded by <paramref name="tailSnapshot"/>.
-    /// Useful when a parser wants to lookahead before consuming.
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool TryPeekRing(long tailSnapshot, out RingItem item)
-        => _recv.TryPeekUntil(tailSnapshot, out item);
-
-    /// <summary>
-    /// Peek one item from the ring without consuming it.
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public RingItem PeekRing() => _recv.PeekSingle();
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void AdvanceRings(ushort quantity)
-    {
-        _recv.AdvanceHead(quantity);
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void RetractRings(ushort quantity)
-    {
-        _recv.RetractHead(quantity);
-    }
-    
-    /// <summary>
     /// Enqueue a received buffer into the inbound ring and wake a waiter if present.
     ///
     /// Producer contract:

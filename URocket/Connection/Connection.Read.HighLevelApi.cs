@@ -217,48 +217,4 @@ public sealed partial class Connection
 
         return items;
     }
-    
-    /// <summary>
-    /// Peeks all ring items visible in the current snapshot batch and converts them
-    /// to <see cref="UnmanagedMemoryManager"/> instances.
-    /// </summary>
-    /// <remarks>
-    /// This method does not advance the ring head. It returns a view of the buffers
-    /// that were visible at the time of the snapshot. The underlying memory must
-    /// remain valid until the caller finishes processing it.
-    /// </remarks>
-    public UnmanagedMemoryManager[] PeekAllSnapshotRingsAsUnmanagedMemory(ReadResult readResult)
-    {
-        var count = SnapshotRingCount;
-
-        if (count == 1)
-            return [PeekRing().AsUnmanagedMemoryManager()];
-
-        var mems = new UnmanagedMemoryManager[count];
-        for (int i = 0; i < count; i++) 
-            mems[i] = PeekRing().AsUnmanagedMemoryManager();
-        
-        return mems;
-    }
-    
-    /// <summary>
-    /// Peeks all ring items visible in the current snapshot batch.
-    /// </summary>
-    /// <remarks>
-    /// This method is non-destructive and does not advance the ring head. It returns
-    /// the items that were visible at the time of the snapshot without copying them.
-    /// </remarks>
-    public RingItem[] PeekAllSnapshotRings(ReadResult readResult)
-    {
-        var count = SnapshotRingCount;
-
-        if (count == 1)
-            return [PeekRing()];
-
-        var items = new RingItem[count];
-        for (int i = 0; i < count; i++)
-            items[i] = PeekRing();
-        
-        return items;
-    }
 }

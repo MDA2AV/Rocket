@@ -68,41 +68,6 @@ public sealed class SpscRecvRing
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool TryPeekUntil(long tailSnapshot, out RingItem item)
-    {
-        long head = _head; // consumer-local
-        if (head >= tailSnapshot)
-        {
-            item = default;
-            return false;
-        }
-
-        item = _items[(int)(head & _mask)];
-        return true;
-    }
-
-    // Consumer-only: assumes NOT empty (or checked)
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public RingItem PeekSingle()
-    {
-        return _items[(int)(_head & _mask)];
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void AdvanceHead(ushort quantity)
-    {
-        long head = _head;
-        Volatile.Write(ref _head, head + quantity);
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void RetractHead(ushort quantity)
-    {
-        long head = _head;
-        Volatile.Write(ref _head, head - quantity);
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool IsEmpty()
         => Volatile.Read(ref _head) >= Volatile.Read(ref _tail);
 
