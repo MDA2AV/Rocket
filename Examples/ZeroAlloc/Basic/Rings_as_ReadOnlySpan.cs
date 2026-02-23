@@ -1,5 +1,5 @@
-using URocket.Connection;
-using URocket.Utils.UnmanagedMemoryManager;
+using zerg;
+using zerg.Utils.UnmanagedMemoryManager;
 
 namespace Examples.ZeroAlloc.Basic;
 

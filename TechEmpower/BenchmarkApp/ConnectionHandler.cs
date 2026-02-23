@@ -4,9 +4,9 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using URocket.Connection;
-using URocket.Utils;
-using URocket.Utils.UnmanagedMemoryManager;
+using zerg;
+using zerg.Utils;
+using zerg.Utils.UnmanagedMemoryManager;
 
 namespace BenchmarkApp;
 
@@ -69,8 +69,8 @@ internal sealed class ConnectionHandler
 
     private unsafe bool HandleResult(Connection connection, ref ReadResult result)
     {
-        bool flushable = false;
-        int advanced = 0;
+        bool flushable;
+        int advanced;
 
         UnmanagedMemoryManager[] rings = connection.GetAllSnapshotRingsAsUnmanagedMemory(result);
         int ringCount = rings.Length;

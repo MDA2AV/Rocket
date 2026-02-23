@@ -1,6 +1,6 @@
 ﻿using Examples.ZeroAlloc.Advanced;
-using URocket.Engine;
-using URocket.Engine.Configs;
+using zerg.Engine;
+using zerg.Engine.Configs;
 
 namespace Examples;
 

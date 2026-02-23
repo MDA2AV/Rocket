@@ -1,0 +1,53 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFrameworks>net8.0;net9.0;net10.0</TargetFrameworks>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        
+        <RootNamespace>zerg</RootNamespace>
+
+        <Title>URocket</Title>
+        <PackageId>zerg</PackageId>
+        <Authors>Diogo Martins</Authors>
+        <RepositoryUrl>https://github.com/MDA2AV/zerg</RepositoryUrl>
+        <RepositoryType>git</RepositoryType>
+        <AssemblyVersion>0.3.12</AssemblyVersion>
+        <FileVersion>0.3.12</FileVersion>
+        <Version>0.3.12</Version>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <PackageTags>io_uring</PackageTags>
+        <PackageLicenseFile>LICENSE</PackageLicenseFile>
+        <Description>https://github.com/MDA2AV/zerg</Description>
+        <PackageProjectUrl>https://github.com/MDA2AV/zerg</PackageProjectUrl>
+        
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Microsoft.Extensions.ObjectPool" Version="10.0.2" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <None Include="native/linux-x64/liburingshim.so"
+              Pack="true"
+              PackagePath="runtimes/linux-x64/native/" />
+    </ItemGroup>
+    <ItemGroup>
+        <None Include="native/linux-musl-x64/liburingshim.so"
+              Pack="true"
+              PackagePath="runtimes/linux-musl-x64/native/" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <None Include="..\LICENSE">
+            <Pack>True</Pack>
+            <PackagePath>\</PackagePath>
+        </None>
+        <None Include="..\README.md">
+            <Pack>True</Pack>
+            <PackagePath>\</PackagePath>
+        </None>
+    </ItemGroup>
+
+</Project>
