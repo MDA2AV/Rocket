@@ -48,7 +48,6 @@ public sealed unsafe partial class Engine {
                             bool hasBuffer = shim_cqe_has_buffer(cqe) != 0;
                             bool hasMore   = (cqe->flags & IORING_CQE_F_MORE) != 0;
                             if (res <= 0) {
-                                Console.WriteLine($"[w{Id}] recv res={res} fd={fd}");
                                 if (hasBuffer) {
                                     ushort bufferId = (ushort)shim_cqe_buffer_id(cqe);
                                     byte* addr = _bufferRingSlab + (nuint)bufferId * (nuint)Config.RecvBufferSize;
