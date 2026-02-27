@@ -92,5 +92,16 @@ public sealed record ReactorConfig(
     /// Acts as a low-latency sleep when no completions are available.
     /// Smaller values reduce tail latency but increase CPU usage.
     /// </summary>
-    long CqTimeout = 1_000_000
+    long CqTimeout = 1_000_000,
+
+    /// <summary>
+    /// Enable incremental buffer consumption (IOU_PBUF_RING_INC).
+    ///
+    /// When enabled, the kernel can partially consume provided buffers across
+    /// multiple recv CQEs instead of consuming one entire buffer per CQE.
+    /// A single buffer can serve multiple recvs, reducing buffer ring pressure.
+    ///
+    /// Requires Linux kernel 6.12+.
+    /// </summary>
+    bool IncrementalBufferConsumption = false
 );

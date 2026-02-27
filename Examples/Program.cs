@@ -44,7 +44,8 @@ internal class Program
                     BufferRingEntries: 16 * 1024,
                     BatchCqes: 4096,
                     MaxConnectionsPerReactor: 8 * 1024,
-                    CqTimeout: 1_000_000
+                    CqTimeout: 1_000_000,
+                    IncrementalBufferConsumption: true
                 )).ToArray()
             });
 

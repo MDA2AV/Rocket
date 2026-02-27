@@ -62,6 +62,14 @@ public sealed unsafe partial class Engine
         /// Mask for buffer ring indexing (power-of-two entries).
         /// </summary>
         private uint _bufferRingMask;
+        /// <summary>Whether incremental buffer consumption is enabled for this reactor.</summary>
+        private bool _incrementalBuffers;
+        /// <summary>Per-buffer byte offset for incremental consumption (next CQE starts here).</summary>
+        private int[]? _bufferOffsets;
+        /// <summary>Per-buffer refcount: how many outstanding RingItems reference this buffer.</summary>
+        private int[]? _bufferRefCounts;
+        /// <summary>Per-buffer flag: true once the final CQE (no IORING_CQE_F_BUF_MORE) has been seen.</summary>
+        private bool[]? _bufferKernelDone;
         /// <summary>
         /// Back-reference to owning engine.
         /// </summary>
@@ -112,15 +120,24 @@ public sealed unsafe partial class Engine
                 return; 
             }
             
-            _bufferRing = shim_setup_buf_ring(io_uring_instance, (uint)Config.BufferRingEntries, c_bufferRingGID, 0, out var ret);
-            if (_bufferRing == null || ret < 0) 
+            _incrementalBuffers = Config.IncrementalBufferConsumption;
+            uint bufRingFlags = _incrementalBuffers ? IOU_PBUF_RING_INC : 0u;
+            _bufferRing = shim_setup_buf_ring(io_uring_instance, (uint)Config.BufferRingEntries, c_bufferRingGID, bufRingFlags, out var ret);
+            if (_bufferRing == null || ret < 0)
                 throw new Exception($"setup_buf_ring failed: ret={ret}");
 
             _bufferRingMask = (uint)(Config.BufferRingEntries - 1);
             nuint slabSize = (nuint)(Config.BufferRingEntries * Config.RecvBufferSize);
             _bufferRingSlab = (byte*)NativeMemory.AlignedAlloc(slabSize, 64);
 
-            for (ushort bid = 0; bid < Config.BufferRingEntries; bid++) 
+            if (_incrementalBuffers)
+            {
+                _bufferOffsets = new int[Config.BufferRingEntries];
+                _bufferRefCounts = new int[Config.BufferRingEntries];
+                _bufferKernelDone = new bool[Config.BufferRingEntries];
+            }
+
+            for (ushort bid = 0; bid < Config.BufferRingEntries; bid++)
             {
                 byte* addr = _bufferRingSlab + (nuint)bid * (nuint)Config.RecvBufferSize;
                 shim_buf_ring_add(_bufferRing, addr, (uint)Config.RecvBufferSize, bid, (ushort)_bufferRingMask, _bufferRingIndex++);
@@ -130,9 +147,15 @@ public sealed unsafe partial class Engine
         /// <summary>
         /// Returns a previously used recv buffer back to the kernel buf_ring.
         /// </summary>
-        private void ReturnBufferRing(byte* addr, ushort bid) 
+        private void ReturnBufferRing(byte* addr, ushort bid)
         {
             _ringCounter++;
+            if (_incrementalBuffers)
+            {
+                _bufferOffsets![bid] = 0;
+                _bufferRefCounts![bid] = 0;
+                _bufferKernelDone![bid] = false;
+            }
             shim_buf_ring_add(_bufferRing, addr, (uint)Config.RecvBufferSize, bid, (ushort)_bufferRingMask, _bufferRingIndex++);
             shim_buf_ring_advance(_bufferRing, 1);
         }
@@ -166,10 +189,16 @@ public sealed unsafe partial class Engine
         /// <summary>
         /// Drains the return queue and re-adds buffers to the buf_ring.
         /// </summary>
-        private void DrainReturnQ() 
+        private void DrainReturnQ()
         {
-            while (_returnQ.TryDequeue(out ushort bid)) 
+            while (_returnQ.TryDequeue(out ushort bid))
             {
+                if (_incrementalBuffers)
+                {
+                    int rc = --_bufferRefCounts![bid];
+                    if (rc > 0 || !_bufferKernelDone![bid])
+                        continue; // still in use by other RingItems or kernel
+                }
                 byte* addr = _bufferRingSlab + (nuint)bid * (nuint)Config.RecvBufferSize;
                 ReturnBufferRing(addr, bid);
             }
@@ -177,13 +206,19 @@ public sealed unsafe partial class Engine
         /// <summary>
         /// Same as DrainReturnQ but returns how many buffers were recycled.
         /// </summary>
-        private int DrainReturnQCounted() 
+        private int DrainReturnQCounted()
         {
             int count = 0;
-            while (_returnQ.TryDequeue(out ushort bid)) 
+            while (_returnQ.TryDequeue(out ushort bid))
             {
+                if (_incrementalBuffers)
+                {
+                    int rc = --_bufferRefCounts![bid];
+                    if (rc > 0 || !_bufferKernelDone![bid])
+                        continue; // still in use by other RingItems or kernel
+                }
                 byte* addr = _bufferRingSlab + (nuint)bid * (nuint)Config.RecvBufferSize;
-                ReturnBufferRing(addr, bid); // queues 1 SQE (buf_ring_add + advance)
+                ReturnBufferRing(addr, bid);
                 count++;
             }
             return count;

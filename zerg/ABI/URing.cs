@@ -480,6 +480,16 @@ public static unsafe partial class ABI{
     internal const uint IORING_CQE_F_MORE = 1u << 1;
 
     /// <summary>
+    /// CQE flag: the kernel still owns this provided buffer and will use it for subsequent CQEs.
+    /// <para>
+    /// Set when incremental buffer consumption (<see cref="IOU_PBUF_RING_INC"/>) is enabled.
+    /// The buffer must not be returned to the buf_ring until this flag is absent (the final CQE for this buffer).
+    /// </para>
+    /// <para>Requires kernel 6.12+.</para>
+    /// </summary>
+    internal const uint IORING_CQE_F_BUF_MORE = 1u << 4;
+
+    /// <summary>
     /// Bit shift for extracting the buffer id (bid) from <c>cqe->flags</c>.
     /// <para>
     /// Buffer id is stored in bits 16..31 when <see cref="IORING_CQE_F_BUFFER"/> is set.
@@ -523,4 +533,21 @@ public static unsafe partial class ABI{
     /// </para>
     /// </summary>
     internal const uint IORING_ENTER_EXT_ARG = 1u << 3;
+
+
+    // =============================================================================
+    // Provided buffer ring flags (io_uring_buf_reg)
+    // =============================================================================
+
+    /// <summary>
+    /// Buffer ring setup flag: enable incremental buffer consumption.
+    /// <para>
+    /// When set, the kernel can partially consume provided buffers across multiple recv CQEs
+    /// instead of consuming one entire buffer per CQE. Each successive CQE writes data at an
+    /// increasing offset within the same buffer. The CQE flag <see cref="IORING_CQE_F_BUF_MORE"/>
+    /// indicates the kernel still owns the buffer; its absence marks the final CQE for that buffer.
+    /// </para>
+    /// <para>Requires kernel 6.12+.</para>
+    /// </summary>
+    internal const uint IOU_PBUF_RING_INC = 2;
 }

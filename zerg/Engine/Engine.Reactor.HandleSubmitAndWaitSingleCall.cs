@@ -79,18 +79,24 @@ public sealed unsafe partial class Engine
                             bool hasBuffer = shim_cqe_has_buffer(cqe) != 0;
                             bool hasMore   = (cqe->flags & IORING_CQE_F_MORE) != 0;
 
-                            if (res <= 0) 
+                            if (res <= 0)
                             {
                                 Console.WriteLine($"[w{Id}] recv res={res} fd={fd}");
 
-                                if (hasBuffer) 
+                                if (hasBuffer)
                                 {
                                     ushort bufferId = (ushort)shim_cqe_buffer_id(cqe);
+                                    if (_incrementalBuffers) {
+                                        _bufferKernelDone![bufferId] = true;
+                                        if (_bufferRefCounts![bufferId] > 0)
+                                            goto skipReturnError; // outstanding RingItems will return it
+                                    }
                                     byte* addr = _bufferRingSlab + (nuint)bufferId * (nuint)Config.RecvBufferSize;
-                                    ReturnBufferRing(addr, bufferId); // queues SQE (will flush on next loop)
+                                    ReturnBufferRing(addr, bufferId);
+                                    skipReturnError:;
                                 }
 
-                                if (connections.Remove(fd, out var connection)) 
+                                if (connections.Remove(fd, out var connection))
                                 {
                                     connection.MarkClosed(res);
                                     _engine.ConnectionPool.Return(connection);
@@ -101,32 +107,43 @@ public sealed unsafe partial class Engine
                                     close(fd);
                                 }
 
-                                //shim_cqe_seen(Ring, cqe);
                                 continue;
                             }
-                            
+
                             // res > 0
-                            if (!hasBuffer) 
+                            if (!hasBuffer)
                             {
-                                //shim_cqe_seen(Ring, cqe);
                                 continue;
                             }
 
                             ushort bid = (ushort)shim_cqe_buffer_id(cqe);
-                            byte* ptr = _bufferRingSlab + (nuint)bid * (nuint)Config.RecvBufferSize;
+                            byte* ptr;
+                            if (_incrementalBuffers) {
+                                bool bufMore = (cqe->flags & IORING_CQE_F_BUF_MORE) != 0;
+                                ptr = _bufferRingSlab + (nuint)bid * (nuint)Config.RecvBufferSize + (nuint)_bufferOffsets![bid];
+                                _bufferOffsets[bid] += res;
+                                _bufferRefCounts![bid]++;
+                                if (!bufMore)
+                                    _bufferKernelDone![bid] = true;
+                            } else {
+                                ptr = _bufferRingSlab + (nuint)bid * (nuint)Config.RecvBufferSize;
+                            }
 
                             if (connections.TryGetValue(fd, out var connection2)) {
                                 connection2.EnqueueRingItem(ptr, res, bid);
 
                                 if (!hasMore) {
-                                    // Re-arm multishot recv if kernel stopped it
-                                    ArmRecvMultishot(io_uring_instance, fd, c_bufferRingGID); // queues SQE (flush next loop)
+                                    ArmRecvMultishot(io_uring_instance, fd, c_bufferRingGID);
                                 }
-                            } 
-                            else 
+                            }
+                            else
                             {
-                                // No connection mapping => immediately return buffer
-                                ReturnBufferRing(ptr, bid); // queues SQE (flush next loop)
+                                if (_incrementalBuffers) {
+                                    _bufferKernelDone![bid] = true;
+                                    if (--_bufferRefCounts![bid] > 0)
+                                        continue; // other RingItems still hold refs
+                                }
+                                ReturnBufferRing(_bufferRingSlab + (nuint)bid * (nuint)Config.RecvBufferSize, bid);
                             }
                         } 
                         else if (kind == UdKind.Send) 

@@ -66,19 +66,25 @@ public sealed unsafe partial class Engine
                             bool hasBuffer = shim_cqe_has_buffer(cqe) != 0;
                             bool hasMore   = (cqe->flags & IORING_CQE_F_MORE) != 0;
 
-                            if (res <= 0) 
+                            if (res <= 0)
                             {
                                 Console.WriteLine($"[w{Id}] recv res={res} fd={fd}");
                                 // Return the CQE's provided buffer (if any)
-                                if (hasBuffer) 
+                                if (hasBuffer)
                                 {
                                     ushort bufferId = (ushort)shim_cqe_buffer_id(cqe);
+                                    if (_incrementalBuffers) {
+                                        _bufferKernelDone![bufferId] = true;
+                                        if (_bufferRefCounts![bufferId] > 0)
+                                            goto skipReturnError; // outstanding RingItems will return it
+                                    }
                                     byte* addr = _bufferRingSlab + (nuint)bufferId * (nuint)Config.RecvBufferSize;
                                     ReturnBufferRing(addr, bufferId);
+                                    skipReturnError:;
                                 }
                                 // REMOVE the connection mapping so we don't process this fd again,
                                 // and so fd reuse won't hit a stale Connection.
-                                if (connections.Remove(fd, out var connection)) 
+                                if (connections.Remove(fd, out var connection))
                                 {
                                     connection.MarkClosed(res);
                                     _engine.ConnectionPool.Return(connection);
@@ -87,34 +93,51 @@ public sealed unsafe partial class Engine
                                         shim_submit(io_uring_instance);
                                     // Close once (only if we owned this connection)
                                     close(fd);
-                                } 
+                                }
                                 shim_cqe_seen(io_uring_instance, cqe);
                                 continue;
-                            } 
-                            else 
+                            }
+                            else
                             {
 
                                 // This should never happen?
-                                if (!hasBuffer) 
+                                if (!hasBuffer)
                                 {
                                     shim_cqe_seen(io_uring_instance, cqe);
                                     continue;
                                 }
-                                
+
                                 var bufferId = (ushort)shim_cqe_buffer_id(cqe);
-                                var ptr = _bufferRingSlab + (nuint)bufferId * (nuint)Config.RecvBufferSize;
-                                
-                                if (connections.TryGetValue(fd, out var connection)) 
+                                byte* ptr;
+                                if (_incrementalBuffers) {
+                                    bool bufMore = (cqe->flags & IORING_CQE_F_BUF_MORE) != 0;
+                                    ptr = _bufferRingSlab + (nuint)bufferId * (nuint)Config.RecvBufferSize + (nuint)_bufferOffsets![bufferId];
+                                    _bufferOffsets[bufferId] += res;
+                                    _bufferRefCounts![bufferId]++;
+                                    if (!bufMore)
+                                        _bufferKernelDone![bufferId] = true;
+                                } else {
+                                    ptr = _bufferRingSlab + (nuint)bufferId * (nuint)Config.RecvBufferSize;
+                                }
+
+                                if (connections.TryGetValue(fd, out var connection))
                                 {
-                                    // With buf_ring, you *should* have hasBuffer=true here; if not, handle separately.
                                     connection.EnqueueRingItem(ptr, res, bufferId);
-                                    if (!hasMore) 
+                                    if (!hasMore)
                                         ArmRecvMultishot(io_uring_instance, fd, c_bufferRingGID);
                                 }
                                 else
                                 {
-                                    ReturnBufferRing(ptr, bufferId); 
-                                } // Immediately return, no need to enqueue
+                                    if (_incrementalBuffers) {
+                                        _bufferKernelDone![bufferId] = true;
+                                        if (--_bufferRefCounts![bufferId] > 0)
+                                        {
+                                            shim_cqe_seen(io_uring_instance, cqe);
+                                            continue;
+                                        }
+                                    }
+                                    ReturnBufferRing(_bufferRingSlab + (nuint)bufferId * (nuint)Config.RecvBufferSize, bufferId);
+                                }
                             }
                         }
                         else if (kind == UdKind.Send) 
