@@ -509,6 +509,16 @@ Same as above but creates a `ReadOnlySequence<byte>` from the rings, which is us
 Examples/ZeroAlloc/Basic/Rings_as_ReadOnlySequence.cs
 ```
 
+### Zero-Copy with SQPOLL
+
+#### `SqPollExample`
+
+Same zero-copy handler as above but with `IORING_SETUP_SQPOLL | IORING_SETUP_SQ_AFF` enabled. The kernel spawns a dedicated polling thread per ring that continuously drains the submission queue, eliminating the submit syscall. Trades a CPU core per reactor for lower latency under sustained load.
+
+```
+Examples/ZeroAlloc/SqPoll/SqPollExample.cs
+```
+
 ### PipeReader Adapter
 
 #### `PipeReaderExample`
@@ -537,6 +547,7 @@ dotnet run --project Examples
 
 # Specific handler
 dotnet run --project Examples -- raw
+dotnet run --project Examples -- sqpoll
 dotnet run --project Examples -- pipereader
 dotnet run --project Examples -- stream
 ```

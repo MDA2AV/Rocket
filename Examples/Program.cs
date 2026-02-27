@@ -1,6 +1,7 @@
 using Examples.PipeReader;
 using Examples.Stream;
 using Examples.ZeroAlloc.Basic;
+using Examples.ZeroAlloc.SqPoll;
 using zerg;
 using zerg.Engine;
 using zerg.Engine.Configs;
@@ -13,14 +14,40 @@ internal class Program
 {
     public static async Task Main(string[] args)
     {
-        // Similar to Sockets, create an object and initialize it
-        // By default set to IPv4 TCP
-        // (More examples on how to configure the engine coming up)
-        var engine = new Engine(new EngineOptions
-        {
-            Port = 8080,
-            ReactorCount = 12
-        });
+        var mode = args.Length > 0 ? args[0] : "pipereader";
+        var reactorCount = args.Length > 1 && int.TryParse(args[1], out int rc) ? rc : 12;
+
+        // SQPOLL mode uses a custom engine with SQPOLL-enabled rings
+        var engine = mode == "sqpoll"
+            ? SqPollExample.CreateEngine(reactorCount: reactorCount)
+            : new Engine(new EngineOptions
+            {
+                Ip = "0.0.0.0",
+                Port = 8080,
+                Backlog = 65535,
+                ReactorCount = reactorCount,
+                AcceptorConfig = new AcceptorConfig(
+                    RingFlags: 0,
+                    SqCpuThread: -1,
+                    SqThreadIdleMs: 100,
+                    RingEntries: 8 * 1024,
+                    BatchSqes: 4096,
+                    CqTimeout: 100_000_000,
+                    IPVersion: IPVersion.IPv6DualStack
+                ),
+                ReactorConfigs = Enumerable.Range(0, reactorCount).Select(_ => new ReactorConfig(
+                    RingFlags: (1u << 12) | (1u << 13), // SINGLE_ISSUER | DEFER_TASKRUN
+                    SqCpuThread: -1,
+                    SqThreadIdleMs: 100,
+                    RingEntries: 8 * 1024,
+                    RecvBufferSize: 32 * 1024,
+                    BufferRingEntries: 16 * 1024,
+                    BatchCqes: 4096,
+                    MaxConnectionsPerReactor: 8 * 1024,
+                    CqTimeout: 1_000_000
+                )).ToArray()
+            });
+
         engine.Listen();
 
         var cts = new CancellationTokenSource();
@@ -30,15 +57,15 @@ internal class Program
             cts.Cancel();
         }, cts.Token);
 
-        // Pick the handler to benchmark:
+        // Pick the handler:
         //   "raw"        — zero-copy, manual ring management (fastest)
-        //   "pipereader"  — zero-copy via PipeReader adapter
-        //   "stream"      — copy-per-read via Stream adapter
-        var mode = args.Length > 0 ? args[0] : "pipereader";
-
+        //   "sqpoll"     — same as raw but with SQPOLL-enabled rings
+        //   "pipereader" — zero-copy via PipeReader adapter
+        //   "stream"     — copy-per-read via Stream adapter
         Func<Connection, Task> handler = mode switch
         {
             "raw"        => Rings_as_ReadOnlySpan.HandleConnectionAsync,
+            "sqpoll"     => SqPollExample.HandleConnectionAsync,
             "pipereader" => PipeReaderExample.HandleConnectionAsync,
             "stream"     => StreamExample.HandleConnectionAsync,
             _            => PipeReaderExample.HandleConnectionAsync,
