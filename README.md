@@ -232,6 +232,7 @@ static async Task HandleConnectionAsync(Connection connection)
 | `BatchCqes` | `int` | `4096` | Max CQEs processed per loop iteration |
 | `MaxConnectionsPerReactor` | `int` | `8192` | Max concurrent connections per reactor |
 | `CqTimeout` | `long` | `1000000` | Wait timeout in nanoseconds (1ms) |
+| `IncrementalBufferConsumption` | `bool` | `false` | Enable `IOU_PBUF_RING_INC` — kernel packs multiple recvs into a single buffer (kernel 6.12+) |
 
 ### AcceptorConfig
 
@@ -593,14 +594,19 @@ dotnet run --project Examples -- stream
 
 ### Features Used by zerg
 
-| Feature | Description |
-|---|---|
-| **Multishot Accept** | Single submission produces a CQE for every new connection |
-| **Multishot Recv** | Single submission per connection; kernel fills a buffer from the buffer ring for each packet |
-| **Buffer Selection** | Pre-registered buffer pool; kernel picks a buffer and returns its ID in the CQE |
-| **SQPOLL** (optional) | Kernel thread polls the SQ, eliminating the submit syscall at the cost of a dedicated CPU core |
-| **DEFER_TASKRUN** | Defers kernel task execution for better async/await integration |
-| **SINGLE_ISSUER** | Optimizes for single-thread submission (matches reactor model) |
+| Feature | Kernel | Description |
+|---|---|---|
+| **Multishot Accept** | 5.19+ | Single submission produces a CQE for every new connection |
+| **Multishot Recv** | 6.0+ | Single submission per connection; kernel fills a buffer from the buffer ring for each packet |
+| **Provided Buffer Rings** | 5.19+ | Pre-registered buffer pool; kernel picks a buffer and returns its ID in the CQE |
+| **Incremental Buffer Consumption** | 6.12+ | Kernel packs multiple recvs into a single buffer at successive offsets, reducing buffer ring pressure (opt-in) |
+| **SQPOLL** | 5.1+ | Kernel thread polls the SQ, eliminating the submit syscall at the cost of a dedicated CPU core (opt-in) |
+| **SQ_AFF** | 5.1+ | Pin the SQPOLL kernel thread to a specific CPU for cache locality |
+| **SINGLE_ISSUER** | 6.0+ | Optimizes for single-thread submission — matches reactor model (default) |
+| **DEFER_TASKRUN** | 6.1+ | Defers kernel task execution for better async/await integration (default) |
+| **Batch CQE Processing** | 5.1+ | Drain up to 4096 CQEs per loop iteration via `peek_batch_cqe` + `cq_advance` |
+| **Submit-and-Wait** | 5.1+ | Combined submit + wait in a single `io_uring_enter` syscall |
+| **Async Cancellation** | 5.5+ | Cancel in-flight multishot operations by `user_data` match when connections close |
 
 ---
 
@@ -633,6 +639,12 @@ dotnet run --project Examples -- stream
 | `IORING_SETUP_DEFER_TASKRUN` | Better for async/await integration (default) |
 | `IORING_SETUP_SQ_AFF` | Pin SQPOLL kernel thread to a specific CPU core |
 | `IORING_SETUP_SINGLE_ISSUER` | Optimize for single-thread submission (default) |
+
+### Incremental Buffer Consumption
+
+| Tunable | Effect |
+|---|---|
+| `IncrementalBufferConsumption = true` | Kernel packs multiple recvs into one buffer; reduces buffer ring pressure for small reads (kernel 6.12+) |
 
 > See [Performance Tuning](https://mda2av.github.io/zerg/docs/guides/performance-tuning/) and [Buffer Management](https://mda2av.github.io/zerg/docs/guides/buffer-management/) guides for more.
 
