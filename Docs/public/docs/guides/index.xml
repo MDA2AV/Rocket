@@ -1,12 +1,12 @@
 <rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
   <channel>
     <title>zerg – Guides</title>
-    <link>http://localhost:1313/zerg/docs/guides/</link>
+    <link>https://mda2av.github.io/zerg/docs/guides/</link>
     <description>Recent content in Guides on zerg</description>
     <generator>Hugo -- gohugo.io</generator>
     <language>en-us</language>
     
-	  <atom:link href="http://localhost:1313/zerg/docs/guides/index.xml" rel="self" type="application/rss+xml" />
+	  <atom:link href="https://mda2av.github.io/zerg/docs/guides/index.xml" rel="self" type="application/rss+xml" />
     
     
       
@@ -16,10 +16,10 @@
     
     <item>
       <title>Zero-Allocation Patterns</title>
-      <link>http://localhost:1313/zerg/docs/guides/zero-allocation/</link>
+      <link>https://mda2av.github.io/zerg/docs/guides/zero-allocation/</link>
       <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
       
-      <guid>http://localhost:1313/zerg/docs/guides/zero-allocation/</guid>
+      <guid>https://mda2av.github.io/zerg/docs/guides/zero-allocation/</guid>
       <description>
         
         
@@ -222,10 +222,10 @@
     
     <item>
       <title>Buffer Management</title>
-      <link>http://localhost:1313/zerg/docs/guides/buffer-management/</link>
+      <link>https://mda2av.github.io/zerg/docs/guides/buffer-management/</link>
       <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
       
-      <guid>http://localhost:1313/zerg/docs/guides/buffer-management/</guid>
+      <guid>https://mda2av.github.io/zerg/docs/guides/buffer-management/</guid>
       <description>
         
         
@@ -417,6 +417,13 @@
 &lt;li&gt;The kernel can now use these buffers for future recv operations&lt;/li&gt;
 &lt;/ol&gt;
 &lt;p&gt;The return is &lt;strong&gt;not immediate&lt;/strong&gt; &amp;ndash; there&amp;rsquo;s a small delay (one reactor loop iteration) before the kernel can reuse the buffer. This is safe because the buffer ring has thousands of buffers.&lt;/p&gt;
+&lt;h3&gt;With Incremental Buffer Consumption&lt;span class=&#34;hx:absolute hx:-mt-20&#34; id=&#34;with-incremental-buffer-consumption&#34;&gt;&lt;/span&gt;
+    &lt;a href=&#34;#with-incremental-buffer-consumption&#34; class=&#34;subheading-anchor&#34; aria-label=&#34;Permalink for this section&#34;&gt;&lt;/a&gt;&lt;/h3&gt;&lt;p&gt;When &lt;code&gt;IncrementalBufferConsumption&lt;/code&gt; is enabled (kernel 6.12+), multiple &lt;code&gt;RingItem&lt;/code&gt;s can share the same &lt;code&gt;bufferId&lt;/code&gt; at different offsets. The reactor uses internal refcounting so you don&amp;rsquo;t need to change anything:&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;Each &lt;code&gt;ReturnRing()&lt;/code&gt; call decrements the buffer&amp;rsquo;s refcount&lt;/li&gt;
+&lt;li&gt;The buffer is only returned to the kernel when &lt;code&gt;refcount == 0&lt;/code&gt; &lt;strong&gt;and&lt;/strong&gt; the kernel is done writing to it&lt;/li&gt;
+&lt;li&gt;All tracking is internal to the reactor thread — the &lt;code&gt;ReturnRing()&lt;/code&gt; API is identical&lt;/li&gt;
+&lt;/ol&gt;
 &lt;h2&gt;Buffer Pool Exhaustion&lt;span class=&#34;hx:absolute hx:-mt-20&#34; id=&#34;buffer-pool-exhaustion&#34;&gt;&lt;/span&gt;
     &lt;a href=&#34;#buffer-pool-exhaustion&#34; class=&#34;subheading-anchor&#34; aria-label=&#34;Permalink for this section&#34;&gt;&lt;/a&gt;&lt;/h2&gt;&lt;p&gt;If all buffers are in-flight (held by the kernel or handlers):&lt;/p&gt;
 &lt;ul&gt;
@@ -490,10 +497,10 @@ Per-Connection:
     
     <item>
       <title>Performance Tuning</title>
-      <link>http://localhost:1313/zerg/docs/guides/performance-tuning/</link>
+      <link>https://mda2av.github.io/zerg/docs/guides/performance-tuning/</link>
       <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
       
-      <guid>http://localhost:1313/zerg/docs/guides/performance-tuning/</guid>
+      <guid>https://mda2av.github.io/zerg/docs/guides/performance-tuning/</guid>
       <description>
         
         
@@ -718,6 +725,33 @@ Per-Connection:
 &lt;li&gt;Better cache behavior&lt;/li&gt;
 &lt;/ul&gt;
 &lt;p&gt;&lt;strong&gt;When to disable:&lt;/strong&gt; Rarely. Only if you&amp;rsquo;re seeing issues with specific kernel versions.&lt;/p&gt;
+&lt;h2&gt;Incremental Buffer Consumption&lt;span class=&#34;hx:absolute hx:-mt-20&#34; id=&#34;incremental-buffer-consumption&#34;&gt;&lt;/span&gt;
+    &lt;a href=&#34;#incremental-buffer-consumption&#34; class=&#34;subheading-anchor&#34; aria-label=&#34;Permalink for this section&#34;&gt;&lt;/a&gt;&lt;/h2&gt;&lt;div class=&#34;hextra-code-block hx:relative hx:mt-6 hx:first:mt-0 hx:group/code&#34;&gt;
+
+&lt;div&gt;&lt;div class=&#34;highlight&#34;&gt;&lt;pre tabindex=&#34;0&#34; class=&#34;chroma&#34;&gt;&lt;code class=&#34;language-csharp&#34; data-lang=&#34;csharp&#34;&gt;&lt;span class=&#34;line&#34;&gt;&lt;span class=&#34;cl&#34;&gt;&lt;span class=&#34;n&#34;&gt;IncrementalBufferConsumption&lt;/span&gt; &lt;span class=&#34;p&#34;&gt;=&lt;/span&gt; &lt;span class=&#34;kc&#34;&gt;true&lt;/span&gt;  &lt;span class=&#34;c1&#34;&gt;// requires kernel 6.12+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&#34;hextra-code-copy-btn-container hx:opacity-0 hx:transition hx:group-hover/code:opacity-100 hx:flex hx:gap-1 hx:absolute hx:m-[11px] hx:right-0 hx:top-0&#34;&gt;
+  &lt;button
+    class=&#34;hextra-code-copy-btn hx:group/copybtn hx:cursor-pointer hx:transition-all hx:active:opacity-50 hx:bg-primary-700/5 hx:border hx:border-black/5 hx:text-gray-600 hx:hover:text-gray-900 hx:rounded-md hx:p-1.5 hx:dark:bg-primary-300/10 hx:dark:border-white/10 hx:dark:text-gray-400 hx:dark:hover:text-gray-50&#34;
+    title=&#34;Copy code&#34;
+  &gt;
+    &lt;div class=&#34;hextra-copy-icon hx:group-[.copied]/copybtn:hidden hx:pointer-events-none hx:h-4 hx:w-4&#34;&gt;&lt;/div&gt;
+&lt;div class=&#34;hextra-success-icon hx:hidden hx:group-[.copied]/copybtn:block hx:pointer-events-none hx:h-4 hx:w-4&#34;&gt;&lt;/div&gt;
+  &lt;/button&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;p&gt;When enabled, the kernel packs multiple recvs into a single provided buffer at successive offsets instead of consuming one entire buffer per recv. This reduces buffer ring pressure.&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;When to enable:&lt;/strong&gt;&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;Many connections doing small reads (e.g., HTTP/1.1 with small request bodies)&lt;/li&gt;
+&lt;li&gt;TCP fragmentation producing multiple CQEs per message&lt;/li&gt;
+&lt;li&gt;Approaching buffer ring exhaustion under high connection count&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;strong&gt;When it won&amp;rsquo;t help:&lt;/strong&gt;&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;Sequential request-response workloads (one recv per request, buffer returned before next)&lt;/li&gt;
+&lt;li&gt;Large payloads that fill most of the buffer anyway&lt;/li&gt;
+&lt;li&gt;Plenty of headroom in the buffer ring (default 16K buffers)&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; If your kernel is older than 6.12, the flag is silently ignored and the reactor falls back to standard one-buffer-per-recv behavior.&lt;/p&gt;
 &lt;h2&gt;Connection Limits&lt;span class=&#34;hx:absolute hx:-mt-20&#34; id=&#34;connection-limits&#34;&gt;&lt;/span&gt;
     &lt;a href=&#34;#connection-limits&#34; class=&#34;subheading-anchor&#34; aria-label=&#34;Permalink for this section&#34;&gt;&lt;/a&gt;&lt;/h2&gt;&lt;div class=&#34;hextra-code-block hx:relative hx:mt-6 hx:first:mt-0 hx:group/code&#34;&gt;
 

@@ -116,6 +116,14 @@ When you call `connection.ReturnRing(bufferId)`:
 
 The return is **not immediate** -- there's a small delay (one reactor loop iteration) before the kernel can reuse the buffer. This is safe because the buffer ring has thousands of buffers.
 
+### With Incremental Buffer Consumption
+
+When `IncrementalBufferConsumption` is enabled (kernel 6.12+), multiple `RingItem`s can share the same `bufferId` at different offsets. The reactor uses internal refcounting so you don't need to change anything:
+
+1. Each `ReturnRing()` call decrements the buffer's refcount
+2. The buffer is only returned to the kernel when `refcount == 0` **and** the kernel is done writing to it
+3. All tracking is internal to the reactor thread — the `ReturnRing()` API is identical
+
 ## Buffer Pool Exhaustion
 
 If all buffers are in-flight (held by the kernel or handlers):

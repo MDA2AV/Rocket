@@ -1,12 +1,12 @@
 <rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
   <channel>
     <title>zerg – API Reference</title>
-    <link>http://localhost:1313/zerg/docs/api-reference/</link>
+    <link>https://mda2av.github.io/zerg/docs/api-reference/</link>
     <description>Recent content in API Reference on zerg</description>
     <generator>Hugo -- gohugo.io</generator>
     <language>en-us</language>
     
-	  <atom:link href="http://localhost:1313/zerg/docs/api-reference/index.xml" rel="self" type="application/rss+xml" />
+	  <atom:link href="https://mda2av.github.io/zerg/docs/api-reference/index.xml" rel="self" type="application/rss+xml" />
     
     
       
@@ -16,10 +16,10 @@
     
     <item>
       <title>Engine</title>
-      <link>http://localhost:1313/zerg/docs/api-reference/engine/</link>
+      <link>https://mda2av.github.io/zerg/docs/api-reference/engine/</link>
       <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
       
-      <guid>http://localhost:1313/zerg/docs/api-reference/engine/</guid>
+      <guid>https://mda2av.github.io/zerg/docs/api-reference/engine/</guid>
       <description>
         
         
@@ -314,10 +314,10 @@
     
     <item>
       <title>Connection: Read</title>
-      <link>http://localhost:1313/zerg/docs/api-reference/connection-read/</link>
+      <link>https://mda2av.github.io/zerg/docs/api-reference/connection-read/</link>
       <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
       
-      <guid>http://localhost:1313/zerg/docs/api-reference/connection-read/</guid>
+      <guid>https://mda2av.github.io/zerg/docs/api-reference/connection-read/</guid>
       <description>
         
         
@@ -713,10 +713,10 @@
     
     <item>
       <title>Connection: Write</title>
-      <link>http://localhost:1313/zerg/docs/api-reference/connection-write/</link>
+      <link>https://mda2av.github.io/zerg/docs/api-reference/connection-write/</link>
       <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
       
-      <guid>http://localhost:1313/zerg/docs/api-reference/connection-write/</guid>
+      <guid>https://mda2av.github.io/zerg/docs/api-reference/connection-write/</guid>
       <description>
         
         
@@ -1007,10 +1007,10 @@
     
     <item>
       <title>ConnectionStream</title>
-      <link>http://localhost:1313/zerg/docs/api-reference/connection-stream/</link>
+      <link>https://mda2av.github.io/zerg/docs/api-reference/connection-stream/</link>
       <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
       
-      <guid>http://localhost:1313/zerg/docs/api-reference/connection-stream/</guid>
+      <guid>https://mda2av.github.io/zerg/docs/api-reference/connection-stream/</guid>
       <description>
         
         
@@ -1279,10 +1279,10 @@
     
     <item>
       <title>Configuration Reference</title>
-      <link>http://localhost:1313/zerg/docs/api-reference/configuration/</link>
+      <link>https://mda2av.github.io/zerg/docs/api-reference/configuration/</link>
       <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
       
-      <guid>http://localhost:1313/zerg/docs/api-reference/configuration/</guid>
+      <guid>https://mda2av.github.io/zerg/docs/api-reference/configuration/</guid>
       <description>
         
         
@@ -1701,10 +1701,10 @@
     
     <item>
       <title>ConnectionPipeReader</title>
-      <link>http://localhost:1313/zerg/docs/api-reference/connection-pipereader/</link>
+      <link>https://mda2av.github.io/zerg/docs/api-reference/connection-pipereader/</link>
       <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
       
-      <guid>http://localhost:1313/zerg/docs/api-reference/connection-pipereader/</guid>
+      <guid>https://mda2av.github.io/zerg/docs/api-reference/connection-pipereader/</guid>
       <description>
         
         

@@ -45,6 +45,7 @@ Configuration for a single reactor's `io_uring` instance and event loop. This is
 | `BatchCqes` | `int` | `4096` | Maximum CQEs processed per loop iteration. Larger improves throughput under load. |
 | `MaxConnectionsPerReactor` | `int` | `8192` | Upper bound on concurrent connections. Should be <= `RingEntries`. |
 | `CqTimeout` | `long` | `1_000_000` (1 ms) | Timeout in nanoseconds passed to `io_uring_wait_cqes()`. Lower = lower tail latency, higher CPU. |
+| `IncrementalBufferConsumption` | `bool` | `false` | Enable `IOU_PBUF_RING_INC`. The kernel packs multiple recvs into a single buffer, reducing buffer ring pressure. **Requires kernel 6.12+.** |
 
 ### Example: Per-Reactor Configuration
 
@@ -56,7 +57,8 @@ var engine = new Engine(new EngineOptions
     ReactorConfigs = Enumerable.Range(0, 4).Select(_ => new ReactorConfig(
         RecvBufferSize: 64 * 1024,       // 64 KB recv buffers
         BufferRingEntries: 32 * 1024,     // 32K buffers per reactor
-        CqTimeout: 500_000                // 0.5 ms timeout
+        CqTimeout: 500_000,              // 0.5 ms timeout
+        IncrementalBufferConsumption: true // kernel 6.12+
     )).ToArray()
 });
 ```

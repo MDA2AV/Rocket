@@ -77,6 +77,130 @@ body {
   color: #94a3b8 !important;
 }
 
+/* ── io_uring Features Section ── */
+.uring-features-section {
+  margin-top: 4rem;
+  max-width: 68rem;
+  margin-left: auto;
+  margin-right: auto;
+  padding: 0 1rem;
+}
+.uring-features-title {
+  text-align: center;
+  font-size: 1.75rem;
+  font-weight: 800;
+  letter-spacing: -0.5px;
+  color: #1a2744;
+  margin-bottom: 0.5rem;
+}
+.dark .uring-features-title {
+  color: #e2e8f0;
+}
+.uring-features-subtitle {
+  text-align: center;
+  color: #4a5e7a;
+  font-size: 1.05rem;
+  margin-bottom: 2rem;
+}
+.dark .uring-features-subtitle {
+  color: #94a3b8;
+}
+.uring-features-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+}
+@media (max-width: 900px) {
+  .uring-features-grid { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 560px) {
+  .uring-features-grid { grid-template-columns: 1fr; }
+}
+.uring-feature-item {
+  padding: 1.15rem 1.25rem;
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(255,255,255,0.9) 0%, rgba(235,240,250,0.8) 100%);
+  border: 1px solid rgba(99, 130, 190, 0.15);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+  transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
+}
+.uring-feature-item:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 10px 24px rgba(59, 100, 180, 0.12);
+  border-color: rgba(79, 120, 200, 0.35);
+}
+.dark .uring-feature-item {
+  background: linear-gradient(135deg, rgba(22,33,62,0.9) 0%, rgba(18,28,50,0.95) 100%);
+  border: 1px solid rgba(80, 120, 200, 0.15);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+.dark .uring-feature-item:hover {
+  box-shadow: 0 10px 24px rgba(50, 90, 180, 0.2);
+  border-color: rgba(90, 140, 230, 0.4);
+}
+.uring-feature-name {
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: #1a2744;
+  margin-bottom: 0.35rem;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.dark .uring-feature-name {
+  color: #e2e8f0;
+}
+.uring-feature-desc {
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: #4a5e7a;
+}
+.dark .uring-feature-desc {
+  color: #94a3b8;
+}
+.uring-feature-desc code {
+  font-size: 0.8rem;
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  background: rgba(99, 130, 190, 0.1);
+  color: #3b6ab5;
+}
+.dark .uring-feature-desc code {
+  background: rgba(80, 120, 200, 0.15);
+  color: #7ba4e0;
+}
+.uring-tag {
+  font-size: 0.65rem;
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  padding: 0.15em 0.5em;
+  border-radius: 4px;
+  background: rgba(59, 130, 246, 0.12);
+  color: #3b82f6;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.dark .uring-tag {
+  background: rgba(59, 130, 246, 0.2);
+  color: #60a5fa;
+}
+.uring-tag-pair {
+  display: inline-flex;
+  gap: 0.3rem;
+  align-items: center;
+}
+.uring-tag-accent {
+  background: rgba(16, 185, 129, 0.12);
+  color: #059669;
+}
+.dark .uring-tag-accent {
+  background: rgba(16, 185, 129, 0.2);
+  color: #34d399;
+}
+
 /* Scroll-to-top container */
 #backToTop {
   background-color: transparent !important;

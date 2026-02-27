@@ -1,7 +1,7 @@
 <!DOCTYPE html>
-<html lang="en" dir="ltr"><head><script src="/zerg/livereload.js?mindelay=10&amp;v=2&amp;port=1313&amp;path=zerg/livereload" data-no-instant defer></script>
+<html lang="en" dir="ltr"><head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="robots" content="noindex, nofollow" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="robots" content="index, follow" />
   <link rel="icon shortcut" href="/zerg/favicon.ico" sizes="32x32" />
 <link rel="icon" href="/zerg/favicon.svg" type="image/svg+xml" id="favicon-svg" />
 <link rel="icon" href="/zerg/favicon-16x16.png" type="image/png" sizes="16x16" />
@@ -11,7 +11,7 @@
 <title>Installation – zerg</title>
   <meta name="description" content="NuGet Package The recommended way to install zerg is via NuGet:
 dotnet add package zerg Or add the package reference directly to your .csproj:
-&lt;PackageReference Include=&#34;zerg&#34; Version=&#34;*&#34; /&gt; zerg targets .NET 8.0, .NET 9.0, and .NET 10.0." /><link rel="canonical" href="http://localhost:1313/zerg/docs/getting-started/installation/" itemprop="url" />
+&lt;PackageReference Include=&#34;zerg&#34; Version=&#34;*&#34; /&gt; zerg targets .NET 8.0, .NET 9.0, and .NET 10.0." /><link rel="canonical" href="https://mda2av.github.io/zerg/docs/getting-started/installation/" itemprop="url" />
 
 <meta property="og:title" content="Installation">
 <meta
@@ -47,7 +47,7 @@ zerg targets .NET 8.0, .NET 9.0, and .NET 10.0.
   content="
     article
   ">
-<meta property="og:url" content="http://localhost:1313/zerg/docs/getting-started/installation/"><meta property="article:section" content="docs">
+<meta property="og:url" content="https://mda2av.github.io/zerg/docs/getting-started/installation/"><meta property="article:section" content="docs">
 
 
 
@@ -62,11 +62,15 @@ dotnet add package zerg Or add the package reference directly to your .csproj:
   <meta name="twitter:description" content="NuGet Package The recommended way to install zerg is via NuGet:
 dotnet add package zerg Or add the package reference directly to your .csproj:
 &lt;PackageReference Include=&#34;zerg&#34; Version=&#34;*&#34; /&gt; zerg targets .NET 8.0, .NET 9.0, and .NET 10.0.">
-<link href="/zerg/css/compiled/main.css" rel="stylesheet" />
-    <link href="/zerg/css/variables.css" rel="stylesheet" />
-    <link href="/zerg/css/custom.css" rel="stylesheet" />
+
+    <link rel="preload" href="/zerg/css/compiled/main.min.860421afd86baea436520550e3f5b912c5d0ca8bfec32b073ac5871b3ae0ca74.css" as="style" integrity="sha256-hgQhr9hrrqQ2UgVQ4/W5EsXQyov&#43;wysHOsWHGzrgynQ=" />
+    <link href="/zerg/css/compiled/main.min.860421afd86baea436520550e3f5b912c5d0ca8bfec32b073ac5871b3ae0ca74.css" rel="stylesheet" integrity="sha256-hgQhr9hrrqQ2UgVQ4/W5EsXQyov&#43;wysHOsWHGzrgynQ=" />
 
   
+
+
+
+
 
 
   <script>
@@ -98,7 +102,7 @@ dotnet add package zerg Or add the package reference directly to your .csproj:
 
   
   
-  <link rel="icon" href="http://localhost:1313/zerg/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="https://mda2av.github.io/zerg/favicon.svg" type="image/svg+xml">
 <style>
  
 nav a[title="Home"] span {
@@ -175,6 +179,130 @@ body {
 }
 .dark .hextra-feature-card p {
   color: #94a3b8 !important;
+}
+
+ 
+.uring-features-section {
+  margin-top: 4rem;
+  max-width: 68rem;
+  margin-left: auto;
+  margin-right: auto;
+  padding: 0 1rem;
+}
+.uring-features-title {
+  text-align: center;
+  font-size: 1.75rem;
+  font-weight: 800;
+  letter-spacing: -0.5px;
+  color: #1a2744;
+  margin-bottom: 0.5rem;
+}
+.dark .uring-features-title {
+  color: #e2e8f0;
+}
+.uring-features-subtitle {
+  text-align: center;
+  color: #4a5e7a;
+  font-size: 1.05rem;
+  margin-bottom: 2rem;
+}
+.dark .uring-features-subtitle {
+  color: #94a3b8;
+}
+.uring-features-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+}
+@media (max-width: 900px) {
+  .uring-features-grid { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 560px) {
+  .uring-features-grid { grid-template-columns: 1fr; }
+}
+.uring-feature-item {
+  padding: 1.15rem 1.25rem;
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(255,255,255,0.9) 0%, rgba(235,240,250,0.8) 100%);
+  border: 1px solid rgba(99, 130, 190, 0.15);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+  transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
+}
+.uring-feature-item:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 10px 24px rgba(59, 100, 180, 0.12);
+  border-color: rgba(79, 120, 200, 0.35);
+}
+.dark .uring-feature-item {
+  background: linear-gradient(135deg, rgba(22,33,62,0.9) 0%, rgba(18,28,50,0.95) 100%);
+  border: 1px solid rgba(80, 120, 200, 0.15);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+.dark .uring-feature-item:hover {
+  box-shadow: 0 10px 24px rgba(50, 90, 180, 0.2);
+  border-color: rgba(90, 140, 230, 0.4);
+}
+.uring-feature-name {
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: #1a2744;
+  margin-bottom: 0.35rem;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.dark .uring-feature-name {
+  color: #e2e8f0;
+}
+.uring-feature-desc {
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: #4a5e7a;
+}
+.dark .uring-feature-desc {
+  color: #94a3b8;
+}
+.uring-feature-desc code {
+  font-size: 0.8rem;
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  background: rgba(99, 130, 190, 0.1);
+  color: #3b6ab5;
+}
+.dark .uring-feature-desc code {
+  background: rgba(80, 120, 200, 0.15);
+  color: #7ba4e0;
+}
+.uring-tag {
+  font-size: 0.65rem;
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  padding: 0.15em 0.5em;
+  border-radius: 4px;
+  background: rgba(59, 130, 246, 0.12);
+  color: #3b82f6;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.dark .uring-tag {
+  background: rgba(59, 130, 246, 0.2);
+  color: #60a5fa;
+}
+.uring-tag-pair {
+  display: inline-flex;
+  gap: 0.3rem;
+  align-items: center;
+}
+.uring-tag-accent {
+  background: rgba(16, 185, 129, 0.12);
+  color: #059669;
+}
+.dark .uring-tag-accent {
+  background: rgba(16, 185, 129, 0.2);
+  color: #34d399;
 }
 
  
@@ -1023,8 +1151,8 @@ div:has(> #backToTop) {
 
       <footer class="hextra-footer hx:bg-gray-100 hx:pb-[env(safe-area-inset-bottom)] hx:dark:bg-neutral-900 hx:print:bg-transparent"><div class="hextra-custom-footer hextra-max-footer-width hx:pl-[max(env(safe-area-inset-left),1.5rem)] hx:pr-[max(env(safe-area-inset-right),1.5rem)] hx:text-gray-600 hx:dark:text-gray-400"></div></footer>
     
-    <script defer src="/zerg/js/main.js" integrity=""></script>
-<script defer src="/zerg/js/flexsearch.9f5b5908f93ae86f1ecd4b043b799f580c2d1654e703dd9357d568ac41b2547a.js" integrity="sha256-n1tZCPk66G8ezUsEO3mfWAwtFlTnA92TV9VorEGyVHo=" crossorigin="anonymous"></script>
-        <script defer src="/zerg/en.search.js" integrity=""></script>
+    <script defer src="/zerg/js/main.min.6731de8dab06dbc377c25b1e39b0de921456605a7312ba81d0b3bc59076deb8e.js" integrity="sha256-ZzHejasG28N3wlseObDekhRWYFpzErqB0LO8WQdt644="></script>
+<script defer src="/zerg/js/flexsearch.433e941a8a573ebb9931fc16fc75266ab6b93f569ac2fb4f3dc66882e0416f4c.js" integrity="sha256-Qz6UGopXPruZMfwW/HUmara5P1aawvtPPcZoguBBb0w=" crossorigin="anonymous"></script>
+        <script defer src="/zerg/en.search.min.777525a1744db5357959b12bfecb8b11dea7b9fa1500d886fd854d54163b7089.js" integrity="sha256-d3UloXRNtTV5WbEr/suLEd6nufoVANiG/YVNVBY7cIk="></script>
   </body>
 </html>

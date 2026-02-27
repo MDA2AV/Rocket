@@ -1,12 +1,12 @@
 <rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
   <channel>
     <title>zerg – About</title>
-    <link>http://localhost:1313/zerg/about/</link>
+    <link>https://mda2av.github.io/zerg/about/</link>
     <description>Recent content in About on zerg</description>
     <generator>Hugo -- gohugo.io</generator>
     <language>en-us</language>
     
-	  <atom:link href="http://localhost:1313/zerg/about/index.xml" rel="self" type="application/rss+xml" />
+	  <atom:link href="https://mda2av.github.io/zerg/about/index.xml" rel="self" type="application/rss+xml" />
     
     
       

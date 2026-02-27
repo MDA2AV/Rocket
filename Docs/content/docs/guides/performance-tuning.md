@@ -134,6 +134,26 @@ This is the **default** for reactors. It tells the kernel to defer task_work (co
 
 **When to disable:** Rarely. Only if you're seeing issues with specific kernel versions.
 
+## Incremental Buffer Consumption
+
+```csharp
+IncrementalBufferConsumption = true  // requires kernel 6.12+
+```
+
+When enabled, the kernel packs multiple recvs into a single provided buffer at successive offsets instead of consuming one entire buffer per recv. This reduces buffer ring pressure.
+
+**When to enable:**
+- Many connections doing small reads (e.g., HTTP/1.1 with small request bodies)
+- TCP fragmentation producing multiple CQEs per message
+- Approaching buffer ring exhaustion under high connection count
+
+**When it won't help:**
+- Sequential request-response workloads (one recv per request, buffer returned before next)
+- Large payloads that fill most of the buffer anyway
+- Plenty of headroom in the buffer ring (default 16K buffers)
+
+**Note:** If your kernel is older than 6.12, the flag is silently ignored and the reactor falls back to standard one-buffer-per-recv behavior.
+
 ## Connection Limits
 
 ```csharp

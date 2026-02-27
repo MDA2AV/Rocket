@@ -1,12 +1,12 @@
 <rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
   <channel>
     <title>zerg – Internals</title>
-    <link>http://localhost:1313/zerg/docs/internals/</link>
+    <link>https://mda2av.github.io/zerg/docs/internals/</link>
     <description>Recent content in Internals on zerg</description>
     <generator>Hugo -- gohugo.io</generator>
     <language>en-us</language>
     
-	  <atom:link href="http://localhost:1313/zerg/docs/internals/index.xml" rel="self" type="application/rss+xml" />
+	  <atom:link href="https://mda2av.github.io/zerg/docs/internals/index.xml" rel="self" type="application/rss+xml" />
     
     
       
@@ -16,10 +16,10 @@
     
     <item>
       <title>SPSC Recv Ring</title>
-      <link>http://localhost:1313/zerg/docs/internals/spsc-ring/</link>
+      <link>https://mda2av.github.io/zerg/docs/internals/spsc-ring/</link>
       <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
       
-      <guid>http://localhost:1313/zerg/docs/internals/spsc-ring/</guid>
+      <guid>https://mda2av.github.io/zerg/docs/internals/spsc-ring/</guid>
       <description>
         
         
@@ -243,10 +243,10 @@
     
     <item>
       <title>MPSC Queues</title>
-      <link>http://localhost:1313/zerg/docs/internals/mpsc-queues/</link>
+      <link>https://mda2av.github.io/zerg/docs/internals/mpsc-queues/</link>
       <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
       
-      <guid>http://localhost:1313/zerg/docs/internals/mpsc-queues/</guid>
+      <guid>https://mda2av.github.io/zerg/docs/internals/mpsc-queues/</guid>
       <description>
         
         
@@ -520,10 +520,10 @@ Consumer:
     
     <item>
       <title>Native Interop</title>
-      <link>http://localhost:1313/zerg/docs/internals/native-interop/</link>
+      <link>https://mda2av.github.io/zerg/docs/internals/native-interop/</link>
       <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
       
-      <guid>http://localhost:1313/zerg/docs/internals/native-interop/</guid>
+      <guid>https://mda2av.github.io/zerg/docs/internals/native-interop/</guid>
       <description>
         
         
@@ -933,10 +933,10 @@ Consumer:
     
     <item>
       <title>Memory Management</title>
-      <link>http://localhost:1313/zerg/docs/internals/memory-management/</link>
+      <link>https://mda2av.github.io/zerg/docs/internals/memory-management/</link>
       <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
       
-      <guid>http://localhost:1313/zerg/docs/internals/memory-management/</guid>
+      <guid>https://mda2av.github.io/zerg/docs/internals/memory-management/</guid>
       <description>
         
         

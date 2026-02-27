@@ -13,9 +13,9 @@
         <Authors>Diogo Martins</Authors>
         <RepositoryUrl>https://github.com/MDA2AV/zerg</RepositoryUrl>
         <RepositoryType>git</RepositoryType>
-        <AssemblyVersion>0.4.11</AssemblyVersion>
-        <FileVersion>0.4.11</FileVersion>
-        <Version>0.4.11</Version>
+        <AssemblyVersion>0.4.12</AssemblyVersion>
+        <FileVersion>0.4.12</FileVersion>
+        <Version>0.4.12</Version>
         <PackageReadmeFile>README.md</PackageReadmeFile>
         <PackageTags>io_uring</PackageTags>
         <PackageLicenseFile>LICENSE</PackageLicenseFile>

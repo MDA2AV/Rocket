@@ -64,6 +64,50 @@ while returnQ.TryDequeue(out bufferId):
 shim_buf_ring_advance(br, count)
 ```
 
+## Incremental Buffer Consumption (Kernel 6.12+)
+
+With `IncrementalBufferConsumption: true`, the kernel can partially consume a buffer across multiple recv CQEs instead of consuming one entire buffer per CQE. This is enabled by passing the `IOU_PBUF_RING_INC` flag when setting up the buffer ring.
+
+### How It Works
+
+Without incremental consumption, each recv CQE consumes an entire buffer — even a 50-byte read takes a full 32 KB buffer. With incremental consumption, the kernel writes successive recvs into the **same buffer at increasing offsets**:
+
+```
+Buffer #7 (32 KB):
+  CQE 1: bytes 0–99     (100 B)   flags: IORING_CQE_F_BUF_MORE  ← kernel still owns it
+  CQE 2: bytes 100–299  (200 B)   flags: IORING_CQE_F_BUF_MORE  ← kernel still owns it
+  CQE 3: bytes 300–349  (50 B)    flags: (none)                  ← kernel is done
+```
+
+All three CQEs share the same `bufferId` but produce separate `RingItem`s with different `ptr` and `length` values. The user calls `ReturnRing()` for each one independently.
+
+### Refcount Tracking
+
+The reactor tracks three things per buffer (only when incremental is enabled):
+
+| Tracking Array | Purpose |
+|---------------|---------|
+| `_bufferOffsets[bid]` | Where the next CQE's data starts within the buffer |
+| `_bufferRefCounts[bid]` | How many outstanding `RingItem`s reference this buffer |
+| `_bufferKernelDone[bid]` | Whether the final CQE (no `IORING_CQE_F_BUF_MORE`) has been seen |
+
+A buffer is only returned to the kernel ring when **both** conditions are met:
+- `refcount == 0` (all user `ReturnRing()` calls done)
+- `kernelDone == true` (kernel won't produce more CQEs for this buffer)
+
+### Transparent to User Code
+
+The user-facing API is unchanged. `RingItem`, `ReturnRing()`, `ConnectionPipeReader`, and `ConnectionStream` all work identically. The refcounting is internal to the reactor thread — no atomics or locking needed.
+
+### When It Helps
+
+Incremental consumption reduces buffer ring pressure when:
+- Many **small reads** relative to buffer size (e.g., small HTTP requests on 32 KB buffers)
+- **TCP fragmentation** splits data into multiple segments received as separate CQEs
+- **High connection count** with slow buffer returns, approaching buffer exhaustion
+
+It has **no effect** on sequential request-response workloads where each recv consumes one buffer and returns it before the next request arrives.
+
 ## Buffer Lifecycle
 
 ```

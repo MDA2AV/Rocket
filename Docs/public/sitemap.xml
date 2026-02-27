@@ -2,66 +2,66 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
   xmlns:xhtml="http://www.w3.org/1999/xhtml">
   <url>
-    <loc>http://localhost:1313/zerg/docs/api-reference/engine/</loc>
+    <loc>https://mda2av.github.io/zerg/docs/api-reference/engine/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/docs/getting-started/</loc>
+    <loc>https://mda2av.github.io/zerg/docs/getting-started/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/docs/getting-started/installation/</loc>
+    <loc>https://mda2av.github.io/zerg/docs/getting-started/installation/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/docs/architecture/reactor-pattern/</loc>
+    <loc>https://mda2av.github.io/zerg/docs/architecture/reactor-pattern/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/docs/internals/spsc-ring/</loc>
+    <loc>https://mda2av.github.io/zerg/docs/internals/spsc-ring/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/docs/guides/zero-allocation/</loc>
+    <loc>https://mda2av.github.io/zerg/docs/guides/zero-allocation/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/docs/architecture/</loc>
+    <loc>https://mda2av.github.io/zerg/docs/architecture/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/docs/api-reference/connection-read/</loc>
+    <loc>https://mda2av.github.io/zerg/docs/api-reference/connection-read/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/docs/architecture/io-uring/</loc>
+    <loc>https://mda2av.github.io/zerg/docs/architecture/io-uring/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/docs/internals/mpsc-queues/</loc>
+    <loc>https://mda2av.github.io/zerg/docs/internals/mpsc-queues/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/docs/getting-started/quick-start/</loc>
+    <loc>https://mda2av.github.io/zerg/docs/getting-started/quick-start/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/docs/api-reference/</loc>
+    <loc>https://mda2av.github.io/zerg/docs/api-reference/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/docs/guides/buffer-management/</loc>
+    <loc>https://mda2av.github.io/zerg/docs/guides/buffer-management/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/docs/architecture/buffer-rings/</loc>
+    <loc>https://mda2av.github.io/zerg/docs/architecture/buffer-rings/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/docs/getting-started/configuration/</loc>
+    <loc>https://mda2av.github.io/zerg/docs/getting-started/configuration/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/docs/api-reference/connection-write/</loc>
+    <loc>https://mda2av.github.io/zerg/docs/api-reference/connection-write/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/docs/internals/native-interop/</loc>
+    <loc>https://mda2av.github.io/zerg/docs/internals/native-interop/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/docs/architecture/connection-lifecycle/</loc>
+    <loc>https://mda2av.github.io/zerg/docs/architecture/connection-lifecycle/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/docs/api-reference/connection-stream/</loc>
+    <loc>https://mda2av.github.io/zerg/docs/api-reference/connection-stream/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/docs/guides/</loc>
+    <loc>https://mda2av.github.io/zerg/docs/guides/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/docs/internals/memory-management/</loc>
+    <loc>https://mda2av.github.io/zerg/docs/internals/memory-management/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/docs/guides/performance-tuning/</loc>
+    <loc>https://mda2av.github.io/zerg/docs/guides/performance-tuning/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/docs/api-reference/configuration/</loc>
+    <loc>https://mda2av.github.io/zerg/docs/api-reference/configuration/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/docs/api-reference/connection-pipereader/</loc>
+    <loc>https://mda2av.github.io/zerg/docs/api-reference/connection-pipereader/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/docs/internals/</loc>
+    <loc>https://mda2av.github.io/zerg/docs/internals/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/docs/architecture/threading-model/</loc>
+    <loc>https://mda2av.github.io/zerg/docs/architecture/threading-model/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/about/</loc>
+    <loc>https://mda2av.github.io/zerg/about/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/categories/</loc>
+    <loc>https://mda2av.github.io/zerg/categories/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/docs/</loc>
+    <loc>https://mda2av.github.io/zerg/docs/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/tags/</loc>
+    <loc>https://mda2av.github.io/zerg/tags/</loc>
   </url><url>
-    <loc>http://localhost:1313/zerg/</loc>
+    <loc>https://mda2av.github.io/zerg/</loc>
   </url>
 </urlset>
