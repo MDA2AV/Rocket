@@ -6,34 +6,30 @@
 
 - **Author:** Diogo Martins
 - **License:** MIT
-- **Repository:** https://github.com/MDA2AV/uRocket
+- **Repository:** https://github.com/MDA2AV/zerg
 - **NuGet:** https://www.nuget.org/packages/zerg/
-- **Docs:** https://mda2av.github.io/zerg/
 - **Target Frameworks:** .NET 8.0, .NET 9.0, .NET 10.0
 
 ---
 
-## Table of Contents
+## Documentation
 
-1. [Requirements](#requirements)
-2. [Installation](#installation)
-3. [Architecture Overview](#architecture-overview)
-4. [Quick Start](#quick-start)
-5. [Configuration](#configuration)
-6. [Connection API](#connection-api)
-7. [Reading Data](#reading-data)
-8. [Writing Data](#writing-data)
-9. [Examples](#examples)
-10. [io_uring Primer](#io_uring-primer)
-11. [Performance Tuning](#performance-tuning)
-12. [Project Structure](#project-structure)
+Full documentation is available at **https://mda2av.github.io/zerg/**
+
+| Page | Description |
+|---|---|
+| [Getting Started](https://mda2av.github.io/zerg/docs/getting-started/installation/) | Installation, quick start, configuration |
+| [Architecture](https://mda2av.github.io/zerg/docs/architecture/reactor-pattern/) | Reactor pattern, io_uring, threading model, connection lifecycle, buffer rings |
+| [API Reference](https://mda2av.github.io/zerg/docs/api-reference/) | Engine, Connection Read/Write, ConnectionPipeReader, ConnectionStream, Configuration |
+| [Guides](https://mda2av.github.io/zerg/docs/guides/zero-allocation/) | Zero-allocation patterns, buffer management, performance tuning |
+| [Internals](https://mda2av.github.io/zerg/docs/internals/) | Memory management, native interop, MPSC/SPSC queues |
 
 ---
 
 ## Requirements
 
 - **Linux** (kernel 6.1+ required for multishot accept/recv, buffer rings, `DEFER_TASKRUN`)
-- **.NET 9.0** or **.NET 10.0** SDK
+- **.NET 8.0**, **.NET 9.0**, or **.NET 10.0** SDK
 - **liburing** (the native shim `liburingshim.so` is bundled in the NuGet package for `linux-x64` and `linux-musl-x64`)
 
 ---
@@ -138,6 +134,8 @@ Each reactor owns:
 - **Explicit buffer lifetimes:** Consumers must return buffers to the kernel after processing
 - **Allocation-free hot paths:** Uses unmanaged memory, `ValueTask`, and object pooling
 - **Multishot operations:** Single submission produces multiple completions
+
+> See the full [Architecture docs](https://mda2av.github.io/zerg/docs/architecture/reactor-pattern/) for deep dives into the reactor pattern, threading model, connection lifecycle, and buffer rings.
 
 ---
 
@@ -261,6 +259,8 @@ var engine = new Engine(new EngineOptions
     )).ToArray()
 });
 ```
+
+> Full config reference: [Configuration docs](https://mda2av.github.io/zerg/docs/api-reference/configuration/)
 
 ---
 
@@ -428,6 +428,8 @@ while ((int n = await stream.ReadAsync(buf)) > 0)
 
 One copy per read. Use when integrating with APIs that require `Stream`.
 
+> Full API reference: [Connection Read](https://mda2av.github.io/zerg/docs/api-reference/connection-read/), [ConnectionPipeReader](https://mda2av.github.io/zerg/docs/api-reference/connection-pipereader/), [ConnectionStream](https://mda2av.github.io/zerg/docs/api-reference/connection-stream/)
+
 ---
 
 ## Writing Data
@@ -480,6 +482,8 @@ await connection.FlushAsync();
 2. **FlushAsync:** Signals the reactor to issue a `send` SQE to the kernel
 3. The reactor handles partial sends automatically (resubmits remaining data)
 4. The write buffer is reset after the full send completes
+
+> Full API reference: [Connection Write](https://mda2av.github.io/zerg/docs/api-reference/connection-write/)
 
 ---
 
@@ -618,6 +622,8 @@ dotnet run --project Examples -- stream
 | `IORING_SETUP_DEFER_TASKRUN` | Better for async/await integration (default) |
 | `IORING_SETUP_SQ_AFF` | Pin SQPOLL kernel thread to a specific CPU core |
 | `IORING_SETUP_SINGLE_ISSUER` | Optimize for single-thread submission (default) |
+
+> See [Performance Tuning](https://mda2av.github.io/zerg/docs/guides/performance-tuning/) and [Buffer Management](https://mda2av.github.io/zerg/docs/guides/buffer-management/) guides for more.
 
 ---
 
