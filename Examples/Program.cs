@@ -14,7 +14,7 @@ internal class Program
 {
     public static async Task Main(string[] args)
     {
-        var mode = args.Length > 0 ? args[0] : "pipereader";
+        var mode = args.Length > 0 ? args[0] : "raw";
         var reactorCount = args.Length > 1 && int.TryParse(args[1], out int rc) ? rc : 12;
 
         // SQPOLL mode uses a custom engine with SQPOLL-enabled rings
