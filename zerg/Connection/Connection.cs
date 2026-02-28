@@ -1,12 +1,14 @@
 using System.Buffers;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks.Sources;
 using zerg.Utils;
+using static zerg.ABI.ABI;
 
 namespace zerg;
 
-public sealed partial class Connection : 
+public sealed partial class Connection :
     IBufferWriter<byte>,
-    IValueTaskSource<RingSnapshot>, 
+    IValueTaskSource<RingSnapshot>,
     IValueTaskSource, /* flush */
     IDisposable
 {
@@ -20,6 +22,21 @@ public sealed partial class Connection :
     /// Owning reactor (used to return buffers back to reactor-owned pool).
     /// </summary>
     public Engine.Engine.Reactor Reactor { get; private set; } = null!;
+
+    // =========================================================================
+    // Per-connection buffer ring (incremental mode only)
+    // =========================================================================
+
+    internal unsafe io_uring_buf_ring* BufRing;
+    internal unsafe byte* BufRingSlab;
+    internal int BufRingEntries;
+    internal uint BufRingMask;
+    internal uint BufRingIndex;
+    internal ushort Bgid;
+    internal bool IncrementalMode;
+    internal int[]? BufRefCounts;
+    internal bool[]? BufKernelDone;
+    internal int[]? BufCumulativeOffset;
 
     // =========================================================================
     // Pooling / lifecycle
@@ -86,6 +103,11 @@ public sealed partial class Connection :
         // Read-side buffers
         _recv.Clear();
 
+        // Per-connection buffer ring: reset pointers but keep slab/arrays for pool reuse
+        unsafe { BufRing = null; }
+        Bgid = 0;
+        IncrementalMode = false;
+
         // Finally reset the VTS cores for reuse
         _readSignal.Reset();
         _flushSignal.Reset();
@@ -118,12 +140,19 @@ public sealed partial class Connection :
         return this;
     }
     
-    public void Dispose()
+    public unsafe void Dispose()
     {
         // Free the unmanaged slab (AlignedFree)
         _manager.Free();
 
         // No-op for your implementation, but fine to keep for correctness/future changes.
         ((IDisposable)_manager).Dispose();
+
+        // Free per-connection buffer ring slab
+        if (BufRingSlab != null)
+        {
+            NativeMemory.AlignedFree(BufRingSlab);
+            BufRingSlab = null;
+        }
     }
 }

@@ -103,5 +103,15 @@ public sealed record ReactorConfig(
     ///
     /// Requires Linux kernel 6.12+.
     /// </summary>
-    bool IncrementalBufferConsumption = false
+    bool IncrementalBufferConsumption = false,
+
+    /// <summary>
+    /// Number of buffers in each per-connection buffer ring used when
+    /// <see cref="IncrementalBufferConsumption"/> is enabled.
+    ///
+    /// Each connection gets its own buffer ring to prevent cross-connection
+    /// interleaving with incremental consumption. Must be a power of two.
+    /// Total memory per connection = ConnectionBufferRingEntries × RecvBufferSize.
+    /// </summary>
+    int ConnectionBufferRingEntries = 128
 );

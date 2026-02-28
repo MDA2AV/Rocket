@@ -79,5 +79,11 @@ public sealed unsafe partial class Connection
     /// Typically called by the consumer after it is done processing a RingItem.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void ReturnRing(ushort bufferId) => Reactor.EnqueueReturnQ(bufferId);
+    public void ReturnRing(ushort bufferId)
+    {
+        if (IncrementalMode)
+            Reactor.EnqueueReturnQIncremental(ClientFd, bufferId);
+        else
+            Reactor.EnqueueReturnQ(bufferId);
+    }
 }
