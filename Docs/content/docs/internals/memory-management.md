@@ -11,7 +11,8 @@ All performance-critical buffers are allocated outside the managed heap:
 
 | Component | Size | Alignment | Lifetime |
 |-----------|------|-----------|----------|
-| Buffer ring slab | `BufferRingEntries * RecvBufferSize` per reactor | 64 bytes | Reactor lifetime |
+| Buffer ring slab (shared mode) | `BufferRingEntries * RecvBufferSize` per reactor | 64 bytes | Reactor lifetime |
+| Buffer ring slab (incremental mode) | `ConnectionBufferRingEntries * RecvBufferSize` per connection | 64 bytes | Connection pool lifetime (survives reuse) |
 | Write slab | 16 KB per connection (configurable) | 64 bytes | Connection lifetime |
 | Inflight buffer | User-defined (typically 16 KB) per handler | 64 bytes | Handler lifetime |
 
@@ -66,6 +67,10 @@ ReadOnlyMemory<byte> memory = manager.Memory;  // zero allocation
 ```
 
 ## Buffer Ring Slab
+
+In **shared mode** (default), each reactor pre-allocates a single contiguous slab for receive buffers. In **incremental mode** (`IncrementalBufferConsumption: true`), each connection owns its own slab of `ConnectionBufferRingEntries * RecvBufferSize` bytes, allocated on first use and retained across connection pool reuse cycles.
+
+### Shared Mode
 
 Each reactor pre-allocates a contiguous slab for receive buffers:
 

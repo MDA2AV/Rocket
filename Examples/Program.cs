@@ -71,6 +71,9 @@ internal class Program
             "sqpoll"     => SqPollExample.HandleConnectionAsync,
             "pipereader" => PipeReaderExample.HandleConnectionAsync,
             "stream"     => StreamExample.HandleConnectionAsync,
+            "te"         => engine.Options.ReactorConfigs[0].IncrementalBufferConsumption
+                            ? c => new ConnectionHandlerIncremental().HandleConnectionAsync(c)
+                            : c => new ConnectionHandler().HandleConnectionAsync(c),
             _            => PipeReaderExample.HandleConnectionAsync,
         };
 
@@ -78,22 +81,11 @@ internal class Program
 
         try
         {
-            // Loop to handle new connections, fire and forget approach
             while (engine.ServerRunning)
             {
                 var connection = await engine.AcceptAsync(cts.Token);
                 if (connection is null) continue;
-                if (mode == "te")
-                {
-                    if (engine.Options.ReactorConfigs[0].IncrementalBufferConsumption)
-                        _ = new ConnectionHandlerIncremental().HandleConnectionAsync(connection);
-                    else
-                        _ = new ConnectionHandler().HandleConnectionAsync(connection);
-                }
-                else
-                {
-                    _ = handler(connection);
-                }
+                _ = handler(connection);
             }
         }
         catch (OperationCanceledException)

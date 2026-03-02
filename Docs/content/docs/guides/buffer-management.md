@@ -109,19 +109,21 @@ When you call `connection.ReturnRing(bufferId)`:
 2. On the reactor's next loop iteration, it drains the return queue
 3. For each returned buffer ID:
    ```c
-   shim_buf_ring_add(br, slab + bufferId * bufSize, bufSize, bufferId, mask, idx)
+   shim_buf_ring_add(br, slab + bufferId * bufSize, bufSize, bufferId, mask, 0)
+   shim_buf_ring_advance(br, 1)
    ```
-4. After processing all returns: `shim_buf_ring_advance(br, count)`
-5. The kernel can now use these buffers for future recv operations
+4. The kernel can now use this buffer for future recv operations
+
+**Note:** The `buf_offset` parameter (last argument to `buf_ring_add`) is a relative offset from `br->tail`, not an absolute index. Since we advance after each add, the offset is always `0`.
 
 The return is **not immediate** -- there's a small delay (one reactor loop iteration) before the kernel can reuse the buffer. This is safe because the buffer ring has thousands of buffers.
 
 ### With Incremental Buffer Consumption
 
-When `IncrementalBufferConsumption` is enabled (kernel 6.12+), multiple `RingItem`s can share the same `bufferId` at different offsets. The reactor uses internal refcounting so you don't need to change anything:
+When `IncrementalBufferConsumption` is enabled (kernel 6.12+), each connection gets its own per-connection buffer ring (with `ConnectionBufferRingEntries` entries). Multiple `RingItem`s can share the same `bufferId` at different offsets within that connection's ring. The reactor uses internal refcounting so you don't need to change anything:
 
-1. Each `ReturnRing()` call decrements the buffer's refcount
-2. The buffer is only returned to the kernel when `refcount == 0` **and** the kernel is done writing to it
+1. Each `ReturnRing()` call decrements the buffer's refcount on the connection
+2. The buffer is only returned to the connection's ring when `refcount == 0` **and** the kernel is done writing to it (`BufKernelDone[bid] == true`)
 3. All tracking is internal to the reactor thread — the `ReturnRing()` API is identical
 
 ## Buffer Pool Exhaustion
@@ -166,11 +168,19 @@ The write slab is automatically reset after `FlushAsync()` completes. You don't 
 ## Memory Layout Summary
 
 ```
-Per-Reactor:
+Per-Reactor (shared mode):
   Buffer Ring Slab: BufferRingEntries * RecvBufferSize bytes (unmanaged, aligned)
   Buffer Ring:      BufferRingEntries * sizeof(entry)        (kernel-managed)
+
+Per-Reactor (incremental mode):
+  No shared buffer ring — each connection owns its own ring.
 
 Per-Connection:
   Write Slab:       16 KB default (unmanaged, 64-byte aligned)
   SPSC Recv Ring:   1024 * sizeof(RingItem)                  (managed array)
+
+Per-Connection (incremental mode, additional):
+  Buffer Ring Slab: ConnectionBufferRingEntries * RecvBufferSize (unmanaged, aligned)
+  Buffer Ring:      ConnectionBufferRingEntries * sizeof(entry)  (kernel-managed)
+  Tracking Arrays:  BufRefCounts, BufKernelDone, BufCumulativeOffset (managed)
 ```
