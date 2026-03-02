@@ -41,12 +41,13 @@ internal class Program
                     SqCpuThread: -1,
                     SqThreadIdleMs: 100,
                     RingEntries: 8 * 1024,
-                    RecvBufferSize: 32 * 1024,
+                    RecvBufferSize: 4 * 1024,
                     BufferRingEntries: 16 * 1024,
                     BatchCqes: 4096,
                     MaxConnectionsPerReactor: 8 * 1024,
                     CqTimeout: 1_000_000,
-                    IncrementalBufferConsumption: true
+                    ConnectionBufferRingEntries: 32,
+                    IncrementalBufferConsumption: false
                 )).ToArray()
             });
 

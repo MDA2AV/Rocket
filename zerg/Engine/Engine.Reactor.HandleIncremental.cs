@@ -28,8 +28,8 @@ public sealed unsafe partial class Engine {
                         bool connectionAdded = _engine.ConnectionQueues.Writer.TryWrite(new ConnectionItem(Id, newFd));
                         if (!connectionAdded) Console.WriteLine("Failed to write connection!!");
                     }
-                    DrainReturnQIncremental();
                     DrainFlushQ();
+                    DrainReturnQIncremental();
                     int got;
                     fixed (io_uring_cqe** pC = cqes) {
                         got = shim_peek_batch_cqe(io_uring_instance, pC, (uint)Config.BatchCqes);
@@ -49,15 +49,9 @@ public sealed unsafe partial class Engine {
                             int fd = UdFdOf(ud);
                             bool hasBuffer = shim_cqe_has_buffer(cqe) != 0;
                             bool hasMore   = (cqe->flags & IORING_CQE_F_MORE) != 0;
+                            bool bufMore = (cqe->flags & IORING_CQE_F_BUF_MORE) != 0;
                             if (res <= 0) {
-                                if (hasBuffer) {
-                                    ushort bufferId = (ushort)shim_cqe_buffer_id(cqe);
-                                    if (connections.TryGetValue(fd, out var connClose)) {
-                                        connClose.BufKernelDone![bufferId] = true;
-                                        if (connClose.BufRefCounts![bufferId] <= 0)
-                                            ReturnConnectionBuffer(connClose, bufferId);
-                                    }
-                                }
+                                // Buffer (if any) will be freed by TeardownConnectionBufRing
                                 if (connections.Remove(fd, out var connection)) {
                                     connection.MarkClosed(res);
                                     TeardownConnectionBufRing(connection);
@@ -73,15 +67,15 @@ public sealed unsafe partial class Engine {
                                 byte* ptr = connection2.BufRingSlab + (nuint)bid * (nuint)Config.RecvBufferSize
                                       + (nuint)connection2.BufCumulativeOffset![bid];
                                 connection2.BufCumulativeOffset[bid] += res;
-                                bool bufMore = (cqe->flags & IORING_CQE_F_BUF_MORE) != 0;
                                 connection2.BufRefCounts![bid]++;
-                                if (!bufMore) connection2.BufKernelDone![bid] = true;
+                                if (!bufMore || !hasMore)
+                                    connection2.BufKernelDone![bid] = true;
                                 connection2.EnqueueRingItem(ptr, res, bid);
                                 if (!hasMore) {
                                     ArmRecvMultishot(io_uring_instance, fd, (uint)connection2.Bgid);
                                 }
                             }
-                            // orphan buffer: no-op for incremental (per-conn ring torn down on close)
+                            // orphan buffer: no-op (per-conn ring torn down on close)
                         } else if (kind == UdKind.Send) {
                             int fd = UdFdOf(ud);
                             if (connections.TryGetValue(fd, out var connection)) {
@@ -94,13 +88,12 @@ public sealed unsafe partial class Engine {
                                 int target = connection.WriteInFlight;
                                 // Still flushing target snapshot
                                 if (connection.WriteHead < target) {
-                                    // Correct: len is total-end (target), not remaining
                                     SubmitSend(io_uring_instance, fd, connection.WriteBuffer, (uint)connection.WriteHead, (uint)target);
                                     continue;
                                 }
                                 Volatile.Write(ref connection.SendInflight, 0); // Flush batch done
                                 connection.WriteInFlight = 0;
-                                connection.ResetWriteBuffer(); // safe because _flushInProgress forbids concurrent writes
+                                connection.ResetWriteBuffer();
                                 if (connection.IsFlushInProgress) connection.CompleteFlush();
                             }
                         } else if (kind == UdKind.Cancel) { }

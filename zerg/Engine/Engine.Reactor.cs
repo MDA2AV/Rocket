@@ -277,13 +277,14 @@ public sealed unsafe partial class Engine
             conn.BufCumulativeOffset![bid] = 0;
 
             byte* addr = conn.BufRingSlab + (nuint)bid * (nuint)Config.RecvBufferSize;
-            shim_buf_ring_add(conn.BufRing, addr, (uint)Config.RecvBufferSize, bid, (ushort)conn.BufRingMask, conn.BufRingIndex++);
+            shim_buf_ring_add(conn.BufRing, addr, (uint)Config.RecvBufferSize, bid, (ushort)conn.BufRingMask, 0);
             shim_buf_ring_advance(conn.BufRing, 1);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void EnqueueReturnQIncremental(int fd, ushort bid)
         {
+            //Console.WriteLine($"Enqueuing {bid}\r\n\r\n");
             ulong packed = MpscUlongQueue.Pack(fd, bid);
             if (!_returnQInc!.TryEnqueue(packed))
             {
@@ -312,13 +313,12 @@ public sealed unsafe partial class Engine
                 if (!connections.TryGetValue(fd, out Connection? conn) || !conn.IncrementalMode)
                     continue; // fd gone or ring already torn down
 
-                if (conn.BufRefCounts![bid] <= 0)
-                    continue; // stale return (fd reuse guard)
-
-                conn.BufRefCounts[bid]--;
-
-                if (conn.BufRefCounts[bid] == 0 && conn.BufKernelDone![bid])
+                conn.BufRefCounts![bid]--;
+                if (conn.BufRefCounts[bid] <= 0 && conn.BufKernelDone![bid])
+                {
+                    //Console.WriteLine($"Returning buffer {bid}");
                     ReturnConnectionBuffer(conn, bid);
+                }
             }
         }
 

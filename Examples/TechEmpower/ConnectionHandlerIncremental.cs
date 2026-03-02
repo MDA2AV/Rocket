@@ -1,7 +1,7 @@
 using System.Buffers;
-using System.Diagnostics.Contracts;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using zerg;
@@ -10,11 +10,22 @@ using zerg.Utils.UnmanagedMemoryManager;
 
 namespace Examples.TechEmpower;
 
+/// <summary>
+/// Incremental-mode connection handler.
+///
+/// Same inflight buffer + ReturnRing approach as ConnectionHandler.
+/// Each ring item is processed and then returned via ReturnRing so the
+/// reactor can decrement the refcount and recycle the buffer once the
+/// kernel is also done with it (BufKernelDone).
+/// </summary>
 internal sealed class ConnectionHandlerIncremental
 {
     private readonly unsafe byte* _inflightData;
     private int _inflightTail;
     private readonly int _length;
+
+    // Debug counter
+    private int _responsesWritten;
 
     [ThreadStatic]
     private static Utf8JsonWriter? t_writer;
@@ -28,31 +39,34 @@ internal sealed class ConnectionHandlerIncremental
     public unsafe ConnectionHandlerIncremental(int length = 1024 * 16)
     {
         _length = length;
-
-        // Allocating an unmanaged byte slab to store inflight data
         _inflightData = (byte*)NativeMemory.AlignedAlloc((nuint)_length, 64);
-
         _inflightTail = 0;
     }
 
-    // Zero allocation read and write example
-    // No Peeking
     internal async Task HandleConnectionAsync(Connection connection)
     {
         try
         {
-            while (true) // Outer loop, iterates everytime we read more data from the wire
+            while (true)
             {
-                var result = await connection.ReadAsync(); // Read data from the wire
+                var result = await connection.ReadAsync();
                 if (result.IsClosed)
+                {
+                    unsafe
+                    {
+                        string inflightHex = _inflightTail > 0
+                            ? System.Text.Encoding.ASCII.GetString(new ReadOnlySpan<byte>(_inflightData, _inflightTail))
+                            : "";
+                        //Console.WriteLine($"[INC] fd={connection.ClientFd} closed: responses={_responsesWritten} inflight={_inflightTail} data=[{inflightHex}]");
+                    }
                     break;
+                }
 
                 if (HandleResult(connection, ref result))
                 {
-                    await connection.FlushAsync(); // Mark data to be ready to be flushed
+                    await connection.FlushAsync();
                 }
 
-                // Reset connection's ManualResetValueTaskSourceCore<ReadResult>
                 connection.ResetRead();
             }
         }
@@ -81,7 +95,7 @@ internal sealed class ConnectionHandlerIncremental
 
         if (_inflightTail == 0)
         {
-            flushable = ProcessRings(connection, rings, out advanced);
+            flushable = ProcessRings(connection, rings, out advanced, ref _responsesWritten);
         }
         else
         {
@@ -93,16 +107,18 @@ internal sealed class ConnectionHandlerIncremental
             for (int i = 1; i < ringCount + 1; i++)
                 mems[i] = rings[i - 1];
 
-            flushable = ProcessRings(connection, mems, out advanced);
+            flushable = ProcessRings(connection, mems, out advanced, ref _responsesWritten);
 
-            if (flushable)  // a request was handled so inflight data can be discarded
+            if (flushable)
                 _inflightTail = 0;
         }
 
         if (!flushable)
         {
             // No complete request found. Copy ring data to the inflight buffer
-            // and return rings to the kernel.
+            // and return rings.
+            int totalNew = CalculateRingsTotalLength(rings);
+            //Console.WriteLine($"[INC] no-flush: rings={ringCount} totalBytes={totalNew} inflightBefore={oldInflightTail} inflightAfter={_inflightTail + totalNew}");
             for (int i = 0; i < rings.Length; i++)
             {
                 Buffer.MemoryCopy(
@@ -130,10 +146,10 @@ internal sealed class ConnectionHandlerIncremental
 
             // Copy current ring unused data
             Buffer.MemoryCopy(
-                rings[currentRingIndex].Ptr + currentRingAdvanced, // source
-                _inflightData + _inflightTail, // destination
-                _length - _inflightTail, // destinationSizeInBytes
-                rings[currentRingIndex].Length - currentRingAdvanced); // sourceBytesToCopy
+                rings[currentRingIndex].Ptr + currentRingAdvanced,
+                _inflightData + _inflightTail,
+                _length - _inflightTail,
+                rings[currentRingIndex].Length - currentRingAdvanced);
 
             _inflightTail += rings[currentRingIndex].Length - currentRingAdvanced;
 
@@ -141,34 +157,40 @@ internal sealed class ConnectionHandlerIncremental
             for (int i = currentRingIndex + 1; i < rings.Length; i++)
             {
                 Buffer.MemoryCopy(
-                    rings[i].Ptr, // source
-                    _inflightData + _inflightTail, // destination
-                    _length - _inflightTail, // destinationSizeInBytes
-                    rings[i].Length); // sourceBytesToCopy
+                    rings[i].Ptr,
+                    _inflightData + _inflightTail,
+                    _length - _inflightTail,
+                    rings[i].Length);
 
                 _inflightTail += rings[i].Length;
             }
         }
 
-        // Return the rings to the kernel, at this stage the request was either handled or the rings' data
-        // has already been copied to the inflight buffer.
+        // Return all rings — data has been processed or copied to inflight.
+        // The reactor will decrement refcount and recycle the buffer once
+        // both the handler and kernel are done with it.
         for (int i = 0; i < rings.Length; i++)
             connection.ReturnRing(rings[i].BufferId);
 
         return flushable;
     }
 
-    [SkipLocalsInit][Pure][MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static unsafe bool ProcessRings(Connection connection, UnmanagedMemoryManager[] rings, out int advanced)
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static unsafe bool ProcessRings(Connection connection, UnmanagedMemoryManager[] rings, out int advanced, ref int responseCount)
     {
         advanced = 0;
 
         int idx;
         bool flushable = false;
 
+        //Console.WriteLine(rings.Length);
+        
         ReadOnlySpan<byte> data = rings.Length == 1
             ? new ReadOnlySpan<byte>(rings[0].Ptr, rings[0].Length)
             : rings.ToReadOnlySequence().ToArray();
+        
+        //Console.WriteLine($"{Encoding.UTF8.GetString(data)}");
 
         while (true)
         {
@@ -185,6 +207,7 @@ internal sealed class ConnectionHandlerIncremental
             ReadOnlySpan<byte> route = data[(space1 + 1)..(space1 + 1 + space2)];
 
             WriteResponse(connection, route[1] == (byte)'j');
+            responseCount++;
             flushable = true;
             if (idx4 >= data.Length) break;
 

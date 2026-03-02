@@ -73,6 +73,7 @@ internal sealed class ConnectionHandler
         int advanced;
 
         UnmanagedMemoryManager[] rings = connection.GetAllSnapshotRingsAsUnmanagedMemory(ringSnapshot);
+        Console.WriteLine(rings.Length);
         int ringCount = rings.Length;
 
         if (ringCount == 0)
