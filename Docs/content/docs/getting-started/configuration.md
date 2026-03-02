@@ -45,7 +45,8 @@ Configuration for a single reactor's `io_uring` instance and event loop. This is
 | `BatchCqes` | `int` | `4096` | Maximum CQEs processed per loop iteration. Larger improves throughput under load. |
 | `MaxConnectionsPerReactor` | `int` | `8192` | Upper bound on concurrent connections. Should be <= `RingEntries`. |
 | `CqTimeout` | `long` | `1_000_000` (1 ms) | Timeout in nanoseconds passed to `io_uring_wait_cqes()`. Lower = lower tail latency, higher CPU. |
-| `IncrementalBufferConsumption` | `bool` | `false` | Enable `IOU_PBUF_RING_INC`. The kernel packs multiple recvs into a single buffer, reducing buffer ring pressure. **Requires kernel 6.12+.** |
+| `IncrementalBufferConsumption` | `bool` | `false` | Enable `IOU_PBUF_RING_INC`. Each connection gets its own buffer ring, and the kernel packs multiple recvs into a single buffer. **Requires kernel 6.12+.** |
+| `ConnectionBufferRingEntries` | `int` | `128` | Buffers per connection when `IncrementalBufferConsumption` is enabled. Must be a power of two. Memory per connection = `ConnectionBufferRingEntries * RecvBufferSize`. |
 
 ### Example: Per-Reactor Configuration
 

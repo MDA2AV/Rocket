@@ -60,13 +60,17 @@ When the handler calls `ReturnRing(bufferId)`, the buffer ID is enqueued to the 
 
 ```
 while returnQ.TryDequeue(out bufferId):
-    shim_buf_ring_add(br, slab + bufferId * bufSize, bufSize, bufferId, mask, idx++)
-shim_buf_ring_advance(br, count)
+    shim_buf_ring_add(br, slab + bufferId * bufSize, bufSize, bufferId, mask, 0)
+    shim_buf_ring_advance(br, 1)
 ```
+
+**Important:** The `buf_offset` parameter in `io_uring_buf_ring_add` is a **relative offset from `br->tail`**, not an absolute index. Since we call `advance(1)` after each add, the offset is always `0`.
 
 ## Incremental Buffer Consumption (Kernel 6.12+)
 
-With `IncrementalBufferConsumption: true`, the kernel can partially consume a buffer across multiple recv CQEs instead of consuming one entire buffer per CQE. This is enabled by passing the `IOU_PBUF_RING_INC` flag when setting up the buffer ring.
+With `IncrementalBufferConsumption: true`, each connection gets its own **per-connection buffer ring** instead of sharing the reactor's global ring. The per-connection rings are created with the `IOU_PBUF_RING_INC` flag, enabling the kernel to partially consume buffers across multiple recv CQEs.
+
+Each per-connection ring has `ConnectionBufferRingEntries` buffers (default 128, must be power of two). A pool of buffer ring group IDs (GIDs) is managed by the reactor — allocated on connection accept and freed on connection close.
 
 ### How It Works
 
@@ -83,13 +87,13 @@ All three CQEs share the same `bufferId` but produce separate `RingItem`s with d
 
 ### Refcount Tracking
 
-The reactor tracks three things per buffer (only when incremental is enabled):
+Each connection tracks three things per buffer (only when incremental is enabled):
 
 | Tracking Array | Purpose |
 |---------------|---------|
-| `_bufferOffsets[bid]` | Where the next CQE's data starts within the buffer |
-| `_bufferRefCounts[bid]` | How many outstanding `RingItem`s reference this buffer |
-| `_bufferKernelDone[bid]` | Whether the final CQE (no `IORING_CQE_F_BUF_MORE`) has been seen |
+| `BufCumulativeOffset[bid]` | Where the next CQE's data starts within the buffer |
+| `BufRefCounts[bid]` | How many outstanding `RingItem`s reference this buffer |
+| `BufKernelDone[bid]` | Whether the final CQE (no `IORING_CQE_F_BUF_MORE`) has been seen |
 
 A buffer is only returned to the kernel ring when **both** conditions are met:
 - `refcount == 0` (all user `ReturnRing()` calls done)
@@ -98,6 +102,16 @@ A buffer is only returned to the kernel ring when **both** conditions are met:
 ### Transparent to User Code
 
 The user-facing API is unchanged. `RingItem`, `ReturnRing()`, `ConnectionPipeReader`, and `ConnectionStream` all work identically. The refcounting is internal to the reactor thread — no atomics or locking needed.
+
+### Per-Connection Ring Lifecycle
+
+```
+Accept → AllocGid() → SetupConnectionBufRing(conn) → ArmRecvMultishot(ring, fd, conn.Bgid)
+  ...connection serves requests...
+Close  → TeardownConnectionBufRing(conn) → FreeGid(gid) → pool return
+```
+
+The buffer slab and tracking arrays are kept alive across pool reuse cycles to avoid re-allocation.
 
 ### When It Helps
 
@@ -148,12 +162,16 @@ A buffer transitions through these states:
 
 | Config Property | Default | Impact |
 |----------------|---------|--------|
-| `BufferRingEntries` | 16384 | Total buffers per reactor. Must be power of two. More buffers = more concurrent in-flight receives. |
+| `BufferRingEntries` | 16384 | Total buffers per reactor (shared mode). Must be power of two. More buffers = more concurrent in-flight receives. |
 | `RecvBufferSize` | 32 KB | Size of each buffer. Larger = fewer buffers needed for big payloads, but more memory per buffer. |
+| `ConnectionBufferRingEntries` | 128 | Buffers per connection (incremental mode only). Must be power of two. |
+| `IncrementalBufferConsumption` | `false` | Enable per-connection buffer rings with `IOU_PBUF_RING_INC`. Requires kernel 6.12+. |
 
-**Memory formula:** `BufferRingEntries * RecvBufferSize` per reactor.
-
+**Memory formula (shared mode):** `BufferRingEntries * RecvBufferSize` per reactor.
 With defaults: 16384 * 32 KB = **512 MB per reactor**.
+
+**Memory formula (incremental mode):** `ConnectionBufferRingEntries * RecvBufferSize` per connection.
+With defaults: 128 * 32 KB = **4 MB per connection**.
 
 ## Important Rules
 

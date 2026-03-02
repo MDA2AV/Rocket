@@ -232,7 +232,8 @@ static async Task HandleConnectionAsync(Connection connection)
 | `BatchCqes` | `int` | `4096` | Max CQEs processed per loop iteration |
 | `MaxConnectionsPerReactor` | `int` | `8192` | Max concurrent connections per reactor |
 | `CqTimeout` | `long` | `1000000` | Wait timeout in nanoseconds (1ms) |
-| `IncrementalBufferConsumption` | `bool` | `false` | Enable `IOU_PBUF_RING_INC` — kernel packs multiple recvs into a single buffer (kernel 6.12+) |
+| `IncrementalBufferConsumption` | `bool` | `false` | Enable `IOU_PBUF_RING_INC` — each connection gets its own buffer ring; kernel packs multiple recvs into a single buffer (kernel 6.12+) |
+| `ConnectionBufferRingEntries` | `int` | `128` | Buffers per connection when `IncrementalBufferConsumption` is enabled (must be power of 2) |
 
 ### AcceptorConfig
 
@@ -644,7 +645,8 @@ dotnet run --project Examples -- stream
 
 | Tunable | Effect |
 |---|---|
-| `IncrementalBufferConsumption = true` | Kernel packs multiple recvs into one buffer; reduces buffer ring pressure for small reads (kernel 6.12+) |
+| `IncrementalBufferConsumption = true` | Each connection gets its own buffer ring; kernel packs multiple recvs into one buffer, reducing buffer ring pressure for small reads (kernel 6.12+) |
+| `ConnectionBufferRingEntries` | Number of buffers per connection ring in incremental mode. Memory per connection = entries * `RecvBufferSize` |
 
 > See [Performance Tuning](https://mda2av.github.io/zerg/docs/guides/performance-tuning/) and [Buffer Management](https://mda2av.github.io/zerg/docs/guides/buffer-management/) guides for more.
 
@@ -676,8 +678,10 @@ zerg/                                         # Core library (NuGet package)
 │   ├── Engine.Config.cs                      # Configuration and thread setup
 │   ├── Engine.Acceptor.cs                    # Accept event loop
 │   ├── Engine.Acceptor.Listener.cs           # Listener socket setup
-│   ├── Engine.Reactor.cs                     # Reactor state and setup
+│   ├── Engine.Reactor.cs                     # Reactor state and setup (shared mode)
+│   ├── Engine.Reactor.Incremental.cs         # Per-connection buffer ring lifecycle (incremental mode)
 │   ├── Engine.Reactor.Handle.cs              # CQE dispatch (recv/send/cancel)
+│   ├── Engine.Reactor.HandleIncremental.cs   # CQE dispatch for incremental buffer mode
 │   ├── Engine.Reactor.HandleSubmitAndWaitCqe.cs       # Two-call submit pattern
 │   ├── Engine.Reactor.HandleSubmitAndWaitSingleCall.cs # Single-call submit pattern
 │   └── Configs/
@@ -703,6 +707,7 @@ zerg/                                         # Core library (NuGet package)
 │   └── MultiProducerSingleConsumer/
 │       ├── MpscIntQueue.cs                   # Lock-free MPSC int queue
 │       ├── MpscUShortQueue.cs                # Lock-free MPSC ushort queue (buffer returns)
+│       ├── MpscUlongQueue.cs                 # Lock-free MPSC ulong queue (incremental buffer returns)
 │       ├── MpscRecvRing.cs                   # MPSC recv ring (reactor → connection)
 │       └── MpscWriteItem.cs                  # MPSC write item queue
 └── native/                                   # Bundled native libraries

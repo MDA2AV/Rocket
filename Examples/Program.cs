@@ -1,5 +1,6 @@
 using Examples.PipeReader;
 using Examples.Stream;
+using Examples.TechEmpower;
 using Examples.ZeroAlloc.Basic;
 using Examples.ZeroAlloc.SqPoll;
 using zerg;
@@ -40,11 +41,12 @@ internal class Program
                     SqCpuThread: -1,
                     SqThreadIdleMs: 100,
                     RingEntries: 8 * 1024,
-                    RecvBufferSize: 32 * 1024,
+                    RecvBufferSize: 4 * 1024,
                     BufferRingEntries: 16 * 1024,
                     BatchCqes: 4096,
                     MaxConnectionsPerReactor: 8 * 1024,
                     CqTimeout: 1_000_000,
+                    ConnectionBufferRingEntries: 32,
                     IncrementalBufferConsumption: false
                 )).ToArray()
             });
@@ -69,6 +71,9 @@ internal class Program
             "sqpoll"     => SqPollExample.HandleConnectionAsync,
             "pipereader" => PipeReaderExample.HandleConnectionAsync,
             "stream"     => StreamExample.HandleConnectionAsync,
+            "te"         => engine.Options.ReactorConfigs[0].IncrementalBufferConsumption
+                            ? c => new ConnectionHandlerIncremental().HandleConnectionAsync(c)
+                            : c => new ConnectionHandler().HandleConnectionAsync(c),
             _            => PipeReaderExample.HandleConnectionAsync,
         };
 
@@ -76,7 +81,6 @@ internal class Program
 
         try
         {
-            // Loop to handle new connections, fire and forget approach
             while (engine.ServerRunning)
             {
                 var connection = await engine.AcceptAsync(cts.Token);

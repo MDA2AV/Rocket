@@ -362,6 +362,232 @@ public class IncrementalBufferTests
     }
 
     // ========================================================================
+    // Small recv buffer — forces buffer-boundary splitting
+    // ========================================================================
+
+    // 64-byte recv buffers with only 4 ring entries — very tight recycling
+    private static readonly ReactorConfig SmallBufferConfig = new(
+        IncrementalBufferConsumption: true,
+        RecvBufferSize: 64,
+        ConnectionBufferRingEntries: 4
+    );
+
+    // 64-byte recv buffers with enough entries to avoid ENOBUFS on larger payloads
+    private static readonly ReactorConfig SmallBufferWideConfig = new(
+        IncrementalBufferConsumption: true,
+        RecvBufferSize: 64,
+        ConnectionBufferRingEntries: 128
+    );
+
+    [Fact]
+    public async Task Incremental_SmallBuffer_Echo_SingleMessage()
+    {
+        await using var server = new ZergTestServer(EchoHandler, reactorConfig: SmallBufferConfig);
+        await Task.Delay(100);
+
+        using var client = new TcpClient();
+        await client.ConnectAsync("127.0.0.1", server.Port);
+        var stream = client.GetStream();
+
+        // 200 bytes > 64-byte buffer — must span multiple buffers
+        var sent = new byte[200];
+        Random.Shared.NextBytes(sent);
+        await stream.WriteAsync(sent);
+
+        using var ms = new MemoryStream();
+        var buf = new byte[4096];
+        while (ms.Length < sent.Length)
+        {
+            var n = await stream.ReadAsync(buf);
+            if (n == 0) break;
+            ms.Write(buf, 0, n);
+        }
+
+        Assert.Equal(sent, ms.ToArray());
+    }
+
+    [Fact]
+    public async Task Incremental_SmallBuffer_Echo_MultipleMessages()
+    {
+        await using var server = new ZergTestServer(EchoHandler, reactorConfig: SmallBufferConfig);
+        await Task.Delay(100);
+
+        using var client = new TcpClient();
+        await client.ConnectAsync("127.0.0.1", server.Port);
+        var stream = client.GetStream();
+
+        for (int i = 0; i < 20; i++)
+        {
+            // Each message is ~100 bytes — bigger than the 64-byte recv buffer
+            var sent = Encoding.UTF8.GetBytes($"smallbuf-msg-{i:D3}-padding-" + new string('X', 60));
+            await stream.WriteAsync(sent);
+            await stream.FlushAsync();
+
+            using var ms = new MemoryStream();
+            var buf = new byte[4096];
+            while (ms.Length < sent.Length)
+            {
+                var n = await stream.ReadAsync(buf);
+                if (n == 0) break;
+                ms.Write(buf, 0, n);
+            }
+
+            Assert.Equal(sent, ms.ToArray());
+        }
+    }
+
+    [Fact]
+    public async Task Incremental_SmallBuffer_Echo_LargePayload()
+    {
+        await using var server = new ZergTestServer(EchoHandler, reactorConfig: SmallBufferWideConfig);
+        await Task.Delay(100);
+
+        using var client = new TcpClient();
+        await client.ConnectAsync("127.0.0.1", server.Port);
+        var stream = client.GetStream();
+
+        // 4KB payload split across 64-byte buffers = ~64 buffer fills
+        var sent = new byte[4096];
+        Random.Shared.NextBytes(sent);
+        await stream.WriteAsync(sent);
+
+        using var ms = new MemoryStream();
+        var buf = new byte[8192];
+        while (ms.Length < sent.Length)
+        {
+            var n = await stream.ReadAsync(buf);
+            if (n == 0) break;
+            ms.Write(buf, 0, n);
+        }
+
+        Assert.Equal(sent, ms.ToArray());
+    }
+
+    [Fact]
+    public async Task Incremental_SmallBuffer_ConcurrentConnections()
+    {
+        await using var server = new ZergTestServer(EchoHandler, reactorCount: 2, reactorConfig: SmallBufferWideConfig);
+        await Task.Delay(100);
+
+        var tasks = Enumerable.Range(0, 10).Select(async i =>
+        {
+            using var client = new TcpClient();
+            await client.ConnectAsync("127.0.0.1", server.Port);
+            var stream = client.GetStream();
+
+            // 200 bytes per message, 5 messages per connection
+            for (int j = 0; j < 5; j++)
+            {
+                var sent = new byte[200];
+                Random.Shared.NextBytes(sent);
+                await stream.WriteAsync(sent);
+                await stream.FlushAsync();
+
+                using var ms = new MemoryStream();
+                var buf = new byte[4096];
+                while (ms.Length < sent.Length)
+                {
+                    var n = await stream.ReadAsync(buf);
+                    if (n == 0) break;
+                    ms.Write(buf, 0, n);
+                }
+
+                Assert.Equal(sent, ms.ToArray());
+            }
+        });
+
+        await Task.WhenAll(tasks);
+    }
+
+    [Fact]
+    public async Task Incremental_SmallBuffer_FragmentedSend()
+    {
+        // Send data in tiny fragments with delays to force many CQEs
+        // and buffer ring recycling
+        await using var server = new ZergTestServer(EchoHandler, reactorConfig: SmallBufferWideConfig);
+        await Task.Delay(100);
+
+        using var client = new TcpClient { NoDelay = true };
+        await client.ConnectAsync("127.0.0.1", server.Port);
+        var stream = client.GetStream();
+
+        var sent = new byte[512];
+        Random.Shared.NextBytes(sent);
+
+        // Send in 16-byte fragments with small delays
+        for (int offset = 0; offset < sent.Length; offset += 16)
+        {
+            int len = Math.Min(16, sent.Length - offset);
+            await stream.WriteAsync(sent.AsMemory(offset, len));
+            await stream.FlushAsync();
+            await Task.Delay(1);
+        }
+
+        using var ms = new MemoryStream();
+        var buf = new byte[4096];
+        while (ms.Length < sent.Length)
+        {
+            var n = await stream.ReadAsync(buf);
+            if (n == 0) break;
+            ms.Write(buf, 0, n);
+        }
+
+        Assert.Equal(sent, ms.ToArray());
+    }
+
+    [Fact]
+    public async Task Incremental_SmallBuffer_Stream_Echo()
+    {
+        await using var server = new ZergTestServer(StreamEchoHandler, reactorConfig: SmallBufferConfig);
+        await Task.Delay(100);
+
+        using var client = new TcpClient();
+        await client.ConnectAsync("127.0.0.1", server.Port);
+        var stream = client.GetStream();
+
+        var sent = new byte[200];
+        Random.Shared.NextBytes(sent);
+        await stream.WriteAsync(sent);
+
+        using var ms = new MemoryStream();
+        var buf = new byte[4096];
+        while (ms.Length < sent.Length)
+        {
+            var n = await stream.ReadAsync(buf);
+            if (n == 0) break;
+            ms.Write(buf, 0, n);
+        }
+
+        Assert.Equal(sent, ms.ToArray());
+    }
+
+    [Fact]
+    public async Task Incremental_SmallBuffer_PipeReader_Echo()
+    {
+        await using var server = new ZergTestServer(PipeReaderEchoHandler, reactorConfig: SmallBufferConfig);
+        await Task.Delay(100);
+
+        using var client = new TcpClient();
+        await client.ConnectAsync("127.0.0.1", server.Port);
+        var stream = client.GetStream();
+
+        var sent = new byte[200];
+        Random.Shared.NextBytes(sent);
+        await stream.WriteAsync(sent);
+
+        using var ms = new MemoryStream();
+        var buf = new byte[4096];
+        while (ms.Length < sent.Length)
+        {
+            var n = await stream.ReadAsync(buf);
+            if (n == 0) break;
+            ms.Write(buf, 0, n);
+        }
+
+        Assert.Equal(sent, ms.ToArray());
+    }
+
+    // ========================================================================
     // Handlers
     // ========================================================================
 
