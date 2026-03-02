@@ -132,7 +132,10 @@ public sealed partial class Engine
                     try
                     {
                         Reactors[wi].InitRing();
-                        Reactors[wi].Handle();
+                        if (Reactors[wi].Config.IncrementalBufferConsumption)
+                            Reactors[wi].HandleIncremental();
+                        else
+                            Reactors[wi].Handle();
                     }
                     catch (Exception ex)
                     {

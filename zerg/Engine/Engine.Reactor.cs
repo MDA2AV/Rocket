@@ -409,10 +409,6 @@ public sealed unsafe partial class Engine
                 // Mark closed to wake any waiter.
                 conn.MarkClosed(error: 0);
 
-                // Teardown per-connection buffer ring if in incremental mode
-                if (conn.IncrementalMode)
-                    TeardownConnectionBufRing(conn);
-
                 // Close fd
                 try
                 {

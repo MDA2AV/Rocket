@@ -10,26 +10,25 @@ using zerg.Utils.UnmanagedMemoryManager;
 
 namespace Examples.TechEmpower;
 
-internal sealed class ConnectionHandler
+internal sealed class ConnectionHandlerIncremental
 {
     private readonly unsafe byte* _inflightData;
     private int _inflightTail;
     private readonly int _length;
-    
+
     [ThreadStatic]
     private static Utf8JsonWriter? t_writer;
-    private static readonly JsonContext SerializerContext = JsonContext.Default;
-    
+
     private const string _jsonBody = "Hello, World!";
     private static ReadOnlySpan<byte> s_plainTextBody => "Hello, World!"u8;
-    
+
     private static ReadOnlySpan<byte> s_headersJson => "HTTP/1.1 200 OK\r\nContent-Length:   \r\nServer: S\r\nContent-Type: application/json\r\n"u8;
     private static ReadOnlySpan<byte> s_headersPlainText => "HTTP/1.1 200 OK\r\nContent-Length: 13\r\nServer: S\r\nContent-Type: text/plain\r\n"u8;
 
-    public unsafe ConnectionHandler(int length = 1024 * 16)
+    public unsafe ConnectionHandlerIncremental(int length = 1024 * 16)
     {
         _length = length;
-        
+
         // Allocating an unmanaged byte slab to store inflight data
         _inflightData = (byte*)NativeMemory.AlignedAlloc((nuint)_length, 64);
 
@@ -47,7 +46,7 @@ internal sealed class ConnectionHandler
                 var result = await connection.ReadAsync(); // Read data from the wire
                 if (result.IsClosed)
                     break;
-                
+
                 if (HandleResult(connection, ref result))
                 {
                     await connection.FlushAsync(); // Mark data to be ready to be flushed
@@ -153,12 +152,12 @@ internal sealed class ConnectionHandler
 
         // Return the rings to the kernel, at this stage the request was either handled or the rings' data
         // has already been copied to the inflight buffer.
-        for (int i = 0; i < rings.Length; i++) 
+        for (int i = 0; i < rings.Length; i++)
             connection.ReturnRing(rings[i].BufferId);
-        
+
         return flushable;
     }
-    
+
     [SkipLocalsInit][Pure][MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static unsafe bool ProcessRings(Connection connection, UnmanagedMemoryManager[] rings, out int advanced)
     {
@@ -208,10 +207,10 @@ internal sealed class ConnectionHandler
 
             var utf8JsonWriter = t_writer ??= new Utf8JsonWriter(connection, new JsonWriterOptions { SkipValidation = true });
             utf8JsonWriter.Reset(connection);
-            JsonSerializer.Serialize(utf8JsonWriter, new JsonMessage { Message = _jsonBody }, SerializerContext.JsonMessage);
+            JsonSerializer.Serialize(utf8JsonWriter, new JsonMessage { Message = _jsonBody }, JsonContext.Default.JsonMessage);
 
             contentLength = (int)utf8JsonWriter.BytesCommitted;
-            
+
             unsafe
             {
                 byte* dst = connection.WriteBuffer + tail + 33;
@@ -229,7 +228,7 @@ internal sealed class ConnectionHandler
             connection.Write(s_plainTextBody);
         }
     }
-    
+
     private static int GetCurrentRingIndex(in int totalAdvanced, UnmanagedMemoryManager[] rings, out int currentRingAdvanced)
     {
         var total = 0;
@@ -241,7 +240,7 @@ internal sealed class ConnectionHandler
                 currentRingAdvanced = totalAdvanced - total;
                 return i;
             }
-            
+
             total += rings[i].Length;
         }
 
@@ -256,9 +255,3 @@ internal sealed class ConnectionHandler
         return total;
     }
 }
-
-public struct JsonMessage { public string Message { get; set; } }
-
-[JsonSourceGenerationOptions(GenerationMode = JsonSourceGenerationMode.Serialization | JsonSourceGenerationMode.Metadata)]
-[JsonSerializable(typeof(JsonMessage))]
-public partial class JsonContext : JsonSerializerContext { }

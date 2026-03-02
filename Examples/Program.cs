@@ -84,7 +84,10 @@ internal class Program
                 if (connection is null) continue;
                 if (mode == "te")
                 {
-                    _ = new ConnectionHandler().HandleConnectionAsync(connection);
+                    if (engine.Options.ReactorConfigs[0].IncrementalBufferConsumption)
+                        _ = new ConnectionHandlerIncremental().HandleConnectionAsync(connection);
+                    else
+                        _ = new ConnectionHandler().HandleConnectionAsync(connection);
                 }
                 else
                 {
