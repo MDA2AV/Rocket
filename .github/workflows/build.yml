@@ -9,51 +9,42 @@ on:
       - main
 
 permissions:
-  contents: read   # Required for reading repository content
-  packages: write  # Required for publishing packages to NuGet
+  contents: read
+  packages: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      # Checkout the repository
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      # Set up .NET SDK
       - name: Set up .NET SDK
-        uses: actions/setup-dotnet@v3
+        uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '10.0' # Specify your .NET SDK version
+          dotnet-version: '10.0'
 
-      # Restore dependencies
-      - name: Restore dependencies
-        run: dotnet restore zerg/zerg.csproj
+      - name: Restore
+        run: dotnet restore zerg.sln
 
-      # Build the project
-      - name: Build project
-        run: dotnet build zerg/zerg.csproj --configuration Release --no-restore
-        
-      - name: Pack NuGet package
-        run: dotnet pack zerg/zerg.csproj --configuration Release --output ./artifacts
+      - name: Build
+        run: dotnet build zerg.sln --configuration Release --no-restore
 
-      # Run tests only for .NET 9
-      #- name: Run tests (only for .NET 9)
-      #  run: |
-      #    if [[ "$(dotnet --version)" == 9.* ]]; then
-      #      dotnet test Unhinged.Tests/Unhinged.Tests.csproj --verbosity normal
-      #    else
-      #      echo "Skipping tests: Not running on .NET 9."
-      #    fi
-        
+      - name: Pack zerg
+        run: dotnet pack zerg/zerg.csproj --configuration Release --no-build --output ./artifacts
+
+      - name: Pack terraform
+        run: dotnet pack terraform/terraform.csproj --configuration Release --no-build --output ./artifacts
+
       - name: Publish to NuGet
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
         run: dotnet nuget push ./artifacts/*.nupkg --source https://api.nuget.org/v3/index.json --api-key $NUGET_API_KEY --skip-duplicate
-        
-      # Publish to GitHub Packages
+
       - name: Publish to GitHub Packages
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: dotnet nuget push ./artifacts/*.nupkg --source https://nuget.pkg.github.com/MDA2AV/index.json --api-key $GITHUB_TOKEN --skip-duplicate
