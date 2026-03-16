@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Runtime.CompilerServices;
 
 namespace zerg.ABI;
 
@@ -64,7 +65,7 @@ public static unsafe partial class ABI{
     /// </remarks>
     /// </summary>
     [DllImport("uringshim")] internal static extern io_uring* shim_create_ring(uint entries, out int err);
-    [DllImport("uringshim")] internal static extern uint shim_get_ring_flags(io_uring* ring);
+    [SuppressGCTransition][DllImport("uringshim")] internal static extern uint shim_get_ring_flags(io_uring* ring);
     [DllImport("uringshim")] internal static extern io_uring* shim_create_ring_ex(
         uint entries,
         uint flags,
@@ -82,7 +83,7 @@ public static unsafe partial class ABI{
     /// <summary>
     /// Acquires a fresh SQE from the ring (may return <c>null</c> if SQ is full).
     /// </summary>
-    [DllImport("uringshim")] internal static extern io_uring_sqe* shim_get_sqe(io_uring* ring);
+    [SuppressGCTransition][DllImport("uringshim")] internal static extern io_uring_sqe* shim_get_sqe(io_uring* ring);
     /// <summary>
     /// Submits pending SQEs to the kernel. Returns number of submitted entries or -errno.
     /// </summary>
@@ -96,15 +97,15 @@ public static unsafe partial class ABI{
     /// Non-blocking peek for up to <paramref name="count"/> CQEs into the given buffer.
     /// Returns the number of CQEs copied (0 if none available), or -errno on failure.
     /// </summary>
-    [DllImport("uringshim")] internal static extern int shim_peek_batch_cqe(io_uring* ring, io_uring_cqe** cqes, uint count);
+    [SuppressGCTransition][DllImport("uringshim")] internal static extern int shim_peek_batch_cqe(io_uring* ring, io_uring_cqe** cqes, uint count);
     /// <summary>
     /// Marks a CQE as seen/consumed, advancing the ring's CQ head.
     /// </summary>
-    [DllImport("uringshim")] internal static extern void shim_cqe_seen(io_uring* ring, io_uring_cqe* cqe);
+    [SuppressGCTransition][DllImport("uringshim")] internal static extern void shim_cqe_seen(io_uring* ring, io_uring_cqe* cqe);
     /// <summary>
     /// Returns how many SQEs are ready (available) to be filled without blocking.
     /// </summary>
-    [DllImport("uringshim")] internal static extern uint shim_sq_ready(io_uring* ring);
+    [SuppressGCTransition][DllImport("uringshim")] internal static extern uint shim_sq_ready(io_uring* ring);
     // ------------------------------------------------------------------------------------
     //  SHIM: QUEUE OPS (ADVANCED / HIGH-PERF)
     // ------------------------------------------------------------------------------------
@@ -219,7 +220,7 @@ public static unsafe partial class ABI{
     /// </summary>
     /// <param name="ring">The io_uring instance.</param>
     /// <param name="count">Number of CQEs to mark as seen.</param>
-    [DllImport("uringshim")]
+    [SuppressGCTransition][DllImport("uringshim")]
     internal static extern void shim_cq_advance(io_uring* ring, uint count);
     /// <summary>
     /// Returns the number of completion queue entries (CQEs) that are
@@ -237,7 +238,7 @@ public static unsafe partial class ABI{
     /// </summary>
     /// <param name="ring">The io_uring instance.</param>
     /// <returns>Number of ready CQEs in the completion queue.</returns>
-    [DllImport("uringshim")]
+    [SuppressGCTransition][DllImport("uringshim")]
     internal static extern uint shim_cq_ready(io_uring* ring);
     // ------------------------------------------------------------------------------------
     //  SHIM: PREP OPS (SQE FILLERS)
@@ -249,7 +250,7 @@ public static unsafe partial class ABI{
     /// <paramref name="flags"/> maps to <c>accept4</c> flags (e.g., <c>SOCK_NONBLOCK</c>).
     /// </para>
     /// </summary>
-    [DllImport("uringshim")] internal static extern void shim_prep_multishot_accept(io_uring_sqe* sqe, int lfd, int flags);
+    [SuppressGCTransition][DllImport("uringshim")] internal static extern void shim_prep_multishot_accept(io_uring_sqe* sqe, int lfd, int flags);
     /// <summary>
     /// Prepares a multishot <c>recv</c> using buffer selection (buf-ring).
     /// <para>
@@ -257,26 +258,26 @@ public static unsafe partial class ABI{
     /// <paramref name="flags"/> maps to <c>recv</c> flags (e.g., <c>MSG_WAITALL</c>).
     /// </para>
     /// </summary>
-    [DllImport("uringshim")] internal static extern void shim_prep_recv_multishot_select(io_uring_sqe* sqe, int fd, uint buf_group, int flags);
+    [SuppressGCTransition][DllImport("uringshim")] internal static extern void shim_prep_recv_multishot_select(io_uring_sqe* sqe, int fd, uint buf_group, int flags);
     /// <summary>
     /// Prepares a <c>send(2)</c> on <paramref name="fd"/> writing <paramref name="nbytes"/> from <paramref name="buf"/>.
     /// <paramref name="flags"/> maps to <c>send</c> flags (e.g., <c>MSG_MORE</c>).
     /// </summary>
-    [DllImport("uringshim")] internal static extern void shim_prep_send(io_uring_sqe* sqe, int fd, void* buf, uint nbytes, int flags);
+    [SuppressGCTransition][DllImport("uringshim")] internal static extern void shim_prep_send(io_uring_sqe* sqe, int fd, void* buf, uint nbytes, int flags);
     // SHIM: PREP OPS (SQE FILLERS)
-    [DllImport("uringshim")] internal static extern void shim_prep_cancel64(io_uring_sqe* sqe, ulong user_data, int flags);
+    [SuppressGCTransition][DllImport("uringshim")] internal static extern void shim_prep_cancel64(io_uring_sqe* sqe, ulong user_data, int flags);
     // ------------------------------------------------------------------------------------
     //  SHIM: USERDATA HELPERS
     // ------------------------------------------------------------------------------------
     /// <summary>
     /// Attaches a 64-bit user token to an SQE (visible later via CQE.user_data).
     /// </summary>
-    [DllImport("uringshim")] internal static extern void  shim_sqe_set_data64(io_uring_sqe* sqe, ulong data);
+    [SuppressGCTransition][DllImport("uringshim")] internal static extern void  shim_sqe_set_data64(io_uring_sqe* sqe, ulong data);
     /// <summary>
     /// Reads the 64-bit user token previously attached to the SQE that completed.
     /// Equivalent to reading <see cref="io_uring_cqe.user_data"/>.
     /// </summary>
-    [DllImport("uringshim")] internal static extern ulong shim_cqe_get_data64(io_uring_cqe* cqe);
+    [SuppressGCTransition][DllImport("uringshim")] internal static extern ulong shim_cqe_get_data64(io_uring_cqe* cqe);
     // ------------------------------------------------------------------------------------
     //  SHIM: BUF-RING HELPERS (BUFFER SELECTION)
     // ------------------------------------------------------------------------------------
@@ -304,19 +305,19 @@ public static unsafe partial class ABI{
     /// <paramref name="mask"/> must be <c>entries - 1</c> for power-of-two rings.
     /// </para>
     /// </summary>
-    [DllImport("uringshim")] internal static extern void shim_buf_ring_add(io_uring_buf_ring* br, void* addr, uint len, ushort bid, ushort mask, uint idx);
+    [SuppressGCTransition][DllImport("uringshim")] internal static extern void shim_buf_ring_add(io_uring_buf_ring* br, void* addr, uint len, ushort bid, ushort mask, uint idx);
     /// <summary>
     /// Advances the visible producer index by <paramref name="count"/> after one or more adds.
     /// </summary>
-    [DllImport("uringshim")] internal static extern void shim_buf_ring_advance(io_uring_buf_ring* br, uint count);
+    [SuppressGCTransition][DllImport("uringshim")] internal static extern void shim_buf_ring_advance(io_uring_buf_ring* br, uint count);
     /// <summary>
     /// Returns non-zero if the CQE indicates a provided buffer was used.
     /// </summary>
-    [DllImport("uringshim")] internal static extern int shim_cqe_has_buffer(io_uring_cqe* cqe);
+    [SuppressGCTransition][DllImport("uringshim")] internal static extern int shim_cqe_has_buffer(io_uring_cqe* cqe);
     /// <summary>
     /// When <see cref="shim_cqe_has_buffer"/> is non-zero, returns the selected buffer id (bid).
     /// </summary>
-    [DllImport("uringshim")] internal static extern uint shim_cqe_buffer_id(io_uring_cqe* cqe);
+    [SuppressGCTransition][DllImport("uringshim")] internal static extern uint shim_cqe_buffer_id(io_uring_cqe* cqe);
     /// <summary>
     /// Waits for a CQE with a timeout specified via <see cref="__kernel_timespec"/>.
     /// <para>
