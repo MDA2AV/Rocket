@@ -3,7 +3,7 @@ using System.Runtime.InteropServices;
 using Microsoft.Extensions.ObjectPool;
 using terraform.Engine.Configs;
 using terraform.Ring;
-using terraform.Utils.MultiProducerSingleConsumer;
+using Zerg.Core;
 using static terraform.ABI.Libc;
 using static terraform.Ring.Constants;
 
@@ -24,7 +24,7 @@ public sealed unsafe partial class Engine
         }
     }
 
-    public partial class Reactor
+    public partial class Reactor : IReactor
     {
         private IoUringBuf* _bufferRing;
         private byte* _bufferRingSlab;

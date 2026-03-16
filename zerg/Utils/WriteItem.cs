@@ -1,7 +1,9 @@
+using Zerg.Core;
+
 namespace zerg.Utils;
 
-public readonly struct WriteItem(UnmanagedMemoryManager.UnmanagedMemoryManager buffer, int clientFd)
+public readonly struct WriteItem(UnmanagedMemoryManager buffer, int clientFd)
 {
-    public UnmanagedMemoryManager.UnmanagedMemoryManager Buffer { get; } = buffer;
+    public UnmanagedMemoryManager Buffer { get; } = buffer;
     public int ClientFd { get; } = clientFd;
 }

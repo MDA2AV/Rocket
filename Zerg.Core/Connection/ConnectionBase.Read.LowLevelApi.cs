@@ -1,9 +1,8 @@
 using System.Runtime.CompilerServices;
-using terraform.Utils;
 
-namespace terraform;
+namespace Zerg.Core;
 
-public sealed unsafe partial class Connection
+public abstract unsafe partial class ConnectionBase
 {
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool TryGetRing(long tailSnapshot, out RingItem item)
@@ -42,8 +41,12 @@ public sealed unsafe partial class Connection
         }
     }
 
+    // =========================================================================
+    // Buffer return (back to reactor-owned pool)
+    // =========================================================================
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void ReturnRing(ushort bufferId)
+    public virtual void ReturnRing(ushort bufferId)
     {
         Reactor.EnqueueReturnQ(bufferId);
     }

@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using terraform.Ring;
+using Zerg.Core;
 using static terraform.ABI.Libc;
 using static terraform.Ring.Constants;
 
@@ -27,7 +28,7 @@ public sealed unsafe partial class Engine
                 {
                     while (reactorQueue.TryDequeue(out int newFd))
                     {
-                        Connection conn = _engine.ConnectionPool.Get()
+                        Connection conn = (Connection)_engine.ConnectionPool.Get()
                             .SetFd(newFd)
                             .SetReactor(_engine.Reactors[Id]);
                         connections[newFd] = conn;

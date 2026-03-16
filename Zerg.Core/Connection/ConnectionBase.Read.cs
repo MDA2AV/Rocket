@@ -1,12 +1,10 @@
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks.Sources;
-using terraform.Utils;
-using terraform.Utils.SingleProducerSingleConsumer;
 
-namespace terraform;
+namespace Zerg.Core;
 
 [SkipLocalsInit]
-public sealed partial class Connection
+public abstract partial class ConnectionBase
 {
     private ManualResetValueTaskSourceCore<RingSnapshot> _readSignal;
     private int _armed;

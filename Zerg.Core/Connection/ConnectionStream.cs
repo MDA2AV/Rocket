@@ -1,12 +1,10 @@
-using terraform.Utils.Memory;
-
-namespace terraform;
+namespace Zerg.Core;
 
 public sealed class ConnectionStream : Stream
 {
-    private readonly Connection _inner;
+    private readonly ConnectionBase _inner;
 
-    public ConnectionStream(Connection inner)
+    public ConnectionStream(ConnectionBase inner)
     {
         _inner = inner ?? throw new ArgumentNullException(nameof(inner));
     }

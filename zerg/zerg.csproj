@@ -30,6 +30,10 @@
     </ItemGroup>
 
     <ItemGroup>
+        <ProjectReference Include="..\Zerg.Core\Zerg.Core.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
         <None Include="native/linux-x64/liburingshim.so"
               Pack="true"
               PackagePath="runtimes/linux-x64/native/" />

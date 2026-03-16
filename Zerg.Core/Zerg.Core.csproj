@@ -9,6 +9,11 @@
     </PropertyGroup>
 
     <ItemGroup>
+        <InternalsVisibleTo Include="terraform" />
+        <InternalsVisibleTo Include="zerg" />
+    </ItemGroup>
+
+    <ItemGroup>
         <PackageReference Include="System.IO.Pipelines" Version="9.0.4" />
     </ItemGroup>
 

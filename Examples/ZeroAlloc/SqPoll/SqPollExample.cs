@@ -1,7 +1,7 @@
 using zerg;
 using zerg.Engine;
 using zerg.Engine.Configs;
-using zerg.Utils.UnmanagedMemoryManager;
+using Zerg.Core;
 
 namespace Examples.ZeroAlloc.SqPoll;
 

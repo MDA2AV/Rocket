@@ -1,7 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using zerg;
-using zerg.Utils.UnmanagedMemoryManager;
+using Zerg.Core;
 
 namespace Examples.ZeroAlloc.Basic;
 

@@ -12,6 +12,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "terraform", "terraform\terr
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Playground.Terraform", "Playground.Terraform\Playground.Terraform.csproj", "{5C6279DD-6055-452E-9883-34730C356358}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Zerg.Core", "Zerg.Core\Zerg.Core.csproj", "{459B3E6F-795A-441A-843C-D7C649E768EA}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -94,6 +96,18 @@ Global
 		{5C6279DD-6055-452E-9883-34730C356358}.Release|x64.Build.0 = Release|Any CPU
 		{5C6279DD-6055-452E-9883-34730C356358}.Release|x86.ActiveCfg = Release|Any CPU
 		{5C6279DD-6055-452E-9883-34730C356358}.Release|x86.Build.0 = Release|Any CPU
+		{459B3E6F-795A-441A-843C-D7C649E768EA}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{459B3E6F-795A-441A-843C-D7C649E768EA}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{459B3E6F-795A-441A-843C-D7C649E768EA}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{459B3E6F-795A-441A-843C-D7C649E768EA}.Debug|x64.Build.0 = Debug|Any CPU
+		{459B3E6F-795A-441A-843C-D7C649E768EA}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{459B3E6F-795A-441A-843C-D7C649E768EA}.Debug|x86.Build.0 = Debug|Any CPU
+		{459B3E6F-795A-441A-843C-D7C649E768EA}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{459B3E6F-795A-441A-843C-D7C649E768EA}.Release|Any CPU.Build.0 = Release|Any CPU
+		{459B3E6F-795A-441A-843C-D7C649E768EA}.Release|x64.ActiveCfg = Release|Any CPU
+		{459B3E6F-795A-441A-843C-D7C649E768EA}.Release|x64.Build.0 = Release|Any CPU
+		{459B3E6F-795A-441A-843C-D7C649E768EA}.Release|x86.ActiveCfg = Release|Any CPU
+		{459B3E6F-795A-441A-843C-D7C649E768EA}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

@@ -1,13 +1,11 @@
 using System.Buffers;
-using terraform.Utils;
-using terraform.Utils.UnmanagedMemoryManager;
 
-namespace terraform;
+namespace Zerg.Core;
 
-public sealed partial class Connection
+public abstract partial class ConnectionBase
 {
     public long TotalRingCount => _recv.GetTailHeadDiff();
-    public int SnapshotRingCount { get; private set; }
+    public int SnapshotRingCount { get; protected set; }
 
     public bool TryDynamicallyGetAllSnapshotRingsAsReadOnlySequence(RingSnapshot readResult, out List<UnmanagedMemoryManager> rings, out ReadOnlySequence<byte> sequence)
     {

@@ -1,5 +1,5 @@
 using terraform;
-using terraform.Utils.UnmanagedMemoryManager;
+using Zerg.Core;
 
 namespace Playground.Terraform.LowLevel;
 

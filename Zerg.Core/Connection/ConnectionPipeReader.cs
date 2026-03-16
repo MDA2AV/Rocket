@@ -1,12 +1,11 @@
 using System.Buffers;
 using System.IO.Pipelines;
-using terraform.Utils;
 
-namespace terraform;
+namespace Zerg.Core;
 
 public sealed class ConnectionPipeReader : PipeReader
 {
-    private readonly Connection _inner;
+    private readonly ConnectionBase _inner;
 
     private readonly List<HeldBuffer> _held = new(4);
     private ReadOnlySequence<byte> _lastSequence;
@@ -15,7 +14,7 @@ public sealed class ConnectionPipeReader : PipeReader
     private bool _cancelRequested;
     private bool _connectionClosed;
 
-    public ConnectionPipeReader(Connection inner)
+    public ConnectionPipeReader(ConnectionBase inner)
     {
         _inner = inner ?? throw new ArgumentNullException(nameof(inner));
     }

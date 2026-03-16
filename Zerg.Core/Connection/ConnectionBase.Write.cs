@@ -1,11 +1,10 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks.Sources;
-using terraform.Utils.UnmanagedMemoryManager;
 
-namespace terraform;
+namespace Zerg.Core;
 
-public unsafe partial class Connection
+public unsafe partial class ConnectionBase
 {
     private ManualResetValueTaskSourceCore<bool> _flushSignal;
     private int _flushArmed;
@@ -22,7 +21,7 @@ public unsafe partial class Connection
     internal int WriteInFlight { get; set; }
     internal int SendInflight;
 
-    public Connection(int writeSlabSize = 1024 * 16)
+    protected ConnectionBase(int writeSlabSize = 1024 * 16)
     {
         _writeSlabSize = writeSlabSize;
         WriteBuffer = (byte*)NativeMemory.AlignedAlloc((nuint)(writeSlabSize), 64);

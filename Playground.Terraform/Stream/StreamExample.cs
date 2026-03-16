@@ -1,4 +1,5 @@
 using terraform;
+using Zerg.Core;
 
 namespace Playground.Terraform.Stream;
 
