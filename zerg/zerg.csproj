@@ -30,7 +30,7 @@
     </ItemGroup>
 
     <ItemGroup>
-        <ProjectReference Include="..\Zerg.Core\Zerg.Core.csproj" />
+        <ProjectReference Include="..\core\core.csproj" />
     </ItemGroup>
 
     <ItemGroup>

@@ -12,7 +12,7 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "terraform", "terraform\terr
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Playground.Terraform", "Playground.Terraform\Playground.Terraform.csproj", "{5C6279DD-6055-452E-9883-34730C356358}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Zerg.Core", "Zerg.Core\Zerg.Core.csproj", "{459B3E6F-795A-441A-843C-D7C649E768EA}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "core", "core\core.csproj", "{459B3E6F-795A-441A-843C-D7C649E768EA}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
