@@ -8,6 +8,12 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Examples", "Examples\Exampl
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Tests", "Tests\Tests.csproj", "{80CF5BC8-6CB3-42FC-A6FB-F7EDD1B4BA70}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "terraform", "terraform\terraform.csproj", "{F208242F-F49F-46BE-B2EC-4E51A2D42C2E}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Playground.Terraform", "Playground.Terraform\Playground.Terraform.csproj", "{5C6279DD-6055-452E-9883-34730C356358}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "core", "core\core.csproj", "{459B3E6F-795A-441A-843C-D7C649E768EA}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -66,10 +72,44 @@ Global
 		{80CF5BC8-6CB3-42FC-A6FB-F7EDD1B4BA70}.Release|x64.Build.0 = Release|Any CPU
 		{80CF5BC8-6CB3-42FC-A6FB-F7EDD1B4BA70}.Release|x86.ActiveCfg = Release|Any CPU
 		{80CF5BC8-6CB3-42FC-A6FB-F7EDD1B4BA70}.Release|x86.Build.0 = Release|Any CPU
+		{F208242F-F49F-46BE-B2EC-4E51A2D42C2E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F208242F-F49F-46BE-B2EC-4E51A2D42C2E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F208242F-F49F-46BE-B2EC-4E51A2D42C2E}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{F208242F-F49F-46BE-B2EC-4E51A2D42C2E}.Debug|x64.Build.0 = Debug|Any CPU
+		{F208242F-F49F-46BE-B2EC-4E51A2D42C2E}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{F208242F-F49F-46BE-B2EC-4E51A2D42C2E}.Debug|x86.Build.0 = Debug|Any CPU
+		{F208242F-F49F-46BE-B2EC-4E51A2D42C2E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F208242F-F49F-46BE-B2EC-4E51A2D42C2E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F208242F-F49F-46BE-B2EC-4E51A2D42C2E}.Release|x64.ActiveCfg = Release|Any CPU
+		{F208242F-F49F-46BE-B2EC-4E51A2D42C2E}.Release|x64.Build.0 = Release|Any CPU
+		{F208242F-F49F-46BE-B2EC-4E51A2D42C2E}.Release|x86.ActiveCfg = Release|Any CPU
+		{F208242F-F49F-46BE-B2EC-4E51A2D42C2E}.Release|x86.Build.0 = Release|Any CPU
+		{5C6279DD-6055-452E-9883-34730C356358}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5C6279DD-6055-452E-9883-34730C356358}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5C6279DD-6055-452E-9883-34730C356358}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{5C6279DD-6055-452E-9883-34730C356358}.Debug|x64.Build.0 = Debug|Any CPU
+		{5C6279DD-6055-452E-9883-34730C356358}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{5C6279DD-6055-452E-9883-34730C356358}.Debug|x86.Build.0 = Debug|Any CPU
+		{5C6279DD-6055-452E-9883-34730C356358}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5C6279DD-6055-452E-9883-34730C356358}.Release|Any CPU.Build.0 = Release|Any CPU
+		{5C6279DD-6055-452E-9883-34730C356358}.Release|x64.ActiveCfg = Release|Any CPU
+		{5C6279DD-6055-452E-9883-34730C356358}.Release|x64.Build.0 = Release|Any CPU
+		{5C6279DD-6055-452E-9883-34730C356358}.Release|x86.ActiveCfg = Release|Any CPU
+		{5C6279DD-6055-452E-9883-34730C356358}.Release|x86.Build.0 = Release|Any CPU
+		{459B3E6F-795A-441A-843C-D7C649E768EA}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{459B3E6F-795A-441A-843C-D7C649E768EA}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{459B3E6F-795A-441A-843C-D7C649E768EA}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{459B3E6F-795A-441A-843C-D7C649E768EA}.Debug|x64.Build.0 = Debug|Any CPU
+		{459B3E6F-795A-441A-843C-D7C649E768EA}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{459B3E6F-795A-441A-843C-D7C649E768EA}.Debug|x86.Build.0 = Debug|Any CPU
+		{459B3E6F-795A-441A-843C-D7C649E768EA}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{459B3E6F-795A-441A-843C-D7C649E768EA}.Release|Any CPU.Build.0 = Release|Any CPU
+		{459B3E6F-795A-441A-843C-D7C649E768EA}.Release|x64.ActiveCfg = Release|Any CPU
+		{459B3E6F-795A-441A-843C-D7C649E768EA}.Release|x64.Build.0 = Release|Any CPU
+		{459B3E6F-795A-441A-843C-D7C649E768EA}.Release|x86.ActiveCfg = Release|Any CPU
+		{459B3E6F-795A-441A-843C-D7C649E768EA}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
-	EndGlobalSection
-	GlobalSection(NestedProjects) = preSolution
 	EndGlobalSection
 EndGlobal

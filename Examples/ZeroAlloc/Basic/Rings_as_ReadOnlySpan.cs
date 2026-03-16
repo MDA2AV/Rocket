@@ -1,5 +1,5 @@
 using zerg;
-using zerg.Utils.UnmanagedMemoryManager;
+using Zerg.Core;
 
 namespace Examples.ZeroAlloc.Basic;
 

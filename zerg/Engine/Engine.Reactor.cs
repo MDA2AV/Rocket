@@ -1,8 +1,8 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.ObjectPool;
+using Zerg.Core;
 using zerg.Engine.Configs;
-using zerg.Utils.MultiProducerSingleConsumer;
 using static zerg.ABI.ABI;
 
 // ReSharper disable always CheckNamespace
@@ -39,7 +39,7 @@ public sealed unsafe partial class Engine
     ///  - buffer ring lifecycle
     /// Each reactor runs on its own thread.
     /// </summary>
-    public partial class Reactor
+    public partial class Reactor : IReactor
     {
         /// <summary>
         /// Kernel-registered io_uring buffer ring for multishot recv.
