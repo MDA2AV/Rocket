@@ -1,0 +1,924 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>zerg - High-Performance TCP Server Framework for C#</title>
+    <style>
+        :root {
+            --bg: #0a0a0f;
+            --bg-card: #12121a;
+            --bg-code: #1a1a2e;
+            --border: #1e1e30;
+            --text: #e0e0e8;
+            --text-muted: #8888a0;
+            --accent-zerg: #7c5cfc;
+            --accent-zerg-dim: #5a3ed8;
+            --accent-terraform: #00c896;
+            --accent-terraform-dim: #00a67a;
+            --accent-hot: #ff6b6b;
+            --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+            --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        html { scroll-behavior: smooth; }
+
+        body {
+            font-family: var(--font-sans);
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.7;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* NAV */
+        nav {
+            position: fixed;
+            top: 0;
+            width: 100%;
+            z-index: 100;
+            background: rgba(10, 10, 15, 0.85);
+            backdrop-filter: blur(16px);
+            border-bottom: 1px solid var(--border);
+            padding: 0 2rem;
+        }
+        nav .nav-inner {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 60px;
+        }
+        nav .links { display: flex; gap: 2.5rem; }
+        nav .links a {
+            color: var(--text-muted);
+            text-decoration: none;
+            font-size: 1.05rem;
+            transition: color 0.2s;
+        }
+        nav .links a:hover { color: var(--text); }
+
+        /* HERO */
+        .hero {
+            padding: 10rem 2rem 6rem;
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+        }
+        .hero::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 800px;
+            height: 800px;
+            background: radial-gradient(circle, rgba(124, 92, 252, 0.08) 0%, transparent 70%);
+            pointer-events: none;
+        }
+        .hero h1 {
+            font-family: var(--font-mono);
+            font-size: clamp(3rem, 8vw, 5.5rem);
+            font-weight: 800;
+            letter-spacing: -2px;
+            margin-bottom: 1.5rem;
+            line-height: 1.1;
+        }
+        .hero h1 .zerg-text { color: var(--accent-zerg); }
+        .hero h1 .terraform-text { color: var(--accent-terraform); }
+        .hero p {
+            font-size: 1.25rem;
+            color: var(--text-muted);
+            max-width: 640px;
+            margin: 0 auto 2.5rem;
+        }
+        .hero-install-group {
+            display: flex;
+            gap: 1.5rem;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+        .hero-install {
+            background: var(--bg-code);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1rem 2rem;
+            font-family: var(--font-mono);
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            cursor: pointer;
+            transition: border-color 0.2s;
+            display: flex;
+            flex-direction: column;
+            gap: 0.3rem;
+            min-width: 320px;
+            position: relative;
+        }
+        .hero-install:hover { border-color: var(--accent-zerg); }
+        .hero-install .cmd { color: var(--accent-zerg); }
+        .hero-install .pkg { color: var(--text); }
+        .copy-icon {
+            position: absolute;
+            top: 0.75rem;
+            right: 0.75rem;
+            color: var(--text-muted);
+            opacity: 0.4;
+            transition: opacity 0.2s;
+        }
+        .hero-install:hover .copy-icon { opacity: 0.8; }
+        .install-label {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            color: var(--accent-zerg);
+            margin-bottom: 0.25rem;
+        }
+        .install-label.terraform { color: var(--accent-terraform); }
+
+        /* SECTIONS */
+        section { padding: 6rem 2rem; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .section-label {
+            font-family: var(--font-mono);
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            color: var(--accent-zerg);
+            margin-bottom: 1rem;
+        }
+        .section-title {
+            font-size: clamp(1.75rem, 4vw, 2.5rem);
+            font-weight: 700;
+            margin-bottom: 1rem;
+            letter-spacing: -1px;
+        }
+        .section-subtitle {
+            color: var(--text-muted);
+            font-size: 1.1rem;
+            max-width: 640px;
+            margin-bottom: 3rem;
+        }
+
+        /* FEATURES LIST */
+        .features-list {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+        .feature-row {
+            display: grid;
+            grid-template-columns: 240px 1fr;
+            border-bottom: 1px solid var(--border);
+            transition: background 0.15s;
+        }
+        .feature-row:last-child { border-bottom: none; }
+        .feature-row:hover { background: rgba(124, 92, 252, 0.03); }
+        .feature-row .feature-name {
+            padding: 1.25rem 1.5rem;
+            font-family: var(--font-mono);
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--text);
+            border-right: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+        }
+        .feature-row .feature-desc {
+            padding: 1.25rem 1.5rem;
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            line-height: 1.6;
+        }
+        .feature-row .feature-desc .tag-note {
+            font-family: var(--font-mono);
+            font-size: 0.7rem;
+            padding: 0.15rem 0.5rem;
+            border-radius: 999px;
+            background: rgba(124, 92, 252, 0.15);
+            color: var(--accent-zerg);
+            margin-left: 0.4rem;
+            vertical-align: middle;
+        }
+
+        /* COMPARISON */
+        .comparison {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            overflow: hidden;
+        }
+        .comparison-header {
+            display: grid;
+            grid-template-columns: 2fr 1fr 1fr;
+            border-bottom: 1px solid var(--border);
+        }
+        .comparison-header > div {
+            padding: 1.25rem 1.5rem;
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+        .comparison-header > div:nth-child(2) {
+            text-align: center;
+            color: var(--accent-zerg);
+            border-left: 1px solid var(--border);
+            font-family: var(--font-mono);
+        }
+        .comparison-header > div:nth-child(3) {
+            text-align: center;
+            color: var(--accent-terraform);
+            border-left: 1px solid var(--border);
+            font-family: var(--font-mono);
+        }
+        .comparison-row {
+            display: grid;
+            grid-template-columns: 2fr 1fr 1fr;
+            border-bottom: 1px solid var(--border);
+            transition: background 0.15s;
+        }
+        .comparison-row:last-child { border-bottom: none; }
+        .comparison-row:hover { background: rgba(124, 92, 252, 0.03); }
+        .comparison-row > div {
+            padding: 1rem 1.5rem;
+            font-size: 0.9rem;
+        }
+        .comparison-row > div:first-child { color: var(--text-muted); }
+        .comparison-row > div:nth-child(2),
+        .comparison-row > div:nth-child(3) {
+            text-align: center;
+            border-left: 1px solid var(--border);
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
+        }
+        .check { color: var(--accent-terraform); }
+        .cross { color: var(--accent-hot); opacity: 0.6; }
+
+        /* CODE BLOCKS */
+        .code-tabs {
+            display: flex;
+            gap: 0;
+            margin-bottom: 0;
+        }
+        .code-tab {
+            padding: 0.7rem 1.5rem;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-bottom: none;
+            border-radius: 8px 8px 0 0;
+            font-family: var(--font-mono);
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .code-tab.active {
+            background: var(--bg-code);
+            color: var(--text);
+            border-color: var(--border);
+        }
+        .code-tab.zerg.active { color: var(--accent-zerg); }
+        .code-tab.terraform.active { color: var(--accent-terraform); }
+        .code-block {
+            background: var(--bg-code);
+            border: 1px solid var(--border);
+            border-radius: 0 8px 8px 8px;
+            padding: 1.75rem;
+            overflow-x: auto;
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
+            line-height: 1.8;
+            display: none;
+        }
+        .code-block.active { display: block; }
+        .code-block .kw { color: #c792ea; }
+        .code-block .type { color: #82aaff; }
+        .code-block .str { color: #c3e88d; }
+        .code-block .comment { color: #546e7a; }
+        .code-block .method { color: #f0c674; }
+        .code-block .num { color: #f78c6c; }
+        .code-block .ns { color: #89ddff; }
+
+        /* ARCHITECTURE */
+        /* ARCHITECTURE DIAGRAM */
+        .arch {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0;
+        }
+        .arch-box {
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1rem 2rem;
+            text-align: center;
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
+            background: var(--bg-code);
+        }
+        .arch-box .arch-title {
+            font-weight: 700;
+            color: var(--text);
+            margin-bottom: 0.25rem;
+        }
+        .arch-box .arch-detail {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+        .arch-box.acceptor { border-color: var(--accent-zerg); }
+        .arch-box.acceptor .arch-title { color: var(--accent-zerg); }
+        .arch-box.reactor { border-color: var(--accent-terraform); }
+        .arch-box.reactor .arch-title { color: var(--accent-terraform); }
+        .arch-box.backend-zerg { border-color: var(--accent-zerg); }
+        .arch-box.backend-zerg .arch-title { color: var(--accent-zerg); }
+        .arch-box.backend-terraform { border-color: var(--accent-terraform); }
+        .arch-box.backend-terraform .arch-title { color: var(--accent-terraform); }
+        .arch-box.kernel { border-color: var(--text-muted); }
+        .arch-connector {
+            width: 1px;
+            height: 24px;
+            background: var(--border);
+        }
+        .arch-connector-label {
+            font-family: var(--font-mono);
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            padding: 0.3rem 0;
+            text-align: center;
+        }
+        .arch-row {
+            display: flex;
+            gap: 1.5rem;
+            align-items: stretch;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        .arch-row .arch-box { flex: 1; min-width: 180px; max-width: 240px; }
+        .arch-branch {
+            display: flex;
+            gap: 1.5rem;
+            justify-content: center;
+            position: relative;
+        }
+        .arch-branch::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 25%;
+            right: 25%;
+            height: 1px;
+            background: var(--border);
+        }
+        .arch-branch-arm {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .arch-or {
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            padding: 0.2rem 0.75rem;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 999px;
+        }
+
+        /* WHEN TO USE */
+        .when-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2rem;
+        }
+        .when-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 2.5rem;
+        }
+        .when-card.zerg-card { border-top: 3px solid var(--accent-zerg); }
+        .when-card.terraform-card { border-top: 3px solid var(--accent-terraform); }
+        .when-card h3 {
+            font-family: var(--font-mono);
+            font-size: 1.3rem;
+            margin-bottom: 0.5rem;
+        }
+        .when-card h3.zerg-title { color: var(--accent-zerg); }
+        .when-card h3.terraform-title { color: var(--accent-terraform); }
+        .when-card .when-desc {
+            color: var(--text-muted);
+            font-size: 0.95rem;
+            margin-bottom: 1.5rem;
+        }
+        .when-card ul {
+            list-style: none;
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+        .when-card li {
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            padding-left: 1.5rem;
+            position: relative;
+        }
+        .when-card li::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0.55rem;
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+        }
+        .when-card.zerg-card li::before { background: var(--accent-zerg); }
+        .when-card.terraform-card li::before { background: var(--accent-terraform); }
+
+        /* FOOTER */
+        footer {
+            border-top: 1px solid var(--border);
+            padding: 3rem 2rem;
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+        }
+        footer a {
+            color: var(--accent-zerg);
+            text-decoration: none;
+        }
+
+        /* RESPONSIVE */
+        @media (max-width: 768px) {
+            .examples-grid, .when-grid {
+                grid-template-columns: 1fr;
+            }
+            .comparison-header,
+            .comparison-row {
+                grid-template-columns: 1.5fr 1fr 1fr;
+            }
+            .comparison-row > div,
+            .comparison-header > div {
+                padding: 0.75rem 0.75rem;
+                font-size: 0.8rem;
+            }
+            nav .links { gap: 1rem; }
+            nav .links a { font-size: 0.8rem; }
+            .feature-row {
+                grid-template-columns: 1fr;
+            }
+            .feature-row .feature-name {
+                border-right: none;
+                border-bottom: 1px solid var(--border);
+                padding: 0.75rem 1.25rem;
+            }
+            .feature-row .feature-desc {
+                padding: 0.75rem 1.25rem 1.25rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <nav>
+        <div class="nav-inner">
+            <div class="links">
+                <a href="#features">Features</a>
+                <a href="#examples">Examples</a>
+                <a href="#compare">Compare</a>
+                <a href="#architecture">Architecture</a>
+                <a href="https://github.com/MDA2AV/zerg">GitHub</a>
+            </div>
+        </div>
+    </nav>
+
+    <!-- HERO -->
+    <section class="hero">
+        <h1><span class="zerg-text">zerg</span> &amp; <span class="terraform-text">terraform</span></h1>
+        <p>High-performance TCP server frameworks for C# built on Linux io_uring. Direct control over sockets, buffers, and scheduling with no hidden abstractions.</p>
+        <div class="hero-install-group">
+            <div class="hero-install" onclick="copyInstall(this, 'dotnet add package zerg\ndotnet add package zerg.core')">
+                <svg class="copy-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                <div class="install-label">zerg</div>
+                <div><span class="cmd">dotnet add package</span> <span class="pkg">zerg</span></div>
+                <div><span class="cmd">dotnet add package</span> <span class="pkg">zerg.core</span></div>
+            </div>
+            <div class="hero-install" onclick="copyInstall(this, 'dotnet add package terraform\ndotnet add package zerg.core')">
+                <svg class="copy-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                <div class="install-label terraform">terraform</div>
+                <div><span class="cmd">dotnet add package</span> <span class="pkg">terraform</span></div>
+                <div><span class="cmd">dotnet add package</span> <span class="pkg">zerg.core</span></div>
+            </div>
+        </div>
+    </section>
+
+    <!-- COMPARISON TABLE -->
+    <section id="compare" style="background: var(--bg-card);">
+        <div class="container">
+            <div class="section-label">Compare</div>
+            <h2 class="section-title">zerg vs terraform</h2>
+            <p class="section-subtitle">Same reactor design, different io_uring backends. Pick the one that fits your constraints.</p>
+
+            <div class="comparison">
+                <div class="comparison-header">
+                    <div>Feature</div>
+                    <div>zerg</div>
+                    <div>terraform</div>
+                </div>
+                <div class="comparison-row">
+                    <div>io_uring implementation</div>
+                    <div>Native C shim (liburing)</div>
+                    <div>Pure C#</div>
+                </div>
+                <div class="comparison-row">
+                    <div>Native binary required</div>
+                    <div>liburingshim.so</div>
+                    <div><span class="check">None</span></div>
+                </div>
+                <div class="comparison-row">
+                    <div>Multishot accept/recv</div>
+                    <div><span class="check">&#10003;</span></div>
+                    <div><span class="check">&#10003;</span></div>
+                </div>
+                <div class="comparison-row">
+                    <div>Provided buffer rings</div>
+                    <div><span class="check">&#10003;</span></div>
+                    <div><span class="check">&#10003;</span></div>
+                </div>
+                <div class="comparison-row">
+                    <div>SQPOLL mode</div>
+                    <div><span class="check">&#10003;</span></div>
+                    <div><span class="check">&#10003;</span></div>
+                </div>
+                <div class="comparison-row">
+                    <div>DEFER_TASKRUN + SINGLE_ISSUER</div>
+                    <div><span class="check">&#10003;</span></div>
+                    <div><span class="check">&#10003;</span></div>
+                </div>
+                <div class="comparison-row">
+                    <div>Incremental buffer consumption</div>
+                    <div><span class="check">&#10003;</span> <span style="color:var(--text-muted);font-size:0.75rem">kernel 6.12+</span></div>
+                    <div><span class="cross">&#10007;</span></div>
+                </div>
+                <div class="comparison-row">
+                    <div>Per-connection buffer rings</div>
+                    <div><span class="check">&#10003;</span></div>
+                    <div><span class="cross">&#10007;</span></div>
+                </div>
+                <div class="comparison-row">
+                    <div>PipeReader adapter</div>
+                    <div><span class="check">&#10003;</span></div>
+                    <div><span class="check">&#10003;</span></div>
+                </div>
+                <div class="comparison-row">
+                    <div>Stream adapter</div>
+                    <div><span class="check">&#10003;</span></div>
+                    <div><span class="check">&#10003;</span></div>
+                </div>
+                <div class="comparison-row">
+                    <div>Fully debuggable in C#</div>
+                    <div><span class="cross">&#10007;</span> <span style="color:var(--text-muted);font-size:0.75rem">C shim opaque</span></div>
+                    <div><span class="check">&#10003;</span></div>
+                </div>
+                <div class="comparison-row">
+                    <div>Minimum kernel</div>
+                    <div>6.1</div>
+                    <div>6.1</div>
+                </div>
+                <div class="comparison-row">
+                    <div>.NET targets</div>
+                    <div>8 / 9 / 10</div>
+                    <div>8 / 9 / 10</div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- FEATURES -->
+    <section id="features">
+        <div class="container">
+            <div class="section-label">Features</div>
+            <h2 class="section-title">Built for extreme throughput</h2>
+            <p class="section-subtitle">Both frameworks share the same reactor architecture and connection API. Choose the implementation that fits your deployment.</p>
+
+            <div class="features-list">
+                <div class="feature-row">
+                    <div class="feature-name">Multishot io_uring</div>
+                    <div class="feature-desc">Single SQE arms multiple accept and recv operations, dramatically reducing syscall overhead at high connection rates.</div>
+                </div>
+                <div class="feature-row">
+                    <div class="feature-name">Provided buffer rings</div>
+                    <div class="feature-desc">Pre-allocated buffer pools let the kernel pick buffers directly, eliminating per-recv allocation and enabling zero-copy reads.</div>
+                </div>
+                <div class="feature-row">
+                    <div class="feature-name">Thread-isolated reactors</div>
+                    <div class="feature-desc">Each reactor owns its own io_uring, buffer ring, and connection map. No cross-thread communication on the hot path &mdash; each reactor is fully self-contained.</div>
+                </div>
+                <div class="feature-row">
+                    <div class="feature-name">DEFER_TASKRUN</div>
+                    <div class="feature-desc">Defers kernel task work to the submitting thread, avoiding cross-thread IPI overhead and keeping all processing on the reactor's core.</div>
+                </div>
+                <div class="feature-row">
+                    <div class="feature-name">SQPOLL mode</div>
+                    <div class="feature-desc">Optional kernel-side submission queue polling eliminates the submit syscall entirely for the lowest possible latency.</div>
+                </div>
+                <div class="feature-row">
+                    <div class="feature-name">Incremental buffers</div>
+                    <div class="feature-desc">On kernel 6.12+, a single buffer can serve multiple recv completions. Reduces buffer ring pressure and enables per-connection buffer isolation. <span class="tag-note">zerg only</span></div>
+                </div>
+                <div class="feature-row">
+                    <div class="feature-name">Three read API levels</div>
+                    <div class="feature-desc">From zero-copy ring buffers to PipeReader to BCL Stream &mdash; pick the abstraction level that fits your protocol parser.</div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- QUICK START -->
+    <section id="examples" style="background: var(--bg-card);">
+        <div class="container">
+            <div class="section-label">Quick start</div>
+            <h2 class="section-title">Same API, two implementations</h2>
+            <p class="section-subtitle">Both packages share the same connection API via the core library. Switching between them is a one-line import change.</p>
+
+            <div class="code-tabs">
+                <div class="code-tab zerg active" onclick="switchTab('quickstart', 'zerg')">zerg</div>
+                <div class="code-tab terraform" onclick="switchTab('quickstart', 'terraform')">terraform</div>
+            </div>
+            <pre class="code-block active" id="quickstart-zerg"><span class="kw">using</span> <span class="ns">zerg</span>;
+<span class="kw">using</span> <span class="ns">zerg.core</span>;
+<span class="kw">using</span> <span class="ns">zerg.Engine</span>;
+<span class="kw">using</span> <span class="ns">zerg.Engine.Configs</span>;
+
+<span class="kw">var</span> engine = <span class="kw">new</span> <span class="type">Engine</span>(<span class="kw">new</span> <span class="type">EngineOptions</span> { Port = <span class="num">8080</span>, ReactorCount = <span class="num">1</span> });
+engine.<span class="method">Listen</span>();
+
+<span class="kw">while</span> (engine.ServerRunning)
+{
+    <span class="kw">var</span> connection = <span class="kw">await</span> engine.<span class="method">AcceptAsync</span>(CancellationToken.None);
+    <span class="kw">if</span> (connection <span class="kw">is null</span>) <span class="kw">continue</span>;
+    _ = <span class="method">HandleAsync</span>(connection);
+}
+
+<span class="kw">static async</span> <span class="type">Task</span> <span class="method">HandleAsync</span>(<span class="type">Connection</span> connection)
+{
+    <span class="kw">while</span> (<span class="kw">true</span>)
+    {
+        <span class="kw">var</span> result = <span class="kw">await</span> connection.<span class="method">ReadAsync</span>();
+        <span class="kw">if</span> (result.IsClosed) <span class="kw">break</span>;
+
+        <span class="kw">var</span> rings = connection.<span class="method">GetAllSnapshotRingsAsUnmanagedMemory</span>(result);
+        <span class="comment">// process rings.ToReadOnlySequence() ...</span>
+        rings.<span class="method">ReturnRingBuffers</span>(connection.Reactor);
+
+        connection.<span class="method">Write</span>(<span class="str">"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"</span>u8);
+        <span class="kw">await</span> connection.<span class="method">FlushAsync</span>();
+        connection.<span class="method">ResetRead</span>();
+    }
+}</pre>
+            <pre class="code-block" id="quickstart-terraform"><span class="kw">using</span> <span class="ns">terraform</span>;
+<span class="kw">using</span> <span class="ns">zerg.core</span>;
+<span class="kw">using</span> <span class="ns">terraform.Engine</span>;
+<span class="kw">using</span> <span class="ns">terraform.Engine.Configs</span>;
+
+<span class="kw">var</span> engine = <span class="kw">new</span> <span class="type">Engine</span>(<span class="kw">new</span> <span class="type">EngineOptions</span> { Port = <span class="num">8080</span>, ReactorCount = <span class="num">1</span> });
+engine.<span class="method">Listen</span>();
+
+<span class="kw">while</span> (engine.ServerRunning)
+{
+    <span class="kw">var</span> connection = <span class="kw">await</span> engine.<span class="method">AcceptAsync</span>(CancellationToken.None);
+    <span class="kw">if</span> (connection <span class="kw">is null</span>) <span class="kw">continue</span>;
+    _ = <span class="method">HandleAsync</span>(connection);
+}
+
+<span class="kw">static async</span> <span class="type">Task</span> <span class="method">HandleAsync</span>(<span class="type">Connection</span> connection)
+{
+    <span class="kw">while</span> (<span class="kw">true</span>)
+    {
+        <span class="kw">var</span> result = <span class="kw">await</span> connection.<span class="method">ReadAsync</span>();
+        <span class="kw">if</span> (result.IsClosed) <span class="kw">break</span>;
+
+        <span class="kw">var</span> rings = connection.<span class="method">GetAllSnapshotRingsAsUnmanagedMemory</span>(result);
+        <span class="comment">// process rings.ToReadOnlySequence() ...</span>
+        rings.<span class="method">ReturnRingBuffers</span>(connection.Reactor);
+
+        connection.<span class="method">Write</span>(<span class="str">"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"</span>u8);
+        <span class="kw">await</span> connection.<span class="method">FlushAsync</span>();
+        connection.<span class="method">ResetRead</span>();
+    }
+}</pre>
+        </div>
+    </section>
+
+    <!-- CONFIGURATION -->
+    <section style="background: var(--bg-card);">
+        <div class="container">
+            <div class="section-label">Configuration</div>
+            <h2 class="section-title">Tune every knob</h2>
+            <p class="section-subtitle">Both frameworks expose the same configuration surface for reactor tuning.</p>
+
+            <pre class="code-block active"><span class="kw">var</span> engine = <span class="kw">new</span> <span class="type">Engine</span>(<span class="kw">new</span> <span class="type">EngineOptions</span>
+{
+    Port = <span class="num">8080</span>,
+    ReactorCount = <span class="num">4</span>,
+    AcceptorConfig = <span class="kw">new</span> <span class="type">AcceptorConfig</span>(IPVersion: <span class="type">IPVersion</span>.IPv6DualStack),
+    ReactorConfigs = Enumerable.<span class="method">Range</span>(<span class="num">0</span>, <span class="num">4</span>).<span class="method">Select</span>(_ => <span class="kw">new</span> <span class="type">ReactorConfig</span>(
+        RingEntries:        <span class="num">8192</span>,          <span class="comment">// io_uring SQ/CQ depth</span>
+        RecvBufferSize:     <span class="num">32</span> * <span class="num">1024</span>,    <span class="comment">// 32KB per buffer</span>
+        BufferRingEntries:  <span class="num">16</span> * <span class="num">1024</span>,    <span class="comment">// 16K pre-allocated recv buffers</span>
+        BatchCqes:          <span class="num">4096</span>,          <span class="comment">// max CQEs per loop iteration</span>
+        CqTimeout:          <span class="num">1_000_000</span>,     <span class="comment">// 1ms wait timeout (nanoseconds)</span>
+        IncrementalBufferConsumption: <span class="kw">false</span>  <span class="comment">// zerg only, kernel 6.12+</span>
+    )).<span class="method">ToArray</span>()
+});</pre>
+        </div>
+    </section>
+
+    <!-- API LEVELS -->
+    <section>
+        <div class="container">
+            <div class="section-label">API</div>
+            <h2 class="section-title">Read and write at every level</h2>
+            <p class="section-subtitle">Pick the abstraction that fits your protocol parser.</p>
+
+            <div class="comparison">
+                <div class="comparison-header">
+                    <div>API</div>
+                    <div>Type</div>
+                    <div>Copy</div>
+                </div>
+                <div class="comparison-row">
+                    <div>TryGetRing / RingItem.AsSpan()</div>
+                    <div>Read</div>
+                    <div><span class="check">Zero-copy</span></div>
+                </div>
+                <div class="comparison-row">
+                    <div>GetAllSnapshotRingsAsUnmanagedMemory().ToReadOnlySequence()</div>
+                    <div>Read</div>
+                    <div><span class="check">Zero-copy</span></div>
+                </div>
+                <div class="comparison-row">
+                    <div>ConnectionPipeReader</div>
+                    <div>Read</div>
+                    <div><span class="check">Zero-copy</span></div>
+                </div>
+                <div class="comparison-row">
+                    <div>ConnectionStream</div>
+                    <div>Read / Write</div>
+                    <div>One copy</div>
+                </div>
+                <div class="comparison-row">
+                    <div>connection.Write(data u8)</div>
+                    <div>Write</div>
+                    <div>Direct</div>
+                </div>
+                <div class="comparison-row">
+                    <div>IBufferWriter&lt;byte&gt; &mdash; GetSpan() / Advance()</div>
+                    <div>Write</div>
+                    <div>Direct</div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+
+    <!-- ARCHITECTURE -->
+    <section id="architecture">
+        <div class="container">
+            <div class="section-label">Architecture</div>
+            <h2 class="section-title">Multi-threaded reactor pattern</h2>
+            <p class="section-subtitle">One acceptor distributes connections round-robin to N reactor threads. No locks on hot paths.</p>
+
+            <div class="arch">
+                <div class="arch-box acceptor">
+                    <div class="arch-title">Acceptor Thread</div>
+                    <div class="arch-detail">multishot accept ring</div>
+                </div>
+                <div class="arch-connector"></div>
+                <div class="arch-connector-label">round-robin via lock-free MPSC queues</div>
+                <div class="arch-connector"></div>
+                <div class="arch-row">
+                    <div class="arch-box reactor">
+                        <div class="arch-title">Reactor #0</div>
+                        <div class="arch-detail">io_uring instance</div>
+                        <div class="arch-detail">buffer ring</div>
+                        <div class="arch-detail">connection map</div>
+                    </div>
+                    <div class="arch-box reactor">
+                        <div class="arch-title">Reactor #1</div>
+                        <div class="arch-detail">io_uring instance</div>
+                        <div class="arch-detail">buffer ring</div>
+                        <div class="arch-detail">connection map</div>
+                    </div>
+                    <div class="arch-box reactor">
+                        <div class="arch-title">Reactor #N</div>
+                        <div class="arch-detail">io_uring instance</div>
+                        <div class="arch-detail">buffer ring</div>
+                        <div class="arch-detail">connection map</div>
+                    </div>
+                </div>
+                <div class="arch-connector"></div>
+                <div class="arch-branch">
+                    <div class="arch-branch-arm">
+                        <div class="arch-connector"></div>
+                        <div class="arch-box backend-zerg">
+                            <div class="arch-title">zerg</div>
+                            <div class="arch-detail">native C shim (liburing)</div>
+                        </div>
+                    </div>
+                    <div class="arch-or">or</div>
+                    <div class="arch-branch-arm">
+                        <div class="arch-connector"></div>
+                        <div class="arch-box backend-terraform">
+                            <div class="arch-title">terraform</div>
+                            <div class="arch-detail">pure C# direct syscalls</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="arch-connector"></div>
+                <div class="arch-box kernel">
+                    <div class="arch-title">Linux Kernel io_uring</div>
+                    <div class="arch-detail">SQ / CQ / buffer rings</div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- WHEN TO USE -->
+    <section style="background: var(--bg-card);">
+        <div class="container">
+            <div class="section-label">Guidance</div>
+            <h2 class="section-title">When to use which</h2>
+            <p class="section-subtitle">Both frameworks share the same connection API. The difference is how they talk to io_uring.</p>
+
+            <div class="when-grid">
+                <div class="when-card zerg-card">
+                    <h3 class="zerg-title">zerg</h3>
+                    <p class="when-desc">Native liburing bindings via a thin C shim. Battle-tested, feature-complete.</p>
+                    <ul>
+                        <li>You want incremental buffer consumption on kernel 6.12+</li>
+                        <li>You need per-connection buffer ring isolation</li>
+                        <li>You value liburing's years of production hardening</li>
+                        <li>Deploying native .so files is not a constraint</li>
+                        <li>You're running high-throughput workloads at scale</li>
+                    </ul>
+                </div>
+                <div class="when-card terraform-card">
+                    <h3 class="terraform-title">terraform</h3>
+                    <p class="when-desc">Pure C# io_uring with direct syscalls. Zero native dependencies.</p>
+                    <ul>
+                        <li>You want zero native binary dependencies</li>
+                        <li>You need full debuggability &mdash; step into ring code in C#</li>
+                        <li>Your environment restricts native library loading</li>
+                        <li>You want a smaller NuGet package footprint</li>
+                        <li>You want to audit or extend the io_uring implementation</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- FOOTER -->
+    <footer>
+        <div class="container">
+            <p style="margin-bottom: 0.5rem;">
+                <a href="https://github.com/MDA2AV/zerg">GitHub</a> &nbsp;&middot;&nbsp;
+                <a href="https://www.nuget.org/packages/zerg/">zerg on NuGet</a> &nbsp;&middot;&nbsp;
+                <a href="https://www.nuget.org/packages/terraform/">terraform on NuGet</a>
+            </p>
+            <p>Linux kernel 6.1+ &nbsp;&middot;&nbsp; .NET 8 / 9 / 10 &nbsp;&middot;&nbsp; MIT License</p>
+        </div>
+    </footer>
+
+    <script>
+        function switchTab(group, tab) {
+            document.querySelectorAll(`#${group}-zerg, #${group}-terraform`).forEach(el => el.classList.remove('active'));
+            document.getElementById(`${group}-${tab}`).classList.add('active');
+
+            const tabs = document.getElementById(`${group}-${tab}`).previousElementSibling;
+            let container = document.getElementById(`${group}-${tab}`);
+            while (container.previousElementSibling && container.previousElementSibling.classList.contains('code-block')) {
+                container = container.previousElementSibling;
+            }
+            const tabBar = container.previousElementSibling;
+            if (tabBar && tabBar.classList.contains('code-tabs')) {
+                tabBar.querySelectorAll('.code-tab').forEach(t => t.classList.remove('active'));
+                tabBar.querySelectorAll(`.code-tab.${tab}`).forEach(t => t.classList.add('active'));
+            }
+        }
+
+        function copyInstall(el, text) {
+            navigator.clipboard.writeText(text);
+            const icon = el.querySelector('.copy-icon');
+            if (icon) {
+                const original = icon.outerHTML;
+                icon.outerHTML = '<svg class="copy-icon" style="opacity:1;color:var(--accent-terraform)" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+                setTimeout(() => {
+                    const check = el.querySelector('.copy-icon');
+                    if (check) check.outerHTML = original;
+                }, 1500);
+            }
+        }
+    </script>
+</body>
+</html>
