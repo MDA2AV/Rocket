@@ -1,6 +1,6 @@
 using System.Runtime.CompilerServices;
 
-namespace Zerg.Core;
+namespace zerg.core;
 
 /// <summary>
 /// ushort Multi Producer Single Consumer Queue

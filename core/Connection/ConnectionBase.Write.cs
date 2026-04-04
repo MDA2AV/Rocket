@@ -2,7 +2,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks.Sources;
 
-namespace Zerg.Core;
+namespace zerg.core;
 
 public unsafe partial class ConnectionBase
 {

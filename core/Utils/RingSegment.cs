@@ -1,6 +1,6 @@
 using System.Buffers;
 
-namespace Zerg.Core;
+namespace zerg.core;
 
 public sealed class RingSegment : ReadOnlySequenceSegment<byte>
 {

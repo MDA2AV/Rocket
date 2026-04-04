@@ -1,5 +1,5 @@
 using System.Runtime.InteropServices;
-using Zerg.Core;
+using zerg.core;
 using static zerg.ABI.ABI;
 
 namespace zerg;

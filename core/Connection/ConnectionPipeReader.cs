@@ -1,7 +1,7 @@
 using System.Buffers;
 using System.IO.Pipelines;
 
-namespace Zerg.Core;
+namespace zerg.core;
 
 public sealed class ConnectionPipeReader : PipeReader
 {

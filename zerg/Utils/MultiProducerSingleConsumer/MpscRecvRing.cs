@@ -1,5 +1,5 @@
 using System.Runtime.CompilerServices;
-using Zerg.Core;
+using zerg.core;
 
 namespace zerg.Utils.MultiProducerSingleConsumer;
 

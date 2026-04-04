@@ -1,7 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
-namespace Zerg.Core;
+namespace zerg.core;
 
 /// <summary>
 /// Multi-producer single-consumer queue for int.

@@ -5,7 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using zerg;
-using Zerg.Core;
+using zerg.core;
 
 namespace Examples.TechEmpower;
 

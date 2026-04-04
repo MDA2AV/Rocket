@@ -1,4 +1,4 @@
-namespace Zerg.Core;
+namespace zerg.core;
 
 public readonly unsafe struct RingItem(byte* ptr, int length, ushort bufferId)
 {

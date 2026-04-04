@@ -3,7 +3,7 @@ using System.Runtime.InteropServices;
 using Microsoft.Extensions.ObjectPool;
 using terraform.Engine.Configs;
 using terraform.Ring;
-using Zerg.Core;
+using zerg.core;
 using static terraform.ABI.Libc;
 using static terraform.Ring.Constants;
 

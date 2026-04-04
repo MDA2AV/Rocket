@@ -1,7 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks.Sources;
 
-namespace Zerg.Core;
+namespace zerg.core;
 
 [SkipLocalsInit]
 public abstract partial class ConnectionBase

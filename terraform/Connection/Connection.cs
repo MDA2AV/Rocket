@@ -1,4 +1,4 @@
-using Zerg.Core;
+using zerg.core;
 
 namespace terraform;
 

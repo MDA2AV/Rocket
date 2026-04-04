@@ -5,16 +5,16 @@
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-        <RootNamespace>Zerg.Core</RootNamespace>
+        <RootNamespace>zerg.core</RootNamespace>
 
         <PackageId>zerg.core</PackageId>
         <Title>zerg.core</Title>
         <Authors>Diogo Martins</Authors>
         <RepositoryUrl>https://github.com/MDA2AV/zerg</RepositoryUrl>
         <RepositoryType>git</RepositoryType>
-        <AssemblyVersion>0.5.25</AssemblyVersion>
-        <FileVersion>0.5.25</FileVersion>
-        <Version>0.5.25</Version>
+        <AssemblyVersion>0.5.26</AssemblyVersion>
+        <FileVersion>0.5.26</FileVersion>
+        <Version>0.5.26</Version>
         <PackageTags>io_uring</PackageTags>
         <PackageLicenseFile>LICENSE</PackageLicenseFile>
         <Description>Shared core library for zerg and terraform io_uring frameworks</Description>
