@@ -302,6 +302,102 @@
         .code-block .ns { color: #89ddff; }
 
         /* ARCHITECTURE */
+        /* BENCHMARKS */
+        .bench-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.5rem;
+            margin-bottom: 2.5rem;
+        }
+        .bench-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.75rem 2rem;
+        }
+        .bench-grid-3 { grid-template-columns: 1fr 1fr 1fr; }
+        .bench-card.zerg-bench { border-top: 3px solid var(--accent-zerg); }
+        .bench-card.terraform-bench { border-top: 3px solid var(--accent-terraform); }
+        .bench-card.socket-bench { border-top: 3px solid var(--text-muted); }
+        .bench-label {
+            font-family: var(--font-mono);
+            font-size: 1rem;
+            font-weight: 700;
+            color: var(--text);
+            margin-bottom: 1.25rem;
+        }
+        .bench-stats {
+            display: flex;
+            gap: 2rem;
+        }
+        .bench-stat { flex: 1; }
+        .bench-value {
+            font-family: var(--font-mono);
+            font-size: 1.75rem;
+            font-weight: 800;
+            color: var(--text);
+            line-height: 1.2;
+        }
+        .bench-value.zerg-value { color: var(--accent-zerg); }
+        .bench-value.terraform-value { color: var(--accent-terraform); }
+        .bench-unit {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            margin-top: 0.2rem;
+        }
+        .bench-bars {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+        .bench-bar-row {
+            display: grid;
+            grid-template-columns: 100px 1fr;
+            align-items: center;
+            gap: 1rem;
+        }
+        .bench-bar-label {
+            font-family: var(--font-mono);
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            text-align: right;
+        }
+        .bench-bar-track {
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+        }
+        .bench-bar-line {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+        .bench-bar-line .bench-bar { flex-shrink: 0; }
+        .bench-bar {
+            height: 28px;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            padding: 0 0.75rem;
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            color: var(--text);
+            min-width: 80px;
+        }
+        .bench-bar.zerg-bar { background: var(--accent-zerg); }
+        .bench-bar.terraform-bar { background: var(--accent-terraform); }
+        .bench-bar.socket-bar { background: rgba(136, 136, 160, 0.3); color: var(--text-muted); }
+        .bench-bar-delta {
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-align: right;
+            min-width: 50px;
+        }
+        .bench-bar-delta.zerg-delta { color: var(--accent-zerg); }
+        .bench-bar-delta.terraform-delta { color: var(--accent-terraform); }
+        .bench-bar-delta.socket-delta { color: var(--text-muted); }
+
         /* ARCHITECTURE DIAGRAM */
         .arch {
             display: flex;
@@ -465,6 +561,8 @@
             }
             nav .links { gap: 1rem; }
             nav .links a { font-size: 0.8rem; }
+            .bench-grid, .bench-grid-3 { grid-template-columns: 1fr; }
+            .bench-bar-row { grid-template-columns: 70px 1fr; }
             .feature-row {
                 grid-template-columns: 1fr;
             }
@@ -483,6 +581,7 @@
     <nav>
         <div class="nav-inner">
             <div class="links">
+                <a href="#benchmarks">Benchmarks</a>
                 <a href="#features">Features</a>
                 <a href="#examples">Examples</a>
                 <a href="#compare">Compare</a>
@@ -508,6 +607,97 @@
                 <div class="install-label terraform">terraform</div>
                 <div><span class="cmd">dotnet add package</span> <span class="pkg">terraform</span></div>
                 <div><span class="cmd">dotnet add package</span> <span class="pkg">zerg.core</span></div>
+            </div>
+        </div>
+    </section>
+
+    <!-- BENCHMARKS -->
+    <section id="benchmarks">
+        <div class="container">
+            <div class="section-label">Performance</div>
+            <h2 class="section-title">Benchmarks</h2>
+            <p class="section-subtitle">HTTP plaintext benchmark on Docker, 12 reactors.</p>
+            <p class="section-subtitle" style="margin-top:-2rem;font-size:0.85rem;">i9-14900K, 64GB DDR5 6400MHz, Linux 6.17, liburing 2.9. Load tested with <a href="https://www.gcannon.org" style="color:var(--accent-zerg);text-decoration:none;">gcannon</a>.</p>
+
+            <div class="bench-grid bench-grid-3">
+                <div class="bench-card zerg-bench">
+                    <div class="bench-label">zerg</div>
+                    <div class="bench-stats">
+                        <div class="bench-stat">
+                            <div class="bench-value zerg-value">3.56M</div>
+                            <div class="bench-unit">req/s</div>
+                        </div>
+                        <div class="bench-stat">
+                            <div class="bench-value zerg-value">132</div>
+                            <div class="bench-unit">us latency</div>
+                        </div>
+                        <div class="bench-stat">
+                            <div class="bench-value zerg-value">1192%</div>
+                            <div class="bench-unit">CPU</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="bench-card terraform-bench">
+                    <div class="bench-label">terraform</div>
+                    <div class="bench-stats">
+                        <div class="bench-stat">
+                            <div class="bench-value terraform-value">3.54M</div>
+                            <div class="bench-unit">req/s</div>
+                        </div>
+                        <div class="bench-stat">
+                            <div class="bench-value terraform-value">134</div>
+                            <div class="bench-unit">us latency</div>
+                        </div>
+                        <div class="bench-stat">
+                            <div class="bench-value terraform-value">1187%</div>
+                            <div class="bench-unit">CPU</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="bench-card socket-bench">
+                    <div class="bench-label">System.Net.Sockets</div>
+                    <div class="bench-stats">
+                        <div class="bench-stat">
+                            <div class="bench-value">2.71M</div>
+                            <div class="bench-unit">req/s</div>
+                        </div>
+                        <div class="bench-stat">
+                            <div class="bench-value">274</div>
+                            <div class="bench-unit">us latency</div>
+                        </div>
+                        <div class="bench-stat">
+                            <div class="bench-value">1560%</div>
+                            <div class="bench-unit">CPU</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="bench-bars">
+                <div class="bench-bar-row">
+                    <div class="bench-bar-label">Throughput</div>
+                    <div class="bench-bar-track">
+                        <div class="bench-bar-line"><div class="bench-bar zerg-bar" style="width:100%"><span>zerg 3.56M</span></div><div class="bench-bar-delta zerg-delta">+31%</div></div>
+                        <div class="bench-bar-line"><div class="bench-bar terraform-bar" style="width:99.4%"><span>terraform 3.54M</span></div><div class="bench-bar-delta terraform-delta">+31%</div></div>
+                        <div class="bench-bar-line"><div class="bench-bar socket-bar" style="width:76.1%"><span>Socket 2.71M</span></div><div class="bench-bar-delta socket-delta">base</div></div>
+                    </div>
+                </div>
+                <div class="bench-bar-row">
+                    <div class="bench-bar-label">Latency</div>
+                    <div class="bench-bar-track">
+                        <div class="bench-bar-line"><div class="bench-bar zerg-bar" style="width:48.2%"><span>zerg 132 us</span></div><div class="bench-bar-delta zerg-delta">-52%</div></div>
+                        <div class="bench-bar-line"><div class="bench-bar terraform-bar" style="width:48.9%"><span>terraform 134 us</span></div><div class="bench-bar-delta terraform-delta">-51%</div></div>
+                        <div class="bench-bar-line"><div class="bench-bar socket-bar" style="width:100%"><span>Socket 274 us</span></div><div class="bench-bar-delta socket-delta">base</div></div>
+                    </div>
+                </div>
+                <div class="bench-bar-row">
+                    <div class="bench-bar-label">CPU usage</div>
+                    <div class="bench-bar-track">
+                        <div class="bench-bar-line"><div class="bench-bar terraform-bar" style="width:76.1%"><span>terraform 1187%</span></div><div class="bench-bar-delta terraform-delta">-24%</div></div>
+                        <div class="bench-bar-line"><div class="bench-bar zerg-bar" style="width:76.4%"><span>zerg 1192%</span></div><div class="bench-bar-delta zerg-delta">-24%</div></div>
+                        <div class="bench-bar-line"><div class="bench-bar socket-bar" style="width:100%"><span>Socket 1560%</span></div><div class="bench-bar-delta socket-delta">base</div></div>
+                    </div>
+                </div>
             </div>
         </div>
     </section>
