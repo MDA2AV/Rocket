@@ -10,11 +10,14 @@ Low-level TCP server framework for C# built on Linux `io_uring`. Direct control 
 
 ```bash
 dotnet add package zerg
+dotnet add package zerg.core
 ```
 
 ## Quick Start
 
 ```csharp
+using zerg;
+using zerg.core;
 using zerg.Engine;
 using zerg.Engine.Configs;
 
@@ -49,6 +52,8 @@ static async Task HandleAsync(Connection connection)
 ## Read API
 
 ```csharp
+using zerg.core;
+
 // High-level: get all buffers as a ReadOnlySequence
 var result = await connection.ReadAsync();
 var rings = connection.GetAllSnapshotRingsAsUnmanagedMemory(result);
@@ -68,6 +73,8 @@ connection.ResetRead();
 **Adapters:**
 
 ```csharp
+using zerg.core;
+
 // Zero-copy PipeReader (buffers held until AdvanceTo)
 var reader = new ConnectionPipeReader(connection);
 var result = await reader.ReadAsync();

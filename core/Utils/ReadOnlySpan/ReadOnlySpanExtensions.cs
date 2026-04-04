@@ -1,6 +1,6 @@
 using System.Runtime.InteropServices;
 
-namespace Zerg.Core;
+namespace zerg.core;
 
 public static class ReadOnlySpanExtensions
 {

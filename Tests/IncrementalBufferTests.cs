@@ -4,7 +4,7 @@ using System.Text;
 using Xunit;
 using zerg;
 using zerg.Engine.Configs;
-using Zerg.Core;
+using zerg.core;
 
 namespace Tests;
 

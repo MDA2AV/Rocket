@@ -1,7 +1,7 @@
 using System.Buffers;
 using System.Runtime.InteropServices;
 
-namespace Zerg.Core;
+namespace zerg.core;
 
 public sealed unsafe class UnmanagedMemoryManager : MemoryManager<byte>
 {

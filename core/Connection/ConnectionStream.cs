@@ -1,4 +1,4 @@
-namespace Zerg.Core;
+namespace zerg.core;
 
 public sealed class ConnectionStream : Stream
 {

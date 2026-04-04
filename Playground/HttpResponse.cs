@@ -2,7 +2,7 @@ using System.Buffers;
 using System.IO.Pipelines;
 using System.Text;
 using zerg;
-using Zerg.Core;
+using zerg.core;
 
 namespace Playground;
 

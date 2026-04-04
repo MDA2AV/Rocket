@@ -2,7 +2,7 @@ using System.Net.Sockets;
 using System.Text;
 using Xunit;
 using zerg;
-using Zerg.Core;
+using zerg.core;
 
 namespace Tests;
 

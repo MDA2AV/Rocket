@@ -1,7 +1,7 @@
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using terraform.Ring;
-using Zerg.Core;
+using zerg.core;
 using static terraform.ABI.Libc;
 using static terraform.Ring.Constants;
 

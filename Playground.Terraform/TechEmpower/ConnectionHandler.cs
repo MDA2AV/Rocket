@@ -5,7 +5,7 @@ using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using terraform;
-using Zerg.Core;
+using zerg.core;
 
 namespace Playground.Terraform.TechEmpower;
 

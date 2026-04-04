@@ -1,7 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.ObjectPool;
-using Zerg.Core;
+using zerg.core;
 using zerg.Engine.Configs;
 using static zerg.ABI.ABI;
 

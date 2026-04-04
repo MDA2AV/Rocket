@@ -1,7 +1,7 @@
 using System.Buffers;
 using System.Threading.Tasks.Sources;
 
-namespace Zerg.Core;
+namespace zerg.core;
 
 public abstract unsafe partial class ConnectionBase :
     IBufferWriter<byte>,
