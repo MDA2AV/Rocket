@@ -1,5 +1,5 @@
 ﻿using zerg;
-using Zerg.Core;
+using zerg.core;
 using zerg.Engine;
 using zerg.Engine.Configs;
 

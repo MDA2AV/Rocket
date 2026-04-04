@@ -1,6 +1,6 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Playground", "Playground\Playground.csproj", "{47BC31EF-961F-4244-877C-350D9B2C5E44}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Playground.Zerg", "Playground.Zerg\Playground.Zerg.csproj", "{47BC31EF-961F-4244-877C-350D9B2C5E44}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "zerg", "zerg\zerg.csproj", "{4CC89CE5-47F6-44B4-8B56-E1145854F9F4}"
 EndProject

@@ -4,7 +4,7 @@ using System.Text;
 using zerg;
 using zerg.core;
 
-namespace Playground;
+namespace Playground.Zerg;
 
 public class HttpResponse
 {

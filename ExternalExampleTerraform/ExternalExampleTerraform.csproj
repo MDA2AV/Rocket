@@ -8,8 +8,8 @@
     </PropertyGroup>
 
     <ItemGroup>
-      <PackageReference Include="terraform" Version="0.5.25" />
-      <PackageReference Include="zerg.core" Version="0.5.25" />
+      <PackageReference Include="terraform" Version="0.5.26" />
+      <PackageReference Include="zerg.core" Version="0.5.26" />
     </ItemGroup>
 
 </Project>

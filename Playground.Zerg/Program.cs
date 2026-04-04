@@ -1,11 +1,11 @@
 ﻿using System.Runtime.CompilerServices;
 using zerg.Engine;
 using zerg.Engine.Configs;
-using static Playground.HttpResponse;
+using static Playground.Zerg.HttpResponse;
 
 // dotnet publish -f net10.0 -c Release /p:PublishAot=true /p:OptimizationPreference=Speed
 
-namespace Playground;
+namespace Playground.Zerg;
 
 [SkipLocalsInit]
 internal static class Program 

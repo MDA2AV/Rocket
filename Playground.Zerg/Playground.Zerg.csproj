@@ -11,7 +11,7 @@
         <TieredPGO>true</TieredPGO>
         <SelfContained>true</SelfContained>
         
-        <RootNamespace>Playground</RootNamespace>
+        <RootNamespace>Playground.Zerg</RootNamespace>
     </PropertyGroup>
 
     <ItemGroup Condition="$(PublishAot) == 'true'">

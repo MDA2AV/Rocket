@@ -1,7 +1,7 @@
 ﻿using terraform;
 using terraform.Engine;
 using terraform.Engine.Configs;
-using Zerg.Core;
+using zerg.core;
 
 var engine = new Engine(new EngineOptions { Port = 8080, ReactorCount = 12 });
 engine.Listen();
