@@ -140,6 +140,15 @@ nav .links a.active { color: var(--accent-zerg); }
 }
 
 /* ARTICLE */
+.post-hero {
+    display: block;
+    width: 100%;
+    height: auto;
+    margin: 0 0 2.5rem;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+}
+
 .post-header { margin-bottom: 2.5rem; }
 .post-header h1 {
     font-family: var(--font-mono);
@@ -184,10 +193,7 @@ nav .links a.active { color: var(--accent-zerg); }
 .post-body code {
     font-family: var(--font-mono);
     font-size: 0.88em;
-    background: rgba(124, 92, 252, 0.1);
-    color: var(--accent-zerg);
-    padding: 0.1em 0.35em;
-    border-radius: 4px;
+    color: var(--text);
 }
 .post-body pre {
     background: var(--bg-code);
