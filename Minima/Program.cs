@@ -68,22 +68,14 @@ internal static unsafe class Program {
             } else {
                 Console.Error.WriteLine($"[minima] accept error: {cqe.res}");
             }
-
-            // Re-arm: one-shot accept consumes the SQE, so we need a new one for the next client.
             SubmitAccept(ring, listenFd);
         } else if (kind == KindRecv) {
             if (!s_conns.TryGetValue(fd, out var conn)) return;
-
             if (cqe.res <= 0) { CloseConn(fd, conn); return; }
-
-            // Echo the received bytes back. We assume the send completes in one shot.
             SubmitSend(ring, fd, conn.Buffer, (uint)cqe.res);
         } else if (kind == KindSend) {
             if (!s_conns.TryGetValue(fd, out var conn)) return;
-
             if (cqe.res <= 0) { CloseConn(fd, conn); return; }
-
-            // Send drained — wait for the next client message.
             SubmitRecv(ring, fd, conn.Buffer, BufferSize);
         }
     }
