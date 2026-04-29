@@ -18,6 +18,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ExternalExampleZerg", "Exte
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ExternalExampleTerraform", "ExternalExampleTerraform\ExternalExampleTerraform.csproj", "{A8C00B59-CD96-4765-815E-B782045285DB}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Minima", "Minima\Minima.csproj", "{B7E5C8A0-3F4D-4A9E-9C8D-1A2B3C4D5E6F}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -136,6 +138,18 @@ Global
 		{A8C00B59-CD96-4765-815E-B782045285DB}.Release|x64.Build.0 = Release|Any CPU
 		{A8C00B59-CD96-4765-815E-B782045285DB}.Release|x86.ActiveCfg = Release|Any CPU
 		{A8C00B59-CD96-4765-815E-B782045285DB}.Release|x86.Build.0 = Release|Any CPU
+		{B7E5C8A0-3F4D-4A9E-9C8D-1A2B3C4D5E6F}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B7E5C8A0-3F4D-4A9E-9C8D-1A2B3C4D5E6F}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B7E5C8A0-3F4D-4A9E-9C8D-1A2B3C4D5E6F}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{B7E5C8A0-3F4D-4A9E-9C8D-1A2B3C4D5E6F}.Debug|x64.Build.0 = Debug|Any CPU
+		{B7E5C8A0-3F4D-4A9E-9C8D-1A2B3C4D5E6F}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{B7E5C8A0-3F4D-4A9E-9C8D-1A2B3C4D5E6F}.Debug|x86.Build.0 = Debug|Any CPU
+		{B7E5C8A0-3F4D-4A9E-9C8D-1A2B3C4D5E6F}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B7E5C8A0-3F4D-4A9E-9C8D-1A2B3C4D5E6F}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B7E5C8A0-3F4D-4A9E-9C8D-1A2B3C4D5E6F}.Release|x64.ActiveCfg = Release|Any CPU
+		{B7E5C8A0-3F4D-4A9E-9C8D-1A2B3C4D5E6F}.Release|x64.Build.0 = Release|Any CPU
+		{B7E5C8A0-3F4D-4A9E-9C8D-1A2B3C4D5E6F}.Release|x86.ActiveCfg = Release|Any CPU
+		{B7E5C8A0-3F4D-4A9E-9C8D-1A2B3C4D5E6F}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
