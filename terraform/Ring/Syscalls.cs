@@ -4,10 +4,6 @@ namespace terraform.Ring;
 
 internal static unsafe class Syscalls
 {
-    // =========================================================================
-    // libc syscall() wrappers — typed per arity
-    // =========================================================================
-
     [DllImport("libc", EntryPoint = "syscall")]
     private static extern long syscall3(long nr, uint entries, IoUringParams* p);
 
@@ -16,10 +12,6 @@ internal static unsafe class Syscalls
 
     [DllImport("libc", EntryPoint = "syscall")]
     private static extern long syscall4(long nr, uint fd, uint opcode, void* arg, uint nr_args);
-
-    // =========================================================================
-    // io_uring syscalls
-    // =========================================================================
 
     /// <summary>
     /// io_uring_setup(entries, params) → ring fd or -errno.
@@ -47,10 +39,6 @@ internal static unsafe class Syscalls
         long ret = syscall4(Constants.SYS_io_uring_register, (uint)fd, opcode, arg, nrArgs);
         return (int)ret;
     }
-
-    // =========================================================================
-    // mmap / munmap / close
-    // =========================================================================
 
     [DllImport("libc")]
     internal static extern void* mmap(void* addr, nuint length, int prot, int flags, int fd, long offset);
