@@ -2,6 +2,9 @@ using terraform.Engine.Configs;
 using terraform.Ring;
 using static terraform.ABI.Libc;
 using static terraform.Ring.Constants;
+// ReSharper disable SuggestVarOrType_Elsewhere
+// ReSharper disable SuggestVarOrType_BuiltInTypes
+// ReSharper disable SuggestVarOrType_SimpleTypes
 
 namespace terraform.Engine;
 

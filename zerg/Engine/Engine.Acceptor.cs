@@ -63,7 +63,7 @@ public sealed unsafe partial class Engine
         /// After this runs successfully, accepted client sockets arrive as CQEs of kind UdKind.Accept,
         /// with cqe->res containing the accepted client fd (or a negative errno on failure).
         /// </summary>
-        public void InitRing() 
+        public void InitRing()
         {
             _io_uring = CreateRing(_acceptorConfig.RingFlags, _acceptorConfig.SqCpuThread, _acceptorConfig.SqThreadIdleMs, out int err, _acceptorConfig.RingEntries);
             CheckRingFlags(shim_get_ring_flags(_io_uring));
