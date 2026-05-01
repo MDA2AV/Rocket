@@ -41,9 +41,7 @@ public abstract unsafe partial class ConnectionBase
         }
     }
 
-    // =========================================================================
     // Buffer return (back to reactor-owned pool)
-    // =========================================================================
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public virtual void ReturnRing(ushort bufferId)

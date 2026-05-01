@@ -1,42 +1,57 @@
+﻿// dotnet publish -f net10.0 -c Release /p:PublishAot=true /p:OptimizationPreference=Speed
+
 using System.Buffers;
-using System.IO.Pipelines;
-using System.Text;
-using zerg;
+using System.Runtime.CompilerServices;
+using rtr;
+using rtr.Engine;
+using rtr.Engine.Configs;
 using zerg.core;
 
 namespace Playground.Zerg;
 
-public class HttpResponse
+[SkipLocalsInit]
+internal static class Program 
 {
-    internal static async Task HandleConnectionStreamAsync(Connection connection)
+    internal static async Task Main() 
     {
-        var stream = new ConnectionStream(connection);
-        var reader = PipeReader.Create(stream);
-        var writer = PipeWriter.Create(stream);
-        
-        while (true)
-        {
-            var result = await reader.ReadAsync();
-            connection.ResetRead();
-            
-            var buffer = result.Buffer;
-            var isCompleted = result.IsCompleted;
-            if (buffer.IsEmpty && isCompleted)
-                return;
-            
-            var sequenceReader = new SequenceReader<byte>(buffer);
+        await Execute(); 
+    }
 
-            if (!sequenceReader.TryReadTo(out ReadOnlySpan<byte> msg, "\r\n\r\n"u8, true))
-            {
-                var data = Encoding.UTF8.GetString(buffer.ToArray());
-                Console.WriteLine(data);
-                continue;
-            }
-            reader.AdvanceTo(buffer.End);
+    private static async Task Execute() 
+    {
+        var engine = new Engine(new EngineOptions
+        {
+            Port = 8080,
+            ReactorCount = 12
+        });
+        engine.Listen();
+        
+        var cts = new CancellationTokenSource();
+
+        _ = Task.Run(async () => 
+        {
+            Console.ReadLine();
+            engine.Stop();
+            await cts.CancelAsync();
             
-            writer.Write("HTTP/1.1 200 OK\r\nContent-Length: 13\r\nContent-Type: text/plain\r\n\r\nHello, World!"u8);
-            await writer.FlushAsync();
+        }, cts.Token);
+            
+        try
+        {
+            while (engine.ServerRunning) 
+            {
+                var conn = await engine.AcceptAsync(cts.Token);
+                //Console.WriteLine($"Connection: {conn.ClientFd}");
+
+                _ = HandleConnectionAsync(conn);
+            }
         }
+        catch (OperationCanceledException)
+        {
+            Console.WriteLine("Signaled to stop");
+        }
+
+        Console.WriteLine("Execution finished.");
     }
     
     internal static async Task HandleConnectionAsync(Connection connection)

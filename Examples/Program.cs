@@ -1,3 +1,4 @@
+using Examples.DualPipe;
 using Examples.PipeReader;
 using Examples.Stream;
 using Examples.TechEmpower;
@@ -47,7 +48,7 @@ internal class Program
                     MaxConnectionsPerReactor: 8 * 1024,
                     CqTimeout: 1_000_000,
                     ConnectionBufferRingEntries: 32,
-                    IncrementalBufferConsumption: false
+                    IncrementalBufferConsumption: true
                 )).ToArray()
             });
 
@@ -64,12 +65,14 @@ internal class Program
         //   "raw"        — zero-copy, manual ring management (fastest)
         //   "sqpoll"     — same as raw but with SQPOLL-enabled rings
         //   "pipereader" — zero-copy via PipeReader adapter
+        //   "dualpipe"   — zero-copy via IDuplexPipe adapter (read + write)
         //   "stream"     — copy-per-read via Stream adapter
         Func<Connection, Task> handler = mode switch
         {
             "raw"        => Rings_as_ReadOnlySpan.HandleConnectionAsync,
             "sqpoll"     => SqPollExample.HandleConnectionAsync,
             "pipereader" => PipeReaderExample.HandleConnectionAsync,
+            "dualpipe"   => DualPipeExample.HandleConnectionAsync,
             "stream"     => StreamExample.HandleConnectionAsync,
             "te"         => engine.Options.ReactorConfigs[0].IncrementalBufferConsumption
                             ? c => new ConnectionHandlerIncremental().HandleConnectionAsync(c)

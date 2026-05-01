@@ -1,27 +1,27 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
         <TargetFrameworks>net8.0;net9.0;net10.0</TargetFrameworks>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-        
-        <RootNamespace>zerg</RootNamespace>
 
-        <Title>zerg</Title>
-        <PackageId>zerg</PackageId>
+        <RootNamespace>rtr</RootNamespace>
+
+        <Title>rtr</Title>
+        <PackageId>rtr</PackageId>
         <Authors>Diogo Martins</Authors>
         <RepositoryUrl>https://github.com/MDA2AV/zerg</RepositoryUrl>
         <RepositoryType>git</RepositoryType>
-        <AssemblyVersion>0.5.26</AssemblyVersion>
-        <FileVersion>0.5.26</FileVersion>
-        <Version>0.5.26</Version>
+        <AssemblyVersion>0.1.0</AssemblyVersion>
+        <FileVersion>0.1.0</FileVersion>
+        <Version>0.1.0</Version>
         <PackageReadmeFile>README.md</PackageReadmeFile>
         <PackageTags>io_uring</PackageTags>
         <PackageLicenseFile>LICENSE</PackageLicenseFile>
-        <Description>https://github.com/MDA2AV/zerg</Description>
+        <Description>Reactor-only io_uring TCP server (no separate acceptor thread; SO_REUSEPORT + multishot accept per reactor).</Description>
         <PackageProjectUrl>https://github.com/MDA2AV/zerg</PackageProjectUrl>
-        
+
     </PropertyGroup>
 
     <ItemGroup>
@@ -36,9 +36,7 @@
     <ItemGroup>
         <None Include="native/linux-x64/liburingshim.so"
               Pack="true"
-              PackagePath="runtimes/linux-x64/native/"
-              Link="liburingshim.so"
-              CopyToOutputDirectory="PreserveNewest" />
+              PackagePath="runtimes/linux-x64/native/" />
     </ItemGroup>
     <ItemGroup>
         <None Include="native/linux-musl-x64/liburingshim.so"
