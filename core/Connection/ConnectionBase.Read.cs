@@ -69,11 +69,9 @@ public abstract partial class ConnectionBase
         if (Volatile.Read(ref _closed) != 0)
             Volatile.Write(ref _pending, 1);
     }
-
-    // =========================================================================
+    
     // IValueTaskSource<RingSnapshot> plumbing
-    // =========================================================================
-
+    
     RingSnapshot IValueTaskSource<RingSnapshot>.GetResult(short token)
     {
         if (token != (short)Volatile.Read(ref _generation))

@@ -12,10 +12,6 @@ public abstract unsafe partial class ConnectionBase :
     public int ClientFd { get; protected set; }
     public IReactor Reactor { get; protected set; } = null!;
 
-    // =========================================================================
-    // Pooling / lifecycle
-    // =========================================================================
-
     public virtual void Clear()
     {
         Interlocked.Increment(ref _generation);
@@ -24,7 +20,10 @@ public abstract unsafe partial class ConnectionBase :
         if (Interlocked.Exchange(ref _armed, 0) != 0)
         {
             try { _readSignal.SetException(new OperationCanceledException("Connection returned to pool.")); }
-            catch { }
+            catch
+            {
+                // ignored
+            }
         }
 
         Volatile.Write(ref _pending, 0);
@@ -32,7 +31,10 @@ public abstract unsafe partial class ConnectionBase :
         if (Interlocked.Exchange(ref _flushArmed, 0) != 0)
         {
             try { _flushSignal.SetException(new OperationCanceledException("Connection returned to pool.")); }
-            catch { }
+            catch
+            {
+                // ignored
+            }
         }
 
         Volatile.Write(ref _flushInProgress, 0);

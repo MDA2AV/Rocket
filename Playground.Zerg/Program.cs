@@ -39,7 +39,7 @@ internal static class Program
             while (engine.ServerRunning) 
             {
                 var conn = await engine.AcceptAsync(cts.Token);
-                Console.WriteLine($"Connection: {conn.ClientFd}");
+                //Console.WriteLine($"Connection: {conn.ClientFd}");
                 
                 //_ = HandleConnectionStreamAsync(conn);
                 _ = HandleConnectionAsync(conn);

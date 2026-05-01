@@ -7,7 +7,7 @@ public sealed class ConnectionPipeReader : PipeReader
 {
     private readonly ConnectionBase _inner;
 
-    private readonly List<HeldBuffer> _held = new(4);
+    private readonly HeldBufferRing _held = new(16);
     private ReadOnlySequence<byte> _lastSequence;
 
     private bool _completed;
@@ -101,12 +101,12 @@ public sealed class ConnectionPipeReader : PipeReader
             if (consumedBytes >= available)
             {
                 _inner.ReturnRing(seg.BufferId);
-                _held.RemoveAt(0);
+                _held.PopFront();
                 consumedBytes -= available;
             }
             else
             {
-                _held[0] = new HeldBuffer(seg.Memory.Slice((int)consumedBytes), seg.BufferId);
+                _held[0] = new HeldBufferRing.HeldBuffer(seg.Memory.Slice((int)consumedBytes), seg.BufferId);
                 consumedBytes = 0;
             }
         }
@@ -122,8 +122,8 @@ public sealed class ConnectionPipeReader : PipeReader
 
         _completed = true;
 
-        foreach (var seg in _held)
-            _inner.ReturnRing(seg.BufferId);
+        for (int i = 0; i < _held.Count; i++)
+            _inner.ReturnRing(_held[i].BufferId);
 
         _held.Clear();
     }
@@ -132,7 +132,7 @@ public sealed class ConnectionPipeReader : PipeReader
     {
         var rings = _inner.GetAllSnapshotRingsAsUnmanagedMemory(result);
         foreach (var ring in rings)
-            _held.Add(new HeldBuffer(ring.Memory, ring.BufferId));
+            _held.PushBack(new HeldBufferRing.HeldBuffer(ring.Memory, ring.BufferId));
     }
 
     private ReadOnlySequence<byte> BuildSequence()
@@ -165,6 +165,4 @@ public sealed class ConnectionPipeReader : PipeReader
             throw new InvalidOperationException(
                 "Reading is not allowed after the reader was completed.");
     }
-
-    private readonly record struct HeldBuffer(ReadOnlyMemory<byte> Memory, ushort BufferId);
 }

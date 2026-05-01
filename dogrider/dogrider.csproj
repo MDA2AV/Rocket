@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFrameworks>net8.0;net9.0;net10.0</TargetFrameworks>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <LangVersion>13.0</LangVersion>
+        <RootNamespace>dogrider</RootNamespace>
+
+        <Title>dogrider</Title>
+        <PackageId>dogrider</PackageId>
+        <Authors>Diogo Martins</Authors>
+        <AssemblyVersion>0.1.0</AssemblyVersion>
+        <FileVersion>0.1.0</FileVersion>
+        <Version>0.1.0</Version>
+        <Description>Imperative WebSocket server framework over zerg's raw io_uring API. Frame protocol ported from GenHTTP.</Description>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\zerg\zerg.csproj" />
+        <ProjectReference Include="..\core\core.csproj" />
+    </ItemGroup>
+
+</Project>
