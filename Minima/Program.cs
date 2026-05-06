@@ -24,31 +24,32 @@ internal static unsafe class Program
     internal static byte* s_responseBytes;
     internal static int   s_responseLen;
 
+    private static ReadOnlySpan<byte> s_response => "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok"u8;
+
     private static int Main()
     {
-        InitResponse();
+        s_responseLen = s_response.Length;
+        s_responseBytes = (byte*)NativeMemory.Alloc((nuint)s_responseLen);
+        s_response.CopyTo(new Span<byte>(s_responseBytes, s_responseLen));
 
-        int n = 12;
-        Console.WriteLine($"[minima] starting {n} reactors on port {Port}");
+        var n = 12;
+        Console.WriteLine($"[Minima] starting {n} reactors on port {Port}");
 
         var threads = new Thread[n];
-        for (int i = 0; i < n; i++)
+        for (var i = 0; i < n; i++)
         {
             var reactor = new Reactor(i, Port, RingEntries);
+            
             threads[i] = new Thread(reactor.Run) { Name = $"reactor-{i}", IsBackground = false };
             threads[i].Start();
         }
 
-        foreach (var t in threads) t.Join();
+        foreach (var t in threads)
+        {
+            t.Join();
+        }
+        
         return 0;
-    }
-
-    private static void InitResponse()
-    {
-        ReadOnlySpan<byte> r = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok"u8;
-        s_responseLen = r.Length;
-        s_responseBytes = (byte*)NativeMemory.Alloc((nuint)s_responseLen);
-        r.CopyTo(new Span<byte>(s_responseBytes, s_responseLen));
     }
 }
 
@@ -60,19 +61,18 @@ internal static class Handler
 {
     public static async Task HandleAsync(Reactor reactor, int fd, Connection conn)
     {
+        // Recv is multishot — armed once by Reactor.Dispatch on accept. The
+        // handler just awaits results and sends responses.
         try
         {
             while (true)
             {
-                conn.QueueRecv(fd);
                 int n = await conn.ReadAsync();
                 if (n <= 0)
                 {
                     conn.Close(fd);
                     return;
                 }
-                // For now we ignore the request body — assume a single recv
-                // delivers complete headers and respond unconditionally.
                 conn.QueueResponse(fd);
                 conn.ResetRead();
             }
@@ -80,6 +80,7 @@ internal static class Handler
         catch (Exception ex)
         {
             Console.Error.WriteLine($"[r{reactor.Id}] handler crash on fd={fd}: {ex}");
+            
             conn.Close(fd);
         }
     }

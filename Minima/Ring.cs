@@ -13,6 +13,8 @@ namespace Minima;
 /// </summary>
 internal sealed unsafe class Ring : IDisposable {
     private int _fd;
+
+    public int Fd => _fd;
     
     private uint*       _sqHead;   
     private uint*       _sqTail;    

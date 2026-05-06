@@ -1,27 +1,28 @@
-using System.Runtime.InteropServices;
 using System.Threading.Tasks.Sources;
 using static Minima.Native;
 
 namespace Minima;
 
 /// <summary>
-/// Per-connection state. Owns the recv slab and the read-side rendezvous
-/// (IValueTaskSource&lt;int&gt;) between the CQE dispatcher (producer) and the
-/// async handler (consumer).
+/// Per-connection state. Holds the read-side rendezvous (IValueTaskSource&lt;int&gt;)
+/// between the CQE dispatcher (producer) and the async handler (consumer).
+/// Recv buffers come from the reactor's shared kernel buffer ring; Connection
+/// just remembers the bid of the last delivered buffer so ResetRead can return it.
 /// </summary>
 internal sealed unsafe class Connection : IValueTaskSource<int>
 {
-    public byte* Buffer;
     private readonly Reactor _reactor;
 
     public Connection(Reactor reactor) { _reactor = reactor; }
 
     // Read-side rendezvous state.
     private ManualResetValueTaskSourceCore<int> _readSignal;  // RunContinuationsAsynchronously = false (default)
-    private int _armed;     // 1 when handler is parked on _readSignal
-    private int _pending;   // 1 when a result arrived while no one was armed
-    private int _closed;    // 1 once recv returned <=0 or send failed
-    private int _lastRes;   // recv length (or 0/-errno on close), set before publishing
+    private int    _armed;       // 1 when handler is parked on _readSignal
+    private int    _pending;     // 1 when a result arrived while no one was armed
+    private int    _closed;      // 1 once recv returned <=0 or send failed
+    private int    _lastRes;     // recv length (or 0/-errno on close)
+    private ushort _bid;         // buffer id from the last recv CQE (only valid if _hasBuffer)
+    private bool   _hasBuffer;   // true when a buffer is checked out and awaits return
 
     public ValueTask<int> ReadAsync()
     {
@@ -43,15 +44,22 @@ internal sealed unsafe class Connection : IValueTaskSource<int>
 
     public void ResetRead()
     {
+        if (_hasBuffer)
+        {
+            _reactor.ReturnBuffer(_bid);
+            _hasBuffer = false;
+        }
         _readSignal.Reset();
         if (_closed != 0)
             _pending = 1;
     }
 
     // Producer: called from Dispatch on a recv CQE. res is cqe.res.
-    public void Complete(int res)
+    public void Complete(int res, ushort bid, bool hasBuffer)
     {
         _lastRes = res;
+        _bid = bid;
+        _hasBuffer = hasBuffer;
         if (res <= 0)
             _closed = 1;
 
@@ -82,27 +90,23 @@ internal sealed unsafe class Connection : IValueTaskSource<int>
         }
     }
 
-    // Pointer-hiding wrappers so the (safe) handler can drive I/O without
-    // entering an unsafe context.
-    public void QueueRecv(int fd) => _reactor.SubmitRecv(fd, Buffer, Program.BufferSize);
-    public void QueueSend(int fd, uint len) => _reactor.SubmitSend(fd, Buffer, len);
     public void QueueResponse(int fd) => _reactor.SubmitSend(fd, Program.s_responseBytes, (uint)Program.s_responseLen);
 
     public void Close(int fd)
     {
-        if (Buffer != null)
+        if (_hasBuffer)
         {
-            NativeMemory.Free(Buffer);
-            Buffer = null;
+            _reactor.ReturnBuffer(_bid);
+            _hasBuffer = false;
         }
         _reactor.Connections.Remove(fd);
         close(fd);
     }
 
     int IValueTaskSource<int>.GetResult(short token) => _readSignal.GetResult(token);
-    
+
     ValueTaskSourceStatus IValueTaskSource<int>.GetStatus(short token) => _readSignal.GetStatus(token);
-    
+
     void IValueTaskSource<int>.OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags)
         => _readSignal.OnCompleted(continuation, state, token, flags);
 }
