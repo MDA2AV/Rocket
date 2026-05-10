@@ -88,28 +88,3 @@ internal static class Handler
         }
     }
 }
-
-
-public class Test
-{
-    public async Task Method1()
-    {
-        await Bridge1(5);
-        await Bridge2(5);
-    }
-
-    public Task Bridge1(int param1)
-    {
-        return Work(param1);
-    }
-    
-    public async Task Bridge2(int param1)
-    {
-        await Work(param1);
-    }
-
-    private async Task Work(int param1)
-    {
-        // do some async work..
-    }
-}
