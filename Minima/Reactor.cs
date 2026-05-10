@@ -13,15 +13,16 @@ namespace Minima;
 internal sealed unsafe class Reactor
 {
     public readonly int Id;
-    public readonly Ring Ring;
+    public Ring Ring = null!;   // created on the reactor's own thread (DEFER_TASKRUN requires same-thread setup+enter)
     public readonly Dictionary<int, Connection> Connections = new();
 
-    private readonly int _listenFd;
+    private int _listenFd;
     private readonly ushort _port;
+    private readonly uint _ringEntries;
 
     // Provided-buffer ring (one per reactor, shared by all its connections).
     private const ushort BgId = 1;
-    private const uint   BufferRingEntries = 1024;          // power of two
+    private const uint   BufferRingEntries = 4096;          // power of two
     private byte*  _bufRing;          // io_uring_buf_ring (kernel-shared)
     private byte*  _bufSlab;          // contiguous slab of recv buffers
     private uint   _bufRingMask;
@@ -31,9 +32,7 @@ internal sealed unsafe class Reactor
     {
         Id = id;
         _port = port;
-        Ring = Ring.Create(ringEntries);
-        _listenFd = OpenReusePortListener(port);
-        InitBufferRing();
+        _ringEntries = ringEntries;
     }
 
     // Buffer ring
@@ -90,6 +89,11 @@ internal sealed unsafe class Reactor
 
     public void Run()
     {
+        Ring = Ring.Create(_ringEntries);
+        _listenFd = OpenReusePortListener(_port);
+        
+        InitBufferRing();
+
         Console.WriteLine($"[r{Id}] listening on 0.0.0.0:{_port}");
         SubmitAcceptMultishot();
 
@@ -147,10 +151,8 @@ internal sealed unsafe class Reactor
 
             if (!Connections.TryGetValue(fd, out var conn))
             {
-                // Stale CQE for a connection we already closed (e.g. multishot
-                // recv termination after close(fd)). Hand the buffer back to the
-                // kernel ring or it leaks.
                 if (hasBuf) ReturnBuffer(bid);
+                
                 return;
             }
 
