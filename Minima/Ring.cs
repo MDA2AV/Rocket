@@ -7,11 +7,8 @@ using static Minima.Native;
 
 namespace Minima;
 
-/// <summary>
-/// Minimum viable io_uring: hand out SQE slots, submit them, drain CQEs.
-/// Sits on top of two syscalls (setup, enter) and two mmaps (ring + sqes).
-/// </summary>
-internal sealed unsafe class Ring : IDisposable {
+internal sealed unsafe class Ring : IDisposable 
+{
     private int _fd;
 
     public int Fd => _fd;
@@ -35,28 +32,45 @@ internal sealed unsafe class Ring : IDisposable {
     private byte* _sqePtr;
     private nuint _sqeSize;
     
-    public static Ring Create(uint entries) {
+    public static Ring Create(uint entries) 
+    {
         IoUringParams ioUringParams = default;
-        // SINGLE_ISSUER: only one thread will submit to this ring → kernel skips SQ locks.
-        // DEFER_TASKRUN: defer completions until io_uring_enter(GETEVENTS) → batched work.
         ioUringParams.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
         int fd = io_uring_setup(entries, &ioUringParams);
-        if (fd < 0) throw new InvalidOperationException($"io_uring_setup failed: {fd}");
+        if (fd < 0)
+        {
+            throw new InvalidOperationException($"io_uring_setup failed: {fd}");
+        }
 
-        var ring = new Ring { _fd = fd, _sqEntries = ioUringParams.sq_entries };
+        var ring = new Ring
+        {
+            _fd = fd, 
+            _sqEntries = ioUringParams.sq_entries 
+        };
         
         nuint sqRingBytes = ioUringParams.sq_off.array + ioUringParams.sq_entries * sizeof(uint);
         nuint cqRingBytes = ioUringParams.cq_off.cqes  + ioUringParams.cq_entries * (nuint)sizeof(IoUringCqe);
         nuint ringBytes   = sqRingBytes > cqRingBytes ? sqRingBytes : cqRingBytes;
 
         void* ringMem = mmap(null, ringBytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, IORING_OFF_SQ_RING);
-        if (ringMem == (void*)-1) { close(fd); throw new InvalidOperationException("mmap(SQ_RING) failed"); }
+        if (ringMem == (void*)-1)
+        {
+            close(fd); 
+            
+            throw new InvalidOperationException("mmap(SQ_RING) failed"); 
+        }
         ring._ringPtr  = (byte*)ringMem;
         ring._ringSize = ringBytes;
         
         nuint sqeBytes = ioUringParams.sq_entries * (nuint)sizeof(IoUringSqe);
         void* sqeMem = mmap(null, sqeBytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, IORING_OFF_SQES);
-        if (sqeMem == (void*)-1) { munmap(ringMem, ringBytes); close(fd); throw new InvalidOperationException("mmap(SQES) failed"); }
+        if (sqeMem == (void*)-1)
+        {
+            munmap(ringMem, ringBytes); 
+            close(fd); 
+            
+            throw new InvalidOperationException("mmap(SQES) failed"); 
+        }
         ring._sqes    = (IoUringSqe*)sqeMem;
         ring._sqePtr  = (byte*)sqeMem;
         ring._sqeSize = sqeBytes; 
@@ -92,7 +106,8 @@ internal sealed unsafe class Ring : IDisposable {
         return &_sqes[slot];
     }
     
-    public int SubmitAndWait(uint waitFor) {
+    public int SubmitAndWait(uint waitFor) 
+    {
         uint published = *_sqTail;
         uint toSubmit  = _sqeTail - published;
         
