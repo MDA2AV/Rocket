@@ -48,7 +48,7 @@ internal class Program
                     MaxConnectionsPerReactor: 8 * 1024,
                     CqTimeout: 1_000_000,
                     ConnectionBufferRingEntries: 32,
-                    IncrementalBufferConsumption: true
+                    IncrementalBufferConsumption: false
                 )).ToArray()
             });
 

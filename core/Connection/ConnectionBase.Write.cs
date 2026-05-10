@@ -6,7 +6,11 @@ namespace zerg.core;
 
 public unsafe partial class ConnectionBase
 {
-    private ManualResetValueTaskSourceCore<bool> _flushSignal;
+    private ManualResetValueTaskSourceCore<bool> _flushSignal = new ()
+    {
+        RunContinuationsAsynchronously = false,
+    };
+    
     private int _flushArmed;
     private int _flushInProgress;
 

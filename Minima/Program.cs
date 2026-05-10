@@ -53,34 +53,34 @@ internal static unsafe class Program
     }
 }
 
-/// <summary>
-/// Per-connection handler. Lives outside Program's unsafe context so it can
-/// use async/await. All pointer-touching work is delegated through Connection helpers.
-/// </summary>
 internal static class Handler
 {
     public static async Task HandleAsync(Reactor reactor, int fd, Connection conn)
     {
-        // Recv is multishot — armed once by Reactor.Dispatch on accept. The
-        // handler just awaits results and sends responses.
         try
         {
             while (true)
             {
-                int n = await conn.ReadAsync();
-                if (n <= 0)
+                RecvSnapshot snap = await conn.ReadAsync();
+
+                while (conn.TryGetItem(snap, out SpscRecvRing.Item item))
+                {
+                    if (item.HasBuffer) reactor.ReturnBuffer(item.Bid);
+                    conn.QueueResponse(fd);
+                }
+
+                if (snap.IsClosed)
                 {
                     conn.Close(fd);
                     return;
                 }
-                conn.QueueResponse(fd);
+
                 conn.ResetRead();
             }
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"[r{reactor.Id}] handler crash on fd={fd}: {ex}");
-            
             conn.Close(fd);
         }
     }

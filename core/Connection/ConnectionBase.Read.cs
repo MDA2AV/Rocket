@@ -6,7 +6,11 @@ namespace zerg.core;
 [SkipLocalsInit]
 public abstract partial class ConnectionBase
 {
-    private ManualResetValueTaskSourceCore<RingSnapshot> _readSignal;
+    private ManualResetValueTaskSourceCore<RingSnapshot> _readSignal = new ()
+    {
+        RunContinuationsAsynchronously = false,
+    };
+
     private int _armed;
     private int _pending;
     private int _closed;

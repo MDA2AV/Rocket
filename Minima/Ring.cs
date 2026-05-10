@@ -34,8 +34,7 @@ internal sealed unsafe class Ring : IDisposable {
     private nuint _ringSize;
     private byte* _sqePtr;
     private nuint _sqeSize;
-
-    /// <summary>Create a ring with <paramref name="entries"/> SQEs. Throws on failure.</summary>
+    
     public static Ring Create(uint entries) {
         IoUringParams ioUringParams = default;
         int fd = io_uring_setup(entries, &ioUringParams);
@@ -72,58 +71,75 @@ internal sealed unsafe class Ring : IDisposable {
 
         return ring;
     }
-
-    /// <summary>Reserve a fresh SQE slot. Returns null if the SQ is full.</summary>
+    
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public IoUringSqe* GetSqe() {
-        // Capacity check uses kernel head: in-flight = our tail - kernel head.
+    public IoUringSqe* GetSqe() 
+    {
         uint head = Volatile.Read(ref *_sqHead);
-        if (_sqeTail - head >= _sqEntries) return null;
+        
+        if (_sqeTail - head >= _sqEntries)
+        {
+            return null;
+        }
 
         uint slot = _sqeTail & _sqMask;
-        _sqArray[slot] = slot;          // identity mapping: SQE i lives at slot i
+        _sqArray[slot] = slot;         
         _sqeTail++;
+        
         return &_sqes[slot];
     }
-
-    /// <summary>
-    /// Publish all reserved SQEs and (optionally) wait for completions.
-    /// Returns the value of io_uring_enter, or 0 if there was nothing to do.
-    /// </summary>
+    
     public int SubmitAndWait(uint waitFor) {
         uint published = *_sqTail;
         uint toSubmit  = _sqeTail - published;
         
         if (toSubmit > 0)
+        {
             Volatile.Write(ref *_sqTail, _sqeTail);
+        }
 
         if (toSubmit == 0 && waitFor == 0) return 0;
 
         uint flags = waitFor > 0 ? IORING_ENTER_GETEVENTS : 0;
+        
         return io_uring_enter(_fd, toSubmit, waitFor, flags);
     }
-
-    /// <summary>Try to read the next CQE. Caller must call <see cref="CqeSeen"/> after processing.</summary>
+    
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool TryGetCqe(out IoUringCqe cqe) {
+    public bool TryGetCqe(out IoUringCqe cqe) 
+    {
         uint head = *_cqHead;
         uint tail = Volatile.Read(ref *_cqTail);
 
-        if (head == tail) { cqe = default; return false; }
+        if (head == tail)
+        {
+            cqe = default; 
+            return false; 
+        }
 
         cqe = _cqes[head & _cqMask];
         return true;
     }
-
-    /// <summary>Mark one CQE as consumed (advances cqHead, freeing the slot).</summary>
+    
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void CqeSeen() => Volatile.Write(ref *_cqHead, *_cqHead + 1);
 
     public void Dispose()
     {
-        if (_ringPtr != null) { munmap(_ringPtr, _ringSize); _ringPtr = null; }
-        if (_sqePtr  != null) { munmap(_sqePtr,  _sqeSize);  _sqePtr  = null; }
-        if (_fd > 0)          { close(_fd); _fd = 0; }
+        if (_ringPtr != null)
+        {
+            munmap(_ringPtr, _ringSize); _ringPtr = null; 
+        }
+
+        if (_sqePtr != null)
+        {
+            munmap(_sqePtr,  _sqeSize);  _sqePtr  = null; 
+        }
+
+        if (_fd > 0)
+        {
+            close(_fd); _fd = 0; 
+        }
     }
 }
 
