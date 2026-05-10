@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using static Minima.Native;
+// ReSharper disable SuggestVarOrType_BuiltInTypes
 
 namespace Minima;
 
@@ -39,7 +40,6 @@ internal sealed unsafe class Reactor
 
     private void InitBufferRing()
     {
-        // Kernel requires ring_addr to be page-aligned (checked via PAGE_MASK).
         nuint ringBytes = (nuint)BufferRingEntries * 16;
         _bufRing = (byte*)NativeMemory.AlignedAlloc(ringBytes, 4096);
         NativeMemory.Clear(_bufRing, ringBytes);
@@ -151,9 +151,7 @@ internal sealed unsafe class Reactor
             bool   hasBuf = (cqe.flags & IORING_CQE_F_BUFFER) != 0;
             ushort bid    = hasBuf ? (ushort)(cqe.flags >> IORING_CQE_BUFFER_SHIFT) : (ushort)0;
             conn.Complete(cqe.res, bid, hasBuf);
-
-            // Multishot recv terminated mid-stream while the connection is still
-            // healthy (rare: e.g., -ENOBUFS retry). Re-arm.
+            
             if (!more && cqe.res > 0)
             {
                 SubmitRecvMultishot(fd);
@@ -167,8 +165,6 @@ internal sealed unsafe class Reactor
             }
         }
     }
-
-    // SQE prep (per-reactor; no static ring sharing)
 
     private IoUringSqe* GetSqeOrFlush()
     {
