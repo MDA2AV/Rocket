@@ -37,6 +37,9 @@ internal sealed unsafe class Ring : IDisposable {
     
     public static Ring Create(uint entries) {
         IoUringParams ioUringParams = default;
+        // SINGLE_ISSUER: only one thread will submit to this ring → kernel skips SQ locks.
+        // DEFER_TASKRUN: defer completions until io_uring_enter(GETEVENTS) → batched work.
+        ioUringParams.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
         int fd = io_uring_setup(entries, &ioUringParams);
         if (fd < 0) throw new InvalidOperationException($"io_uring_setup failed: {fd}");
 

@@ -12,15 +12,15 @@ namespace Minima;
 internal static unsafe class Program
 {
     private const ushort Port       = 8080;
-    private const uint   RingEntries = 4096;
-    internal const int   BufferSize = 16 * 1024;
+    private const uint   RingEntries = 8192;
+    internal const int   BufferSize = 32 * 1024;
 
     // user_data layout: kind in high 32 bits, fd in low 32 bits.
     internal const ulong KindAccept = 1UL << 32;
     internal const ulong KindRecv   = 2UL << 32;
     internal const ulong KindSend   = 3UL << 32;
 
-    // Pre-built HTTP/1.1 response shared across all reactors (read-only after init).
+    // Pre-built HTTP/1.1 response shared across all reactors
     internal static byte* s_responseBytes;
     internal static int   s_responseLen;
 
@@ -65,7 +65,10 @@ internal static class Handler
 
                 while (conn.TryGetItem(snap, out SpscRecvRing.Item item))
                 {
-                    if (item.HasBuffer) reactor.ReturnBuffer(item.Bid);
+                    if (item.HasBuffer)
+                    {
+                        reactor.ReturnBuffer(item.Bid);
+                    }
                     conn.QueueResponse(fd);
                 }
 

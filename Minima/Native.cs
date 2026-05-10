@@ -28,6 +28,13 @@ internal static unsafe class Native {
     public const int    IORING_CQE_BUFFER_SHIFT = 16;
     public const uint   IORING_REGISTER_PBUF_RING = 22;
 
+    // Setup flags. SINGLE_ISSUER tells the kernel only one thread will submit
+    // to this ring (skips locking on the SQ). DEFER_TASKRUN defers completion
+    // processing until io_uring_enter(GETEVENTS), which lets the kernel batch
+    // work and avoids interrupting the reactor with task_work mid-flight.
+    public const uint   IORING_SETUP_SINGLE_ISSUER = 1u << 12;
+    public const uint   IORING_SETUP_DEFER_TASKRUN = 1u << 13;
+
     public const int PROT_READ    = 1;
     public const int PROT_WRITE   = 2;
     public const int MAP_SHARED   = 1;
