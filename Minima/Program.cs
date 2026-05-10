@@ -65,18 +65,13 @@ internal static class Handler
 
                 while (conn.TryGetItem(snap, out SpscRecvRing.Item item))
                 {
-                    if (item.HasBuffer)
-                    {
-                        reactor.ReturnBuffer(item.Bid);
-                    }
-                    
+                    if (item.HasBuffer) reactor.ReturnBuffer(item.Bid);
                     conn.QueueResponse(fd);
                 }
 
                 if (snap.IsClosed)
                 {
                     conn.Close(fd);
-                    
                     return;
                 }
 
@@ -86,7 +81,6 @@ internal static class Handler
         catch (Exception ex)
         {
             Console.Error.WriteLine($"[r{reactor.Id}] handler crash on fd={fd}: {ex}");
-
             conn.Close(fd);
         }
     }

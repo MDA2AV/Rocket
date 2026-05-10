@@ -84,7 +84,7 @@ internal sealed unsafe class Reactor
         *(uint*)(slot + 8)   = Program.BufferSize;
         *(ushort*)(slot + 12) = bid;
         _bufRingTail++;
-        
+
         Volatile.Write(ref *(ushort*)(_bufRing + 14), _bufRingTail);
     }
 
@@ -110,7 +110,6 @@ internal sealed unsafe class Reactor
         }
 
         close(_listenFd);
-        
         Ring.Dispose();
     }
 
@@ -128,7 +127,7 @@ internal sealed unsafe class Reactor
                 var conn = new Connection(this);
                 Connections[clientFd] = conn;
                 SubmitRecvMultishot(clientFd);
-                
+
                 _ = Handler.HandleAsync(this, clientFd, conn);
             }
             else
@@ -143,15 +142,20 @@ internal sealed unsafe class Reactor
         }
         else if (kind == Program.KindRecv)
         {
+            bool   hasBuf = (cqe.flags & IORING_CQE_F_BUFFER) != 0;
+            ushort bid    = hasBuf ? (ushort)(cqe.flags >> IORING_CQE_BUFFER_SHIFT) : (ushort)0;
+
             if (!Connections.TryGetValue(fd, out var conn))
             {
+                // Stale CQE for a connection we already closed (e.g. multishot
+                // recv termination after close(fd)). Hand the buffer back to the
+                // kernel ring or it leaks.
+                if (hasBuf) ReturnBuffer(bid);
                 return;
             }
 
-            bool   hasBuf = (cqe.flags & IORING_CQE_F_BUFFER) != 0;
-            ushort bid    = hasBuf ? (ushort)(cqe.flags >> IORING_CQE_BUFFER_SHIFT) : (ushort)0;
             conn.Complete(cqe.res, bid, hasBuf);
-            
+
             if (!more && cqe.res > 0)
             {
                 SubmitRecvMultishot(fd);
