@@ -216,7 +216,7 @@ conn.ResetRead();</code></pre>
 
                 <p>The handler runs on top of the reactor's call stack. No thread-pool hop, no scheduler. SetResult is, mechanically, just a function call into the handler's continuation that happens to carry a snapshot as its payload. When the handler finishes draining, hits the next await and parks, the stack unwinds back to Dispatch which moves on to the next CQE.</p>
 
-                <p>The reactor/dispatcher loop always runs on the same software AND CPU thread, and so does the handler — even though the code is fully asynchronous and await boundaries are hit on every iteration.</p>
+                <p>The reactor/dispatcher loop always runs on the same software AND CPU thread, and so does the handler, even though the code is fully asynchronous and await boundaries are hit on every iteration.</p>
             </div>
         </article>
     </main>
