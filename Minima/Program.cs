@@ -40,7 +40,11 @@ internal static unsafe class Program
         {
             var reactor = new Reactor(i, Port, RingEntries);
             
-            threads[i] = new Thread(reactor.Run) { Name = $"reactor-{i}", IsBackground = false };
+            threads[i] = new Thread(reactor.Run)
+            {
+                Name = $"reactor-{i}", 
+                IsBackground = false 
+            };
             threads[i].Start();
         }
 
@@ -67,7 +71,12 @@ internal static class Handler
                 {
                     if (item.HasBuffer)
                     {
-                        reactor.ReturnBuffer(item.Bid);
+                        UnmanagedMemoryManager mem = item.AsMemoryManager();
+                        ReadOnlyMemory<byte> data = mem.Memory;
+                        // data is now usable with any BCL Memory<byte>/async API
+                        _ = data.Length;
+
+                        reactor.ReturnBuffer(mem.BufferId);
                     }
                     conn.QueueResponse(fd);
                 }

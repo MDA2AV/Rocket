@@ -59,7 +59,7 @@ internal sealed unsafe class Connection : IValueTaskSource<RecvSnapshot>
 
     public void ResetRead() => _readSignal.Reset();
 
-    public void Complete(int res, ushort bid, bool hasBuffer)
+    public void Complete(int res, ushort bid, bool hasBuffer, byte* ptr)
     {
         if (res <= 0)
         {
@@ -69,7 +69,7 @@ internal sealed unsafe class Connection : IValueTaskSource<RecvSnapshot>
                 _reactor.ReturnBuffer(bid);
             }
         }
-        else if (!_recv.TryEnqueue(new SpscRecvRing.Item { Bid = bid, Len = res, HasBuffer = hasBuffer }))
+        else if (!_recv.TryEnqueue(new SpscRecvRing.Item { Ptr = ptr, Bid = bid, Len = res, HasBuffer = hasBuffer }))
         {
             Console.Error.WriteLine("[conn] recv queue overflow; closing.");
             if (hasBuffer)

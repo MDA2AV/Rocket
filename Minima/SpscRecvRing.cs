@@ -3,13 +3,18 @@ using System.Runtime.CompilerServices;
 
 namespace Minima;
 
-internal sealed class SpscRecvRing
+internal sealed unsafe class SpscRecvRing
 {
     public struct Item
     {
+        public byte* Ptr;
         public ushort Bid;
         public int Len;
         public bool HasBuffer;
+
+        public ReadOnlySpan<byte> AsSpan() => new(Ptr, Len);
+
+        public UnmanagedMemoryManager AsMemoryManager() => new(Ptr, Len, Bid);
     }
 
     private readonly Item[] _items;
