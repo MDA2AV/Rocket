@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using static Minima.Native;
+using static Minima.Program;
 // ReSharper disable SuggestVarOrType_BuiltInTypes
 
 namespace Minima;
@@ -43,7 +44,7 @@ internal sealed unsafe class Reactor
         _bufRing = (byte*)NativeMemory.AlignedAlloc(ringBytes, 4096);
         NativeMemory.Clear(_bufRing, ringBytes);
 
-        nuint slabBytes = BufferRingEntries * (nuint)Program.BufferSize;
+        nuint slabBytes = BufferRingEntries * (nuint)BufferSize;
         _bufSlab = (byte*)NativeMemory.AlignedAlloc(slabBytes, 64);
 
         _bufRingMask = BufferRingEntries - 1;
@@ -67,8 +68,8 @@ internal sealed unsafe class Reactor
         // stays at zero until we set it explicitly.
         for (ushort bid = 0; bid < BufferRingEntries; bid++) {
             byte* slot = _bufRing + (uint)bid * 16;
-            *(ulong*)(slot + 0)  = (ulong)(_bufSlab + bid * (nuint)Program.BufferSize);
-            *(uint*)(slot + 8)   = Program.BufferSize;
+            *(ulong*)(slot + 0)  = (ulong)(_bufSlab + bid * (nuint)BufferSize);
+            *(uint*)(slot + 8)   = BufferSize;
             *(ushort*)(slot + 12) = bid;
         }
         _bufRingTail = (ushort)BufferRingEntries;
@@ -79,8 +80,8 @@ internal sealed unsafe class Reactor
     public void ReturnBuffer(ushort bid)
     {
         byte* slot = _bufRing + (_bufRingTail & _bufRingMask) * 16;
-        *(ulong*)(slot + 0)  = (ulong)(_bufSlab + bid * (nuint)Program.BufferSize);
-        *(uint*)(slot + 8)   = Program.BufferSize;
+        *(ulong*)(slot + 0)  = (ulong)(_bufSlab + bid * (nuint)BufferSize);
+        *(uint*)(slot + 8)   = BufferSize;
         *(ushort*)(slot + 12) = bid;
         _bufRingTail++;
 
@@ -123,7 +124,7 @@ internal sealed unsafe class Reactor
         int   fd   = (int)(cqe.user_data & 0xffffffffUL);
         bool  more = (cqe.flags & IORING_CQE_F_MORE) != 0;
 
-        if (kind == Program.KindAccept)
+        if (kind == KindAccept)
         {
             if (cqe.res >= 0)
             {
@@ -144,7 +145,7 @@ internal sealed unsafe class Reactor
                 SubmitAcceptMultishot();
             }
         }
-        else if (kind == Program.KindRecv)
+        else if (kind == KindRecv)
         {
             bool   hasBuf = (cqe.flags & IORING_CQE_F_BUFFER) != 0;
             ushort bid    = hasBuf ? (ushort)(cqe.flags >> IORING_CQE_BUFFER_SHIFT) : (ushort)0;
@@ -152,18 +153,19 @@ internal sealed unsafe class Reactor
             if (!Connections.TryGetValue(fd, out var conn))
             {
                 if (hasBuf) ReturnBuffer(bid);
-                
+
                 return;
             }
 
-            conn.Complete(cqe.res, bid, hasBuf);
+            byte* ptr = hasBuf ? _bufSlab + (nuint)bid * (nuint)BufferSize : null;
+            conn.Complete(cqe.res, bid, hasBuf, ptr);
 
             if (!more && cqe.res > 0)
             {
                 SubmitRecvMultishot(fd);
             }
         }
-        else if (kind == Program.KindSend)
+        else if (kind == KindSend)
         {
             if (Connections.TryGetValue(fd, out var conn) && cqe.res <= 0)
             {
@@ -198,7 +200,7 @@ internal sealed unsafe class Reactor
         sqe->opcode    = IORING_OP_ACCEPT;
         sqe->ioprio    = IORING_ACCEPT_MULTISHOT;
         sqe->fd        = _listenFd;
-        sqe->user_data = Program.KindAccept | (uint)_listenFd;
+        sqe->user_data = KindAccept | (uint)_listenFd;
     }
 
     public void SubmitRecvMultishot(int fd)
@@ -210,7 +212,7 @@ internal sealed unsafe class Reactor
         sqe->ioprio    = IORING_RECV_MULTISHOT;
         sqe->fd        = fd;
         sqe->buf_index = BgId;          // same offset as buf_group in the kernel union
-        sqe->user_data = Program.KindRecv | (uint)fd;
+        sqe->user_data = KindRecv | (uint)fd;
     }
 
     public void SubmitSend(int fd, byte* buf, uint len)
@@ -221,7 +223,7 @@ internal sealed unsafe class Reactor
         sqe->fd        = fd;
         sqe->addr      = (ulong)buf;
         sqe->len       = len;
-        sqe->user_data = Program.KindSend | (uint)fd;
+        sqe->user_data = KindSend | (uint)fd;
     }
 
     private static int OpenReusePortListener(ushort port)
