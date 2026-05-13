@@ -26,6 +26,13 @@
 
         <ul class="post-list">
             <li>
+                <a href="io-uring-minima-part-3.html" class="post-card">
+                    <span class="post-meta">2026-05-13 &middot; Part 3 of 5</span>
+                    <div class="post-title">C# Networking Deep Dive With io_uring &mdash; Part 3: Touching the Bytes</div>
+                    <div class="post-excerpt">Extending the async model from part 2 to expose the received bytes themselves. We add a <code>byte*</code> to each ring item, then introduce <code>UnmanagedMemoryManager</code> &mdash; a <code>MemoryManager&lt;byte&gt;</code> subclass that wraps an unmanaged pointer so the recv slabs can flow into the BCL <code>Memory&lt;byte&gt;</code> ecosystem (PipeReader, ReadOnlySequence, async APIs).</div>
+                </a>
+            </li>
+            <li>
                 <a href="io-uring-minima-part-2.html" class="post-card">
                     <span class="post-meta">2026-05-10 &middot; Part 2 of 5</span>
                     <div class="post-title">C# Networking Deep Dive With io_uring &mdash; Part 2: Bridge the Async Model</div>
