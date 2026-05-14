@@ -37,13 +37,11 @@
             </div>
 
             <div class="post-body">
-                <p>In part 2 we introduced an asynchronous API when reading data from the wire, where only the number of received bytes was considered. On this part 3 let's extend it to access the actual received data.</p>
+                <p>In part 2 we introduced an asynchronous API for reading data from the wire, where only the number of received bytes was considered. On this part 3 let's extend it to access the actual received data.</p>
 
                 <p>As usual, the entire source code can be found at <a href="https://github.com/MDA2AV/zerg/tree/main/Minima">Minima</a></p>
 
-                <p>Before diving into the code let's understand which data structures make sense to consider.</p>
-
-                <p>Data will be pushed to the CQ shared ring buffers by the kernel whenever some data arrives from the wire, this can represent a partial, complete or more than one request. By request I mean it could be a HTTP/1.1, HTTP/2, gRPC, websocket, etc pretty much a request from any protocol. Whenever we call a <code>ReadAsync</code>, we receive a snapshot with a tail that should point us to a snapshot of CQE metadata, currently this metadata only includes the number of bytes from each CQE, we need to add a <code>byte*</code> pointing to where the data is.</p>
+                <p>Data will be pushed to the CQ shared ring buffers by the kernel whenever data arrives from the wire, this can represent a partial, complete or more than one request. By request I mean it could be a HTTP/1.1, HTTP/2, gRPC, websocket, etc pretty much a request from any protocol. Whenever we call a <code>ReadAsync</code>, we receive a <code>RecvSnapshot</code>, a frozen view of the CQE metadata accumulated so far, currently this metadata only includes the number of bytes from each CQE, we need to add a <code>byte*</code> pointing to where the data is.</p>
 
 <pre><code class="language-csharp">public struct Item
 {
@@ -70,7 +68,7 @@
     (...)
 }</code></pre>
 
-                <p><code>_hasBuf</code> - True when the kernel attached a provided buffer to this completion.</p>
+                <p><code>hasBuf</code> - True when the kernel attached a provided buffer to this completion.</p>
 
                 <p><code>bid</code> - the index of the buffer slot the kernel picked from the provided-buffer ring for this recv.</p>
 
@@ -78,28 +76,20 @@
 
                 <p>So <code>ptr</code> points to the "slot" which can be calculated by knowing the buffer Id and the size of each buffer. These slots are contiguous memory allocated during initialization.</p>
 
-                <p>Now for each received CQE we store the byte* where kernel stored the received data, each <code>ReadAsync</code> will return a snapshot that contains one or more Item, each Item contains the metadata for one CQE. On the handler side we must consume this data. We don't want to be dealing with pointers though, that would force us to use unsafe everywhere we touch the received data.</p>
+                <p><code>conn.Complete</code> adds a new Item to our SPSC ring. In case you don't remember previous parts, each CQE has a "kind", <code>kind==KindRecv</code> means that this CQE signals data was received from the wire.</p>
 
-                <p>We already have the <code>ReadOnlySpan</code> view of the data via the <code>AsSpan()</code> but spans are ref structs and can't be freely used anywhere, but why is that? Spans are used to create views over stack allocated data unlike its heap allocated counterpart <code>Memory</code>/<code>ReadOnlyMemory</code>, we can't directly use <code>ReadOnlyMemory</code> either because it can't be directly created from a <code>byte*</code> even though this byte* points at heap allocated data stored in each reactor's <code>_bufSlab</code> we initialize for each reactor.</p>
+                <p>Now for each received CQE we can access the byte* where kernel stored the received data, each <code>ReadAsync</code> will return a snapshot that contains one or more Items, each Item contains the metadata for one CQE. On the handler side we must consume this data. We don't want to be dealing with pointers though, that would force us to use unsafe everywhere we touch the received data.</p>
 
-                <p>I present you <code>UnmanagedMemoryManager</code></p>
+                <p>We already have the <code>ReadOnlySpan</code> view of the data via the <code>AsSpan()</code> but spans are ref structs and can't be freely used anywhere. Why is that? Spans are used to create views over stack allocated data unlike its heap allocated counterpart <code>Memory</code>/<code>ReadOnlyMemory</code>, we can't directly use <code>ReadOnlyMemory</code> because it can't be directly created from a <code>byte*</code> even though this byte* points at unmanaged memory allocated upfront in each reactor's <code>_bufSlab</code>.</p>
 
-<pre><code class="language-csharp">public sealed unsafe class UnmanagedMemoryManager : MemoryManager&lt;byte&gt;
+                <p>Enter <code>UnmanagedMemoryManager</code></p>
+
+<pre><code class="language-csharp">internal sealed unsafe class UnmanagedMemoryManager : MemoryManager&lt;byte&gt;
 {
     private readonly byte* _ptr;
     private readonly int _length;
 
     public ushort BufferId { get; }
-
-    public byte* Ptr =&gt; _ptr;
-
-    public int Length =&gt; _length;
-
-    public UnmanagedMemoryManager(byte* ptr, int length)
-    {
-        _ptr = ptr;
-        _length = length;
-    }
 
     public UnmanagedMemoryManager(byte* ptr, int length, ushort bufferId)
     {
@@ -108,22 +98,18 @@
         BufferId = bufferId;
     }
 
-    public override Span&lt;byte&gt; GetSpan() =&gt; new Span&lt;byte&gt;(_ptr, _length);
+    public override Span&lt;byte&gt; GetSpan() =&gt; new(_ptr, _length);
 
-    public override MemoryHandle Pin(int elementIndex = 0) =&gt; new MemoryHandle(_ptr + elementIndex);
+    public override MemoryHandle Pin(int elementIndex = 0) =&gt; new(_ptr + elementIndex);
 
     public override void Unpin() { }
 
-    public void Free()
-    {
-        if (_ptr != null)
-        {
-            NativeMemory.AlignedFree(_ptr);
-        }
-    }
-
     protected override void Dispose(bool disposing) { }
 }</code></pre>
+
+                <p>Similar to Span and Memory, <code>UnmanagedMemoryManager</code> is a view over memory, the abstract method implementations are just ceremony, the data already comes pinned by default. Pin is essentially a struct construction, zero cost at runtime. It exists purely to satisfy the contract. <code>Dispose</code> is empty because the manager is a view, not an owner, the buffer's lifetime is managed by <code>BufferId</code>.</p>
+
+                <p>The actual cost is creating a new <code>UnmanagedMemoryManager</code> for each Item, this can also be avoided by pre-allocating all the possible <code>UnmanagedMemoryManager</code>s. Every bid maps to a fixed address in the slab: <code>_bufSlab + bid * BufferSize</code>. The pointer for a given bid never changes. Only <code>Len</code> varies per recv. So we can pre-allocate one manager per slot at reactor init and reuse it forever.</p>
 
                 <p><code>UnmanagedMemoryManager</code> is the bridge between safe and unsafe code, by inheriting from <code>MemoryManager</code> it can be exposed as Memory and plugged into the entire BCL ecosystem for free:</p>
 
@@ -137,9 +123,9 @@
 
                 <p>This is especially useful for <code>ReadOnlySequence</code> which is very handy when dealing with TCP fragmentation.</p>
 
-                <p>This is how zero allocation is achieved on the receiving branch, the data is written to pre-allocated slots and we directly read from them. This data can be parsed by slicing over it and is valid until we return the CQE's buffer Id as can be seen in the snipped below through conn.ReturnBuffer. After returning each buffer, the kernel may reuse that "slot" for new incoming data so its data can be invalid/overwritten.</p>
+                <p>This is how zero allocation is achieved on the receiving branch, the data is written to pre-allocated slots and we directly read from them. This data can be parsed by slicing over it and is valid until we return the CQE's buffer Id as can be seen in the snippet below through reactor.ReturnBuffer. After returning each buffer, the kernel may reuse that "slot" for new incoming data so its data can be invalid/overwritten.</p>
 
-                <p>So, how does how handler look now?</p>
+                <p>So, how does the handler look now?</p>
 
 <pre><code class="language-csharp">public static async Task HandleAsync(Reactor reactor, int fd, Connection conn)
 {
@@ -179,7 +165,7 @@
     }
 }</code></pre>
 
-                <p>The possibilites are now endless, we can build a <code>ReadOnlySequence</code> from all the data to facilitate slicing across multiple segments, also in the case of incomplete requests we can again create a <code>ReadOnlySequence</code>, call another <code>ReadAsync</code> and add the received segments to the already existing <code>ReadOnlySequence</code>.</p>
+                <p>The possibilities are now endless, we can build a <code>ReadOnlySequence</code> from all the data to facilitate slicing across multiple segments, also in the case of incomplete requests we can again create a <code>ReadOnlySequence</code>, call another <code>ReadAsync</code> and add the received segments to the already existing <code>ReadOnlySequence</code>. We'll put this to use in Part 4 when we parse a real HTTP request that spans multiple segments.</p>
             </div>
         </article>
     </main>
