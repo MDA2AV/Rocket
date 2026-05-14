@@ -123,7 +123,7 @@
 
                 <p>This is especially useful for <code>ReadOnlySequence</code> which is very handy when dealing with TCP fragmentation.</p>
 
-                <p>This is how zero allocation is achieved on the receiving branch, the data is written to pre-allocated slots and we directly read from them. This data can be parsed by slicing over it and is valid until we return the CQE's buffer Id as can be seen in the snippet below through reactor.ReturnBuffer. After returning each buffer, the kernel may reuse that "slot" for new incoming data so its data can be invalid/overwritten.</p>
+                <p>This is how zero allocation is achieved on the receiving branch, the data is written to pre-allocated slots and we directly read from them. While this is zero copy in user space, the kernel itself still copies the bytes from the socket receive buffer into <code>_bufSlab[bid]</code>, avoiding that copy requires different mechanisms (<a href="https://docs.kernel.org/networking/iou-zcrx.html">io_uring zcrx</a>) which are outside Part 3's scope. This data can be parsed by slicing over it and is valid until we return the CQE's buffer Id as can be seen in the snippet below through reactor.ReturnBuffer. After returning each buffer, the kernel may reuse that "slot" for new incoming data so its data can be invalid/overwritten.</p>
 
                 <p>So, how does the handler look now?</p>
 
