@@ -26,6 +26,13 @@
 
         <ul class="post-list">
             <li>
+                <a href="io-uring-minima-part-4.html" class="post-card">
+                    <span class="post-meta">2026-05-18 &middot; Part 4 of 5</span>
+                    <div class="post-title">C# Networking Deep Dive With io_uring &mdash; Part 4: Zero Copy Receive</div>
+                    <div class="post-excerpt">A theoretical side-quest into io_uring zero copy receive (zcrx), where the NIC DMAs payload straight into registered user memory so the kernel never copies it. A high-level Minima vs MinimaZero comparison across buffer ownership, <code>ZCRX_IFQ</code> registration, <code>RECV_ZC</code>, the 32-byte CQE token, the refill queue, and why zcrx collapses the multi-reactor model to a single ring. Scaffold only, no runnable code, since there was no zcrx-capable NIC to test on.</div>
+                </a>
+            </li>
+            <li>
                 <a href="io-uring-minima-part-3.html" class="post-card">
                     <span class="post-meta">2026-05-13 &middot; Part 3 of 5</span>
                     <div class="post-title">C# Networking Deep Dive With io_uring &mdash; Part 3: Touching the Bytes</div>
