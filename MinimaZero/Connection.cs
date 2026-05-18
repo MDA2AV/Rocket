@@ -1,7 +1,7 @@
 using System.Threading.Tasks.Sources;
-using static Minima.Native;
+using static MinimaZero.Native;
 
-namespace Minima;
+namespace MinimaZero;
 
 internal readonly struct RecvSnapshot
 {
@@ -10,10 +10,10 @@ internal readonly struct RecvSnapshot
 
     public RecvSnapshot(long tail, bool isClosed)
     {
-        Tail = tail; 
-        IsClosed = isClosed; 
+        Tail = tail;
+        IsClosed = isClosed;
     }
-    
+
     public static RecvSnapshot Closed() => new(0, isClosed: true);
 }
 
@@ -23,7 +23,7 @@ internal sealed unsafe class Connection : IValueTaskSource<RecvSnapshot>
 
     public Connection(Reactor reactor)
     {
-        _reactor = reactor; 
+        _reactor = reactor;
     }
 
     private ManualResetValueTaskSourceCore<RecvSnapshot> _readSignal;
@@ -48,7 +48,7 @@ internal sealed unsafe class Connection : IValueTaskSource<RecvSnapshot>
         {
             throw new InvalidOperationException("ReadAsync already armed.");
         }
-        
+
         _armed = 1;
 
         return new ValueTask<RecvSnapshot>(this, _readSignal.Version);
@@ -58,29 +58,23 @@ internal sealed unsafe class Connection : IValueTaskSource<RecvSnapshot>
         => _recv.TryDequeueUntil(snap.Tail, out item);
 
     public void ResetRead() => _readSignal.Reset();
-
-    public void Complete(int res, ushort bid, bool hasBuffer, byte* ptr)
+    
+    public void Complete(int res, ulong off, byte* ptr)
     {
+        bool hasBuffer = ptr != null;
+
         if (res <= 0)
         {
             _closed = 1;
-            if (hasBuffer)
-            {
-                _reactor.ReturnBuffer(bid);
-            }
+            // No chunk is associated with an error/EOF completion, so there
+            // is nothing to hand back to the refill queue here.
         }
-        else if (!_recv.TryEnqueue(new SpscRecvRing.Item
-                 {
-                     Ptr = ptr, 
-                     Bid = bid, 
-                     Len = res, 
-                     HasBuffer = hasBuffer
-                 }))
+        else if (!_recv.TryEnqueue(new SpscRecvRing.Item { Ptr = ptr, Off = off, Len = res, HasBuffer = hasBuffer }))
         {
             Console.Error.WriteLine("[conn] recv queue overflow; closing.");
             if (hasBuffer)
             {
-                _reactor.ReturnBuffer(bid);
+                _reactor.RefillRqe(off, (uint)res);
             }
             _closed = 1;
         }
@@ -95,7 +89,7 @@ internal sealed unsafe class Connection : IValueTaskSource<RecvSnapshot>
     public void MarkClosed()
     {
         _closed = 1;
-        
+
         if (_armed == 1)
         {
             _armed = 0;
@@ -111,18 +105,18 @@ internal sealed unsafe class Connection : IValueTaskSource<RecvSnapshot>
         {
             if (item.HasBuffer)
             {
-                _reactor.ReturnBuffer(item.Bid);
+                _reactor.RefillRqe(item.Off, (uint)item.Len);
             }
         }
-        
+
         _reactor.Connections.Remove(fd);
         close(fd);
     }
 
     RecvSnapshot IValueTaskSource<RecvSnapshot>.GetResult(short token) => _readSignal.GetResult(token);
-    
+
     ValueTaskSourceStatus IValueTaskSource<RecvSnapshot>.GetStatus(short token) => _readSignal.GetStatus(token);
-    
+
     void IValueTaskSource<RecvSnapshot>.OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags)
         => _readSignal.OnCompleted(continuation, state, token, flags);
 }
