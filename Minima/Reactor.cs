@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using static Minima.Native;
@@ -8,8 +9,11 @@ namespace Minima;
 
 /// <summary>
 /// One reactor = one thread + one io_uring + one listening socket (SO_REUSEPORT)
-/// + one connection map. Fully isolated from other reactors; the kernel
-/// load-balances incoming connections across all SO_REUSEPORT listeners.
+/// + one connection map. The reactor thread is the sole writer of the SQ ring,
+/// the kernel-shared buf_ring, and the connection map. Handlers may run on any
+/// thread (e.g. resumed by a thread-pool timer after `await Task.Delay(1)`);
+/// they reach the reactor only through two MPSC queues (`_returnQ`, `_flushQ`)
+/// woken by an `eventfd` registered as a multishot poll in the ring.
 /// </summary>
 internal sealed unsafe class Reactor
 {
@@ -29,6 +33,22 @@ internal sealed unsafe class Reactor
     private uint   _bufRingMask;
     private ushort _bufRingTail;
 
+    // Cross-thread wake mechanism: handlers running off-reactor enqueue work
+    // into these MPSC queues and `eventfd_write` _wakeFd; a multishot poll on
+    // _wakeFd registered with the ring delivers a CQE that wakes the reactor.
+    // When the caller is already the reactor thread (the common case — handler
+    // resumed inline from an IVTS SetResult), the Enqueue* methods bypass
+    // the queue and call the direct op, avoiding 2 syscalls per request.
+    private int _wakeFd;
+    private int _reactorThreadId;
+    private readonly ConcurrentQueue<ushort> _returnQ = new();
+    private readonly ConcurrentQueue<int>    _flushQ  = new();
+
+    // Transient io_uring_enter errnos (Linux): interrupted, would-block, busy.
+    private const int EINTR  = 4;
+    private const int EAGAIN = 11;
+    private const int EBUSY  = 16;
+
     public Reactor(int id, ushort port, uint ringEntries)
     {
         Id = id;
@@ -36,7 +56,9 @@ internal sealed unsafe class Reactor
         _ringEntries = ringEntries;
     }
 
+    // =========================================================================
     // Buffer ring
+    // =========================================================================
 
     private void InitBufferRing()
     {
@@ -54,12 +76,12 @@ internal sealed unsafe class Reactor
             ring_entries = BufferRingEntries,
             bgid         = BgId,
         };
-        
+
         int ret = io_uring_register(Ring.Fd, IORING_REGISTER_PBUF_RING, &reg, 1);
         if (ret < 0)
         {
             int err = Marshal.GetLastPInvokeError();
-            
+
             throw new InvalidOperationException($"register pbuf_ring failed: ret={ret} errno={err}");
         }
 
@@ -73,11 +95,13 @@ internal sealed unsafe class Reactor
             *(ushort*)(slot + 12) = bid;
         }
         _bufRingTail = (ushort)BufferRingEntries;
-        
+
         Volatile.Write(ref *(ushort*)(_bufRing + 14), _bufRingTail);
     }
 
-    public void ReturnBuffer(ushort bid)
+    // Reactor-thread-only: writes the kernel-shared buf_ring tail directly.
+    // Off-reactor callers must use EnqueueReturnQ instead.
+    internal void ReturnBufferDirect(ushort bid)
     {
         byte* slot = _bufRing + (_bufRingTail & _bufRingMask) * 16;
         *(ulong*)(slot + 0)  = (ulong)(_bufSlab + bid * (nuint)BufferSize);
@@ -88,33 +112,125 @@ internal sealed unsafe class Reactor
         Volatile.Write(ref *(ushort*)(_bufRing + 14), _bufRingTail);
     }
 
+    // =========================================================================
+    // Cross-thread entry points (safe to call from any thread)
+    // =========================================================================
+
+    public void EnqueueReturnQ(ushort bid)
+    {
+        // Fast path: caller is the reactor thread (handler running inline from
+        // an IVTS SetResult). Go straight to the buf_ring — no queue, no syscall.
+        if (Environment.CurrentManagedThreadId == _reactorThreadId)
+        {
+            ReturnBufferDirect(bid);
+            return;
+        }
+        _returnQ.Enqueue(bid);
+        WakeFdWrite();
+    }
+
+    internal void EnqueueFlush(int fd)
+    {
+        // Fast path: caller is the reactor thread; write the SQE directly.
+        if (Environment.CurrentManagedThreadId == _reactorThreadId)
+        {
+            if (Connections.TryGetValue(fd, out var conn))
+            {
+                SubmitSend(fd, conn.WriteBuffer, (uint)conn.WriteInFlight);
+            }
+            return;
+        }
+        _flushQ.Enqueue(fd);
+        WakeFdWrite();
+    }
+
+    private void WakeFdWrite()
+    {
+        ulong v = 1;
+        // 8-byte write to eventfd increments its counter; the kernel marks the
+        // fd readable, which fires our registered multishot poll's next CQE.
+        write(_wakeFd, &v, 8);
+    }
+
+    private void DrainReturnQ()
+    {
+        while (_returnQ.TryDequeue(out ushort bid))
+        {
+            ReturnBufferDirect(bid);
+        }
+    }
+
+    private void DrainFlushQ()
+    {
+        while (_flushQ.TryDequeue(out int fd))
+        {
+            if (!Connections.TryGetValue(fd, out var conn))
+            {
+                continue;
+            }
+            // Connection state was set by FlushAsync; the Enqueue/Dequeue pair
+            // establishes the happens-before so WriteInFlight is visible here.
+            SubmitSend(fd, conn.WriteBuffer, (uint)conn.WriteInFlight);
+        }
+    }
+
+    private void ArmWakePoll()
+    {
+        IoUringSqe* sqe = GetSqeOrFlush();
+        Unsafe.InitBlockUnaligned(sqe, 0, 64);
+        sqe->opcode    = IORING_OP_POLL_ADD;
+        sqe->fd        = _wakeFd;
+        sqe->op_flags  = POLLIN;                  // poll32_events lives at this offset
+        sqe->len       = IORING_POLL_ADD_MULTI;   // multishot — stays armed across CQEs
+        sqe->user_data = KindWake | (uint)_wakeFd;
+    }
+
+    // =========================================================================
+    // Main loop
+    // =========================================================================
+
     public void Run()
     {
+        _reactorThreadId = Environment.CurrentManagedThreadId;
+
         Ring = Ring.Create(_ringEntries);
         _listenFd = OpenReusePortListener(_port);
-        
+
         InitBufferRing();
+
+        _wakeFd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+        if (_wakeFd < 0)
+        {
+            throw new InvalidOperationException("eventfd failed");
+        }
 
         Console.WriteLine($"[r{Id}] listening on 0.0.0.0:{_port}");
         SubmitAcceptMultishot();
+        ArmWakePoll();
 
         while (true)
         {
+            // Drain MPSC queues from off-reactor handlers. Cheap when empty.
+            DrainReturnQ();
+            DrainFlushQ();
+
             int rc = Ring.SubmitAndWait(1);
-            if (rc < 0 && rc != -4 /* EINTR */)
+            if (rc < 0 && rc != -EINTR && rc != -EAGAIN && rc != -EBUSY)
             {
                 Console.Error.WriteLine($"[r{Id}] io_uring_enter failed: {rc}");
                 break;
             }
 
-            while (Ring.TryGetCqe(out IoUringCqe cqe))
+            uint ready = Ring.CqReady();
+            for (uint i = 0; i < ready; i++)
             {
-                Dispatch(in cqe);
-                Ring.CqeSeen();
+                Dispatch(in Ring.CqeAt(i));
             }
+            Ring.CqAdvance(ready);
         }
 
         close(_listenFd);
+        close(_wakeFd);
         Ring.Dispose();
     }
 
@@ -124,16 +240,31 @@ internal sealed unsafe class Reactor
         int   fd   = (int)(cqe.user_data & 0xffffffffUL);
         bool  more = (cqe.flags & IORING_CQE_F_MORE) != 0;
 
+        if (kind == KindWake)
+        {
+            // Drain the eventfd counter so the next write re-triggers POLLIN
+            // (multishot poll is edge-triggered on the user_space side).
+            ulong drain;
+            read(_wakeFd, &drain, 8);
+            // The actual queue drains happen at the top of the next loop
+            // iteration — nothing else to do here.
+            if (!more)
+            {
+                ArmWakePoll();
+            }
+            return;
+        }
+
         if (kind == KindAccept)
         {
             if (cqe.res >= 0)
             {
                 int clientFd = cqe.res;
-                var conn = new Connection(this);
+                var conn = new Connection(this, clientFd);
                 Connections[clientFd] = conn;
                 SubmitRecvMultishot(clientFd);
 
-                _ = Handler.HandleAsync(this, clientFd, conn);
+                _ = Handler.HandleAsync(this, conn);
             }
             else
             {
@@ -150,29 +281,71 @@ internal sealed unsafe class Reactor
             bool   hasBuf = (cqe.flags & IORING_CQE_F_BUFFER) != 0;
             ushort bid    = hasBuf ? (ushort)(cqe.flags >> IORING_CQE_BUFFER_SHIFT) : (ushort)0;
 
+            if (cqe.res <= 0)
+            {
+                // Peer EOF or recv error — reactor owns teardown.
+                if (hasBuf)
+                {
+                    ReturnBufferDirect(bid);
+                }
+                if (Connections.Remove(fd, out var dyingConn))
+                {
+                    dyingConn.MarkClosed();
+                    dyingConn.FreeNative();
+                    close(fd);
+                }
+                return;
+            }
+
             if (!Connections.TryGetValue(fd, out var conn))
             {
-                if (hasBuf) ReturnBuffer(bid);
-
+                // Straggler buffer for an already-closed connection.
+                if (hasBuf)
+                {
+                    ReturnBufferDirect(bid);
+                }
                 return;
             }
 
             byte* ptr = hasBuf ? _bufSlab + (nuint)bid * (nuint)BufferSize : null;
             conn.Complete(cqe.res, bid, hasBuf, ptr);
 
-            if (!more && cqe.res > 0)
+            if (!more)
             {
                 SubmitRecvMultishot(fd);
             }
         }
         else if (kind == KindSend)
         {
-            if (Connections.TryGetValue(fd, out var conn) && cqe.res <= 0)
+            if (!Connections.TryGetValue(fd, out var conn))
             {
-                conn.MarkClosed();
+                return;
             }
+            if (cqe.res <= 0)
+            {
+                // Send error — reactor owns teardown.
+                Connections.Remove(fd);
+                conn.MarkClosed();
+                conn.FreeNative();
+                close(fd);
+                return;
+            }
+            conn.WriteHead += cqe.res;
+            if (conn.WriteHead < conn.WriteInFlight)
+            {
+                // Partial send: resubmit the remainder.
+                SubmitSend(fd, conn.WriteBuffer + conn.WriteHead, (uint)(conn.WriteInFlight - conn.WriteHead));
+                return;
+            }
+            // Full target ack'd — resets buffer state and signals the awaiter.
+            conn.CompleteFlush();
         }
     }
+
+    // =========================================================================
+    // SQE producers (reactor-thread-only — Connection.FlushAsync hands off via
+    // EnqueueFlush, which DrainFlushQ turns into SubmitSend on this thread)
+    // =========================================================================
 
     private IoUringSqe* GetSqeOrFlush()
     {
@@ -181,15 +354,15 @@ internal sealed unsafe class Reactor
         {
             return sqe;
         }
-        
+
         Ring.SubmitAndWait(0);
         sqe = Ring.GetSqe();
-        
+
         if (sqe == null)
         {
             throw new InvalidOperationException("SQ full after flush");
         }
-        
+
         return sqe;
     }
 
@@ -203,7 +376,7 @@ internal sealed unsafe class Reactor
         sqe->user_data = KindAccept | (uint)_listenFd;
     }
 
-    public void SubmitRecvMultishot(int fd)
+    private void SubmitRecvMultishot(int fd)
     {
         IoUringSqe* sqe = GetSqeOrFlush();
         Unsafe.InitBlockUnaligned(sqe, 0, 64);
@@ -215,7 +388,7 @@ internal sealed unsafe class Reactor
         sqe->user_data = KindRecv | (uint)fd;
     }
 
-    public void SubmitSend(int fd, byte* buf, uint len)
+    private void SubmitSend(int fd, byte* buf, uint len)
     {
         IoUringSqe* sqe = GetSqeOrFlush();
         Unsafe.InitBlockUnaligned(sqe, 0, 64);

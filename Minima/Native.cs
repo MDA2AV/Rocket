@@ -12,6 +12,7 @@ internal static unsafe class Native {
     private const long SYS_IO_URING_ENTER    = 426;
     private const long SYS_IO_URING_REGISTER = 427;
 
+    public const byte IORING_OP_POLL_ADD = 6;
     public const byte IORING_OP_ACCEPT = 13;
     public const byte IORING_OP_SEND   = 26;
     public const byte IORING_OP_RECV   = 27;
@@ -27,6 +28,12 @@ internal static unsafe class Native {
     public const uint   IORING_CQE_F_MORE       = 1u << 1;
     public const int    IORING_CQE_BUFFER_SHIFT = 16;
     public const uint   IORING_REGISTER_PBUF_RING = 22;
+    public const uint   IORING_POLL_ADD_MULTI   = 1u << 0;
+
+    // eventfd flags + poll mask (used for the cross-thread wake mechanism).
+    public const int    EFD_CLOEXEC  = 0x80000;
+    public const int    EFD_NONBLOCK = 0x800;
+    public const uint   POLLIN       = 0x0001;
 
     // Setup flags. SINGLE_ISSUER tells the kernel only one thread will submit
     // to this ring (skips locking on the SQ). DEFER_TASKRUN defers completion
@@ -71,6 +78,9 @@ internal static unsafe class Native {
     [DllImport("libc")] public static extern int   bind(int fd, sockaddr_in* addr, uint len);
     [DllImport("libc")] public static extern int   listen(int fd, int backlog);
     [DllImport("libc")] public static extern int   setsockopt(int fd, int level, int optname, void* optval, uint optlen);
+    [DllImport("libc")] public static extern int   eventfd(uint initval, int flags);
+    [DllImport("libc")] public static extern long  write(int fd, void* buf, nuint count);
+    [DllImport("libc")] public static extern long  read(int fd, void* buf, nuint count);
 
     public static ushort Htons(ushort x) => (ushort)((x << 8) | (x >> 8));
     

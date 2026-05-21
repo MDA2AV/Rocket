@@ -142,6 +142,19 @@ internal sealed unsafe class Ring : IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void CqeSeen() => Volatile.Write(ref *_cqHead, *_cqHead + 1);
 
+    // Batched CQ drain (liburing io_uring_for_each_cqe + io_uring_cq_advance):
+    // read the kernel-written tail once (acquire), process the whole batch,
+    // then publish the consumed head once (release) instead of once per CQE.
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public uint CqReady() => Volatile.Read(ref *_cqTail) - *_cqHead;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public ref readonly IoUringCqe CqeAt(uint i) => ref _cqes[(*_cqHead + i) & _cqMask];
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void CqAdvance(uint n) => Volatile.Write(ref *_cqHead, *_cqHead + n);
+
     public void Dispose()
     {
         if (_ringPtr != null)

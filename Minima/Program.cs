@@ -1,5 +1,3 @@
-using System.Runtime.InteropServices;
-
 namespace Minima;
 
 /// <summary>
@@ -19,19 +17,13 @@ internal static unsafe class Program
     internal const ulong KindAccept = 1UL << 32;
     internal const ulong KindRecv   = 2UL << 32;
     internal const ulong KindSend   = 3UL << 32;
+    internal const ulong KindWake   = 4UL << 32;  // eventfd-based cross-thread wake
 
-    // Pre-built HTTP/1.1 response shared across all reactors
-    internal static byte* s_responseBytes;
-    internal static int   s_responseLen;
-
-    private static ReadOnlySpan<byte> s_response => "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok"u8;
+    internal static ReadOnlySpan<byte> Response =>
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok"u8;
 
     private static int Main()
     {
-        s_responseLen = s_response.Length;
-        s_responseBytes = (byte*)NativeMemory.Alloc((nuint)s_responseLen);
-        s_response.CopyTo(new Span<byte>(s_responseBytes, s_responseLen));
-
         var n = 12;
         Console.WriteLine($"[Minima] starting {n} reactors on port {Port}");
 
@@ -59,13 +51,15 @@ internal static unsafe class Program
 
 internal static class Handler
 {
-    public static async Task HandleAsync(Reactor reactor, int fd, Connection conn)
+    public static async Task HandleAsync(Reactor reactor, Connection conn)
     {
         try
         {
             while (true)
             {
                 RecvSnapshot snap = await conn.ReadAsync();
+
+                await Task.Delay(0);
 
                 while (conn.TryGetItem(snap, out SpscRecvRing.Item item))
                 {
@@ -76,14 +70,22 @@ internal static class Handler
                         // data is now usable with any BCL Memory<byte>/async API
                         _ = data.Length;
 
-                        reactor.ReturnBuffer(mem.BufferId);
+                        // Cross-thread safe: the handler may not be on the
+                        // reactor thread (e.g. after `await Task.Delay(...)`),
+                        // so we enqueue rather than touching the buf_ring.
+                        reactor.EnqueueReturnQ(mem.BufferId);
                     }
-                    conn.QueueResponse(fd);
                 }
+
+                // One response per recv burst — accumulate in the connection's
+                // per-connection write slab, then submit and await ack.
+                conn.Write(Program.Response);
+                await conn.FlushAsync();
 
                 if (snap.IsClosed)
                 {
-                    conn.Close(fd);
+                    // Reactor already owns teardown (Connections.Remove + close
+                    // happens in Dispatch's recv-error branch); we just exit.
                     return;
                 }
 
@@ -92,8 +94,9 @@ internal static class Handler
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[r{reactor.Id}] handler crash on fd={fd}: {ex}");
-            conn.Close(fd);
+            Console.Error.WriteLine($"[r{reactor.Id}] handler crash on fd={conn.ClientFd}: {ex}");
+            // Reactor will clean the connection up via the recv-error path
+            // (or SPSC overflow) on the next CQE for this fd.
         }
     }
 }
