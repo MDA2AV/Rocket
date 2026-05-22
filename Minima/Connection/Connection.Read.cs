@@ -80,7 +80,8 @@ internal sealed unsafe partial class Connection : IValueTaskSource<RecvSnapshot>
                      Ptr = ptr,
                      Bid = bid,
                      Len = res,
-                     HasBuffer = hasBuffer
+                     HasBuffer = hasBuffer,
+                     Gen = (ushort)Volatile.Read(ref _generation)
                  }))
         {
             Console.Error.WriteLine("[conn] recv queue overflow.");

@@ -69,6 +69,9 @@ internal sealed unsafe partial class Connection
 
         _readSignal.Reset();
         _flushSignal.Reset();
+
+        _recv.Reset();             // discard any leftover SPSC items
+        IncrementalMode = false;   // per-conn ring (if any) was torn down before Clear
     }
 
     public void Dispose()
@@ -78,5 +81,6 @@ internal sealed unsafe partial class Connection
             NativeMemory.AlignedFree(WriteBuffer);
             WriteBuffer = null;
         }
+        DisposeIncremental();
     }
 }

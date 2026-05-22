@@ -27,8 +27,15 @@ internal static unsafe class Native {
     public const uint   IORING_CQE_F_BUFFER     = 1u << 0;
     public const uint   IORING_CQE_F_MORE       = 1u << 1;
     public const int    IORING_CQE_BUFFER_SHIFT = 16;
-    public const uint   IORING_REGISTER_PBUF_RING = 22;
+    public const uint   IORING_REGISTER_PBUF_RING   = 22;
+    public const uint   IORING_UNREGISTER_PBUF_RING = 23;
     public const uint   IORING_POLL_ADD_MULTI   = 1u << 0;
+
+    // Incremental provided-buffer consumption (kernel 6.12+). IOU_PBUF_RING_INC
+    // is set in io_uring_buf_reg.flags at registration; IORING_CQE_F_BUF_MORE is
+    // set on recv CQEs while the kernel will keep appending to the same buffer.
+    public const ushort IOU_PBUF_RING_INC     = 2;
+    public const uint   IORING_CQE_F_BUF_MORE = 1u << 4;
 
     // eventfd flags + poll mask (used for the cross-thread wake mechanism).
     public const int    EFD_CLOEXEC  = 0x80000;

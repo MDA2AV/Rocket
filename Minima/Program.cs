@@ -16,6 +16,10 @@ internal static unsafe class Program
     private const uint   RingEntries = 8192;
     internal const int   BufferSize = 32 * 1024;
 
+    // Per-reactor toggle: false = one shared buf_ring (simple path); true =
+    // per-connection rings with incremental consumption (IOU_PBUF_RING_INC).
+    private const bool   Incremental = true;
+
     // user_data layout: kind in high 32 bits, fd in low 32 bits.
     internal const ulong KindAccept = 1UL << 32;
     internal const ulong KindRecv   = 2UL << 32;
@@ -33,7 +37,7 @@ internal static unsafe class Program
         var threads = new Thread[n];
         for (var i = 0; i < n; i++)
         {
-            var reactor = new Reactor(i, Port, RingEntries);
+            var reactor = new Reactor(i, Port, RingEntries, Incremental);
             
             threads[i] = new Thread(reactor.Run)
             {
@@ -73,10 +77,9 @@ internal static class Handler
                         // data is now usable with any BCL Memory<byte>/async API
                         _ = data.Length;
 
-                        // Cross-thread safe: the handler may not be on the
-                        // reactor thread (e.g. after `await Task.Delay(...)`),
-                        // so we enqueue rather than touching the buf_ring.
-                        reactor.EnqueueReturnQ(mem.BufferId);
+                        // Cross-thread safe and mode-agnostic: routes to the
+                        // shared-ring return or the incremental refcounted return.
+                        conn.ReturnBuffer(in item);
                     }
                 }
 

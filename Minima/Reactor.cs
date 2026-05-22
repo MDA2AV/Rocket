@@ -15,7 +15,7 @@ namespace Minima;
 /// they reach the reactor only through two MPSC queues (`_returnQ`, `_flushQ`)
 /// woken by an `eventfd` registered as a multishot poll in the ring.
 /// </summary>
-internal sealed unsafe class Reactor
+internal sealed unsafe partial class Reactor
 {
     public readonly int Id;
     public Ring Ring = null!;   // created on the reactor's own thread (DEFER_TASKRUN requires same-thread setup+enter)
@@ -24,6 +24,7 @@ internal sealed unsafe class Reactor
     private int _listenFd;
     private readonly ushort _port;
     private readonly uint _ringEntries;
+    private readonly bool _incremental;
 
     // Provided-buffer ring (one per reactor, shared by all its connections).
     private const ushort BgId = 1;
@@ -51,16 +52,26 @@ internal sealed unsafe class Reactor
     private const int PoolMax = 1024;
     private readonly Stack<Connection.Connection> _pool = new(PoolMax);
 
+    // Incremental-mode (IOU_PBUF_RING_INC) sizing. Each connection gets its own
+    // ring, so reserved native memory is bounded by:
+    //   PoolMax × ConnBufRingEntries × IncRecvBufferSize × ReactorCount.
+    // Keep entries small — the point of incremental is that one buffer holds
+    // many reads, so you need few of them per connection.
+    private const int MaxConnections     = 4096;   // GID cap (one bgid per active connection)
+    private const int ConnBufRingEntries = 16;     // buffers per connection ring
+    private const int IncRecvBufferSize  = 4096;   // bytes per buffer (filled incrementally)
+
     // Transient io_uring_enter errnos (Linux): interrupted, would-block, busy.
     private const int EINTR  = 4;
     private const int EAGAIN = 11;
     private const int EBUSY  = 16;
 
-    public Reactor(int id, ushort port, uint ringEntries)
+    public Reactor(int id, ushort port, uint ringEntries, bool incremental = false)
     {
         Id = id;
         _port = port;
         _ringEntries = ringEntries;
+        _incremental = incremental;
     }
 
     // =========================================================================
@@ -207,7 +218,10 @@ internal sealed unsafe class Reactor
         Ring = Ring.Create(_ringEntries);
         _listenFd = OpenReusePortListener(_port);
 
-        InitBufferRing();
+        if (_incremental)
+            InitIncremental();
+        else
+            InitBufferRing();
 
         _wakeFd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
         if (_wakeFd < 0)
@@ -215,10 +229,22 @@ internal sealed unsafe class Reactor
             throw new InvalidOperationException("eventfd failed");
         }
 
-        Console.WriteLine($"[r{Id}] listening on 0.0.0.0:{_port}");
+        Console.WriteLine($"[r{Id}] listening on 0.0.0.0:{_port} (incremental={_incremental})");
         SubmitAcceptMultishot();
         ArmWakePoll();
 
+        if (_incremental)
+            LoopIncremental();
+        else
+            LoopShared();
+
+        close(_listenFd);
+        close(_wakeFd);
+        Ring.Dispose();
+    }
+
+    private void LoopShared()
+    {
         while (true)
         {
             // Drain MPSC queues from off-reactor handlers. Cheap when empty.
@@ -239,10 +265,6 @@ internal sealed unsafe class Reactor
             }
             Ring.CqAdvance(ready);
         }
-
-        close(_listenFd);
-        close(_wakeFd);
-        Ring.Dispose();
     }
 
     private void Dispatch(in IoUringCqe cqe)
@@ -385,7 +407,9 @@ internal sealed unsafe class Reactor
         sqe->user_data = KindAccept | (uint)_listenFd;
     }
 
-    private void SubmitRecvMultishot(int fd)
+    private void SubmitRecvMultishot(int fd) => SubmitRecvMultishot(fd, BgId);
+
+    private void SubmitRecvMultishot(int fd, ushort bgid)
     {
         IoUringSqe* sqe = GetSqeOrFlush();
         Unsafe.InitBlockUnaligned(sqe, 0, 64);
@@ -393,7 +417,7 @@ internal sealed unsafe class Reactor
         sqe->flags     = IOSQE_BUFFER_SELECT;
         sqe->ioprio    = IORING_RECV_MULTISHOT;
         sqe->fd        = fd;
-        sqe->buf_index = BgId;          // same offset as buf_group in the kernel union
+        sqe->buf_index = bgid;          // buffer-group id (shared BgId, or per-conn in incremental)
         sqe->user_data = KindRecv | (uint)fd;
     }
 
@@ -414,10 +438,19 @@ internal sealed unsafe class Reactor
         // and either push the Connection back to the pool or free its native
         // WriteBuffer if the pool is full.
         conn.MarkClosed();
-        conn.DrainRecv();
+        if (_incremental)
+        {
+            // The per-connection ring is freed wholesale; no per-buffer return.
+            // Clear() empties the SPSC ring (leftover slices discarded).
+            TeardownConnectionBufRing(conn);
+        }
+        else
+        {
+            conn.DrainRecv();   // return leftover buffers to the shared ring
+        }
         close(fd);
         conn.Clear();
-        
+
         if (_pool.Count < PoolMax)
         {
             _pool.Push(conn);
