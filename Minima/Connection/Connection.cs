@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
+using Minima.Utils;
 
-namespace Minima.Connection;
+namespace Minima;
 
 internal sealed unsafe partial class Connection 
 {
@@ -18,6 +19,8 @@ internal sealed unsafe partial class Connection
         ClientFd = fd;
         _writeSlabSize = writeSlabSize;
         WriteBuffer = (byte*)NativeMemory.AlignedAlloc((nuint)writeSlabSize, 64);
+        
+        _manager = new UnmanagedMemoryManager(WriteBuffer, writeSlabSize);
     }
     
     // =========================================================================

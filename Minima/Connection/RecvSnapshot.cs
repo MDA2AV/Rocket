@@ -1,4 +1,4 @@
-namespace Minima.Connection;
+namespace Minima;
 
 internal readonly struct RecvSnapshot
 {

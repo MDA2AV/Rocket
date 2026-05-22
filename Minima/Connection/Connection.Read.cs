@@ -3,7 +3,7 @@ using Minima.Utils;
 
 // ReSharper disable SuggestVarOrType_BuiltInTypes
 
-namespace Minima.Connection;
+namespace Minima;
 
 /// <summary>
 /// Per-connection state. The handler may run on any thread (e.g. resumed by

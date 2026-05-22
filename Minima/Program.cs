@@ -1,4 +1,3 @@
-using Minima.Connection;
 using Minima.Utils;
 
 namespace Minima;
@@ -18,7 +17,7 @@ internal static unsafe class Program
 
     // Per-reactor toggle: false = one shared buf_ring (simple path); true =
     // per-connection rings with incremental consumption (IOU_PBUF_RING_INC).
-    private const bool   Incremental = true;
+    private const bool   Incremental = false;
 
     // user_data layout: kind in high 32 bits, fd in low 32 bits.
     internal const ulong KindAccept = 1UL << 32;
@@ -58,15 +57,13 @@ internal static unsafe class Program
 
 internal static class Handler
 {
-    public static async Task HandleAsync(Reactor reactor, Connection.Connection conn)
+    public static async Task HandleAsync(Reactor reactor, Connection conn)
     {
         try
         {
             while (true)
             {
                 RecvSnapshot snap = await conn.ReadAsync();
-
-                await Task.Delay(0);
 
                 while (conn.TryGetItem(snap, out SpscRecvRing.Item item))
                 {

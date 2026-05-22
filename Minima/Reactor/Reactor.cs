@@ -19,7 +19,7 @@ internal sealed unsafe partial class Reactor
 {
     public readonly int Id;
     public Ring Ring = null!;   // created on the reactor's own thread (DEFER_TASKRUN requires same-thread setup+enter)
-    public readonly Dictionary<int, Connection.Connection> Connections = new();
+    public readonly Dictionary<int,Connection> Connections = new();
 
     private int _listenFd;
     private readonly ushort _port;
@@ -42,15 +42,15 @@ internal sealed unsafe partial class Reactor
     // the queue and call the direct op, avoiding 2 syscalls per request.
     private int _wakeFd;
     private int _reactorThreadId;
-    private readonly MpscUshortQueue _returnQ = new(1 << 14);   // 16384 slots
-    private readonly MpscIntQueue    _flushQ  = new(1 << 12);   // 4096 slots
+    private readonly Mpsc<ushort> _returnQ = new(1 << 14);   // 16384 slots
+    private readonly Mpsc<int>    _flushQ  = new(1 << 12);   // 4096 slots
 
     // Connection pool. Reactor-thread-only — accept and teardown both run on
     // this reactor, so a plain Stack<T> is sufficient (no MPMC primitive
     // needed). PoolMax caps the slab footprint per reactor:
     //   PoolMax × WriteSlabSize × ReactorCount = total reserved native memory.
     private const int PoolMax = 1024;
-    private readonly Stack<Connection.Connection> _pool = new(PoolMax);
+    private readonly Stack<Connection> _pool = new(PoolMax);
 
     // Incremental-mode (IOU_PBUF_RING_INC) sizing. Each connection gets its own
     // ring, so reserved native memory is bounded by:
@@ -145,7 +145,9 @@ internal sealed unsafe partial class Reactor
         }
         SpinWait sw = default;
         while (!_returnQ.TryEnqueue(bid))
+        {
             sw.SpinOnce();
+        }
         WakeFdWrite();
     }
 
@@ -162,7 +164,9 @@ internal sealed unsafe partial class Reactor
         }
         SpinWait sw = default;
         while (!_flushQ.TryEnqueue(fd))
+        {
             sw.SpinOnce();
+        }
         WakeFdWrite();
     }
 
@@ -219,9 +223,13 @@ internal sealed unsafe partial class Reactor
         _listenFd = OpenReusePortListener(_port);
 
         if (_incremental)
+        {
             InitIncremental();
+        }
         else
+        {
             InitBufferRing();
+        }
 
         _wakeFd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
         if (_wakeFd < 0)
@@ -234,9 +242,13 @@ internal sealed unsafe partial class Reactor
         ArmWakePoll();
 
         if (_incremental)
+        {
             LoopIncremental();
+        }
         else
+        {
             LoopShared();
+        }
 
         close(_listenFd);
         close(_wakeFd);
@@ -293,9 +305,10 @@ internal sealed unsafe partial class Reactor
             if (cqe.res >= 0)
             {
                 int clientFd = cqe.res;
-                Connection.Connection conn = _pool.TryPop(out var pooled)
+                SetNoDelay(clientFd);
+                Connection conn = _pool.TryPop(out var pooled)
                     ? pooled.SetFd(clientFd)
-                    : new Connection.Connection(this, clientFd);
+                    : new Connection(this, clientFd);
                 Connections[clientFd] = conn;
                 SubmitRecvMultishot(clientFd);
 
@@ -432,7 +445,7 @@ internal sealed unsafe partial class Reactor
         sqe->user_data = KindSend | (uint)fd;
     }
 
-    private void Recycle(Connection.Connection conn, int fd)
+    private void Recycle(Connection conn, int fd)
     {
         // Wake awaiters, drain in-flight buffers, close the fd, reset state,
         // and either push the Connection back to the pool or free its native
@@ -459,6 +472,15 @@ internal sealed unsafe partial class Reactor
         {
             conn.Dispose();
         }
+    }
+
+    // Disable Nagle on an accepted connection. Must be set per-accepted-socket,
+    // not on the listener — TCP_NODELAY doesn't reliably inherit across accept,
+    // which is why zerg/terraform/rtr all set it on the client fd, not the listener.
+    private static void SetNoDelay(int fd)
+    {
+        int one = 1;
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(int));
     }
 
     private static int OpenReusePortListener(ushort port)

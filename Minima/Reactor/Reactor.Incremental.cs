@@ -16,7 +16,7 @@ namespace Minima;
 internal sealed unsafe partial class Reactor
 {
     private Stack<ushort>?  _freeGids;
-    private MpscUlongQueue? _returnQInc;
+    private Mpsc<ulong>? _returnQInc;
 
     private void InitIncremental()
     {
@@ -25,7 +25,7 @@ internal sealed unsafe partial class Reactor
         for (int g = MaxConnections + 1; g >= 2; g--)
             _freeGids.Push((ushort)g);
 
-        _returnQInc = new MpscUlongQueue(1 << 16);
+        _returnQInc = new Mpsc<ulong>(1 << 16);
     }
 
     private ushort AllocGid() => _freeGids!.Pop();
@@ -35,7 +35,7 @@ internal sealed unsafe partial class Reactor
     // Per-connection ring lifecycle
     // =========================================================================
 
-    private void SetupConnectionBufRing(Connection.Connection conn)
+    private void SetupConnectionBufRing(Connection conn)
     {
         ushort gid = AllocGid();
         int entries = ConnBufRingEntries;
@@ -82,7 +82,7 @@ internal sealed unsafe partial class Reactor
         Volatile.Write(ref *(ushort*)(conn.BufRing + 14), (ushort)entries);
     }
 
-    private void TeardownConnectionBufRing(Connection.Connection conn)
+    private void TeardownConnectionBufRing(Connection conn)
     {
         if (conn.IncrementalMode)
         {
@@ -94,7 +94,7 @@ internal sealed unsafe partial class Reactor
     }
 
     // Re-add a fully-consumed buffer to its connection's ring (reactor-thread only).
-    private static void ReturnConnectionBuffer(Connection.Connection conn, ushort bid)
+    private static void ReturnConnectionBuffer(Connection conn, ushort bid)
     {
         conn.CumOffset![bid]  = 0;
         conn.RefCount![bid]   = 0;
@@ -112,6 +112,18 @@ internal sealed unsafe partial class Reactor
     // Refcounted return path (handler → reactor), carrying (fd, gen, bid)
     // =========================================================================
 
+    // (fd, gen, bid) packed into one ulong for the incremental return queue:
+    // fd in the high 32 bits, gen in the next 16, bid in the low 16.
+    private static ulong PackReturn(int fd, ushort gen, ushort bid)
+        => ((ulong)(uint)fd << 32) | ((ulong)gen << 16) | bid;
+
+    private static void UnpackReturn(ulong packed, out int fd, out ushort gen, out ushort bid)
+    {
+        fd  = (int)(packed >> 32);
+        gen = (ushort)((packed >> 16) & 0xFFFF);
+        bid = (ushort)(packed & 0xFFFF);
+    }
+
     public void EnqueueReturnQIncremental(int fd, ushort gen, ushort bid)
     {
         // Fast path: caller is the reactor thread (handler resumed inline).
@@ -120,12 +132,10 @@ internal sealed unsafe partial class Reactor
             ApplyReturnIncremental(fd, gen, bid);
             return;
         }
-        ulong packed = MpscUlongQueue.Pack(fd, gen, bid);
+        ulong packed = PackReturn(fd, gen, bid);
         SpinWait sw = default;
         while (!_returnQInc!.TryEnqueue(packed))
-        {
             sw.SpinOnce();
-        }
         WakeFdWrite();
     }
 
@@ -133,7 +143,7 @@ internal sealed unsafe partial class Reactor
     {
         while (_returnQInc!.TryDequeue(out ulong packed))
         {
-            MpscUlongQueue.Unpack(packed, out int fd, out ushort gen, out ushort bid);
+            UnpackReturn(packed, out int fd, out ushort gen, out ushort bid);
             ApplyReturnIncremental(fd, gen, bid);
         }
     }
@@ -206,9 +216,10 @@ internal sealed unsafe partial class Reactor
             if (cqe.res >= 0)
             {
                 int clientFd = cqe.res;
-                Connection.Connection conn = _pool.TryPop(out var pooled)
+                SetNoDelay(clientFd);
+                Connection conn = _pool.TryPop(out var pooled)
                     ? pooled.SetFd(clientFd)
-                    : new Connection.Connection(this, clientFd);
+                    : new Connection(this, clientFd);
                 Connections[clientFd] = conn;
                 SetupConnectionBufRing(conn);
                 SubmitRecvMultishot(clientFd, conn.Bgid);

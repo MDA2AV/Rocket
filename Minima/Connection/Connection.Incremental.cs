@@ -2,7 +2,7 @@ using System.Runtime.InteropServices;
 using Minima.Utils;
 // ReSharper disable SuggestVarOrType_BuiltInTypes
 
-namespace Minima.Connection;
+namespace Minima;
 
 /// <summary>
 /// Incremental-mode (IOU_PBUF_RING_INC) per-connection buffer-ring state.

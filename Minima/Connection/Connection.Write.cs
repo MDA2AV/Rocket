@@ -1,8 +1,10 @@
 using System.Buffers;
 using System.Threading.Tasks.Sources;
+using Minima.Utils;
+
 // ReSharper disable SuggestVarOrType_BuiltInTypes
 
-namespace Minima.Connection;
+namespace Minima;
 
 internal sealed unsafe partial class Connection : IValueTaskSource, IBufferWriter<byte>
 {
@@ -11,6 +13,8 @@ internal sealed unsafe partial class Connection : IValueTaskSource, IBufferWrite
     internal int   WriteHead;
     internal int   WriteTail;
     internal int   WriteInFlight;
+    
+    private readonly UnmanagedMemoryManager _manager;
 
     private ManualResetValueTaskSourceCore<bool> _flushSignal = new()
     {
@@ -24,7 +28,18 @@ internal sealed unsafe partial class Connection : IValueTaskSource, IBufferWrite
     
     public Memory<byte> GetMemory(int sizeHint = 0)
     {
-        throw new NotImplementedException();
+        if (Volatile.Read(ref _flushInProgress) != 0)
+        {
+            throw new InvalidOperationException("Cannot write while flush is in progress.");
+        }
+
+        int remaining = _writeSlabSize - WriteTail;
+        if (sizeHint > remaining)
+        {
+            throw new InvalidOperationException("Buffer too small.");
+        }
+
+        return _manager.Memory.Slice(WriteTail, remaining);
     }
 
     public Span<byte> GetSpan(int sizeHint = 0)
@@ -45,7 +60,9 @@ internal sealed unsafe partial class Connection : IValueTaskSource, IBufferWrite
     public void Advance(int count)
     {
         if (Volatile.Read(ref _flushInProgress) != 0)
+        {
             throw new InvalidOperationException("Cannot write while flush is in progress.");
+        }
 
         WriteTail += count;
     }
