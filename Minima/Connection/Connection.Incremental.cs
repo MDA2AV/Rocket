@@ -26,7 +26,7 @@ public sealed unsafe partial class Connection
     internal int[]?  RefCount;         // per-bid: outstanding handler refs
     internal bool[]? KernelDone;       // per-bid: kernel finished appending (no F_BUF_MORE)
 
-    internal int Generation => Volatile.Read(ref _generation);
+    internal int Generation => Volatile.Read(ref _generation); 
 
     /// <summary>
     /// Called by the handler to hand a consumed recv buffer back. Routes by mode:
