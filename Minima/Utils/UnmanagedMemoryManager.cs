@@ -1,6 +1,6 @@
 using System.Buffers;
 
-namespace Minima;
+namespace Minima.Utils;
 
 internal sealed unsafe class UnmanagedMemoryManager : MemoryManager<byte>
 {

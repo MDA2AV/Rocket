@@ -1,7 +1,8 @@
 using System.Runtime.CompilerServices;
+
 // ReSharper disable SuggestVarOrType_BuiltInTypes
 
-namespace Minima;
+namespace Minima.Utils;
 
 internal sealed unsafe class SpscRecvRing
 {

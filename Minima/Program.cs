@@ -1,3 +1,6 @@
+using Minima.Connection;
+using Minima.Utils;
+
 namespace Minima;
 
 /// <summary>
@@ -51,7 +54,7 @@ internal static unsafe class Program
 
 internal static class Handler
 {
-    public static async Task HandleAsync(Reactor reactor, Connection conn)
+    public static async Task HandleAsync(Reactor reactor, Connection.Connection conn)
     {
         try
         {

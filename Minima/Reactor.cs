@@ -1,6 +1,6 @@
-using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using Minima.Utils;
 using static Minima.Native;
 using static Minima.Program;
 // ReSharper disable SuggestVarOrType_BuiltInTypes
@@ -19,7 +19,7 @@ internal sealed unsafe class Reactor
 {
     public readonly int Id;
     public Ring Ring = null!;   // created on the reactor's own thread (DEFER_TASKRUN requires same-thread setup+enter)
-    public readonly Dictionary<int, Connection> Connections = new();
+    public readonly Dictionary<int, Connection.Connection> Connections = new();
 
     private int _listenFd;
     private readonly ushort _port;
@@ -41,8 +41,15 @@ internal sealed unsafe class Reactor
     // the queue and call the direct op, avoiding 2 syscalls per request.
     private int _wakeFd;
     private int _reactorThreadId;
-    private readonly ConcurrentQueue<ushort> _returnQ = new();
-    private readonly ConcurrentQueue<int>    _flushQ  = new();
+    private readonly MpscUshortQueue _returnQ = new(1 << 14);   // 16384 slots
+    private readonly MpscIntQueue    _flushQ  = new(1 << 12);   // 4096 slots
+
+    // Connection pool. Reactor-thread-only — accept and teardown both run on
+    // this reactor, so a plain Stack<T> is sufficient (no MPMC primitive
+    // needed). PoolMax caps the slab footprint per reactor:
+    //   PoolMax × WriteSlabSize × ReactorCount = total reserved native memory.
+    private const int PoolMax = 1024;
+    private readonly Stack<Connection.Connection> _pool = new(PoolMax);
 
     // Transient io_uring_enter errnos (Linux): interrupted, would-block, busy.
     private const int EINTR  = 4;
@@ -125,7 +132,9 @@ internal sealed unsafe class Reactor
             ReturnBufferDirect(bid);
             return;
         }
-        _returnQ.Enqueue(bid);
+        SpinWait sw = default;
+        while (!_returnQ.TryEnqueue(bid))
+            sw.SpinOnce();
         WakeFdWrite();
     }
 
@@ -140,7 +149,9 @@ internal sealed unsafe class Reactor
             }
             return;
         }
-        _flushQ.Enqueue(fd);
+        SpinWait sw = default;
+        while (!_flushQ.TryEnqueue(fd))
+            sw.SpinOnce();
         WakeFdWrite();
     }
 
@@ -260,7 +271,9 @@ internal sealed unsafe class Reactor
             if (cqe.res >= 0)
             {
                 int clientFd = cqe.res;
-                var conn = new Connection(this, clientFd);
+                Connection.Connection conn = _pool.TryPop(out var pooled)
+                    ? pooled.SetFd(clientFd)
+                    : new Connection.Connection(this, clientFd);
                 Connections[clientFd] = conn;
                 SubmitRecvMultishot(clientFd);
 
@@ -290,9 +303,7 @@ internal sealed unsafe class Reactor
                 }
                 if (Connections.Remove(fd, out var dyingConn))
                 {
-                    dyingConn.MarkClosed();
-                    dyingConn.FreeNative();
-                    close(fd);
+                    Recycle(dyingConn, fd);
                 }
                 return;
             }
@@ -325,9 +336,7 @@ internal sealed unsafe class Reactor
             {
                 // Send error — reactor owns teardown.
                 Connections.Remove(fd);
-                conn.MarkClosed();
-                conn.FreeNative();
-                close(fd);
+                Recycle(conn, fd);
                 return;
             }
             conn.WriteHead += cqe.res;
@@ -397,6 +406,26 @@ internal sealed unsafe class Reactor
         sqe->addr      = (ulong)buf;
         sqe->len       = len;
         sqe->user_data = KindSend | (uint)fd;
+    }
+
+    private void Recycle(Connection.Connection conn, int fd)
+    {
+        // Wake awaiters, drain in-flight buffers, close the fd, reset state,
+        // and either push the Connection back to the pool or free its native
+        // WriteBuffer if the pool is full.
+        conn.MarkClosed();
+        conn.DrainRecv();
+        close(fd);
+        conn.Clear();
+        
+        if (_pool.Count < PoolMax)
+        {
+            _pool.Push(conn);
+        }
+        else
+        {
+            conn.Dispose();
+        }
     }
 
     private static int OpenReusePortListener(ushort port)

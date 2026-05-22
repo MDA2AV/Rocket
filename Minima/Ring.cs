@@ -132,10 +132,12 @@ internal sealed unsafe class Ring : IDisposable
         if (head == tail)
         {
             cqe = default; 
+            
             return false; 
         }
 
         cqe = _cqes[head & _cqMask];
+        
         return true;
     }
     
