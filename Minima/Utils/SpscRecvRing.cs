@@ -4,7 +4,7 @@ using System.Runtime.CompilerServices;
 
 namespace Minima.Utils;
 
-internal sealed unsafe class SpscRecvRing
+public sealed unsafe class SpscRecvRing
 {
     public struct Item
     {

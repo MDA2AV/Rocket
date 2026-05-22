@@ -6,7 +6,7 @@ using Minima.Utils;
 
 namespace Minima;
 
-internal sealed unsafe partial class Connection : IValueTaskSource, IBufferWriter<byte>
+public sealed unsafe partial class Connection : IValueTaskSource, IBufferWriter<byte>
 {
     private readonly int _writeSlabSize;
     internal byte* WriteBuffer;

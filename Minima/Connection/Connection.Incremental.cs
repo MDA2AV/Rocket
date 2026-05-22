@@ -13,7 +13,7 @@ namespace Minima;
 ///
 /// All of these stay allocated across pool reuse and are freed in Dispose().
 /// </summary>
-internal sealed unsafe partial class Connection
+public sealed unsafe partial class Connection
 {
     internal byte*   BufRing;          // kernel-shared ring control area
     internal byte*   BufSlab;          // this connection's recv slab

@@ -1,8 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 // ReSharper disable SuggestVarOrType_BuiltInTypes
-// ReSharper disable SuggestVarOrType_Elsewhere
-// ReSharper disable SuggestVarOrType_SimpleTypes
 
 namespace Minima.Utils;
 
@@ -11,15 +9,14 @@ namespace Minima.Utils;
 ///
 /// Dmitry Vyukov's bounded MPMC algorithm, specialised to one consumer.
 /// Power-of-two capacity, zero-allocation after construction. Producers claim a
-/// slot via CAS on the enqueue position (so a failed TryEnqueue on a full queue
+/// slot via CAS on the enqueue position (a failed TryEnqueue on a full queue
 /// leaves the position untouched — no burned tickets); the single consumer
 /// advances the dequeue position with a plain write. Each slot carries a
 /// sequence number that coordinates ownership between producers and consumer.
 ///
 /// One generic queue serves every reactor handoff: Mpsc&lt;ushort&gt; for buffer
 /// returns, Mpsc&lt;int&gt; for flush fds, Mpsc&lt;ulong&gt; for packed incremental
-/// returns. T is constrained to unmanaged so each Cell stays a blittable value
-/// type with no GC references.
+/// returns. T is unmanaged so each Cell is a blittable value type with no GC refs.
 /// </summary>
 internal sealed class Mpsc<T> where T : unmanaged
 {
@@ -29,34 +26,24 @@ internal sealed class Mpsc<T> where T : unmanaged
         public T    Value;
     }
 
-    // 64-byte padding keeps the producer and consumer positions off the same
-    // cache line, avoiding false sharing between enqueue and dequeue.
-    [StructLayout(LayoutKind.Explicit, Size = 64)]
-    private struct PaddedLong
-    {
-        [FieldOffset(0)] public long Value;
-    }
-
     private readonly Cell[] _buffer;
     private readonly int    _mask;
 
+    // PaddedLong is a top-level struct (not nested here) because the CLR forbids
+    // explicit layout on a type nested inside a generic.
     private PaddedLong _enqueuePos;
     private PaddedLong _dequeuePos;
 
     public Mpsc(int capacityPow2)
     {
         if (capacityPow2 < 2 || (capacityPow2 & (capacityPow2 - 1)) != 0)
-        {
             throw new ArgumentException("Capacity must be a power of two >= 2.", nameof(capacityPow2));
-        }
 
         _buffer = new Cell[capacityPow2];
         _mask   = capacityPow2 - 1;
 
         for (int i = 0; i < capacityPow2; i++)
-        {
             _buffer[i].Sequence = i;
-        }
     }
 
     /// <summary>Multi-producer safe. Returns false if the queue is full.</summary>
@@ -80,17 +67,13 @@ internal sealed class Mpsc<T> where T : unmanaged
                 {
                     cell.Value = item;
                     Volatile.Write(ref cell.Sequence, pos + 1);
-                    
                     return true;
                 }
-                
                 continue;   // lost the race; reload and retry
             }
 
-            if (dif < 0) 
-            {
-                return false; // slot not yet consumed → full
-            }
+            if (dif < 0)
+                return false;   // slot not yet consumed → full
         }
     }
 
@@ -112,11 +95,21 @@ internal sealed class Mpsc<T> where T : unmanaged
             item = cell.Value;
             _dequeuePos.Value = pos + 1;                          // single consumer: plain write
             Volatile.Write(ref cell.Sequence, pos + mask + 1);   // free slot for producers
-            
             return true;
         }
 
         item = default;
         return false;
     }
+}
+
+/// <summary>
+/// A single long padded to a 64-byte cache line so the producer and consumer
+/// positions never share a line (no false sharing). Top-level and non-generic
+/// so it can legally use explicit layout.
+/// </summary>
+[StructLayout(LayoutKind.Explicit, Size = 64)]
+internal struct PaddedLong
+{
+    [FieldOffset(0)] public long Value;
 }

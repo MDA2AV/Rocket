@@ -2,7 +2,7 @@ using System.Buffers;
 
 namespace Minima.Utils;
 
-internal sealed unsafe class UnmanagedMemoryManager : MemoryManager<byte>
+public sealed unsafe class UnmanagedMemoryManager : MemoryManager<byte>
 {
     private readonly byte* _ptr;
     private readonly int _length;

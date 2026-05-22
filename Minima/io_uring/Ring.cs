@@ -7,7 +7,7 @@ using static Minima.Native;
 
 namespace Minima;
 
-internal sealed unsafe class Ring : IDisposable 
+public sealed unsafe class Ring : IDisposable 
 {
     private int _fd;
 

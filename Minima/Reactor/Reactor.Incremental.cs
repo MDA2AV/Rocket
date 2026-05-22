@@ -1,7 +1,6 @@
 using System.Runtime.InteropServices;
 using Minima.Utils;
 using static Minima.Native;
-using static Minima.Program;
 // ReSharper disable SuggestVarOrType_BuiltInTypes
 
 namespace Minima;
@@ -13,7 +12,7 @@ namespace Minima;
 /// handler has returned every slice it was handed. Selected per reactor by the
 /// `_incremental` flag; the shared-ring path in Reactor.cs is untouched.
 /// </summary>
-internal sealed unsafe partial class Reactor
+public sealed unsafe partial class Reactor
 {
     private Stack<ushort>?  _freeGids;
     private Mpsc<ulong>? _returnQInc;
@@ -94,7 +93,7 @@ internal sealed unsafe partial class Reactor
     }
 
     // Re-add a fully-consumed buffer to its connection's ring (reactor-thread only).
-    private static void ReturnConnectionBuffer(Connection conn, ushort bid)
+    private void ReturnConnectionBuffer(Connection conn, ushort bid)
     {
         conn.CumOffset![bid]  = 0;
         conn.RefCount![bid]   = 0;
@@ -219,12 +218,14 @@ internal sealed unsafe partial class Reactor
                 SetNoDelay(clientFd);
                 Connection conn = _pool.TryPop(out var pooled)
                     ? pooled.SetFd(clientFd)
-                    : new Connection(this, clientFd);
+                    : new Connection(this, clientFd, _config.WriteSlabSize);
                 Connections[clientFd] = conn;
                 SetupConnectionBufRing(conn);
                 SubmitRecvMultishot(clientFd, conn.Bgid);
 
-                _ = Handler.HandleAsync(this, conn);
+                _ = _config.UsePipe
+                    ? Handler.HandlePipeAsync(this, conn)
+                    : Handler.HandleAsync(this, conn);
             }
             else
             {

@@ -2,7 +2,6 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Minima.Utils;
 using static Minima.Native;
-using static Minima.Program;
 // ReSharper disable SuggestVarOrType_BuiltInTypes
 
 namespace Minima;
@@ -15,20 +14,28 @@ namespace Minima;
 /// they reach the reactor only through two MPSC queues (`_returnQ`, `_flushQ`)
 /// woken by an `eventfd` registered as a multishot poll in the ring.
 /// </summary>
-internal sealed unsafe partial class Reactor
+public sealed unsafe partial class Reactor
 {
     public readonly int Id;
     public Ring Ring = null!;   // created on the reactor's own thread (DEFER_TASKRUN requires same-thread setup+enter)
     public readonly Dictionary<int,Connection> Connections = new();
 
     private int _listenFd;
+    private readonly ServerConfig _config;
     private readonly ushort _port;
     private readonly uint _ringEntries;
     private readonly bool _incremental;
+    private readonly uint RecvBufferSize;
+
+    // CQE user_data layout: kind tag in the high 32 bits, fd in the low 32.
+    private const ulong KindAccept = 1UL << 32;
+    private const ulong KindRecv   = 2UL << 32;
+    private const ulong KindSend   = 3UL << 32;
+    private const ulong KindWake   = 4UL << 32;  // eventfd-based cross-thread wake
 
     // Provided-buffer ring (one per reactor, shared by all its connections).
     private const ushort BgId = 1;
-    private const uint   BufferRingEntries = 4096;          // power of two
+    private readonly uint BufferRingEntries;                // power of two
     private byte*  _bufRing;          // io_uring_buf_ring (kernel-shared)
     private byte*  _bufSlab;          // contiguous slab of recv buffers
     private uint   _bufRingMask;
@@ -49,29 +56,37 @@ internal sealed unsafe partial class Reactor
     // this reactor, so a plain Stack<T> is sufficient (no MPMC primitive
     // needed). PoolMax caps the slab footprint per reactor:
     //   PoolMax × WriteSlabSize × ReactorCount = total reserved native memory.
-    private const int PoolMax = 1024;
-    private readonly Stack<Connection> _pool = new(PoolMax);
+    private readonly int PoolMax;
+    private readonly Stack<Connection> _pool;
 
     // Incremental-mode (IOU_PBUF_RING_INC) sizing. Each connection gets its own
     // ring, so reserved native memory is bounded by:
     //   PoolMax × ConnBufRingEntries × IncRecvBufferSize × ReactorCount.
     // Keep entries small — the point of incremental is that one buffer holds
     // many reads, so you need few of them per connection.
-    private const int MaxConnections     = 4096;   // GID cap (one bgid per active connection)
-    private const int ConnBufRingEntries = 16;     // buffers per connection ring
-    private const int IncRecvBufferSize  = 4096;   // bytes per buffer (filled incrementally)
+    private readonly int  MaxConnections;       // GID cap (one bgid per active connection)
+    private readonly int  ConnBufRingEntries;   // buffers per connection ring
+    private readonly uint IncRecvBufferSize;    // bytes per buffer (filled incrementally)
 
     // Transient io_uring_enter errnos (Linux): interrupted, would-block, busy.
     private const int EINTR  = 4;
     private const int EAGAIN = 11;
     private const int EBUSY  = 16;
 
-    public Reactor(int id, ushort port, uint ringEntries, bool incremental = false)
+    public Reactor(int id, ServerConfig config)
     {
         Id = id;
-        _port = port;
-        _ringEntries = ringEntries;
-        _incremental = incremental;
+        _config = config;
+        _port = config.Port;
+        _ringEntries = config.RingEntries;
+        _incremental = config.Incremental;
+        RecvBufferSize = (uint)config.RecvBufferSize;
+        BufferRingEntries = (uint)config.BufferRingEntries;
+        PoolMax = config.PoolMax;
+        MaxConnections = config.MaxConnections;
+        ConnBufRingEntries = config.ConnBufRingEntries;
+        IncRecvBufferSize = (uint)config.IncRecvBufferSize;
+        _pool = new Stack<Connection>(config.PoolMax);
     }
 
     // =========================================================================
@@ -84,7 +99,7 @@ internal sealed unsafe partial class Reactor
         _bufRing = (byte*)NativeMemory.AlignedAlloc(ringBytes, 4096);
         NativeMemory.Clear(_bufRing, ringBytes);
 
-        nuint slabBytes = BufferRingEntries * (nuint)BufferSize;
+        nuint slabBytes = BufferRingEntries * (nuint)RecvBufferSize;
         _bufSlab = (byte*)NativeMemory.AlignedAlloc(slabBytes, 64);
 
         _bufRingMask = BufferRingEntries - 1;
@@ -108,8 +123,8 @@ internal sealed unsafe partial class Reactor
         // stays at zero until we set it explicitly.
         for (ushort bid = 0; bid < BufferRingEntries; bid++) {
             byte* slot = _bufRing + (uint)bid * 16;
-            *(ulong*)(slot + 0)  = (ulong)(_bufSlab + bid * (nuint)BufferSize);
-            *(uint*)(slot + 8)   = BufferSize;
+            *(ulong*)(slot + 0)  = (ulong)(_bufSlab + bid * (nuint)RecvBufferSize);
+            *(uint*)(slot + 8)   = RecvBufferSize;
             *(ushort*)(slot + 12) = bid;
         }
         _bufRingTail = (ushort)BufferRingEntries;
@@ -122,8 +137,8 @@ internal sealed unsafe partial class Reactor
     internal void ReturnBufferDirect(ushort bid)
     {
         byte* slot = _bufRing + (_bufRingTail & _bufRingMask) * 16;
-        *(ulong*)(slot + 0)  = (ulong)(_bufSlab + bid * (nuint)BufferSize);
-        *(uint*)(slot + 8)   = BufferSize;
+        *(ulong*)(slot + 0)  = (ulong)(_bufSlab + bid * (nuint)RecvBufferSize);
+        *(uint*)(slot + 8)   = RecvBufferSize;
         *(ushort*)(slot + 12) = bid;
         _bufRingTail++;
 
@@ -308,11 +323,13 @@ internal sealed unsafe partial class Reactor
                 SetNoDelay(clientFd);
                 Connection conn = _pool.TryPop(out var pooled)
                     ? pooled.SetFd(clientFd)
-                    : new Connection(this, clientFd);
+                    : new Connection(this, clientFd, _config.WriteSlabSize);
                 Connections[clientFd] = conn;
                 SubmitRecvMultishot(clientFd);
 
-                _ = Handler.HandleAsync(this, conn);
+                _ = _config.UsePipe
+                    ? Handler.HandlePipeAsync(this, conn)
+                    : Handler.HandleAsync(this, conn);
             }
             else
             {
@@ -353,7 +370,7 @@ internal sealed unsafe partial class Reactor
                 return;
             }
 
-            byte* ptr = hasBuf ? _bufSlab + (nuint)bid * (nuint)BufferSize : null;
+            byte* ptr = hasBuf ? _bufSlab + (nuint)bid * (nuint)RecvBufferSize : null;
             conn.Complete(cqe.res, bid, hasBuf, ptr);
 
             if (!more)

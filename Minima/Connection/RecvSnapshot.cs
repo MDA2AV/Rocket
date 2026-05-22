@@ -1,6 +1,6 @@
 namespace Minima;
 
-internal readonly struct RecvSnapshot
+public readonly struct RecvSnapshot
 {
     public readonly long Tail;
     public readonly bool IsClosed;

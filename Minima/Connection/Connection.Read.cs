@@ -17,7 +17,7 @@ namespace Minima;
 /// from a previous connection life are detectable and return `Closed()`
 /// instead of leaking the new tenant's state.
 /// </summary>
-internal sealed unsafe partial class Connection : IValueTaskSource<RecvSnapshot>
+public sealed unsafe partial class Connection : IValueTaskSource<RecvSnapshot>
 {
     internal Connection SetFd(int fd)
     {

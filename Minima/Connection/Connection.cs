@@ -3,7 +3,7 @@ using Minima.Utils;
 
 namespace Minima;
 
-internal sealed unsafe partial class Connection 
+public sealed unsafe partial class Connection 
 {
     private readonly Reactor _reactor;
 

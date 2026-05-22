@@ -7,7 +7,7 @@ namespace Minima;
 /// the kernel struct layouts they expect, and the constants needed to
 /// drive a minimal io_uring loop.
 /// </summary>
-internal static unsafe class Native {
+public static unsafe class Native {
     private const long SYS_IO_URING_SETUP    = 425;
     private const long SYS_IO_URING_ENTER    = 426;
     private const long SYS_IO_URING_REGISTER = 427;
