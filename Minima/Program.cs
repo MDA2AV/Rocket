@@ -1,4 +1,6 @@
-using System.Runtime.InteropServices;
+using System.Buffers;
+using System.IO.Pipelines;
+using Minima.Utils;
 
 namespace Minima;
 
@@ -11,39 +13,28 @@ namespace Minima;
 /// </summary>
 internal static unsafe class Program
 {
-    private const ushort Port       = 8080;
-    private const uint   RingEntries = 8192;
-    internal const int   BufferSize = 32 * 1024;
-
-    // user_data layout: kind in high 32 bits, fd in low 32 bits.
-    internal const ulong KindAccept = 1UL << 32;
-    internal const ulong KindRecv   = 2UL << 32;
-    internal const ulong KindSend   = 3UL << 32;
-
-    // Pre-built HTTP/1.1 response shared across all reactors
-    internal static byte* s_responseBytes;
-    internal static int   s_responseLen;
-
-    private static ReadOnlySpan<byte> s_response => "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok"u8;
+    internal static ReadOnlySpan<byte> Response =>
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok"u8;
 
     private static int Main()
     {
-        s_responseLen = s_response.Length;
-        s_responseBytes = (byte*)NativeMemory.Alloc((nuint)s_responseLen);
-        s_response.CopyTo(new Span<byte>(s_responseBytes, s_responseLen));
-
-        var n = 12;
-        Console.WriteLine($"[Minima] starting {n} reactors on port {Port}");
-
-        var threads = new Thread[n];
-        for (var i = 0; i < n; i++)
+        // All tunables live in ServerConfig — override the defaults here.
+        var config = new ServerConfig()
         {
-            var reactor = new Reactor(i, Port, RingEntries);
-            
+            UsePipe = false,
+        };
+
+        Console.WriteLine($"[Minima] starting {config.ReactorCount} reactors on port {config.Port} (incremental={config.Incremental})");
+
+        var threads = new Thread[config.ReactorCount];
+        for (var i = 0; i < config.ReactorCount; i++)
+        {
+            var reactor = new Reactor(i, config);
+
             threads[i] = new Thread(reactor.Run)
             {
-                Name = $"reactor-{i}", 
-                IsBackground = false 
+                Name = $"reactor-{i}",
+                IsBackground = false
             };
             threads[i].Start();
         }
@@ -52,14 +43,14 @@ internal static unsafe class Program
         {
             t.Join();
         }
-        
+
         return 0;
     }
 }
 
 internal static class Handler
 {
-    public static async Task HandleAsync(Reactor reactor, int fd, Connection conn)
+    public static async Task HandleAsync(Reactor reactor, Connection conn)
     {
         try
         {
@@ -76,14 +67,21 @@ internal static class Handler
                         // data is now usable with any BCL Memory<byte>/async API
                         _ = data.Length;
 
-                        reactor.ReturnBuffer(mem.BufferId);
+                        // Cross-thread safe and mode-agnostic: routes to the
+                        // shared-ring return or the incremental refcounted return.
+                        conn.ReturnBuffer(in item);
                     }
-                    conn.QueueResponse(fd);
                 }
+
+                // One response per recv burst — accumulate in the connection's
+                // per-connection write slab, then submit and await ack.
+                conn.Write(Program.Response);
+                await conn.FlushAsync();
 
                 if (snap.IsClosed)
                 {
-                    conn.Close(fd);
+                    // Reactor already owns teardown (Connections.Remove + close
+                    // happens in Dispatch's recv-error branch); we just exit.
                     return;
                 }
 
@@ -92,8 +90,50 @@ internal static class Handler
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[r{reactor.Id}] handler crash on fd={fd}: {ex}");
-            conn.Close(fd);
+            Console.Error.WriteLine($"[r{reactor.Id}] handler crash on fd={conn.ClientFd}: {ex}");
+            // Reactor will clean the connection up via the recv-error path
+            // (or SPSC overflow) on the next CQE for this fd.
+        }
+    }
+
+    // PipeReader/PipeWriter variant — same behavior, driven through the BCL
+    // pipe adapters instead of the raw ReadAsync/TryGetItem/Write API.
+    public static async Task HandlePipeAsync(Reactor reactor, Connection conn)
+    {
+        var reader = new ConnectionPipeReader(conn);
+        var writer = new ConnectionPipeWriter(conn);
+
+        try
+        {
+            while (true)
+            {
+                ReadResult read = await reader.ReadAsync();
+                ReadOnlySequence<byte> buffer = read.Buffer;
+
+                if (!buffer.IsEmpty)
+                {
+                    // A real server would parse requests out of `buffer` here.
+                    writer.Write(Program.Response);
+                    await writer.FlushAsync();
+                }
+
+                // Consume everything we got; AdvanceTo returns the recv buffers.
+                reader.AdvanceTo(buffer.End);
+
+                if (read.IsCompleted)
+                {
+                    break;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[r{reactor.Id}] pipe handler crash on fd={conn.ClientFd}: {ex}");
+        }
+        finally
+        {
+            reader.Complete();
+            writer.Complete();
         }
     }
 }

@@ -1,9 +1,10 @@
 using System.Runtime.CompilerServices;
+
 // ReSharper disable SuggestVarOrType_BuiltInTypes
 
-namespace Minima;
+namespace Spring.Utils;
 
-internal sealed unsafe class SpscRecvRing
+public sealed unsafe class SpscRecvRing
 {
     public struct Item
     {
@@ -11,6 +12,7 @@ internal sealed unsafe class SpscRecvRing
         public ushort Bid;
         public int Len;
         public bool HasBuffer;
+        public ushort Gen;   // connection generation when enqueued (incremental return guard)
 
         public ReadOnlySpan<byte> AsSpan() => new(Ptr, Len);
 
@@ -90,4 +92,14 @@ internal sealed unsafe class SpscRecvRing
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool IsEmpty() => Volatile.Read(ref _head) >= Volatile.Read(ref _tail);
+
+    // Reactor-thread-only, called during connection teardown (Clear) when no
+    // handler is consuming. Discards any leftover items so the recycled
+    // connection starts empty.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void Reset()
+    {
+        _head = 0;
+        _tail = 0;
+    }
 }
