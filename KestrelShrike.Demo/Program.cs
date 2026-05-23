@@ -13,7 +13,7 @@ builder.WebHost.UseKestrel(kestrel =>
 // SHRIKE=0 → Kestrel's default Socket transport (baseline). Otherwise the epoll Shrike transport.
 if (Environment.GetEnvironmentVariable("SHRIKE") != "0")
 {
-    //builder.WebHost.UseShrike(opts => opts.ReactorCount = Math.Max(1, 4));
+    builder.WebHost.UseShrike(opts => opts.ReactorCount = Math.Max(1, 4));
 }
 
 var app = builder.Build();

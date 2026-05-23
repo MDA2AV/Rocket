@@ -4,10 +4,12 @@
         <TargetFramework>net10.0</TargetFramework>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
+        <ServerGarbageCollection>true</ServerGarbageCollection>
+        <TieredPGO>true</TieredPGO>
     </PropertyGroup>
 
     <ItemGroup>
-        <ProjectReference Include="..\Raptor\Raptor.csproj" />
+        <ProjectReference Include="..\Spring\Spring.csproj" />
     </ItemGroup>
 
 </Project>
