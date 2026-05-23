@@ -8,7 +8,7 @@ builder.WebHost.UseKestrel(kestrel =>
     })
     .UseZerg(opts =>
     {
-        opts.ReactorCount = Math.Max(1, 64);
+        opts.ReactorCount = Math.Max(1, 32);
     });
 
 var app = builder.Build();

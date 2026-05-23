@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!-- NuGet package metadata -->
+    <PackageId>Twinflow</PackageId>
+    <Version>0.6.9</Version>
+    <Authors>Diogo Martins</Authors>
+    <Description>A lean io_uring-based Kestrel transport for ASP.NET Core on Linux. A per-core io_uring reactor drives accept and recv (multishot + provided buffers); responses are sent with a thread-safe libc send() from the thread pool, so the ring stays single-issuer with DEFER_TASKRUN. Self-contained — no external dependencies.</Description>
+    <PackageTags>io_uring;kestrel;aspnetcore;transport;linux;networking;performance</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+</Project>

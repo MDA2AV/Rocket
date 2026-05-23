@@ -39,6 +39,9 @@ jobs:
 
       - name: Pack terraform
         run: dotnet pack terraform/terraform.csproj --configuration Release --no-build --output ./artifacts
+        
+      - name: Pack Twinflow
+        run: dotnet pack Twinflow/Twinflow.csproj --configuration Release --no-build --output ./artifacts
 
       - name: Publish to NuGet
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
