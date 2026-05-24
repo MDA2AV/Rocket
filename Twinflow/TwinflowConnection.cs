@@ -62,7 +62,7 @@ internal sealed class TwinflowConnection
                     int off = 0;
                     while (off < seg.Length)
                     {
-                        int sent = TrySend(seg.Span.Slice(off), out bool wouldBlock, out bool closed);
+                        int sent = TrySend(seg.Span[off..], out bool wouldBlock, out bool closed);
                         if (closed)
                         {
                             fail = true;

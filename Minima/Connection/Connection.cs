@@ -12,7 +12,13 @@ public sealed unsafe partial class Connection
     // Bumped on Clear(); the low 16 bits are used as the IVTS token so stale
     // awaiters can be detected after pool reuse.
     private int _generation;
-    
+
+    // Refcount: the connection has two owners — the reactor (recv side) and the
+    // handler (which may run off-reactor). Init to 2 on accept; each owner DecRef's
+    // when done; teardown (Recycle) runs only at refs==0, so a connection is never
+    // recycled or pool-reused while a handler is still in flight on another thread.
+    private int _refs;
+
     public Connection(Reactor reactor, int fd, int writeSlabSize = 1024 * 16)
     {
         _reactor = reactor;
@@ -53,7 +59,20 @@ public sealed unsafe partial class Connection
             _flushSignal.SetResult(true);
         }
     }
-    
+
+    // Init to 2 (reactor + handler) at accept.
+    internal void InitRefs() => Volatile.Write(ref _refs, 2);
+
+    // Release one owner's ref. Whoever drives it to 0 hands the connection to the
+    // reactor for teardown (close + Clear + pool) — never recycled before both done.
+    internal void DecRef()
+    {
+        if (Interlocked.Decrement(ref _refs) == 0)
+        {
+            _reactor.EnqueueRecycle(this);
+        }
+    }
+
     internal void Clear()
     {
         // Bump generation first — readers of IVTS plumbing observe this via

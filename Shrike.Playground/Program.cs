@@ -1,5 +1,6 @@
 // ReSharper disable always SuggestVarOrType_BuiltInTypes
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using Shrike;
 
 [SkipLocalsInit]
@@ -18,6 +19,23 @@ internal static class Program
             .InjectHandler(HandleAsync);
 
         engine.Build().Run();
+    }
+
+    // Same knob + object as Minima / AspBaseline / SocketBaseline: serialize a
+    // WORK_ITEMS-element object to JSON on the THREAD POOL per request. 0/unset = inline.
+    private static readonly int WorkItems =
+        int.TryParse(Environment.GetEnvironmentVariable("WORK_ITEMS"), out int n) ? n : 0;
+
+    private static readonly Payload LargeObject = BuildPayload(Math.Max(WorkItems, 1));
+
+    private static Payload BuildPayload(int count)
+    {
+        var items = new Item[count];
+        for (int i = 0; i < count; i++)
+        {
+            items[i] = new Item(i, $"item-{i}", i * 1.5, (i & 1) == 0, $"category-{i % 8}");
+        }
+        return new Payload(DateTime.UtcNow.ToString("O"), count, items);
     }
 
     /// <summary>
@@ -45,7 +63,16 @@ internal static class Program
             }
 
             if (wrote)
+            {
+                // Real async work on the THREAD POOL — handler resumes off-worker. Shrike's
+                // FlushAsync does a thread-safe send() directly (epoll), so no handoff here.
+                if (WorkItems > 0)
+                {
+                    _ = await Task.Run(static () => JsonSerializer.SerializeToUtf8Bytes(LargeObject));
+                }
+
                 await conn.FlushAsync();
+            }
         }
     }
 
@@ -71,3 +98,6 @@ internal static class Program
         dst[1] = (byte)('0' + ones);
     }
 }
+
+internal sealed record Item(int Id, string Name, double Value, bool Active, string Category);
+internal sealed record Payload(string Generated, int Count, Item[] Items);
