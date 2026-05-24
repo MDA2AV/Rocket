@@ -281,13 +281,13 @@ nav .links a.active { color: var(--accent-zerg); }
     font-family: var(--font-mono);
     font-size: 0.9rem;
 }
-.glossary div { margin-bottom: 0.35rem; }
+.glossary div { display: flex; gap: 1rem; margin-bottom: 0.35rem; }
 .glossary div:last-child { margin-bottom: 0; }
 .glossary .term {
     color: var(--accent-zerg);
     font-weight: 700;
-    display: inline-block;
-    width: 3.5rem;
+    flex: 0 0 auto;
+    min-width: 4rem;
 }
 .glossary .def { color: var(--text-muted); }
 

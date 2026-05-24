@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Minima.Utils;
@@ -51,6 +52,12 @@ public sealed unsafe partial class Reactor
     private int _reactorThreadId;
     private readonly Mpsc<ushort> _returnQ = new(1 << 14);   // 16384 slots
     private readonly Mpsc<int>    _flushQ  = new(1 << 12);   // 4096 slots
+
+    // Teardown handoff: when a connection's refcount hits 0 off-reactor (handler exited
+    // on the thread pool), the recycle must run on the reactor (it touches the buf_ring
+    // and the reactor-only pool). Connection is a ref type, so this is a ConcurrentQueue
+    // rather than the unmanaged Mpsc<T>.
+    private readonly ConcurrentQueue<Connection> _recycleQ = new();
 
     // Connection pool. Reactor-thread-only — accept and teardown both run on
     // this reactor, so a plain Stack<T> is sufficient (no MPMC primitive
@@ -215,6 +222,27 @@ public sealed unsafe partial class Reactor
         }
     }
 
+    // Called by Connection.DecRef when the refcount hits 0. Teardown must run on the
+    // reactor (buf_ring + pool are reactor-owned), so off-reactor callers hand off.
+    internal void EnqueueRecycle(Connection conn)
+    {
+        if (Environment.CurrentManagedThreadId == _reactorThreadId)
+        {
+            Recycle(conn, conn.ClientFd);
+            return;
+        }
+        _recycleQ.Enqueue(conn);
+        WakeFdWrite();
+    }
+
+    private void DrainRecycleQ()
+    {
+        while (_recycleQ.TryDequeue(out Connection? conn))
+        {
+            Recycle(conn, conn.ClientFd);
+        }
+    }
+
     private void ArmWakePoll()
     {
         IoUringSqe* sqe = GetSqeOrFlush();
@@ -277,6 +305,7 @@ public sealed unsafe partial class Reactor
             // Drain MPSC queues from off-reactor handlers. Cheap when empty.
             DrainReturnQ();
             DrainFlushQ();
+            DrainRecycleQ();
 
             int rc = Ring.SubmitAndWait(1);
             if (rc < 0 && rc != -EINTR && rc != -EAGAIN && rc != -EBUSY)
@@ -325,6 +354,7 @@ public sealed unsafe partial class Reactor
                     ? pooled.SetFd(clientFd)
                     : new Connection(this, clientFd, _config.WriteSlabSize);
                 Connections[clientFd] = conn;
+                conn.InitRefs();
                 SubmitRecvMultishot(clientFd);
 
                 _ = _config.UsePipe
@@ -355,7 +385,8 @@ public sealed unsafe partial class Reactor
                 }
                 if (Connections.Remove(fd, out var dyingConn))
                 {
-                    Recycle(dyingConn, fd);
+                    dyingConn.MarkClosed();   // signal the handler to exit
+                    dyingConn.DecRef();       // release the reactor's ref; teardown at refs==0
                 }
                 return;
             }
@@ -386,9 +417,10 @@ public sealed unsafe partial class Reactor
             }
             if (cqe.res <= 0)
             {
-                // Send error — reactor owns teardown.
+                // Send error — release the reactor's ref; teardown when the handler exits too.
                 Connections.Remove(fd);
-                Recycle(conn, fd);
+                conn.MarkClosed();
+                conn.DecRef();
                 return;
             }
             conn.WriteHead += cqe.res;

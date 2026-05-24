@@ -175,6 +175,7 @@ public sealed unsafe partial class Reactor
         {
             DrainReturnQIncremental();
             DrainFlushQ();
+            DrainRecycleQ();
 
             int rc = Ring.SubmitAndWait(1);
             if (rc < 0 && rc != -EINTR && rc != -EAGAIN && rc != -EBUSY)
@@ -220,6 +221,7 @@ public sealed unsafe partial class Reactor
                     ? pooled.SetFd(clientFd)
                     : new Connection(this, clientFd, _config.WriteSlabSize);
                 Connections[clientFd] = conn;
+                conn.InitRefs();
                 SetupConnectionBufRing(conn);
                 SubmitRecvMultishot(clientFd, conn.Bgid);
 
@@ -247,9 +249,10 @@ public sealed unsafe partial class Reactor
                 // Peer EOF / recv error — the whole per-conn ring is freed in Recycle.
                 if (Connections.Remove(fd, out var dyingConn))
                 {
-                    Recycle(dyingConn, fd);
+                    dyingConn.MarkClosed();
+                    dyingConn.DecRef();
                 }
-                
+
                 return;
             }
 
@@ -284,8 +287,9 @@ public sealed unsafe partial class Reactor
             if (cqe.res <= 0)
             {
                 Connections.Remove(fd);
-                Recycle(conn, fd);
-                
+                conn.MarkClosed();
+                conn.DecRef();
+
                 return;
             }
             conn.WriteHead += cqe.res;

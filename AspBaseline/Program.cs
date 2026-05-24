@@ -11,7 +11,7 @@ var app = builder.Build();
 // JSON per request and discard it (the work stands in for a serializing endpoint).
 // 0 / unset = no work (plain "ok"). The handler already runs on the thread pool here —
 // no Task.Run needed — which is exactly Kestrel's model.
-int workItems = int.TryParse(Environment.GetEnvironmentVariable("WORK_ITEMS"), out int n) ? n : 0;
+int workItems = 1000;
 Payload largeObject = BuildPayload(Math.Max(workItems, 1));
 
 app.MapGet("/", () =>

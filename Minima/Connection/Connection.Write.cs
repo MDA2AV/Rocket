@@ -90,6 +90,15 @@ public sealed unsafe partial class Connection : IValueTaskSource, IBufferWriter<
     // Flush inner buffer data to the kernel
     public ValueTask FlushAsync()
     {
+        // Connection already torn down (reactor saw EOF/error → MarkClosed): don't flush
+        // a removed connection — the handoff would reach a reactor that no longer knows
+        // this fd and the awaiter would hang. Return completed so the handler unwinds to
+        // its next ReadAsync, sees IsClosed, and exits.
+        if (Volatile.Read(ref _closed) == 1)
+        {
+            return default;
+        }
+
         if (Interlocked.Exchange(ref _flushInProgress, 1) == 1)
         {
             throw new InvalidOperationException("FlushAsync already in progress.");
@@ -114,6 +123,14 @@ public sealed unsafe partial class Connection : IValueTaskSource, IBufferWriter<
         int gen = Volatile.Read(ref _generation);
 
         _reactor.EnqueueFlush(ClientFd);
+
+        // Race recovery (mirrors ReadAsync): if close raced in after the guard above,
+        // self-complete so we don't hang waiting on a send the reactor will never make.
+        if (Volatile.Read(ref _closed) == 1 && Interlocked.Exchange(ref _flushArmed, 0) == 1)
+        {
+            Volatile.Write(ref _flushInProgress, 0);
+            _flushSignal.SetResult(true);
+        }
 
         return new ValueTask(this, (short)gen);
     }

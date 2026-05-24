@@ -26,29 +26,36 @@
 
         <ul class="post-list">
             <li>
+                <a href="io-uring-minima-part-5.html" class="post-card">
+                    <span class="post-meta">2026-05-24 &middot; Part 5</span>
+                    <div class="post-title">C# Networking Deep Dive With io_uring &mdash; Part 5: io_uring and the Thread Pool</div>
+                    <div class="post-excerpt">A rant, not the planned Kestrel integration. Why io_uring's frightening speed in the pinned-reactor model is conditional: it holds only while the handler never leaves the reactor, and the entire .NET backend (thread pool, async/await, Kestrel) is built on leaving it. The reactor deadlock when an off-reactor thread can't get its SQE submitted, Minima's eventfd wake, why SQPOLL only relocates the problem, and why epoll sidesteps the whole thing.</div>
+                </a>
+            </li>
+            <li>
                 <a href="io-uring-minima-part-4.html" class="post-card">
-                    <span class="post-meta">2026-05-18 &middot; Part 4 of 5</span>
+                    <span class="post-meta">2026-05-18 &middot; Part 4</span>
                     <div class="post-title">C# Networking Deep Dive With io_uring &mdash; Part 4: Zero Copy Receive</div>
                     <div class="post-excerpt">A theoretical side-quest into io_uring zero copy receive (zcrx), where the NIC DMAs payload straight into registered user memory so the kernel never copies it. A high-level Minima vs MinimaZero comparison across buffer ownership, <code>ZCRX_IFQ</code> registration, <code>RECV_ZC</code>, the 32-byte CQE token, the refill queue, and why zcrx collapses the multi-reactor model to a single ring. Scaffold only, no runnable code, since there was no zcrx-capable NIC to test on.</div>
                 </a>
             </li>
             <li>
                 <a href="io-uring-minima-part-3.html" class="post-card">
-                    <span class="post-meta">2026-05-13 &middot; Part 3 of 5</span>
+                    <span class="post-meta">2026-05-13 &middot; Part 3</span>
                     <div class="post-title">C# Networking Deep Dive With io_uring &mdash; Part 3: Touching the Bytes</div>
                     <div class="post-excerpt">Extending the async model from part 2 to expose the received bytes themselves. We add a <code>byte*</code> to each ring item, then introduce <code>UnmanagedMemoryManager</code> &mdash; a <code>MemoryManager&lt;byte&gt;</code> subclass that wraps an unmanaged pointer so the recv slabs can flow into the BCL <code>Memory&lt;byte&gt;</code> ecosystem (PipeReader, ReadOnlySequence, async APIs).</div>
                 </a>
             </li>
             <li>
                 <a href="io-uring-minima-part-2.html" class="post-card">
-                    <span class="post-meta">2026-05-10 &middot; Part 2 of 5</span>
+                    <span class="post-meta">2026-05-10 &middot; Part 2</span>
                     <div class="post-title">C# Networking Deep Dive With io_uring &mdash; Part 2: Bridge the Async Model</div>
                     <div class="post-excerpt">Wrapping the io_uring loop with C# async/await via <code>IValueTaskSource</code>. A zero-allocation producer/consumer rendezvous between the kernel CQE dispatcher and the application handler, with a small SPSC ring that buffers back-to-back CQEs and a snapshot pattern that lets the handler drain in batches without chasing a moving tail.</div>
                 </a>
             </li>
             <li>
                 <a href="io-uring-minima-part-1.html" class="post-card">
-                    <span class="post-meta">2026-04-29 &middot; Part 1 of 5</span>
+                    <span class="post-meta">2026-04-29 &middot; Part 1</span>
                     <div class="post-title">io_uring from scratch in C# &mdash; Part 1</div>
                     <div class="post-excerpt">Bypassing every abstraction and using the kernel interface directly for high-efficiency TCP networking on Linux. We build a minimum viable io_uring wrapper in C# and walk through the setup, the SQE/CQE protocol, and the basic event loop.</div>
                 </a>

@@ -23,6 +23,7 @@ internal static unsafe class Program
         var config = new ServerConfig()
         {
             UsePipe = false,
+            ReactorCount = 24
         };
 
         Console.WriteLine($"[Minima] starting {config.ReactorCount} reactors on port {config.Port} (incremental={config.Incremental})");
@@ -54,7 +55,7 @@ internal static class Handler
     // Real async-work knob: serialize an in-memory object of WORK_ITEMS elements to JSON
     // on the THREAD POOL (via Task.Run) per request. 0 / unset = disabled (pure inline
     // reactor path). Genuine CPU + allocation, not a busy-spin.
-    private static readonly int WorkItems = 100;
+    private static readonly int WorkItems = 50;
 
     private static readonly Payload LargeObject = BuildPayload(Math.Max(WorkItems, 1));
 
@@ -97,7 +98,8 @@ internal static class Handler
                 // CPU + GC pressure on the pool, not a busy-spin.
                 if (WorkItems > 0)
                 {
-                    _ = await Task.Run(static () => JsonSerializer.SerializeToUtf8Bytes(LargeObject));
+                    //_ = await Task.Run(static () => JsonSerializer.SerializeToUtf8Bytes(LargeObject));
+                    JsonSerializer.SerializeToUtf8Bytes(LargeObject);
                 }
 
                 // One response per recv burst — accumulate in the connection's
@@ -120,6 +122,10 @@ internal static class Handler
             Console.Error.WriteLine($"[r{reactor.Id}] handler crash on fd={conn.ClientFd}: {ex}");
             // Reactor will clean the connection up via the recv-error path
             // (or SPSC overflow) on the next CQE for this fd.
+        }
+        finally
+        {
+            conn.DecRef();   // release the handler's ref; teardown runs once the reactor releases too
         }
     }
 
@@ -161,6 +167,7 @@ internal static class Handler
         {
             reader.Complete();
             writer.Complete();
+            conn.DecRef();
         }
     }
 }
