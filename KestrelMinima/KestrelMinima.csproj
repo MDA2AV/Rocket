@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <PackageId>KestrelMinima</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>Diogo Martins</Authors>
+    <Description>Minima's io_uring engine as a Kestrel transport. Per-core reactor drives accept and recv (multishot + provided buffers). Writes are fire-and-forget: FlushAsync enqueues an io_uring send SQE and returns synchronously — no IValueTaskSource, no awaiter scheduling. Safe for HTTP/1.1 plaintext because clients send the next request only after receiving the response. Self-contained — no external dependencies.</Description>
+    <PackageTags>io_uring;kestrel;aspnetcore;transport;linux;networking;performance</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+</Project>

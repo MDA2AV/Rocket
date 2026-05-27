@@ -39,13 +39,13 @@ public sealed unsafe class Connection : IValueTaskSource<bool>, IValueTaskSource
     public int Ep;
 
     // ---- read IVTS (result = isClosed) ----
-    private ManualResetValueTaskSourceCore<bool> _readSignal = new() { RunContinuationsAsynchronously = false };
+    private ManualResetValueTaskSourceCore<bool> _readSignal = new() { RunContinuationsAsynchronously = true };
     private int _armed;
     private int _pending;
     private int _closed;
 
     // ---- flush IVTS ----
-    private ManualResetValueTaskSourceCore<bool> _flushSignal = new() { RunContinuationsAsynchronously = false };
+    private ManualResetValueTaskSourceCore<bool> _flushSignal = new() { RunContinuationsAsynchronously = true };
     private int _flushArmed;
 
     public Connection(int maxConnections, int inSlabSize, int outSlabSize)

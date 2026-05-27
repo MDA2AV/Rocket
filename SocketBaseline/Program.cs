@@ -5,7 +5,7 @@ using System.Text.Json;
 // Raw System.Net.Sockets HTTP/1.1 server — NO ASP.NET, NO Kestrel. A single async accept
 // loop; each connection is handled on the thread pool via the runtime's async socket engine
 // (epoll-backed on Linux). Same WORK_ITEMS knob + same object as Minima / AspBaseline.
-int workItems = 50;
+int workItems = 1000;
 Payload largeObject = BuildPayload(Math.Max(workItems, 1));
 
 byte[] response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok"u8.ToArray();
@@ -32,14 +32,16 @@ async Task HandleAsync(Socket client)
         {
             int read = await client.ReceiveAsync(buf.AsMemory(), SocketFlags.None);
             if (read <= 0) break;   // peer closed
+            
+            _ = await Task.Run(static () => JsonSerializer.Serialize("Hello World!"));
 
             // Same work as Minima/AspBaseline: serialize the object on the thread pool
             // (the handler already runs there) and discard. WORK_ITEMS=0 → plain "ok".
-            if (workItems > 0)
+            /*if (workItems > 0)
             {
                 // Force threadpool
                 _ = await Task.Run(() => JsonSerializer.SerializeToUtf8Bytes(largeObject));
-            }
+            }*/
 
             int sent = 0;
             while (sent < response.Length)

@@ -170,7 +170,7 @@ public sealed unsafe partial class Reactor
         {
             sw.SpinOnce();
         }
-        WakeFdWrite();
+        //WakeFdWrite();
     }
 
     internal void EnqueueFlush(int fd)
