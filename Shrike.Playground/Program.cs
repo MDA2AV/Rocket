@@ -10,7 +10,7 @@ internal static class Program
     {
         var engine = ShrikeEngine
             .CreateBuilder()
-            .SetNWorkersSolver(() => 12)
+            .SetNWorkersSolver(() => 6)
             .SetBacklog(16384)
             .SetMaxEventsPerWake(512)
             .SetMaxNumberConnectionsPerWorker(512)
@@ -23,8 +23,7 @@ internal static class Program
 
     // Same knob + object as Minima / AspBaseline / SocketBaseline: serialize a
     // WORK_ITEMS-element object to JSON on the THREAD POOL per request. 0/unset = inline.
-    private static readonly int WorkItems =
-        int.TryParse(Environment.GetEnvironmentVariable("WORK_ITEMS"), out int n) ? n : 0;
+    private static readonly int WorkItems = 1000;
 
     private static readonly Payload LargeObject = BuildPayload(Math.Max(WorkItems, 1));
 
@@ -64,12 +63,14 @@ internal static class Program
 
             if (wrote)
             {
+                _ = await Task.Run(static () => JsonSerializer.Serialize("Hello World!"));
+                
                 // Real async work on the THREAD POOL — handler resumes off-worker. Shrike's
                 // FlushAsync does a thread-safe send() directly (epoll), so no handoff here.
-                if (WorkItems > 0)
+                /*if (WorkItems > 0)
                 {
                     _ = await Task.Run(static () => JsonSerializer.SerializeToUtf8Bytes(LargeObject));
-                }
+                }*/
 
                 await conn.FlushAsync();
             }
@@ -80,14 +81,14 @@ internal static class Program
 
     private static unsafe void CommitPlainTextResponse(Connection connection)
     {
-        int tail = connection.WriteBuffer.Tail;
-        int contentLength = s_plainTextBody.Length;
+        //int tail = connection.WriteBuffer.Tail;
+        //int contentLength = s_plainTextBody.Length;
 
         connection.WriteBuffer.WriteUnmanaged("HTTP/1.1 200 OK\r\n"u8 +
-                                              "Content-Length:   \r\n"u8 +
+                                              "Content-Length: 13\r\n"u8 +
                                               "Server: S\r\n"u8 +
-                                              "Content-Type: text/plain\r\n"u8);
-        connection.WriteBuffer.WriteUnmanaged(DateHelper.HeaderBytes);
+                                              "Content-Type: text/plain\r\n\r\nHello, World!"u8);
+        /*connection.WriteBuffer.WriteUnmanaged(DateHelper.HeaderBytes);
         connection.WriteBuffer.WriteUnmanaged(s_plainTextBody);
 
         // Patch the 2-digit Content-Length into the reserved spaces (offset matches the header above).
@@ -95,7 +96,7 @@ internal static class Program
         int tens = contentLength / 10;
         int ones = contentLength - tens * 10;
         dst[0] = (byte)('0' + tens);
-        dst[1] = (byte)('0' + ones);
+        dst[1] = (byte)('0' + ones);*/
     }
 }
 

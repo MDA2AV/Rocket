@@ -26,6 +26,13 @@
 
         <ul class="post-list">
             <li>
+                <a href="io-uring-minima-part-6.html" class="post-card">
+                    <span class="post-meta">2026-05-27 &middot; Part 6</span>
+                    <div class="post-title">C# Networking Deep Dive With io_uring &mdash; Part 6: Numbers</div>
+                    <div class="post-excerpt">Six implementations on the same i9 14900k box, two workloads (sync plaintext "OK" and an async <code>Task.Run</code> doing a trivial <code>JsonSerializer.Serialize</code>), measured with wrk and gcannon. io_uring r+w with IVTS inline tops the sync chart at 3.95M req/s but turns very unstable under async; once the handler leaves the reactor, the io_uring/threadpool variant drops to ~2.4M while epoll/threadpool and Kestrel's stock socket both hold ~3.6M sync / ~3.0M async. A hybrid io_uring recv + libc send lands in the middle. Includes a comparison-at-a-glance table.</div>
+                </a>
+            </li>
+            <li>
                 <a href="io-uring-minima-part-5.html" class="post-card">
                     <span class="post-meta">2026-05-24 &middot; Part 5</span>
                     <div class="post-title">C# Networking Deep Dive With io_uring &mdash; Part 5: io_uring and the Thread Pool</div>
