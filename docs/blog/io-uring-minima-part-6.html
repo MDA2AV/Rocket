@@ -75,6 +75,17 @@
                     <a href="https://github.com/MDA2AV/gcannon">gcannon (io_uring)</a>
                 </p>
 
+                <h2>io_uring configuration</h2>
+
+                <p>All io_uring variants share the same ring setup:</p>
+
+                <ul>
+                    <li><code>SINGLE_ISSUER</code> + <code>DEFER_TASKRUN</code></li>
+                    <li>Multishot accept and multishot recv (send is one-shot per response)</li>
+                    <li>No zero copy receive, no zero copy send</li>
+                    <li>Incremental buffer consumption disabled, similar performance for this specific benchmark</li>
+                </ul>
+
                 <h2>io_uring read+write with IVTS reactor inline continuations</h2>
 
                 <p>This is the exact model explored throughout the series, expected to deliver high performance on synchronous test.</p>
