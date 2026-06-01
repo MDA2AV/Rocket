@@ -6,11 +6,7 @@
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-        <RootNamespace>Minima</RootNamespace>
+        <RootNamespace>MinimaTimeout</RootNamespace>
     </PropertyGroup>
-
-    <ItemGroup>
-        <ProjectReference Include="..\Magpie\Magpie.csproj" />
-    </ItemGroup>
 
 </Project>

@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>C# Networking Deep Dive With io_uring &mdash; Part 7 &mdash; zerg</title>
+    <link rel="stylesheet" href="blog.css">
+</head>
+<body>
+    <nav>
+        <div class="nav-inner">
+            <div class="links">
+                <a href="../index.html#benchmarks">Benchmarks</a>
+                <a href="../index.html#features">Features</a>
+                <a href="../index.html#examples">Examples</a>
+                <a href="index.html" class="active">Blog</a>
+                <a href="https://github.com/MDA2AV/zerg" style="display:inline-flex;align-items:center;gap:0.4rem;"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>GitHub</a>
+            </div>
+        </div>
+    </nav>
+
+    <aside class="post-nav">
+        <div class="post-nav-title">All posts</div>
+        <ul>
+            <li><a href="io-uring-minima-part-1.html"><span class="part-num">Part 1</span>io_uring from scratch</a></li>
+            <li><a href="io-uring-minima-part-2.html"><span class="part-num">Part 2</span>Bridge the Async Model</a></li>
+            <li><a href="io-uring-minima-part-3.html"><span class="part-num">Part 3</span>Touching the Bytes</a></li>
+            <li><a href="io-uring-minima-part-4.html"><span class="part-num">Part 4</span>Zero Copy Receive</a></li>
+            <li><a href="io-uring-minima-part-5.html"><span class="part-num">Part 5</span>io_uring and the Thread Pool</a></li>
+            <li><a href="io-uring-minima-part-6.html"><span class="part-num">Part 6</span>Numbers</a></li>
+            <li><a href="io-uring-minima-part-7.html" class="active"><span class="part-num">Part 7</span>fractal</a></li>
+        </ul>
+    </aside>
+
+    <main class="page">
+        <a href="index.html" class="back-link">&larr; All posts</a>
+
+        <article>
+            <img src="images/part-7-hero.png" alt="A radial fractal radiating from a bright golden core into intricate blue self-similar fronds." class="post-hero">
+
+            <header class="post-header">
+                <h1>C# Networking Deep Dive With io_uring &mdash; Part 7: fractal</h1>
+                <div class="post-meta">2026-06-01 &middot; Part 7</div>
+            </header>
+
+            <div class="post-body">
+                <p>As per tradition, a new part that doesn't follow what the last part suggested would be the continuation topic (Kestrel integration benchmarks).</p>
+
+                <p>In this part 7 we are building a real world application for Minima, fractal - a high performance file serving server with an ambitious goal, to be the world's fastest at its use case. The source code for fractal can be found at <a href="https://github.com/dotnet-web-stack/fractal">github.com/dotnet-web-stack/fractal</a>.</p>
+
+                <p class="note">As always a kind reminder that all the code provided by this series is meant for research purposes only, this is not product or library meant for general usage. This work should be used to help you create or improve your own projects, not a direct replacement.</p>
+
+                <p>So, how do you serve a static file as fast as the machine allows?</p>
+
+                <p>Last week I've been researching on static file serving topic and the mechanisms used by the high performance edge servers. It's a vast and interesting topic. For example in C# we can use the <a href="https://learn.microsoft.com/en-us/dotnet/api/system.io.randomaccess">RandomAccess API</a>, a low level interface that uses the <a href="https://man7.org/linux/man-pages/man2/pread.2.html">pread</a> syscall to read from the kernel page cache. We can also use <a href="https://man7.org/linux/man-pages/man2/sendfile.2.html">sendfile</a> that writes from "disk" directly to socket bypassing user space.</p>
+
+                <p>Let's explore these in more detail..</p>
+
+                <h2>pread</h2>
+
+                <p>pread(fd, buf, count, offset) - positional read into your buffer.</p>
+
+                <p>Reads count bytes from offset, does not touch the file's current position, that means one open fd can be read concurrently by every thread/connection without locks.</p>
+
+                <p>Cost:</p>
+
+                <ul>
+                    <li>read file data - page cache -&gt; our buffer (1 copy)</li>
+                    <li>then to send we do another copy - our buffer -&gt; socket (1 copy)</li>
+                </ul>
+
+                <p>So total 2 syscalls and 2 copies.</p>
+
+                <p>Fully synchronous/blocking, however the cache is typically hot so it is very fast and cheap.</p>
+
+                <h2>sendfile</h2>
+
+                <p>sendfile(out_fd, in_fd, offset, count) - copy fd -&gt; fd inside the kernel.</p>
+
+                <p>Bypasses user space entirely.</p>
+
+                <p>Cost:</p>
+
+                <ul>
+                    <li>page cache -&gt; socket (1 copy) [would be 0 with DMA zero copy send]</li>
+                </ul>
+
+                <p>So total 1 syscall.</p>
+
+                <p>The catch here is that we can't "touch" the bytes which complicates possible compression or encryption on the user space web framework side. Some edge servers do work around this issue by pre-compressing on disk and using <a href="https://docs.kernel.org/networking/tls.html">kTLS (Kernel TLS)</a> for HTTPS.</p>
+
+                <p>Just like pread it is synchronous/blocking.</p>
+
+                <h2>FileStream</h2>
+
+                <p>C#'s high level Stream</p>
+
+                <p>Its API supports sync and async calls. I didn't dig much deep on this one as its performance was as expected on a different ballpark thus not a direct comparison to what fractal aims to do. An important thing that jumped out is that while it provides an async API, on Linux it is not truly async - a blocking read scheduled on the <a href="https://devblogs.microsoft.com/dotnet/file-io-improvements-in-dotnet-6/">thread pool</a> (Windows can do real overlapped I/O, Linux has no async file I/O outside io_uring).</p>
+
+                <p>These three are what I found to be the state of the art for reading files from disk in C#.</p>
+
+                <h2>The idea behind fractal</h2>
+
+                <p>Let's recall the model from parts 1-6, Minima is one reactor per core, each owns its io_uring and connections. Handlers are async but every await is completed by the reactor inline (ManualResetValueTaskSourceCore with RunContinuationsAsynchronously = false). So unless the request handler awaits an external call that is scheduled to continue at the thread pool, there is no thread hopping, everything runs inline in the reactor's thread.</p>
+
+                <p>Looking at the options we have so far (pread and sendfile), these are hostile to the architecture by construction, the sync paths stall the reactor thread. We need true asynchronous file I/O.</p>
+
+                <p>We've been of course using io_uring for the networking I/O but we can use it too for file I/O, using the same io_uring! our Ring deals with file descriptors which don't differentiate between a file or a socket so our reactor can handle both CQEs from socket and file data. A file read is just another tagged SQE on the reactor's ring.</p>
+
+                <h2>Extending Minima: a third completion source</h2>
+
+                <p>The connection already speaks two awaitable "facets", recv (<code>IValueTaskSource&lt;RecvSnapshot&gt;</code>, the one we built in <a href="https://mda2av.github.io/zerg/blog/io-uring-minima-part-2.html">Part 2</a>) and flush (<code>IValueTaskSource</code>). A file read is just a third one. Same <code>ManualResetValueTaskSourceCore</code>, same inline-resume trick, a new signal:</p>
+
+<pre><code class="language-csharp">public sealed unsafe partial class Connection : IValueTaskSource&lt;int&gt;
+{
+    private ManualResetValueTaskSourceCore&lt;int&gt; _fileSignal = new()
+    {
+        RunContinuationsAsynchronously = false,   // resume on the reactor thread
+    };
+    private int _fileArmed;
+
+    // Stashed by ReadFileAsync, read by the reactor when it builds the SQE. Both run on
+    // the reactor thread (the handler is inline), so it's just a field handoff between two
+    // points on the same call stack. No queue, no lock.
+    internal int   FileReadFd;
+    internal byte* FileReadDst;
+    internal int   FileReadLen;
+    internal long  FileReadOffset;
+}</code></pre>
+
+                <p>First, the new completion needs a tag. Every SQE we submit carries an opaque <code>user_data</code> we get back on the CQE. Minima packs a <em>kind</em> in the high 32 bits and the client fd in the low 32. We add one constant:</p>
+
+<pre><code class="language-csharp">private const ulong KindAccept   = 1UL &lt;&lt; 32;
+private const ulong KindRecv     = 2UL &lt;&lt; 32;
+private const ulong KindSend     = 3UL &lt;&lt; 32;
+private const ulong KindFileRead = 4UL &lt;&lt; 32;   // new: file read into the write slab</code></pre>
+
+                <p>The awaitable. <code>ReadFileAsync</code> is what the handler calls. It mirrors <code>ReadAsync</code>/<code>FlushAsync</code> guard, arm, stash, submit, return a <code>ValueTask</code> bound to <code>this</code>:</p>
+
+<pre><code class="language-csharp">public ValueTask&lt;int&gt; ReadFileAsync(int fileFd, int len, long fileOffset)
+{
+    if (Volatile.Read(ref _closed) == 1)
+        return new ValueTask&lt;int&gt;(0);                 // connection already gone
+
+    if (WriteTail + len &gt; _writeSlabSize)
+        throw new InvalidOperationException("Write slab too small for file read.");
+
+    if (Interlocked.Exchange(ref _fileArmed, 1) == 1)
+        throw new InvalidOperationException("ReadFileAsync already armed.");
+
+    _fileSignal.Reset(); // Reset it so that it can be awaited again.
+
+    FileReadFd     = fileFd;
+    FileReadDst    = WriteBuffer + WriteTail;          // land bytes straight into the slab
+    FileReadLen    = len;
+    FileReadOffset = fileOffset;
+
+    int gen = Volatile.Read(ref _generation);          // pooled-connection stale-token guard
+    _reactor.SubmitFileRead(ClientFd);
+
+    // Close-race recovery (same as FlushAsync): if a close slipped in after the guard,
+    // self-complete so we don't hang on a read the reactor will never make.
+    if (Volatile.Read(ref _closed) == 1 &amp;&amp; Interlocked.Exchange(ref _fileArmed, 0) == 1)
+        _fileSignal.SetResult(0);
+
+    return new ValueTask&lt;int&gt;(this, (short)gen);
+}</code></pre>
+
+                <p>Two things to notice. <code>FileReadDst = WriteBuffer + WriteTail</code> points the read into the write slab, right after whatever the handler already wrote (our headers) so the body lands contiguous with the headers and goes out in one send later. And the <code>ValueTask</code> is bound to the connection itself with the generation as its token, so a stale await left over from a previous pooled life resolves to a no-op instead of leaking into the new tenant.</p>
+
+                <p>The submit. The reactor turns the stashed request into a single SQE. This is the whole "file I/O on the network ring" idea, in eight lines:</p>
+
+<pre><code class="language-csharp">internal void SubmitFileRead(int fd)
+{
+    if (!Connections.TryGetValue(fd, out var conn)) return;
+
+    IoUringSqe* sqe = GetSqeOrFlush();
+    Unsafe.InitBlockUnaligned(sqe, 0, 64);
+    sqe-&gt;opcode    = IORING_OP_READ;
+    sqe-&gt;fd        = conn.FileReadFd;            // the *file* fd we read from
+    sqe-&gt;addr      = (ulong)conn.FileReadDst;    // into the slab
+    sqe-&gt;len       = (uint)conn.FileReadLen;
+    sqe-&gt;off       = (ulong)conn.FileReadOffset; // positional, like pread
+    sqe-&gt;user_data = KindFileRead | (uint)fd;    // tag + the *client* fd
+}</code></pre>
+
+                <p>The detail that makes it work: <code>sqe-&gt;fd</code> is the file fd (we're reading a file), but <code>user_data</code> carries the client fd. The read pulls from the file, the completion has to tell the reactor <em>whose handler to wake</em>. Two different descriptors, one SQE. And note <code>GetSqeOrFlush</code> only grabs a slot in the ring, the read isn't submitted to the kernel here. The handler is mid-<code>await</code>, still inside the reactor's dispatch of the recv that triggered it, the SQE goes out on the reactor's next <code>io_uring_enter</code>, alongside everything else it batched this turn.</p>
+
+                <p>The completion. Now the read is just another CQE the reactor reaps. One new branch in the dispatch loop, right next to recv and send:</p>
+
+<pre><code class="language-csharp">else if (kind == KindFileRead)
+{
+    if (Connections.TryGetValue(fd, out var conn))
+        conn.CompleteFileRead(cqe.res);   // cqe.res = bytes read
+}</code></pre>
+
+<pre><code class="language-csharp">internal void CompleteFileRead(int res)
+{
+    Interlocked.Exchange(ref _fileArmed, 0);
+    _fileSignal.SetResult(res);           // &lt;- the inline resume happens here
+}</code></pre>
+
+                <p>That <code>SetResult</code> is the payoff. Because <code>_fileSignal</code> has <code>RunContinuationsAsynchronously = false</code>, calling it doesn't <em>schedule</em> the handler, it runs the handler's continuation inline, on the reactor thread, on the reactor's own call stack, right inside this CQE's dispatch. No thread-pool hop, no scheduler, exactly as in Part 2, only now the thing we waited for came off the disk instead of the wire.</p>
+
+                <p>The <code>IValueTaskSource&lt;int&gt;</code> plumbing is the same three methods the runtime needs that we wrote for recv, just backed by <code>_fileSignal</code> and gated by the generation token:</p>
+
+<pre><code class="language-csharp">int IValueTaskSource&lt;int&gt;.GetResult(short token)
+    =&gt; token == (short)Volatile.Read(ref _generation)
+        ? _fileSignal.GetResult(_fileSignal.Version)
+        : 0;                                    // stale awaiter from a recycled connection
+
+ValueTaskSourceStatus IValueTaskSource&lt;int&gt;.GetStatus(short token)
+    =&gt; token == (short)Volatile.Read(ref _generation)
+        ? _fileSignal.GetStatus(_fileSignal.Version)
+        : ValueTaskSourceStatus.Succeeded;
+
+void IValueTaskSource&lt;int&gt;.OnCompleted(Action&lt;object?&gt; c, object? s, short token, ValueTaskSourceOnCompletedFlags f)
+{
+    if (token != (short)Volatile.Read(ref _generation)) { c(s); return; }
+    _fileSignal.OnCompleted(c, s, _fileSignal.Version, f);
+}</code></pre>
+
+                <p>And that's the entire extension. The handler now reads a file the same way it reads a socket:</p>
+
+<pre><code class="language-csharp">conn.Write(headers);                                              // headers -&gt; slab
+int n = await conn.ReadFileAsync(asset.Fd, (int)asset.Size, 0);   // file -&gt; slab, async, inline
+conn.Advance(n);
+await conn.FlushAsync();                                          // slab -&gt; socket</code></pre>
+
+                <p>No new threads, no new queue, no second ring. We added a new file tag, an SQE, a dispatch branch, and one more IVTS, and because the read is both <em>submitted by</em> and <em>completed by</em> the reactor, it can never trigger the deadlock we documented in <a href="https://mda2av.github.io/zerg/blog/io-uring-minima-part-5.html">Part 5</a>. It physically can't leave the core. That's true async file I/O, in a model that already knew how to wait without blocking.</p>
+
+                <h2>The asset cache and the page cache</h2>
+
+                <p>fractal never reads a file from disk on the hot path, it reads from the kernel page cache, and it opens every file exactly once at startup. That is the job of the AssetCache. It walks the wwwroot, opens each file read only, and keeps the handle and the size around for the life of the process.</p>
+
+<pre><code class="language-csharp">SafeFileHandle handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+handles.Add(handle);                            // keep it alive for the cache's lifetime
+
+int  fd   = (int)handle.DangerousGetHandle();   // the raw fd io_uring needs
+long size = RandomAccess.GetLength(handle);</code></pre>
+
+                <p>io_uring works with raw file descriptors so we need the int fd, not the managed handle. A SafeFileHandle owns that fd and would close it the moment the handle is collected, so we hold every handle in an array for the cache's lifetime and only then hand the raw fd from DangerousGetHandle to the reactor. As long as the handle is alive the fd is valid, and one open fd per file is the price (mind RLIMIT_NOFILE on a huge tree). The reads are positional so the same fd is read concurrently by every connection on every reactor, no locks and no seeking.</p>
+
+                <p>Now the page cache. It is not per fd, it is per inode. The kernel caches a file's pages once under its inode and every fd pointing at that inode shares them. The first read faults the pages in from disk, every read after that is served straight from memory, which is why a warm read completes almost instantly and the whole benchmark runs at memory speed. fractal keeps no copy of the file itself, the page cache is the copy.</p>
+
+                <p>Which raises the obvious question, what happens when a file changes. If something writes the file in place the writes land on the same pages under the same inode, so our next read sees the new bytes and the cache stays coherent for free. The catch is that almost nobody edits in place. Editors and deploy scripts write a new file and rename it over the old one, which is an atomic swap to a brand new inode. Our held fd still points at the old inode, and because we are holding it open that inode and its pages cannot be freed, so fractal keeps serving the old content until the process reopens the files. AssetCache is a startup snapshot of the tree, that is the tradeoff of pre-opening every fd, you give up live reloading and in return never pay an open or a stat on the hot path. For a static asset server that is exactly the deal you want, and picking up new files is a restart away.</p>
+
+                <p>We now covered the base mechanism that makes fractal, this is still however just the bones of it, we still need logic to parse HTTP requests, deal with pre-compressed files and fragmented requests. All this logic already exists in the <a href="https://github.com/dotnet-web-stack/fractal">fractal repository</a> but won't be covered in this Part 7 (or any future part), the HTTP parsing is achieved with a third party library <a href="https://github.com/dotnet-web-stack/Glyph11">Glyph11</a>.</p>
+
+                <p>Let's benchmark this.</p>
+
+                <h2>Benchmarks</h2>
+
+                <p class="note">These values are not "scientific", just a ballpark estimate.</p>
+
+                <p>All four servers ran on the same box, over loopback, with a warm page cache, one server at a time so they never fight for cores. Same <a href="https://github.com/wg/wrk">wrk</a>, same file, same everything.</p>
+
+                <h3>Hardware</h3>
+
+                <p>i9 14900k<br>
+                64GB DDR5 6400MHz<br>
+                Linux Kernel 6.17.0-22-generic</p>
+
+                <p>Tests are done through localhost loopback (no NIC influence)</p>
+
+                <h3>Setup</h3>
+
+<pre><code>wrk -c 512 -t18 -d5s http://localhost:&lt;port&gt;/10kb.html</code></pre>
+
+                <p><code>10kb.html</code> is 9170 bytes and wrk sends no Accept-Encoding, so everyone serves the same identity body with no compression. fractal runs 12 reactors, nginx 12 workers, ASP.NET with DOTNET_PROCESSOR_COUNT=12 (the nearest knob it has), so it's roughly a 12-core budget across the board. nginx is the tuned config from the repo's nginx-bench (sendfile, reuseport, open_file_cache, access_log off, keepalive cranked up), not stock, so it's a fair fight and not a strawman.</p>
+
+                <div class="table-scroll"><table>
+                    <thead><tr><th>Server</th><th>Req/s</th><th>Transfer/s</th><th>Avg latency</th></tr></thead>
+                    <tbody>
+                        <tr><td>fractal</td><td>2.34M</td><td>20.3GB/s</td><td>233us</td></tr>
+                        <tr><td>fractal (PipeReader/PipeWriter)</td><td>2.05M</td><td>17.7GB/s</td><td>295us</td></tr>
+                        <tr><td>nginx (tuned)</td><td>1.61M</td><td>14.1GB/s</td><td>309us</td></tr>
+                        <tr><td>ASP.NET Core MapStaticAssets</td><td>508K</td><td>4.47GB/s</td><td>0.99ms</td></tr>
+                    </tbody>
+                </table></div>
+
+                <p>fractal lands first. It pushes about 1.45x the throughput of tuned nginx and around 4.6x ASP.NET's MapStaticAssets, and it does it at the lowest average latency of the four. Even the PipeReader/PipeWriter variant, which trades a little speed for the convenience of the standard pipe API, still sits about 27% above nginx. The raw handler beats the pipe one by roughly 14%, and that gap is the cost of the pipe wrappers, the held-buffer bookkeeping and sequence building and extra virtual calls that the raw path simply doesn't pay.</p>
+
+                <p class="note">The big caveat is that this is loopback. 20GB/s is about 160 Gbps, which is the loopback memcpy path, not a wire. Real NICs top out far below that, so these numbers are an upper bound on what the server can push, not what you would deliver over a real network, where the NIC becomes the bottleneck long before the server does and everyone converges near line rate. The point isn't "fractal does 160 Gbps", it's that fractal gets out of its own way. It spends less CPU per request than the alternatives, so it has more headroom before anything else becomes the limit.</p>
+
+                <p>One more caveat, this time in nginx's favor. nginx serves with sendfile, and on a real NIC that can be a true zero copy send, the card pulls the file's pages straight out of the page cache by DMA with no CPU copy at all. Over loopback there is no NIC and no DMA to a card, so that path never really kicks in and the bytes get copied around in memory like everyone else's. So we are not seeing nginx at its absolute best here, on a real network with a capable NIC sendfile's zero copy could claw back some of this gap.</p>
+
+                <p>As always, measure your own workload before drawing conclusions about it.</p>
+            </div>
+        </article>
+    </main>
+
+    <footer>
+        <a href="index.html">&larr; All posts</a>
+        &nbsp;&middot;&nbsp;
+        <a href="../index.html">zerg homepage</a>
+    </footer>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-clike.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-csharp.min.js"></script>
+</body>
+</html>

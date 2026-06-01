@@ -28,6 +28,7 @@
             <li><a href="io-uring-minima-part-4.html"><span class="part-num">Part 4</span>Zero Copy Receive</a></li>
             <li><a href="io-uring-minima-part-5.html"><span class="part-num">Part 5</span>io_uring and the Thread Pool</a></li>
             <li><a href="io-uring-minima-part-6.html"><span class="part-num">Part 6</span>Numbers</a></li>
+            <li><a href="io-uring-minima-part-7.html"><span class="part-num">Part 7</span>fractal</a></li>
         </ul>
     </aside>
 
@@ -37,6 +38,13 @@
         <p class="page-subtitle">Notes on io_uring, low-level networking and the internals of zerg.</p>
 
         <ul class="post-list">
+            <li>
+                <a href="io-uring-minima-part-7.html" class="post-card">
+                    <span class="post-meta">2026-06-01 &middot; Part 7</span>
+                    <div class="post-title">C# Networking Deep Dive With io_uring &mdash; Part 7: fractal</div>
+                    <div class="post-excerpt">Building fractal, a thread-per-core static file server on io_uring with an eye on being the fastest at its one job. Why pread, sendfile and FileStream are all wrong for a pinned reactor, then extending Minima with true async file I/O: a third <code>IValueTaskSource</code> facet that rides the same ring as the network, reads files straight into the send slab, and resumes the handler inline on the reactor thread with no thread hopping. Benchmarked against tuned nginx (~1.45x) and ASP.NET <code>MapStaticAssets</code> (~4.6x).</div>
+                </a>
+            </li>
             <li>
                 <a href="io-uring-minima-part-6.html" class="post-card">
                     <span class="post-meta">2026-05-27 &middot; Part 6</span>

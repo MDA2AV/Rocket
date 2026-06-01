@@ -1,4 +1,4 @@
-namespace Minima;
+namespace MinimaTimeout;
 
 /// <summary>
 /// All server tunables in one place — replaces the consts that used to be
@@ -15,12 +15,13 @@ public sealed record ServerConfig
     // Handler style: false = raw ReadAsync/TryGetItem loop; true = PipeReader/PipeWriter.
     public bool   UsePipe      { get; init; } = false;
 
-    // Static file served by the handler via Magpie (io_uring file read). If the path
-    // doesn't exist a sample file is written there at startup.
-    public string FilePath     { get; init; } = "/tmp/minima-magpie-sample.html";
-
     // io_uring SQ/CQ depth.
     public uint   RingEntries  { get; init; } = 8192;
+
+    // Reactor wait timeout in nanoseconds (zerg-style timed wait instead of an
+    // eventfd wake). Too large hurts latency under low load; too small burns CPU
+    // waking for nothing. 1ms matches zerg's reactor default.
+    public long   CqTimeout    { get; init; } = 1_000; // <----
 
     // Shared buffer ring (used when Incremental == false).
     public int    RecvBufferSize    { get; init; } = 32 * 1024;

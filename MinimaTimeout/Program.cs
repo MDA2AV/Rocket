@@ -1,9 +1,9 @@
 using System.Buffers;
 using System.IO.Pipelines;
 using System.Text.Json;
-using Minima.Utils;
+using MinimaTimeout.Utils;
 
-namespace Minima;
+namespace MinimaTimeout;
 
 /// <summary>
 /// Multi-reactor HTTP/1.1 server using io_uring directly. Spawns N reactor
@@ -27,8 +27,6 @@ internal static unsafe class Program
         };
 
         Console.WriteLine($"[Minima] starting {config.ReactorCount} reactors on port {config.Port} (incremental={config.Incremental})");
-
-        Handler.Init(config);
 
         var threads = new Thread[config.ReactorCount];
         for (var i = 0; i < config.ReactorCount; i++)
@@ -54,44 +52,10 @@ internal static unsafe class Program
 
 internal static class Handler
 {
-    // Magpie io_uring file reader — opened once, shared across reactors. io_uring reads
-    // use an explicit offset, so concurrent reads on the shared fd are safe.
-    private static Magpie.MagpieReader _magpie = null!;
-    private static int    _fd;
-    private static int    _fileSize;
-    private static byte[] _headers = null!;
-
-    // Builds an HTML file of exactly `size` bytes (ASCII) for the file-serve demo.
-    private static string BuildSample(int size)
-    {
-        const string head = "<!doctype html><html><head><title>Magpie</title></head><body>"
-                           + "<h1>Served from disk via io_uring (Magpie)</h1><pre>";
-        const string tail = "</pre></body></html>";
-        return head + new string('x', size - head.Length - tail.Length) + tail;
-    }
-
-    public static void Init(ServerConfig config)
-    {
-        // Self-contained: drop a sample file if the configured path is missing, so the
-        // demo runs anywhere. Point ServerConfig.FilePath at a real file to serve it.
-        if (!File.Exists(config.FilePath))
-        {
-            File.WriteAllText(config.FilePath, BuildSample(10 * 1024));
-        }
-
-        _magpie   = new Magpie.MagpieReader(rings: config.ReactorCount);
-        _fd       = Magpie.MagpieReader.OpenRead(config.FilePath);
-        _fileSize = (int)Magpie.MagpieReader.Size(_fd);
-        _headers  = System.Text.Encoding.ASCII.GetBytes(
-            $"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {_fileSize}\r\n\r\n");
-
-        Console.WriteLine($"[Minima] serving '{config.FilePath}' ({_fileSize} bytes) via Magpie");
-    }
-
     // Real async-work knob: serialize an in-memory object of WORK_ITEMS elements to JSON
     // on the THREAD POOL (via Task.Run) per request. 0 / unset = disabled (pure inline
     // reactor path). Genuine CPU + allocation, not a busy-spin.
-    private static readonly int WorkItems = 1;
+    private static readonly int WorkItems = 1000;
 
     private static readonly Payload LargeObject = BuildPayload(Math.Max(WorkItems, 1));
 
@@ -127,15 +91,22 @@ internal static class Handler
                         conn.ReturnBuffer(in item);
                     }
                 }
+                
+                //_ = await Task.Run(static () => JsonSerializer.Serialize("Hello World!"));
 
-                // Serve the file: write the precomputed headers, then read the file body
-                // straight into the connection's write slab via Magpie (io_uring). On a
-                // warm page cache this completes inline on the reactor thread; the first
-                // (cold) read blocks the reactor briefly while io-wq hits disk.
-                conn.Write(_headers);
-                Span<byte> body = conn.GetSpan(_fileSize);
-                int n = _magpie.Read(_fd, body, 0);
-                conn.Advance(n);
+                // Real async work: serialize a large object to JSON on the THREAD POOL.
+                // The handler resumes OFF-REACTOR, so the FlushAsync below pays the eventfd
+                // handoff the pure-inline path avoids — and the serialization is genuine
+                // CPU + GC pressure on the pool, not a busy-spin.
+                /*if (WorkItems > 0)
+                {
+                    _ = await Task.Run(static () => JsonSerializer.SerializeToUtf8Bytes(LargeObject));
+                    //JsonSerializer.SerializeToUtf8Bytes(LargeObject);
+                }*/
+
+                // One response per recv burst — accumulate in the connection's
+                // per-connection write slab, then submit and await ack.
+                conn.Write(Program.Response);
                 await conn.FlushAsync();
 
                 if (snap.IsClosed)

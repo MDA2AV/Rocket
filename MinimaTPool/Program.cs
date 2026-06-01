@@ -23,7 +23,7 @@ internal static unsafe class Program
         var config = new ServerConfig()
         {
             UsePipe = false,
-            ReactorCount = 10
+            ReactorCount = 12
         };
 
         Console.WriteLine($"[Minima] starting {config.ReactorCount} reactors on port {config.Port} (incremental={config.Incremental})");
@@ -92,7 +92,7 @@ internal static class Handler
                     }
                 }
                 
-                _ = await Task.Run(static () => JsonSerializer.Serialize("Hello World!"));
+                //_ = await Task.Run(static () => JsonSerializer.Serialize("Hello World!"));
 
                 // Real async work: serialize a large object to JSON on the THREAD POOL.
                 // The handler resumes OFF-REACTOR, so the FlushAsync below pays the eventfd

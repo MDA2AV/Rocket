@@ -1,19 +1,19 @@
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using MinimaTPool.Utils;
-using static MinimaTPool.Native;
+using MinimaTimeout.Utils;
+using static MinimaTimeout.Native;
 // ReSharper disable SuggestVarOrType_BuiltInTypes
 
-namespace MinimaTPool;
+namespace MinimaTimeout;
 
 /// <summary>
-/// One reactor = one thread + one io_uring + one listening socket (SO_REUSEPORT)
-/// + one connection map. The reactor thread is the sole writer of the SQ ring,
-/// the kernel-shared buf_ring, and the connection map. Handlers may run on any
-/// thread (e.g. resumed by a thread-pool timer after `await Task.Delay(1)`);
-/// they reach the reactor only through two MPSC queues (`_returnQ`, `_flushQ`)
-/// woken by an `eventfd` registered as a multishot poll in the ring.
+/// Thread-pool variant that wakes the reactor with a timed wait instead of an
+/// eventfd (zerg's strategy). The reactor is still the sole SQ submitter
+/// (SINGLE_ISSUER + DEFER_TASKRUN); off-reactor handlers reach it through the MPSC
+/// queues (`_returnQ`, `_flushQ`, `_recycleQ`) but do NOT poke an eventfd. Instead
+/// the reactor bounds its CQE wait with `CqTimeout`, so when no completion arrives
+/// it loops back and drains the queues on its own.
 /// </summary>
 public sealed unsafe partial class Reactor
 {
@@ -32,7 +32,6 @@ public sealed unsafe partial class Reactor
     private const ulong KindAccept = 1UL << 32;
     private const ulong KindRecv   = 2UL << 32;
     private const ulong KindSend   = 3UL << 32;
-    private const ulong KindWake   = 4UL << 32;  // eventfd-based cross-thread wake
 
     // Provided-buffer ring (one per reactor, shared by all its connections).
     private const ushort BgId = 1;
@@ -42,13 +41,11 @@ public sealed unsafe partial class Reactor
     private uint   _bufRingMask;
     private ushort _bufRingTail;
 
-    // Cross-thread wake mechanism: handlers running off-reactor enqueue work
-    // into these MPSC queues and `eventfd_write` _wakeFd; a multishot poll on
-    // _wakeFd registered with the ring delivers a CQE that wakes the reactor.
-    // When the caller is already the reactor thread (the common case — handler
-    // resumed inline from an IVTS SetResult), the Enqueue* methods bypass
-    // the queue and call the direct op, avoiding 2 syscalls per request.
-    private int _wakeFd;
+    // Off-reactor handlers enqueue work into these MPSC queues; there is NO eventfd
+    // wake. The reactor bounds its CQE wait with CqTimeout (zerg-style), so it loops
+    // back to drain the queues on its own. When the caller is already the reactor
+    // thread (handler resumed inline), the Enqueue* methods bypass the queue and run
+    // the op directly.
     private int _reactorThreadId;
     private readonly Mpsc<ushort> _returnQ = new(1 << 14);   // 16384 slots
     private readonly Mpsc<int>    _flushQ  = new(1 << 12);   // 4096 slots
@@ -79,6 +76,7 @@ public sealed unsafe partial class Reactor
     private const int EINTR  = 4;
     private const int EAGAIN = 11;
     private const int EBUSY  = 16;
+    private const int ETIME  = 62;   // timed wait expired with no completion ready
 
     public Reactor(int id, ServerConfig config)
     {
@@ -168,10 +166,9 @@ public sealed unsafe partial class Reactor
         SpinWait sw = default;
         while (!_returnQ.TryEnqueue(bid))
         {
-            Console.WriteLine("spinning");
             sw.SpinOnce();
         }
-        //WakeFdWrite();
+        // No wake — the reactor's timed wait drains _returnQ on its next cycle.
     }
 
     internal void EnqueueFlush(int fd)
@@ -188,18 +185,10 @@ public sealed unsafe partial class Reactor
         SpinWait sw = default;
         while (!_flushQ.TryEnqueue(fd))
         {
-            Console.WriteLine("spinning");
             sw.SpinOnce();
         }
-        WakeFdWrite();
-    }
-
-    private void WakeFdWrite()
-    {
-        ulong v = 1;
-        // 8-byte write to eventfd increments its counter; the kernel marks the
-        // fd readable, which fires our registered multishot poll's next CQE.
-        write(_wakeFd, &v, 8);
+        // No wake — the reactor's timed wait (SubmitAndWaitTimeout) comes back
+        // around to drain _flushQ on its own.
     }
 
     private void DrainReturnQ()
@@ -234,7 +223,7 @@ public sealed unsafe partial class Reactor
             return;
         }
         _recycleQ.Enqueue(conn);
-        WakeFdWrite();
+        // No wake — drained by the reactor on its next timed-wait cycle.
     }
 
     private void DrainRecycleQ()
@@ -243,17 +232,6 @@ public sealed unsafe partial class Reactor
         {
             Recycle(conn, conn.ClientFd);
         }
-    }
-
-    private void ArmWakePoll()
-    {
-        IoUringSqe* sqe = GetSqeOrFlush();
-        Unsafe.InitBlockUnaligned(sqe, 0, 64);
-        sqe->opcode    = IORING_OP_POLL_ADD;
-        sqe->fd        = _wakeFd;
-        sqe->op_flags  = POLLIN;                  // poll32_events lives at this offset
-        sqe->len       = IORING_POLL_ADD_MULTI;   // multishot — stays armed across CQEs
-        sqe->user_data = KindWake | (uint)_wakeFd;
     }
 
     // =========================================================================
@@ -276,15 +254,8 @@ public sealed unsafe partial class Reactor
             InitBufferRing();
         }
 
-        _wakeFd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-        if (_wakeFd < 0)
-        {
-            throw new InvalidOperationException("eventfd failed");
-        }
-
         Console.WriteLine($"[r{Id}] listening on 0.0.0.0:{_port} (incremental={_incremental})");
         SubmitAcceptMultishot();
-        ArmWakePoll();
 
         if (_incremental)
         {
@@ -296,7 +267,6 @@ public sealed unsafe partial class Reactor
         }
 
         close(_listenFd);
-        close(_wakeFd);
         Ring.Dispose();
     }
 
@@ -309,14 +279,18 @@ public sealed unsafe partial class Reactor
             DrainFlushQ();
             DrainRecycleQ();
 
-            int rc = Ring.SubmitAndWait(1);
-            if (rc < 0 && rc != -EINTR && rc != -EAGAIN && rc != -EBUSY)
+            // Bounded wait: returns on the first CQE, or after CqTimeout (-ETIME),
+            // so we loop back and re-drain the queues without an eventfd poke.
+            int rc = Ring.SubmitAndWaitTimeout(1, _config.CqTimeout);
+            
+            if (rc < 0 && rc != -EINTR && rc != -EAGAIN && rc != -EBUSY && rc != -ETIME)
             {
                 Console.Error.WriteLine($"[r{Id}] io_uring_enter failed: {rc}");
                 break;
             }
 
             uint ready = Ring.CqReady();
+            //if (ready != 0) Console.WriteLine(ready);
             for (uint i = 0; i < ready; i++)
             {
                 Dispatch(in Ring.CqeAt(i));
@@ -330,21 +304,6 @@ public sealed unsafe partial class Reactor
         ulong kind = cqe.user_data & 0xffffffff_00000000UL;
         int   fd   = (int)(cqe.user_data & 0xffffffffUL);
         bool  more = (cqe.flags & IORING_CQE_F_MORE) != 0;
-
-        if (kind == KindWake)
-        {
-            // Drain the eventfd counter so the next write re-triggers POLLIN
-            // (multishot poll is edge-triggered on the user_space side).
-            ulong drain;
-            read(_wakeFd, &drain, 8);
-            // The actual queue drains happen at the top of the next loop
-            // iteration — nothing else to do here.
-            if (!more)
-            {
-                ArmWakePoll();
-            }
-            return;
-        }
 
         if (kind == KindAccept)
         {
