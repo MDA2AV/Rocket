@@ -222,28 +222,50 @@ void IValueTaskSource&lt;int&gt;.OnCompleted(Action&lt;object?&gt; c, object? s,
 
                 <p>And that's the entire extension. The handler now reads a file the same way it reads a socket:</p>
 
-<pre><code class="language-csharp">conn.Write(headers);                                              // headers -&gt; slab
-int n = await conn.ReadFileAsync(asset.Fd, (int)asset.Size, 0);   // file -&gt; slab, async, inline
-conn.Advance(n);
-await conn.FlushAsync();                                          // slab -&gt; socket</code></pre>
+<pre><code class="language-csharp">conn.Write(headers);                                  // response header -&gt; slab
+int n = await conn.ReadFileAsync(asset.Fd, budget, 0); // file -&gt; slab, async, inline
+conn.Advance(n);                                      // n = bytes the read returned
+await conn.FlushAsync();                              // slab -&gt; socket</code></pre>
 
                 <p>No new threads, no new queue, no second ring. We added a new file tag, an SQE, a dispatch branch, and one more IVTS, and because the read is both <em>submitted by</em> and <em>completed by</em> the reactor, it can never trigger the deadlock we documented in <a href="https://mda2av.github.io/zerg/blog/io-uring-minima-part-5.html">Part 5</a>. It physically can't leave the core. That's true async file I/O, in a model that already knew how to wait without blocking.</p>
 
                 <h2>The asset cache and the page cache</h2>
 
-                <p>fractal never reads a file from disk on the hot path, it reads from the kernel page cache, and it opens every file exactly once at startup. That is the job of the AssetCache. It walks the wwwroot, opens each file read only, and keeps the handle and the size around for the life of the process.</p>
+                <p>fractal never reads a file from disk on the hot path, it reads from the kernel page cache, and it opens every file exactly once at startup. That is the job of the <code>AssetCache</code>. It walks the wwwroot, opens each file read only, and keeps the handle around for the life of the process.</p>
 
 <pre><code class="language-csharp">SafeFileHandle handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read);
 handles.Add(handle);                            // keep it alive for the cache's lifetime
 
-int  fd   = (int)handle.DangerousGetHandle();   // the raw fd io_uring needs
-long size = RandomAccess.GetLength(handle);</code></pre>
+int fd = (int)handle.DangerousGetHandle();      // the raw fd io_uring needs, no length recorded</code></pre>
 
-                <p>io_uring works with raw file descriptors so we need the int fd, not the managed handle. A SafeFileHandle owns that fd and would close it the moment the handle is collected, so we hold every handle in an array for the cache's lifetime and only then hand the raw fd from DangerousGetHandle to the reactor. As long as the handle is alive the fd is valid, and one open fd per file is the price (mind RLIMIT_NOFILE on a huge tree). The reads are positional so the same fd is read concurrently by every connection on every reactor, no locks and no seeking.</p>
+                <p>io_uring works with raw file descriptors so we need the int fd, not the managed handle. A <code>SafeFileHandle</code> owns that fd and would close it the moment the handle is collected, so we hold every handle in an array for the cache's lifetime and only then hand the raw fd from <code>DangerousGetHandle</code> to the reactor. As long as the handle is alive the fd is valid, and one open fd per file is the price (mind RLIMIT_NOFILE on a huge tree). The reads are positional so the same fd is read concurrently by every connection on every reactor, no locks and no seeking.</p>
 
                 <p>Now the page cache. It is not per fd, it is per inode. The kernel caches a file's pages once under its inode and every fd pointing at that inode shares them. The first read faults the pages in from disk, every read after that is served straight from memory, which is why a warm read completes almost instantly and the whole benchmark runs at memory speed. fractal keeps no copy of the file itself, the page cache is the copy.</p>
 
-                <p>Which raises the obvious question, what happens when a file changes. If something writes the file in place the writes land on the same pages under the same inode, so our next read sees the new bytes and the cache stays coherent for free. The catch is that almost nobody edits in place. Editors and deploy scripts write a new file and rename it over the old one, which is an atomic swap to a brand new inode. Our held fd still points at the old inode, and because we are holding it open that inode and its pages cannot be freed, so fractal keeps serving the old content until the process reopens the files. AssetCache is a startup snapshot of the tree, that is the tradeoff of pre-opening every fd, you give up live reloading and in return never pay an open or a stat on the hot path. For a static asset server that is exactly the deal you want, and picking up new files is a restart away.</p>
+                <p>Which raises the obvious question, what happens when a file changes. If something writes the file in place the writes land on the same pages under the same inode, so our next read sees the new bytes and the cache stays coherent for free. The catch is that almost nobody edits in place. Editors and deploy scripts write a new file and rename it over the old one, which is an atomic swap to a brand new inode. Our held fd still points at the old inode, and because we are holding it open that inode and its pages cannot be freed, so fractal keeps serving the old content until the process reopens the files. <code>AssetCache</code> is a startup snapshot of the tree, that is the tradeoff of pre-opening every fd, we never pay an open or a stat on the hot path and the cost is that the snapshot has to be told when to refresh.</p>
+
+                <p>So we give it a reload. fractal rebuilds the whole snapshot off the hot path, opens the new fds and re-bakes the header prefixes, then swaps it in with a single atomic reference. Because the fd and its header prefix live together in one immutable record, a reactor reading the snapshot sees either the whole old version or the whole new one, never a half and half. A request that already resolved keeps the snapshot it resolved against and finishes cleanly, the next request picks up the new one.</p>
+
+                <p>The old fds are closed a few seconds later rather than right away. io_uring takes a reference to the file when it submits a read, so a read already in flight is safe even if we close the fd underneath it, the grace just covers the tiny gap between a handler resolving the snapshot and submitting its read. The trigger is a signal, the same model nginx uses, you deploy your files and send SIGHUP and fractal reloads without missing a request. Watching the directory with inotify would make it automatic, same machinery underneath.</p>
+
+                <p>There is a second kind of staleness, the length. The easy way to send a Content-Length is to measure every file at startup and bake it into the header, but a file edited in place can change size, and through the page cache that edit is already live, so a length measured at startup can quietly stop matching the bytes we are about to send. fractal never measures up front. It bakes only the header prefix, everything except the length. On each request it lays down that prefix, reserves a fixed-width gap where the length line will go, and reads the file into the slab right after the gap. The length line itself is written only after the read returns, once we know what it should say.</p>
+
+<pre><code class="language-csharp">conn.Write(prefix);                              // fills the slab, nothing is sent yet
+WriteTail += ClLineWidth;                        // reserve a gap for the last header line, left blank
+
+int budget = slab.Length - headerLen;
+int n = await conn.ReadFileAsync(asset.Fd, budget, 0);   // read file bytes into the slab, still no send
+if (n &lt; budget)                                // the whole file fit, so now we know its length
+{
+    WriteContentLength(slab.Slice(lineAt, ClLineWidth), n);  // only now do we write the length line
+    await conn.FlushAsync();                     // first and only send: prefix + length + body
+    return;
+}
+await SendChunkedAsync(conn, asset, prefix);     // too big, gap never filled, stream chunked instead</code></pre>
+
+                <p>The io_uring read result is the exact byte count we just pulled from the page cache, so that is the number we write into the gap, no extra fstat, the count falls out of the read we were already doing. The length is computed from the bytes we are about to ship, never from something we wrote down earlier, so the two cannot disagree.</p>
+
+                <p>That leaves one case, a file too big for the slab. We size the read at the slab minus the header, so a read that comes back full might have more behind it and we cannot know its total length. This is where reserving rather than writing pays off. Every write so far only filled the slab, the flush is the only thing that sends, and we have not flushed, so nothing is committed. The gap we left for the length line stays blank, we rewind the slab to the front, write a Transfer-Encoding: chunked header, and stream the file from there in slab sized frames, each one prefixed with its own size, until a short read marks the end. The client only ever sees the chunked header. Small files, almost everything a static server sees, stay on the single read single send path with a real Content-Length. Big files stream. Neither one trusts a stored size.</p>
 
                 <p>We now covered the base mechanism that makes fractal, this is still however just the bones of it, we still need logic to parse HTTP requests, deal with pre-compressed files and fragmented requests. All this logic already exists in the <a href="https://github.com/dotnet-web-stack/fractal">fractal repository</a> but won't be covered in this Part 7 (or any future part), the HTTP parsing is achieved with a third party library <a href="https://github.com/dotnet-web-stack/Glyph11">Glyph11</a>.</p>
 
