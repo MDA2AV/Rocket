@@ -11,6 +11,7 @@
 
     <ItemGroup>
         <ProjectReference Include="..\Magpie\Magpie.csproj" />
+        <ProjectReference Include="..\RingPg\RingPg.csproj" />
     </ItemGroup>
 
 </Project>

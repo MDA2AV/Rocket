@@ -280,7 +280,10 @@ public sealed unsafe partial class Reactor
             throw new InvalidOperationException("eventfd failed");
         }
 
-        Console.WriteLine($"[r{Id}] listening on 0.0.0.0:{_port} (incremental={_incremental})");
+        if (Environment.GetEnvironmentVariable("MINIMA_DB") == "1")
+            Db = RingPg.PgConnection.Connect(this, "bench", "bench");
+
+        Console.WriteLine($"[r{Id}] listening on 0.0.0.0:{_port} (incremental={_incremental}{(Db != null ? ", +pg on ring" : "")})");
         SubmitAcceptMultishot();
         ArmWakePoll();
 
@@ -341,6 +344,13 @@ public sealed unsafe partial class Reactor
             {
                 ArmWakePoll();
             }
+            return;
+        }
+
+        if (kind == KindDb)
+        {
+            // A RingPg SEND/RECV completed on the DB socket → resume the query inline (RCA=false).
+            _dbTarget?.Complete(cqe.res);
             return;
         }
 

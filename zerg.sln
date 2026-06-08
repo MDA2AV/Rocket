@@ -84,6 +84,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "loom", "loom\loom.csproj", 
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "harrier", "harrier\harrier.csproj", "{5421D76F-0EE2-452D-AA07-249B0ADD2644}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RingPg", "RingPg\RingPg.csproj", "{3E40F1D7-8FA0-4383-BEF3-9C05E63556E0}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -598,6 +600,18 @@ Global
 		{5421D76F-0EE2-452D-AA07-249B0ADD2644}.Release|x64.Build.0 = Release|Any CPU
 		{5421D76F-0EE2-452D-AA07-249B0ADD2644}.Release|x86.ActiveCfg = Release|Any CPU
 		{5421D76F-0EE2-452D-AA07-249B0ADD2644}.Release|x86.Build.0 = Release|Any CPU
+		{3E40F1D7-8FA0-4383-BEF3-9C05E63556E0}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{3E40F1D7-8FA0-4383-BEF3-9C05E63556E0}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3E40F1D7-8FA0-4383-BEF3-9C05E63556E0}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{3E40F1D7-8FA0-4383-BEF3-9C05E63556E0}.Debug|x64.Build.0 = Debug|Any CPU
+		{3E40F1D7-8FA0-4383-BEF3-9C05E63556E0}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{3E40F1D7-8FA0-4383-BEF3-9C05E63556E0}.Debug|x86.Build.0 = Debug|Any CPU
+		{3E40F1D7-8FA0-4383-BEF3-9C05E63556E0}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{3E40F1D7-8FA0-4383-BEF3-9C05E63556E0}.Release|Any CPU.Build.0 = Release|Any CPU
+		{3E40F1D7-8FA0-4383-BEF3-9C05E63556E0}.Release|x64.ActiveCfg = Release|Any CPU
+		{3E40F1D7-8FA0-4383-BEF3-9C05E63556E0}.Release|x64.Build.0 = Release|Any CPU
+		{3E40F1D7-8FA0-4383-BEF3-9C05E63556E0}.Release|x86.ActiveCfg = Release|Any CPU
+		{3E40F1D7-8FA0-4383-BEF3-9C05E63556E0}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

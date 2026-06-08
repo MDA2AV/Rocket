@@ -26,6 +26,14 @@ internal static class Http
     /// so it completes on the reactor and resumes inline — NO thread pool.
     internal static bool RingWork;
 
+    /// LOOM_DELAY_US=&lt;n&gt; → with LOOM_RING=1, await an io_uring TIMEOUT of n microseconds
+    /// instead of a NOP — real async latency, still no thread pool.
+    internal static long DelayUs;
+
+    /// LOOM_DB=1 → each reactor opens a Postgres connection whose SEND/RECV ride the ring;
+    /// GET /db runs "SELECT 42" over it (await resumes inline — no thread pool).
+    internal static bool UseDb;
+
     /// <summary>
     /// Minima-equivalent handler: does NOT parse the request — writes the exact same fixed
     /// "ok" response Minima emits, once per recv. Synchronous when <see cref="Work"/> is off
@@ -47,7 +55,8 @@ internal static class Http
     /// reactor and resumes inline — NO thread pool, unlike Handle2Work's Task.Run.
     private static async Task Handle2Ring(Reactor reactor, Connection conn)
     {
-        await reactor.RingYieldAsync(conn);
+        if (DelayUs > 0) await reactor.DelayAsync(conn, DelayUs);   // real async latency, no pool
+        else await reactor.RingYieldAsync(conn);                    // instant NOP
         WriteOk(conn);
         reactor.Send(conn);
     }
@@ -97,6 +106,8 @@ internal static class Http
 
         if (path.SequenceEqual("/work"u8))
             return HandleWork(reactor, conn);   // async path — no spans cross the await
+        if (path.SequenceEqual("/db"u8))
+            return HandleDb(reactor, conn);     // io_uring Postgres query
 
         WriteText(conn, SumAB(query));          // baseline11 — synchronous, never yields
         reactor.Send(conn);
@@ -120,6 +131,39 @@ internal static class Http
         bool onReactor = reactor.OnReactorThread;   // true ⇒ the SyncContext brought us home
         WriteWork(conn, sum, beforeThread, onReactor);
         reactor.Send(conn);                          // submit on the reactor thread
+    }
+
+    /// io_uring-native Postgres: the query SEND and response RECV ride the reactor's ring, so
+    /// `await reactor.DbQueryAsync(...)` resumes inline — no .NET socket engine, no thread pool.
+    private static async Task HandleDb(Reactor reactor, Connection conn)
+    {
+        string v = await DbQuery(reactor, "SELECT 42");
+        WriteDb(conn, v);
+        reactor.Send(conn);
+    }
+
+    // The async orchestration (lives here, not in the `unsafe` Reactor): SEND the query, then
+    // RECV until ReadyForQuery — both ride the ring, both resume inline on the reactor.
+    private static async Task<string> DbQuery(Reactor reactor, string sql)
+    {
+        int len = reactor.DbPrepareQuery(sql);
+        await reactor.DbSendAsync(len);
+        reactor.DbResetRecv();
+        while (true)
+        {
+            int n = await reactor.DbRecvAsync();
+            if (n <= 0) return "";
+            if (reactor.DbFinishRecv(n, out string result)) return result;
+        }
+    }
+
+    private static unsafe void WriteDb(Connection conn, string v)
+    {
+        Span<byte> body = stackalloc byte[64];
+        int p = 0;
+        Append(body, ref p, "db="u8);
+        p += System.Text.Encoding.ASCII.GetBytes(v, body[p..]);
+        Emit(conn, body[..p]);
     }
 
     private static unsafe void WriteText(Connection conn, long value)

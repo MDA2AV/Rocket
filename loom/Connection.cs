@@ -16,6 +16,7 @@ internal sealed unsafe class Connection : IValueTaskSource<int>
     public int WriteLen;
     public int WriteSent;
     public bool CloseAfter;
+    public byte* Ts;        // 16-byte __kernel_timespec for IORING_OP_TIMEOUT (must outlive the await)
 
     // IVTS for an io_uring-native await: a handler can `await` a ring op, and the reactor
     // completes it from the matching CQE — RCA=false ⇒ the continuation resumes inline on the
@@ -39,6 +40,7 @@ internal sealed unsafe class Connection : IValueTaskSource<int>
     {
         Recv = (byte*)NativeMemory.Alloc(RecvBuf);
         Write = (byte*)NativeMemory.Alloc(WriteBuf);
+        Ts = (byte*)NativeMemory.Alloc(16);
     }
 
     public void Reset(int fd)
@@ -50,5 +52,6 @@ internal sealed unsafe class Connection : IValueTaskSource<int>
     {
         NativeMemory.Free(Recv);
         NativeMemory.Free(Write);
+        NativeMemory.Free(Ts);
     }
 }

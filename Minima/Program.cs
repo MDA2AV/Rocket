@@ -140,7 +140,10 @@ internal static class Handler
                 
                 //_ = await Task.Run(static () => JsonSerializer.Serialize("Hello World!"));
                 
-                conn.Write(Program.Response);
+                if (reactor.Db != null)
+                    WriteDbResponse(conn, await reactor.Db.QueryAsync("SELECT 42"));  // PG over the ring, inline
+                else
+                    conn.Write(Program.Response);
                 await conn.FlushAsync();
 
                 if (snap.IsClosed)
@@ -164,6 +167,20 @@ internal static class Handler
             conn.DecRef();   // release the handler's ref; teardown runs once the reactor releases too
         }
     }
+
+    private static void WriteDbResponse(Connection conn, string value)
+    {
+        Span<byte> resp = stackalloc byte[160];
+        int p = 0;
+        p += Copy(resp[p..], "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: "u8);
+        int bodyLen = 3 + value.Length;   // "db=" + value
+        System.Buffers.Text.Utf8Formatter.TryFormat(bodyLen, resp[p..], out int dn); p += dn;
+        p += Copy(resp[p..], "\r\n\r\ndb="u8);
+        p += System.Text.Encoding.ASCII.GetBytes(value, resp[p..]);
+        conn.Write(resp[..p]);
+    }
+
+    private static int Copy(Span<byte> dst, ReadOnlySpan<byte> src) { src.CopyTo(dst); return src.Length; }
 
     // PipeReader/PipeWriter variant — same behavior, driven through the BCL
     // pipe adapters instead of the raw ReadAsync/TryGetItem/Write API.

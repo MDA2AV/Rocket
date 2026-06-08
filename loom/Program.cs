@@ -25,6 +25,8 @@ internal static class Program
         if (Environment.GetEnvironmentVariable("LOOM_MINIMA") is { } m) Http.MinimaMode = m == "1";
         if (Environment.GetEnvironmentVariable("LOOM_WORK") is { } w) Http.Work = w == "1";
         Http.RingWork = Environment.GetEnvironmentVariable("LOOM_RING") == "1";
+        if (long.TryParse(Environment.GetEnvironmentVariable("LOOM_DELAY_US"), out long du)) Http.DelayUs = du;
+        Http.UseDb = Environment.GetEnvironmentVariable("LOOM_DB") == "1";
 
         Console.WriteLine($"loom: {reactors} io_uring reactors on :{port} " +
                           $"(SyncContext per reactor, minima-mode={Http.MinimaMode})");

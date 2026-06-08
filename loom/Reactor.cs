@@ -16,8 +16,9 @@ namespace Loom;
 /// </summary>
 internal sealed unsafe class Reactor
 {
-    private const uint OP_ACCEPT = 1, OP_RECV = 2, OP_SEND = 3, OP_WAKE = 4, OP_RING = 5;
+    private const uint OP_ACCEPT = 1, OP_RECV = 2, OP_SEND = 3, OP_WAKE = 4, OP_RING = 5, OP_DB = 6;
     private const byte IORING_OP_NOP = 0;
+    private const byte IORING_OP_TIMEOUT = 11;
     private const uint RING_ENTRIES = 4096;
     private const int MAX_FD = 1 << 16;
 
@@ -30,6 +31,7 @@ internal sealed unsafe class Reactor
     private readonly Connection?[] _slots = new Connection?[MAX_FD];
     private readonly Stack<Connection> _pool = new();
     private readonly ConcurrentQueue<(SendOrPostCallback cb, object? st)> _continuations = new();
+    private DbConn _db = null!;     // this reactor's Postgres connection (its SEND/RECV ride this ring)
 
     public Reactor(int id, ushort port) { _id = id; _port = port; }
 
@@ -64,7 +66,8 @@ internal sealed unsafe class Reactor
         _listenFd = MakeListener(_port);
         _wakeFd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
         _ring = Ring.Create(RING_ENTRIES);
-        Console.WriteLine($"[loom r{_id}] listening on :{_port}");
+        if (Http.UseDb) _db = Pg.Connect("bench", "bench");   // one-time blocking handshake; queries ride the ring
+        Console.WriteLine($"[loom r{_id}] listening on :{_port}{(Http.UseDb ? " (+pg on ring)" : "")}");
         ArmAccept();
         ArmWake();
 
@@ -95,7 +98,55 @@ internal sealed unsafe class Reactor
             case OP_SEND: OnSend((int)(ud & 0xffffffff), res); break;
             case OP_WAKE: OnWake(); break;
             case OP_RING: OnRing((int)(ud & 0xffffffff), res); break;
+            case OP_DB: _db.IoComplete(res); break;   // DB SEND/RECV CQE → resume the query inline
         }
+    }
+
+    // ── Postgres over the ring ───────────────────────────────────────────────
+    // The query SEND and the response RECV are ordinary ring ops on the DB socket fd; their
+    // CQEs complete the DbConn's IVTS (RCA=false), so the await resumes inline on the reactor —
+    // no .NET socket engine, no thread pool, no marshal-home. The async orchestration lives in
+    // Http.DbQuery (this class is `unsafe`, so it can't hold an `await`); these are its sync
+    // (unsafe) primitives, all run on the reactor thread.
+
+    internal int DbPrepareQuery(string sql) => Pg.Query(_db.Send, sql);
+    internal void DbResetRecv() => _db.RecvLen = 0;
+
+    internal bool DbFinishRecv(int n, out string result)
+    {
+        _db.RecvLen += n;
+        if (Pg.TryParse(new ReadOnlySpan<byte>(_db.Recv, _db.RecvLen), out int fs, out int fl, out bool ready) && ready)
+        {
+            result = fl > 0 ? System.Text.Encoding.ASCII.GetString(_db.Recv + fs, fl) : "";
+            return true;
+        }
+        result = "";
+        return false;
+    }
+
+    internal ValueTask<int> DbSendAsync(int len)
+    {
+        ValueTask<int> vt = _db.IoAwait();
+        IoUringSqe* s = Sqe();
+        s->opcode = IORING_OP_SEND;
+        s->fd = _db.Fd;
+        s->addr = (ulong)_db.Send;
+        s->len = (uint)len;
+        s->op_flags = 0x4000;   // MSG_NOSIGNAL
+        s->user_data = Ud(OP_DB, _db.Fd);
+        return vt;
+    }
+
+    internal ValueTask<int> DbRecvAsync()
+    {
+        ValueTask<int> vt = _db.IoAwait();
+        IoUringSqe* s = Sqe();
+        s->opcode = IORING_OP_RECV;
+        s->fd = _db.Fd;
+        s->addr = (ulong)(_db.Recv + _db.RecvLen);
+        s->len = (uint)(DbConn.Buf - _db.RecvLen);
+        s->user_data = Ud(OP_DB, _db.Fd);
+        return vt;
     }
 
     /// <summary>
@@ -116,6 +167,26 @@ internal sealed unsafe class Reactor
     {
         Connection? c = _slots[fd];
         c?.RingComplete(res);   // RCA=false ⇒ resumes the awaiting handler inline on this thread
+    }
+
+    /// <summary>
+    /// Async delay via io_uring TIMEOUT — real latency, served entirely on the reactor (the
+    /// thread stays free for other connections while this one waits). No thread pool. This is
+    /// the shape of any async I/O on your ring: replace TIMEOUT with a file/DB read.
+    /// </summary>
+    public ValueTask<int> DelayAsync(Connection conn, long micros)
+    {
+        long* ts = (long*)conn.Ts;
+        ts[0] = micros / 1_000_000;            // tv_sec
+        ts[1] = (micros % 1_000_000) * 1000;   // tv_nsec
+        ValueTask<int> vt = conn.RingAwait();
+        IoUringSqe* s = Sqe();
+        s->opcode = IORING_OP_TIMEOUT;
+        s->addr = (ulong)conn.Ts;
+        s->len = 1;                            // one timespec
+        s->off = 0;                            // pure time-based (fire after the duration)
+        s->user_data = Ud(OP_RING, conn.Fd);
+        return vt;
     }
 
     private void OnWake()
