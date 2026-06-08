@@ -39,12 +39,14 @@ internal sealed class Rings_as_ReadOnlySpan
             // Create a ReadOnlySequence<byte> to easily slice the data
             var sequence = rings.ToReadOnlySequence();
             
+            //_ = await Task.Run(static () => 5);
+            
             // Process received data...
-            if (WorkItems > 0)
+            /*if (WorkItems > 0)
             {
                 //_ = await Task.Run(static () => JsonSerializer.SerializeToUtf8Bytes(LargeObject));
                 JsonSerializer.SerializeToUtf8Bytes(LargeObject);
-            }
+            }*/
             
             // Return rings to the kernel
             foreach (var ring in rings)

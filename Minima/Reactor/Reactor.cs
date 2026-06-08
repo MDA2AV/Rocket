@@ -191,6 +191,19 @@ public sealed unsafe partial class Reactor
         }
         WakeFdWrite();
     }
+    
+    // Called by Connection.DecRef when the refcount hits 0. Teardown must run on the
+    // reactor (buf_ring + pool are reactor-owned), so off-reactor callers hand off.
+    internal void EnqueueRecycle(Connection conn)
+    {
+        if (Environment.CurrentManagedThreadId == _reactorThreadId)
+        {
+            Recycle(conn, conn.ClientFd);
+            return;
+        }
+        _recycleQ.Enqueue(conn);
+        WakeFdWrite();
+    }
 
     private void WakeFdWrite()
     {
@@ -220,19 +233,6 @@ public sealed unsafe partial class Reactor
             // establishes the happens-before so WriteInFlight is visible here.
             SubmitSend(fd, conn.WriteBuffer, (uint)conn.WriteInFlight);
         }
-    }
-
-    // Called by Connection.DecRef when the refcount hits 0. Teardown must run on the
-    // reactor (buf_ring + pool are reactor-owned), so off-reactor callers hand off.
-    internal void EnqueueRecycle(Connection conn)
-    {
-        if (Environment.CurrentManagedThreadId == _reactorThreadId)
-        {
-            Recycle(conn, conn.ClientFd);
-            return;
-        }
-        _recycleQ.Enqueue(conn);
-        WakeFdWrite();
     }
 
     private void DrainRecycleQ()

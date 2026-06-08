@@ -22,8 +22,9 @@ internal static unsafe class Program
         // All tunables live in ServerConfig — override the defaults here.
         var config = new ServerConfig()
         {
+            Port = 8080,
             UsePipe = false,
-            ReactorCount = 12
+            ReactorCount = 2
         };
 
         Console.WriteLine($"[Minima] starting {config.ReactorCount} reactors on port {config.Port} (incremental={config.Incremental})");
@@ -132,10 +133,14 @@ internal static class Handler
                 // straight into the connection's write slab via Magpie (io_uring). On a
                 // warm page cache this completes inline on the reactor thread; the first
                 // (cold) read blocks the reactor briefly while io-wq hits disk.
-                conn.Write(_headers);
-                Span<byte> body = conn.GetSpan(_fileSize);
-                int n = _magpie.Read(_fd, body, 0);
-                conn.Advance(n);
+                //conn.Write(_headers);
+                //Span<byte> body = conn.GetSpan(_fileSize);
+                //int n = _magpie.Read(_fd, body, 0);
+                //conn.Advance(n);
+                
+                //_ = await Task.Run(static () => JsonSerializer.Serialize("Hello World!"));
+                
+                conn.Write(Program.Response);
                 await conn.FlushAsync();
 
                 if (snap.IsClosed)

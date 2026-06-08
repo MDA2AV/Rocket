@@ -1,9 +1,9 @@
 using System.Threading.Tasks.Sources;
-using Minima.Utils;
+using Kingslayer.Utils;
 
 // ReSharper disable SuggestVarOrType_BuiltInTypes
 
-namespace Minima;
+namespace Kingslayer;
 
 /// <summary>
 /// Per-connection state. The handler may run on any thread (e.g. resumed by
@@ -25,9 +25,10 @@ public sealed unsafe partial class Connection : IValueTaskSource<RecvSnapshot>
         return this;
     }
 
+    // EXPERIMENT: resume the ReadAsync continuation on the thread pool (its own thread), not inline.
     private ManualResetValueTaskSourceCore<RecvSnapshot> _readSignal = new()
     {
-        RunContinuationsAsynchronously = false,
+        RunContinuationsAsynchronously = true,
     };
     private int _armed;
     private int _pending;
