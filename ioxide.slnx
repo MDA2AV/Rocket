@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="ioxide.file/ioxide.file.csproj" />
+  <Project Path="ioxide.pg/ioxide.pg.csproj" />
+  <Project Path="ioxide/ioxide.csproj" />
+  <Project Path="Playground/Playground.csproj" />
+</Solution>

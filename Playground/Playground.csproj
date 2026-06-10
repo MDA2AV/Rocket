@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>Playground</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../ioxide/ioxide.csproj" />
+    <ProjectReference Include="../ioxide.pg/ioxide.pg.csproj" />
+    <ProjectReference Include="../ioxide.file/ioxide.file.csproj" />
+  </ItemGroup>
+
+</Project>
