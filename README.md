@@ -5,9 +5,9 @@
 One ring per reactor thread - run one per core. HTTP, Postgres, and file I/O submit on that
 ring and resume inline on the same thread. No thread pool on the hot path. No native dependencies - raw syscalls, nothing else.
 
-> Linux 6.1+ · .NET 10 · status `0.0.2` - experimental
+> Linux 6.1+ · .NET 10 · status `0.0.1` - experimental
 
-📖 **[Documentation →](https://mda2av.github.io/uRocket/)** - architecture, guides, the full picture
+📖 **[Documentation →](https://mda2av.github.io/ioxide/)** - architecture, guides, the full picture
 
 ## Quick start
 
