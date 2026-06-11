@@ -5,12 +5,14 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <RootNamespace>Examples</RootNamespace>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="../ioxide/ioxide.csproj" />
     <ProjectReference Include="../ioxide.pg/ioxide.pg.csproj" />
+    <ProjectReference Include="../ioxide.tls/ioxide.tls.csproj" />
   </ItemGroup>
 
 </Project>

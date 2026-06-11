@@ -64,7 +64,8 @@
     <p><code>Run()</code> executes on the reactor's own thread, in a deliberate order: record the
     thread id (every fast-path check compares against it), create the ring -
     <code>DEFER_TASKRUN</code> requires that setup and enter happen on the same thread - open the
-    SO_REUSEPORT listener, register the buffer ring (or initialize the per-connection ring
+    SO_REUSEPORT listeners - one per <code>Port</code>/<code>ExtraPorts</code> entry, accepts
+    route by listener fd - register the buffer ring (or initialize the per-connection ring
     machinery in incremental mode), create the eventfd, run <code>OnStart</code> so the
     application opens its ring-native clients here, then arm the multishot accept and the wake
     poll and fall into the loop. Client opens started in <code>OnStart</code> may be async: their

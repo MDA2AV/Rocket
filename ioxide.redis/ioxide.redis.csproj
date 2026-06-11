@@ -5,17 +5,17 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <RootNamespace>ioxide.pg</RootNamespace>
+    <RootNamespace>ioxide.redis</RootNamespace>
 
-    <PackageId>ioxide.pg</PackageId>
+    <PackageId>ioxide.redis</PackageId>
     <Version>0.0.2</Version>
     <Authors>MDA2AV</Authors>
-    <Description>Postgres driver for the ioxide io_uring runtime: pooled ring-native connections per reactor, ring-native connect and handshake, inline completion resume.</Description>
+    <Description>Redis client for the ioxide io_uring runtime: pooled ring-native connections per reactor, full RESP2 protocol, a generic command API plus typed helpers (strings, keys, hashes, lists, sets, sorted sets, pub/sub, transactions, scripting), and pipelining. Inline completion resume.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <PackageProjectUrl>https://mda2av.github.io/ioxide/learn/postgres.html</PackageProjectUrl>
+    <PackageProjectUrl>https://mda2av.github.io/ioxide/learn/clients.html</PackageProjectUrl>
     <RepositoryUrl>https://github.com/MDA2AV/ioxide</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <PackageTags>io_uring;postgres;postgresql;driver;linux;ioxide</PackageTags>
+    <PackageTags>io_uring;redis;resp;client;cache;linux;ioxide</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 

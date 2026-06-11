@@ -71,6 +71,20 @@ public sealed class PgPool
         _pool.Return(connection);
     }
 
+    /// <summary>Rent → stream a query's rows through <paramref name="onRow"/> → return.</summary>
+    public async ValueTask<int> QueryRowsAsync(string sql, PgRowHandler onRow)
+    {
+        PgConnection connection = await RentAsync();
+        try
+        {
+            return await connection.QueryRowsAsync(sql, onRow);
+        }
+        finally
+        {
+            Return(connection);
+        }
+    }
+
     /// <summary>Rent → run one simple query → return. The everyday path.</summary>
     public async ValueTask<PgResult> QueryAsync(string sql)
     {

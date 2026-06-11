@@ -3,13 +3,15 @@
 [![ioxide](https://img.shields.io/nuget/v/ioxide?label=ioxide)](https://www.nuget.org/packages/ioxide/)
 [![ioxide.pg](https://img.shields.io/nuget/v/ioxide.pg?label=ioxide.pg)](https://www.nuget.org/packages/ioxide.pg/)
 [![ioxide.file](https://img.shields.io/nuget/v/ioxide.file?label=ioxide.file)](https://www.nuget.org/packages/ioxide.file/)
+[![ioxide.tls](https://img.shields.io/nuget/v/ioxide.tls?label=ioxide.tls)](https://www.nuget.org/packages/ioxide.tls/)
+[![ioxide.redis](https://img.shields.io/nuget/v/ioxide.redis?label=ioxide.redis)](https://www.nuget.org/packages/ioxide.redis/)
 
 **A shared-nothing io_uring runtime for .NET.**
 
 One ring per reactor thread - run one per core. HTTP, Postgres, and file I/O submit on that
 ring and resume inline on the same thread. No thread pool on the hot path. No native dependencies - raw syscalls, nothing else.
 
-> Linux 6.1+ · .NET 10 · status `0.0.1` - experimental
+> Linux 6.1+ · .NET 10 · status `0.0.2` - experimental
 
 **[Documentation →](https://mda2av.github.io/ioxide/)** - architecture, guides, the full picture
 

@@ -72,6 +72,8 @@ public sealed class PgConnection : IDisposable
         int length = WriteStartup(options.User, options.Database);
         await SendAllAsync(length);
 
+        PgScram? scram = null;
+
         while (true)
         {
             Message message = await ReceiveMessageAsync();
@@ -80,12 +82,43 @@ public sealed class PgConnection : IDisposable
             {
                 case PgProtocol.Authentication:
                     int code = ReadAuthCode(message);
-                    if (code != 0)
+                    if (code == 0)
                     {
-                        throw new PgException(
-                            $"authentication method {code} not supported (trust auth only; SCRAM is on the roadmap)");
+                        break;   // AuthenticationOk
                     }
-                    break;
+                    if (code == 10)
+                    {
+                        // SASL: the server lists mechanisms; we speak SCRAM-SHA-256.
+                        if (!ScramOffered(message))
+                        {
+                            throw new PgException("server offers SASL but not SCRAM-SHA-256");
+                        }
+                        scram = new PgScram(options.Password
+                            ?? throw new PgException("server requires SCRAM-SHA-256 but PgOptions.Password is not set"));
+                        await SendAllAsync(WriteSaslInitial(scram.ClientFirst()));
+                        break;
+                    }
+                    if (code == 11)
+                    {
+                        // SASLContinue: server-first in, client-final (with proof) out.
+                        if (scram == null)
+                        {
+                            throw new PgException("unexpected SASLContinue");
+                        }
+                        await SendAllAsync(WriteSaslFinal(scram.ClientFinal(ReadAuthData(message))));
+                        break;
+                    }
+                    if (code == 12)
+                    {
+                        // SASLFinal: verify the server signature.
+                        if (scram == null)
+                        {
+                            throw new PgException("unexpected SASLFinal");
+                        }
+                        scram.VerifyServerFinal(ReadAuthData(message));
+                        break;
+                    }
+                    throw new PgException($"authentication method {code} not supported (trust or SCRAM-SHA-256)");
 
                 case PgProtocol.ErrorResponse:
                     throw ReadServerError(message);
@@ -250,6 +283,81 @@ public sealed class PgConnection : IDisposable
 
         _recvCapacity *= 2;
         _recv = (nint)NativeMemory.Realloc((void*)_recv, (nuint)_recvCapacity);
+    }
+
+    /// <summary>
+    /// Run one simple query, streaming every DataRow to <paramref name="onRow"/> (inline, on the
+    /// reactor) and returning the row count. Server errors throw after the stream resyncs at
+    /// ReadyForQuery, same as <see cref="QueryAsync"/>.
+    /// </summary>
+    public async ValueTask<int> QueryRowsAsync(string sql, PgRowHandler onRow)
+    {
+        if (IsBroken)
+        {
+            throw new PgException("connection is broken");
+        }
+
+        int length = WriteQuery(sql);
+        await SendAllAsync(length);
+
+        int rows = 0;
+        PgException? serverError = null;
+
+        while (true)
+        {
+            Message message = await ReceiveMessageAsync();
+
+            switch (message.Tag)
+            {
+                case PgProtocol.DataRow:
+                    rows++;
+                    if (serverError == null)
+                    {
+                        InvokeRow(onRow, in message);
+                    }
+                    break;
+
+                case PgProtocol.ErrorResponse:
+                    serverError = ReadServerError(message);
+                    break;
+
+                case PgProtocol.ReadyForQuery:
+                    if (serverError != null)
+                    {
+                        throw serverError;
+                    }
+                    return rows;
+            }
+        }
+    }
+
+    private unsafe void InvokeRow(PgRowHandler onRow, in Message message)
+    {
+        onRow(new PgRow(new ReadOnlySpan<byte>((void*)(_recv + message.BodyStart), message.BodyLength)));
+    }
+
+    private unsafe bool ScramOffered(in Message message)
+    {
+        ReadOnlySpan<byte> body = Body(message);
+        return body.Length > 4 && PgProtocol.OffersScramSha256(body[4..]);
+    }
+
+    private unsafe string ReadAuthData(in Message message)
+    {
+        ReadOnlySpan<byte> body = Body(message);
+        return Encoding.UTF8.GetString(body[4..]);
+    }
+
+    private unsafe int WriteSaslInitial(string clientFirst)
+    {
+        byte[] payload = Encoding.UTF8.GetBytes(clientFirst);
+        return PgProtocol.WriteSaslInitialResponse(new Span<byte>((void*)_send, _sendCapacity), "SCRAM-SHA-256", payload);
+    }
+
+    private unsafe int WriteSaslFinal(string clientFinal)
+    {
+        byte[] payload = Encoding.UTF8.GetBytes(clientFinal);
+        return PgProtocol.WriteSaslResponse(new Span<byte>((void*)_send, _sendCapacity), payload);
     }
 
     private unsafe int WriteStartup(string user, string database)

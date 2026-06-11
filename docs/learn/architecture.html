@@ -157,6 +157,7 @@
     <table>
       <tr><th>Option</th><th>Default</th><th>Meaning</th></tr>
       <tr><td><code>Port</code></td><td>8080</td><td>SO_REUSEPORT listener port (every reactor binds it)</td></tr>
+      <tr><td><code>ExtraPorts</code></td><td>[]</td><td>additional listener ports; <code>conn.ListenerPort</code> says which one a connection used</td></tr>
       <tr><td><code>ReactorCount</code></td><td>12</td><td>reactors = threads; run one per core</td></tr>
       <tr><td><code>RingEntries</code></td><td>8192</td><td>io_uring SQ/CQ depth</td></tr>
       <tr><td><code>RecvBufferSize</code></td><td>32 KB</td><td>shared mode: bytes per recv buffer</td></tr>
