@@ -20,7 +20,8 @@ public sealed unsafe partial class Reactor
     // Connection table indexed by fd (dense small ints - array beats Dictionary per CQE).
     private Connection?[] _connections = new Connection?[4096];
 
-    private int _listenFd;
+    private int[] _listenFds = [];
+    private ushort[] _listenPorts = [];
     private readonly ServerConfig _config;
     private readonly ushort _port;
     private readonly uint _ringEntries;
@@ -200,7 +201,7 @@ public sealed unsafe partial class Reactor
             Connection? conn = ConnAt(fd, (ushort)gen);
             if (conn != null)
             {
-                SubmitSend(fd, (ushort)gen, conn.WriteBuffer, (uint)conn.WriteInFlight);
+                SubmitSend(fd, (ushort)gen, conn.WriteBuffer, (uint)conn.WriteInFlight, conn.SendOpFlags);
             }
             return;
         }
@@ -258,7 +259,7 @@ public sealed unsafe partial class Reactor
             {
                 continue;
             }
-            SubmitSend(fd, gen, conn.WriteBuffer, (uint)conn.WriteInFlight);
+            SubmitSend(fd, gen, conn.WriteBuffer, (uint)conn.WriteInFlight, conn.SendOpFlags);
         }
     }
 
@@ -286,7 +287,19 @@ public sealed unsafe partial class Reactor
         _reactorThreadId = Environment.CurrentManagedThreadId;
 
         Ring = Ring.Create(_ringEntries);
-        _listenFd = OpenReusePortListener(_port);
+
+        // One SO_REUSEPORT listener per port; accepts route by listener fd.
+        _listenFds = new int[1 + _config.ExtraPorts.Length];
+        _listenPorts = new ushort[_listenFds.Length];
+        _listenPorts[0] = _port;
+        for (int i = 0; i < _config.ExtraPorts.Length; i++)
+        {
+            _listenPorts[i + 1] = _config.ExtraPorts[i];
+        }
+        for (int i = 0; i < _listenFds.Length; i++)
+        {
+            _listenFds[i] = OpenReusePortListener(_listenPorts[i]);
+        }
 
         if (_incremental)
         {
@@ -307,8 +320,11 @@ public sealed unsafe partial class Reactor
         // once the loop starts.
         OnStart?.Invoke(this);
 
-        Console.WriteLine($"[r{Id}] listening on 0.0.0.0:{_port} (incremental={_incremental})");
-        SubmitAcceptMultishot();
+        Console.WriteLine($"[r{Id}] listening on 0.0.0.0:{string.Join(",", _listenPorts)} (incremental={_incremental})");
+        foreach (int listenFd in _listenFds)
+        {
+            SubmitAcceptMultishot(listenFd);
+        }
         ArmWakePoll();
 
         if (_incremental)
@@ -320,7 +336,10 @@ public sealed unsafe partial class Reactor
             LoopShared();
         }
 
-        close(_listenFd);
+        foreach (int listenFd in _listenFds)
+        {
+            close(listenFd);
+        }
         close(_wakeFd);
         Ring.Dispose();
     }
@@ -429,6 +448,7 @@ public sealed unsafe partial class Reactor
                         : new Connection(this, clientFd, _config.WriteSlabSize, _config.RecvQueueEntries);
                     Track(clientFd, conn);
                     conn.InitRefs();
+                    conn.ListenerPort = PortOf(fd);
                     SubmitRecvMultishot(clientFd, (ushort)conn.Generation, BgId);
 
                     _ = Handle(this, conn);
@@ -439,7 +459,7 @@ public sealed unsafe partial class Reactor
                 }
                 if (!more)
                 {
-                    SubmitAcceptMultishot();
+                    SubmitAcceptMultishot(fd);
                 }
                 return;
             }
@@ -473,7 +493,7 @@ public sealed unsafe partial class Reactor
         if (conn.WriteHead < conn.WriteInFlight)
         {
             // Partial send (rare with MSG_WAITALL): resubmit the remainder.
-            SubmitSend(fd, gen, conn.WriteBuffer + conn.WriteHead, (uint)(conn.WriteInFlight - conn.WriteHead));
+            SubmitSend(fd, gen, conn.WriteBuffer + conn.WriteHead, (uint)(conn.WriteInFlight - conn.WriteHead), conn.SendOpFlags);
             return;
         }
         conn.CompleteFlush();
@@ -511,14 +531,27 @@ public sealed unsafe partial class Reactor
         return sqe;
     }
 
-    private void SubmitAcceptMultishot()
+    private void SubmitAcceptMultishot(int listenFd)
     {
         IoUringSqe* sqe = GetSqeOrFlush();
         Unsafe.InitBlockUnaligned(sqe, 0, 64);
         sqe->opcode    = IORING_OP_ACCEPT;
         sqe->ioprio    = IORING_ACCEPT_MULTISHOT;
-        sqe->fd        = _listenFd;
-        sqe->user_data = Tag(KindAccept, 0, _listenFd);
+        sqe->fd        = listenFd;
+        sqe->user_data = Tag(KindAccept, 0, listenFd);
+    }
+
+    // Accept-time only; the listener table is tiny (Port + ExtraPorts).
+    private ushort PortOf(int listenFd)
+    {
+        for (int i = 0; i < _listenFds.Length; i++)
+        {
+            if (_listenFds[i] == listenFd)
+            {
+                return _listenPorts[i];
+            }
+        }
+        return _port;
     }
 
     private void SubmitRecvMultishot(int fd, ushort gen, ushort bgid)
@@ -533,7 +566,7 @@ public sealed unsafe partial class Reactor
         sqe->user_data = Tag(KindRecv, gen, fd);
     }
 
-    private void SubmitSend(int fd, ushort gen, byte* buf, uint len)
+    private void SubmitSend(int fd, ushort gen, byte* buf, uint len, uint opFlags)
     {
         IoUringSqe* sqe = GetSqeOrFlush();
         Unsafe.InitBlockUnaligned(sqe, 0, 64);
@@ -541,7 +574,7 @@ public sealed unsafe partial class Reactor
         sqe->fd        = fd;
         sqe->addr      = (ulong)buf;
         sqe->len       = len;
-        sqe->op_flags  = MSG_WAITALL;   // kernel retries short sends - one CQE per flush
+        sqe->op_flags  = opFlags;   // MSG_WAITALL by default; cleared for kTLS
         sqe->user_data = Tag(KindSend, gen, fd);
     }
 

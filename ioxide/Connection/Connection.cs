@@ -9,6 +9,16 @@ public sealed unsafe partial class Connection
 
     public int ClientFd { get; private set; }
 
+    /// <summary>The listener port this connection was accepted on; set per accept.</summary>
+    public ushort ListenerPort { get; internal set; }
+
+    /// <summary>
+    /// op_flags for sends on this connection. Defaults to MSG_WAITALL (the kernel coalesces short
+    /// sends into one CQE). kTLS rejects MSG_WAITALL, so <c>ioxide.tls</c> clears this after the
+    /// handoff; the reactor's partial-send loop preserves correctness either way.
+    /// </summary>
+    public uint SendOpFlags { get; set; } = 0x100;   // MSG_WAITALL
+
     // Bumped on Clear(); the low 16 bits serve as the IVTS token so stale awaiters
     // from a previous pool life are detectable.
     private int _generation;
@@ -80,6 +90,8 @@ public sealed unsafe partial class Connection
 
         _recv.Reset();
         IncrementalMode = false;
+        SendOpFlags = 0x100;   // MSG_WAITALL; a kTLS connection re-sets this per handshake
+        ListenerPort = 0;
     }
 
     public void Dispose()

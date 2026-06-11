@@ -259,6 +259,7 @@ public sealed unsafe partial class Reactor
                         : new Connection(this, clientFd, _config.WriteSlabSize, _config.RecvQueueEntries);
                     Track(clientFd, conn);
                     conn.InitRefs();
+                    conn.ListenerPort = PortOf(fd);
                     SetupConnectionBufRing(conn);
                     SubmitRecvMultishot(clientFd, (ushort)conn.Generation, conn.Bgid);
 
@@ -270,7 +271,7 @@ public sealed unsafe partial class Reactor
                 }
                 if (!more)
                 {
-                    SubmitAcceptMultishot();
+                    SubmitAcceptMultishot(fd);
                 }
                 return;
             }

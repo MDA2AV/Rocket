@@ -4,6 +4,13 @@ namespace ioxide;
 public sealed record ServerConfig
 {
     public ushort Port         { get; init; } = 8080;
+
+    /// <summary>
+    /// Additional listener ports (every reactor binds each one). Connections carry the port they
+    /// arrived on in <see cref="Connection.ListenerPort"/>, so one handler can serve several
+    /// entry points (e.g. plaintext + TLS).
+    /// </summary>
+    public ushort[] ExtraPorts { get; init; } = [];
     public int    ReactorCount { get; init; } = 12;
 
     // io_uring SQ/CQ depth.

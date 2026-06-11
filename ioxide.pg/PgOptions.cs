@@ -14,6 +14,9 @@ public sealed record PgOptions
 
     public required string Database { get; init; }
 
+    /// <summary>Password for SCRAM-SHA-256; empty/null means trust auth.</summary>
+    public string? Password { get; init; }
+
     /// <summary>
     /// Connections opened per reactor. One connection carries one query at a time, so this is the
     /// reactor's query concurrency; total server-side connections = PoolSize × ReactorCount.

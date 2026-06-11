@@ -50,6 +50,24 @@ is saturated and neither is the pool - the ceiling is the co-located machine: se
 generator, and database all sharing 32 cores. On separate hosts the pg numbers would rise
 until Postgres itself becomes the wall.
 
+## tls - a medium response, two ways
+
+A fixed 8 KB body over TLS 1.3 (`EXAMPLES_TLS_BODY` to resize), self-signed cert generated at
+startup. `wrk -c512 -t18`, keep-alive (handshake amortized). Both face the same wrk client-TLS
+load, so the ratio is a fair server-side comparison; absolutes are co-located-limited.
+
+| mode | req/s | TLS out | vs ktls |
+|---|---|---|---|
+| tls-ktls      | 1,492,775 | 11.7 GB/s | - |
+| tls-sslstream |   975,216 |  7.7 GB/s | 0.65x |
+
+- **kTLS (`ioxide.tls`)** offloads response encryption to the kernel on the io_uring send path -
+  zero-copy, no managed crypto. Needs Linux's `tls` module (`modprobe tls`) and OpenSSL 3.
+- **SslStream over `ConnectionStream`** is fully managed and portable (TLS 1.2 + 1.3, client
+  certs, no native dependency), at ~0.65x the throughput. Needs no ioxide changes - it rides the
+  `ConnectionStream` bridge plus host glue.
+- kTLS is ~1.5x faster, stable across payload sizes (same ratio at a 2-byte body).
+
 ## Notes
 
 - **Raw vs pg:** the ~5x gap is the cost of a database round-trip per request plus machine

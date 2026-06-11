@@ -64,6 +64,42 @@ internal static class PgProtocol
         return 5 + bodyLength;
     }
 
+    /// <summary>SASLInitialResponse: mechanism name + the client-first message.</summary>
+    public static int WriteSaslInitialResponse(Span<byte> buffer, string mechanism, ReadOnlySpan<byte> initial)
+    {
+        buffer[0] = (byte)'p';
+        int position = 5;
+        position += WriteCString(buffer, position, mechanism);
+        BinaryPrimitives.WriteInt32BigEndian(buffer[position..], initial.Length);
+        position += 4;
+        initial.CopyTo(buffer[position..]);
+        position += initial.Length;
+        BinaryPrimitives.WriteInt32BigEndian(buffer[1..], position - 1);
+        return position;
+    }
+
+    /// <summary>SASLResponse: the raw continuation payload (client-final message).</summary>
+    public static int WriteSaslResponse(Span<byte> buffer, ReadOnlySpan<byte> data)
+    {
+        buffer[0] = (byte)'p';
+        BinaryPrimitives.WriteInt32BigEndian(buffer[1..], 4 + data.Length);
+        data.CopyTo(buffer[5..]);
+        return 5 + data.Length;
+    }
+
+    /// <summary>Does an AuthenticationSASL mechanism list (body after the code) offer SCRAM-SHA-256?</summary>
+    public static bool OffersScramSha256(ReadOnlySpan<byte> mechanisms)
+    {
+        while (mechanisms.Length > 0)
+        {
+            int end = mechanisms.IndexOf((byte)0);
+            if (end <= 0) break;
+            if (mechanisms[..end].SequenceEqual("SCRAM-SHA-256"u8)) return true;
+            mechanisms = mechanisms[(end + 1)..];
+        }
+        return false;
+    }
+
     /// <summary>The exact bytes <see cref="WriteQuery"/> needs for <paramref name="sql"/>.</summary>
     public static int QueryLength(string sql)
     {
