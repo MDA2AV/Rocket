@@ -32,11 +32,25 @@ public sealed unsafe class Ring : IDisposable
     private byte* _sqePtr;
     private nuint _sqeSize;
     
-    public static Ring Create(uint entries) 
+    private bool _hasSqArray;
+
+    public static Ring Create(uint entries)
     {
+        // Prefer NO_SQARRAY (6.6+): the SQ slot index is implicit, dropping one
+        // store + cache line per SQE. Fall back for older kernels (EINVAL).
         IoUringParams ioUringParams = default;
-        ioUringParams.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
+        ioUringParams.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_NO_SQARRAY;
         int fd = io_uring_setup(entries, &ioUringParams);
+        bool hasSqArray = false;
+
+        if (fd == -EINVAL)
+        {
+            ioUringParams = default;
+            ioUringParams.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
+            fd = io_uring_setup(entries, &ioUringParams);
+            hasSqArray = true;
+        }
+
         if (fd < 0)
         {
             throw new InvalidOperationException($"io_uring_setup failed: {fd}");
@@ -44,8 +58,9 @@ public sealed unsafe class Ring : IDisposable
 
         var ring = new Ring
         {
-            _fd = fd, 
-            _sqEntries = ioUringParams.sq_entries 
+            _fd = fd,
+            _sqEntries = ioUringParams.sq_entries,
+            _hasSqArray = hasSqArray
         };
         
         nuint sqRingBytes = ioUringParams.sq_off.array + ioUringParams.sq_entries * sizeof(uint);
@@ -90,19 +105,22 @@ public sealed unsafe class Ring : IDisposable
     }
     
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public IoUringSqe* GetSqe() 
+    public IoUringSqe* GetSqe()
     {
         uint head = Volatile.Read(ref *_sqHead);
-        
+
         if (_sqeTail - head >= _sqEntries)
         {
             return null;
         }
 
         uint slot = _sqeTail & _sqMask;
-        _sqArray[slot] = slot;         
+        if (_hasSqArray)
+        {
+            _sqArray[slot] = slot;
+        }
         _sqeTail++;
-        
+
         return &_sqes[slot];
     }
     

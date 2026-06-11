@@ -3,43 +3,32 @@ using ioxide.utils;
 
 namespace ioxide;
 
-public sealed unsafe partial class Connection 
+public sealed unsafe partial class Connection
 {
     private readonly Reactor _reactor;
 
     public int ClientFd { get; private set; }
 
-    // Bumped on Clear(); the low 16 bits are used as the IVTS token so stale
-    // awaiters can be detected after pool reuse.
+    // Bumped on Clear(); the low 16 bits serve as the IVTS token so stale awaiters
+    // from a previous pool life are detectable.
     private int _generation;
 
-    // Refcount: the connection has two owners — the reactor (recv side) and the
-    // handler (which may run off-reactor). Init to 2 on accept; each owner DecRef's
-    // when done; teardown (Recycle) runs only at refs==0, so a connection is never
-    // recycled or pool-reused while a handler is still in flight on another thread.
+    // Two owners: the reactor (recv side) and the handler. Init 2 on accept; teardown
+    // runs only at 0, so a connection is never recycled under a live handler.
     private int _refs;
 
-    public Connection(Reactor reactor, int fd, int writeSlabSize = 1024 * 16)
+    public Connection(Reactor reactor, int fd, int writeSlabSize = 1024 * 16, int recvQueueEntries = 64)
     {
         _reactor = reactor;
         ClientFd = fd;
         _writeSlabSize = writeSlabSize;
         WriteBuffer = (byte*)NativeMemory.AlignedAlloc((nuint)writeSlabSize, 64);
-        
+        _recv = new SpscRecvRing(recvQueueEntries);
+
         _manager = new UnmanagedMemoryManager(WriteBuffer, writeSlabSize);
     }
-    
-    // =========================================================================
-    // Pool lifecycle — invoked from Reactor.Dispatch's recv/send error paths.
-    // Reactor-thread only.
-    //
-    //   teardown:  MarkClosed()  → wake awaiters with closed=1
-    //              DrainRecv()   → return any in-flight buf_ring items
-    //              close(fd)
-    //              Clear()       → reset state, bump _generation
-    //              push to pool, OR Dispose() if pool is full
-    // =========================================================================
-    
+
+    // Wake awaiters with closed=1. Reactor-thread or teardown paths only.
     public void MarkClosed()
     {
         Volatile.Write(ref _closed, 1);
@@ -60,12 +49,9 @@ public sealed unsafe partial class Connection
         }
     }
 
-    // Init to 2 (reactor + handler) at accept.
     internal void InitRefs() => Volatile.Write(ref _refs, 2);
 
-    // Release one owner's ref. Whoever drives it to 0 hands the connection to the
-    // reactor for teardown (close + Clear + pool) — never recycled before both done.
-    // Public because the application's handler (in another assembly) releases its ref here.
+    /// <summary>Release one owner's ref; whoever hits 0 hands the connection to the reactor for recycle.</summary>
     public void DecRef()
     {
         if (Interlocked.Decrement(ref _refs) == 0)
@@ -76,8 +62,7 @@ public sealed unsafe partial class Connection
 
     internal void Clear()
     {
-        // Bump generation first — readers of IVTS plumbing observe this via
-        // Volatile.Read and stale tokens get RecvSnapshot.Closed() / no-op.
+        // Bump generation first so stale IVTS tokens resolve to Closed()/no-op.
         Interlocked.Increment(ref _generation);
 
         Volatile.Write(ref _armed, 0);
@@ -93,8 +78,8 @@ public sealed unsafe partial class Connection
         _readSignal.Reset();
         _flushSignal.Reset();
 
-        _recv.Reset();             // discard any leftover SPSC items
-        IncrementalMode = false;   // per-conn ring (if any) was torn down before Clear
+        _recv.Reset();
+        IncrementalMode = false;
     }
 
     public void Dispose()

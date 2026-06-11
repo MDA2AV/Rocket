@@ -1,17 +1,26 @@
 using System.IO.Pipelines;
+using System.Runtime.CompilerServices;
+using System.Threading.Tasks.Sources;
 // ReSharper disable SuggestVarOrType_BuiltInTypes
 
 namespace ioxide;
 
 /// <summary>
-/// Adapts Minima's <see cref="Connection"/> write API (GetMemory/GetSpan/Advance/
-/// FlushAsync) to a standard <see cref="PipeWriter"/>, so PipeWriter-based code
-/// can write responses through the connection's per-connection slab.
-/// A thin wrapper — all the work lives in Connection.
+/// Adapts the <see cref="Connection"/> write API to a <see cref="PipeWriter"/>. Writes go straight
+/// into the connection's slab; a parked flush chains onto the connection's value-task source
+/// instead of an async state machine, so the adapter allocates nothing at steady state.
 /// </summary>
-public sealed class ConnectionPipeWriter : PipeWriter
+public sealed class ConnectionPipeWriter : PipeWriter, IValueTaskSource<FlushResult>
 {
     private readonly Connection _conn;
+
+    private ManualResetValueTaskSourceCore<FlushResult> _core = new()
+    {
+        RunContinuationsAsynchronously = false,
+    };
+    private ValueTaskAwaiter _pendingFlush;
+    private readonly Action _onFlushDone;
+
     private bool _completed;
     private bool _cancelRequested;
     private long _unflushed;
@@ -19,6 +28,7 @@ public sealed class ConnectionPipeWriter : PipeWriter
     public ConnectionPipeWriter(Connection connection)
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
+        _onFlushDone = OnFlushDone;
     }
 
     public override bool CanGetUnflushedBytes => true;
@@ -46,18 +56,41 @@ public sealed class ConnectionPipeWriter : PipeWriter
         ValueTask inner = _conn.FlushAsync();
 
         if (inner.IsCompletedSuccessfully)
+        {
             return new ValueTask<FlushResult>(new FlushResult(isCanceled: false, isCompleted: _completed));
+        }
 
-        return AwaitFlush(inner);
+        _core.Reset();
+        _pendingFlush = inner.GetAwaiter();
+        _pendingFlush.UnsafeOnCompleted(_onFlushDone);
+        return new ValueTask<FlushResult>(this, _core.Version);
     }
 
-    private async ValueTask<FlushResult> AwaitFlush(ValueTask inner)
+    // Completion of a parked flush - runs inline on the reactor.
+    private void OnFlushDone()
     {
-        await inner;
-        return new FlushResult(isCanceled: false, isCompleted: _completed);
+        _pendingFlush.GetResult();
+
+        bool canceled = _cancelRequested;
+        _cancelRequested = false;
+        _core.SetResult(new FlushResult(canceled, _completed));
     }
 
     public override void CancelPendingFlush() => _cancelRequested = true;
 
     public override void Complete(Exception? exception = null) => _completed = true;
+
+    // IValueTaskSource<FlushResult> - forwards to the core armed in FlushAsync.
+    FlushResult IValueTaskSource<FlushResult>.GetResult(short token) => _core.GetResult(token);
+
+    ValueTaskSourceStatus IValueTaskSource<FlushResult>.GetStatus(short token) => _core.GetStatus(token);
+
+    void IValueTaskSource<FlushResult>.OnCompleted(
+        Action<object?> continuation,
+        object? state,
+        short token,
+        ValueTaskSourceOnCompletedFlags flags)
+    {
+        _core.OnCompleted(continuation, state, token, flags);
+    }
 }

@@ -16,7 +16,7 @@ public sealed unsafe class SpscRecvRing
 
         public ReadOnlySpan<byte> AsSpan() => new(Ptr, Len);
 
-        public UnmanagedMemoryManager AsMemoryManager() => new(Ptr, Len, Bid);
+        public UnmanagedMemoryManager AsMemoryManager() => new(Ptr, Len, Bid, Gen);
     }
 
     private readonly Item[] _items;
@@ -72,6 +72,10 @@ public sealed unsafe class SpscRecvRing
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public long SnapshotTail() => Volatile.Read(ref _tail);
+
+    /// <summary>Items between the current head and <paramref name="tailSnapshot"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public int CountUntil(long tailSnapshot) => (int)Math.Max(0, tailSnapshot - _head);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool TryDequeueUntil(long tailSnapshot, out Item item)

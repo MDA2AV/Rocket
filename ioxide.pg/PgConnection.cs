@@ -1,194 +1,327 @@
 using System.Runtime.InteropServices;
 using System.Text;
-using System.Threading.Tasks.Sources;
-using static ioxide.pg.Native;
 
 namespace ioxide.pg;
 
 /// <summary>
-/// A Postgres connection that runs entirely on a host io_uring reactor.
-///
-/// The TCP connect and the startup handshake happen once, with blocking syscalls, when the
-/// connection is opened. After that, every query is an IORING_OP_SEND of the query followed by one
-/// or more IORING_OP_RECV of the response — both submitted on the host's ring and awaited through
-/// this object's value-task source. Because that source completes its continuations synchronously,
-/// a query resumes inline on the reactor thread: no .NET socket engine, no thread pool.
-///
-/// A single connection is a single conversation, so it carries one in-flight query at a time. For
-/// concurrency, open several connections and pool them.
+/// A Postgres connection that runs entirely on the host's ring - connect and handshake included,
+/// so opening one never blocks the reactor. One query in flight at a time; concurrency comes from
+/// <see cref="PgPool"/>. A server ErrorResponse throws but leaves the connection usable (the
+/// stream resyncs at ReadyForQuery); a transport failure marks it <see cref="IsBroken"/> and the
+/// pool replaces it.
 /// </summary>
-public sealed class PgConnection : IRingCompletion, IValueTaskSource<int>
+public sealed class PgConnection : IDisposable
 {
-    private const int BufferSize = 32 * 1024;
+    private const int InitialBufferSize = 64 * 1024;
+    private const int MaxBufferSize = 1 << 20;
 
-    private readonly IRingHost _host;
-    private readonly nint _sendBuffer;
-    private readonly nint _recvBuffer;
+    private readonly RingSocket _socket;
 
-    private int _received;
+    // Native wire buffers. Kept as nint (not byte*) so the async protocol flow can do address
+    // arithmetic without an unsafe context; only the small parse/format helpers touch memory.
+    private nint _send;
+    private int _sendCapacity;
+    private nint _recv;
+    private int _recvCapacity;
 
-    private ManualResetValueTaskSourceCore<int> _completion = new()
+    private int _received;   // valid bytes in _recv
+    private int _scan;       // start of the first unparsed message
+
+    /// <summary>Transport-level failure happened; the connection must be discarded, not reused.</summary>
+    public bool IsBroken { get; private set; }
+
+    private unsafe PgConnection(RingSocket socket)
     {
-        RunContinuationsAsynchronously = false
-    };
-
-    public int Fd { get; }
-
-    private PgConnection(IRingHost host, int fd, nint sendBuffer, nint recvBuffer)
-    {
-        _host = host;
-        Fd = fd;
-        _sendBuffer = sendBuffer;
-        _recvBuffer = recvBuffer;
+        _socket = socket;
+        _send = (nint)NativeMemory.Alloc(InitialBufferSize);
+        _sendCapacity = InitialBufferSize;
+        _recv = (nint)NativeMemory.Alloc(InitialBufferSize);
+        _recvCapacity = InitialBufferSize;
     }
 
     /// <summary>
-    /// Connect to Postgres on 127.0.0.1, run the trust-auth startup handshake, and bind the
-    /// connection to <paramref name="host"/> so that its completions route here. This is blocking
-    /// and one-time — call it at reactor startup, before serving.
+    /// Open a connection over the ring: connect, send the startup message, and consume the
+    /// handshake until ReadyForQuery. Trust authentication only for now - anything else fails
+    /// with a clear error rather than a silent hang.
     /// </summary>
-    public static unsafe PgConnection Connect(IRingHost host, string user, string database, ushort port = 5432)
+    public static async Task<PgConnection> ConnectAsync(IRingHost host, PgOptions options)
     {
-        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        RingSocket socket = RingSocket.CreateTcp(host);
+        var connection = new PgConnection(socket);
 
-        sockaddr_in address = default;
-        address.sin_family = AF_INET;
-        address.sin_port = Htons(port);
-        address.sin_addr = 0x0100007F;   // 127.0.0.1, already in network byte order
+        try
+        {
+            int rc = await socket.ConnectAsync(options.Host, options.Port);
+            if (rc < 0)
+            {
+                throw PgException.Transport($"connect to {options.Host}:{options.Port}", rc);
+            }
 
-        if (connect(fd, &address, (uint)sizeof(sockaddr_in)) < 0)
-            throw new InvalidOperationException("Postgres connect failed.");
+            await connection.StartupAsync(options);
+            return connection;
+        }
+        catch
+        {
+            connection.Dispose();
+            throw;
+        }
+    }
 
-        // Small queries must not wait on Nagle to coalesce; that would add a ~40ms delayed-ACK
-        // stall to every request.
-        int on = 1;
-        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(int));
-
-        nint sendBuffer = (nint)NativeMemory.Alloc(BufferSize);
-        nint recvBuffer = (nint)NativeMemory.Alloc(BufferSize);
-
-        int startupLength = Pg.Startup((byte*)sendBuffer, user, database);
-        Native.send(fd, (void*)sendBuffer, (nuint)startupLength, 0);
-
-        // Read until ReadyForQuery so we know the server has finished authenticating and is idle.
-        int received = 0;
+    private async Task StartupAsync(PgOptions options)
+    {
+        int length = WriteStartup(options.User, options.Database);
+        await SendAllAsync(length);
 
         while (true)
         {
-            long n = Native.recv(fd, (void*)(recvBuffer + received), (nuint)(BufferSize - received), 0);
+            Message message = await ReceiveMessageAsync();
 
-            if (n <= 0)
-                throw new InvalidOperationException("Postgres startup handshake failed.");
+            switch (message.Tag)
+            {
+                case PgProtocol.Authentication:
+                    int code = ReadAuthCode(message);
+                    if (code != 0)
+                    {
+                        throw new PgException(
+                            $"authentication method {code} not supported (trust auth only; SCRAM is on the roadmap)");
+                    }
+                    break;
 
-            received += (int)n;
+                case PgProtocol.ErrorResponse:
+                    throw ReadServerError(message);
 
-            if (Pg.TryParse(new ReadOnlySpan<byte>((void*)recvBuffer, received), out _, out _))
-                break;
+                case PgProtocol.ReadyForQuery:
+                    return;
+
+                // ParameterStatus, BackendKeyData, NoticeResponse: skipped by the walker.
+            }
         }
-
-        var connection = new PgConnection(host, fd, sendBuffer, recvBuffer);
-        host.Bind(fd, connection);
-
-        return connection;
     }
 
     /// <summary>
-    /// Run a simple query and return the first column of the first row as text, or an empty string
-    /// if the result had no rows.
+    /// Run one simple query and collect its result (first column of the first row, the row count,
+    /// and the command tag). Throws <see cref="PgException"/> on a server error - after consuming
+    /// the rest of the response, so the connection stays usable.
     /// </summary>
-    public async Task<string> QueryAsync(string sql)
+    public async ValueTask<PgResult> QueryAsync(string sql)
     {
-        int queryLength = BuildQuery(sql);
+        if (IsBroken)
+        {
+            throw new PgException("connection is broken");
+        }
 
-        await SendQuery(queryLength);
+        int length = WriteQuery(sql);
+        await SendAllAsync(length);
 
-        _received = 0;
+        string? value = null;
+        bool valueCaptured = false;
+        int rows = 0;
+        string commandTag = "";
+        PgException? serverError = null;
 
-        // The response can arrive across several recvs; keep reading until ReadyForQuery shows up.
         while (true)
         {
-            int n = await ReceiveRows();
+            Message message = await ReceiveMessageAsync();
 
-            if (n <= 0)
-                return "";
+            switch (message.Tag)
+            {
+                case PgProtocol.DataRow:
+                    rows++;
+                    if (!valueCaptured)
+                    {
+                        valueCaptured = true;
+                        value = ReadFirstField(message);
+                    }
+                    break;
 
-            if (TryReadResult(n, out string value))
-                return value;
+                case PgProtocol.CommandComplete:
+                    commandTag = ReadBodyCString(message);
+                    break;
+
+                case PgProtocol.ErrorResponse:
+                    // Don't throw yet: consume until ReadyForQuery so the stream
+                    // is resynchronized and the connection can serve the next query.
+                    serverError = ReadServerError(message);
+                    break;
+
+                case PgProtocol.ReadyForQuery:
+                    if (serverError != null)
+                    {
+                        throw serverError;
+                    }
+                    return new PgResult(value, rows, commandTag);
+            }
         }
     }
 
-    private unsafe int BuildQuery(string sql)
+    private readonly record struct Message(byte Tag, int BodyStart, int BodyLength);
+
+    private async ValueTask<Message> ReceiveMessageAsync()
     {
-        return Pg.Query((byte*)_sendBuffer, sql);
-    }
-
-    private ValueTask<int> SendQuery(int length)
-    {
-        _completion.Reset();
-
-        var pending = new ValueTask<int>(this, _completion.Version);
-
-        _host.SubmitSend(Fd, _sendBuffer, length);
-
-        return pending;
-    }
-
-    private ValueTask<int> ReceiveRows()
-    {
-        _completion.Reset();
-
-        var pending = new ValueTask<int>(this, _completion.Version);
-
-        _host.SubmitRecv(Fd, _recvBuffer + _received, BufferSize - _received);
-
-        return pending;
-    }
-
-    private unsafe bool TryReadResult(int n, out string value)
-    {
-        _received += n;
-
-        bool ready = Pg.TryParse(
-            new ReadOnlySpan<byte>((void*)_recvBuffer, _received),
-            out int fieldStart,
-            out int fieldLength);
-
-        if (!ready)
+        while (true)
         {
-            value = "";
-            return false;
+            if (TryParseMessage(out Message message))
+            {
+                return message;
+            }
+
+            // Everything buffered is consumed - rewind so the buffer never fills
+            // from pure accumulation across queries.
+            if (_scan == _received)
+            {
+                _scan = 0;
+                _received = 0;
+            }
+
+            EnsureRecvSpace();
+
+            int n = await _socket.RecvAsync(_recv + _received, _recvCapacity - _received);
+            if (n <= 0)
+            {
+                IsBroken = true;
+                throw PgException.Transport("recv", n);
+            }
+            _received += n;
+        }
+    }
+
+    private async ValueTask SendAllAsync(int length)
+    {
+        int sent = 0;
+        while (sent < length)
+        {
+            int n = await _socket.SendAsync(_send + sent, length - sent);
+            if (n <= 0)
+            {
+                IsBroken = true;
+                throw PgException.Transport("send", n);
+            }
+            sent += n;
+        }
+    }
+
+    private unsafe bool TryParseMessage(out Message message)
+    {
+        var buffered = new ReadOnlySpan<byte>((void*)_recv, _received);
+        int position = _scan;
+
+        try
+        {
+            if (PgProtocol.TryReadMessage(buffered, ref position, out byte tag, out int bodyStart, out int bodyLength))
+            {
+                _scan = position;
+                message = new Message(tag, bodyStart, bodyLength);
+                return true;
+            }
+        }
+        catch (PgException)
+        {
+            // Malformed framing - the stream can't be resynchronized.
+            IsBroken = true;
+            throw;
         }
 
-        value = fieldLength > 0
-            ? Encoding.ASCII.GetString((byte*)(_recvBuffer + fieldStart), fieldLength)
-            : "";
-
-        return true;
+        message = default;
+        return false;
     }
 
-    // ── The reactor calls this when a SEND or RECV on our fd completes ───────────────────────
-
-    public void Complete(int result)
+    private unsafe void EnsureRecvSpace()
     {
-        _completion.SetResult(result);
+        if (_received < _recvCapacity)
+        {
+            return;
+        }
+
+        // Buffer is full with a partial message at the end. First reclaim the
+        // consumed prefix; only grow when a single message outsizes the buffer.
+        if (_scan > 0)
+        {
+            Buffer.MemoryCopy((void*)(_recv + _scan), (void*)_recv, _recvCapacity, _received - _scan);
+            _received -= _scan;
+            _scan = 0;
+            return;
+        }
+
+        if (_recvCapacity >= MaxBufferSize)
+        {
+            IsBroken = true;
+            throw new PgException($"backend message exceeds {MaxBufferSize} bytes");
+        }
+
+        _recvCapacity *= 2;
+        _recv = (nint)NativeMemory.Realloc((void*)_recv, (nuint)_recvCapacity);
     }
 
-    int IValueTaskSource<int>.GetResult(short token)
+    private unsafe int WriteStartup(string user, string database)
     {
-        return _completion.GetResult(token);
+        return PgProtocol.WriteStartup(new Span<byte>((void*)_send, _sendCapacity), user, database);
     }
 
-    ValueTaskSourceStatus IValueTaskSource<int>.GetStatus(short token)
+    private unsafe int WriteQuery(string sql)
     {
-        return _completion.GetStatus(token);
+        int needed = PgProtocol.QueryLength(sql);
+        if (needed > _sendCapacity)
+        {
+            if (needed > MaxBufferSize)
+            {
+                throw new PgException($"query exceeds {MaxBufferSize} bytes");
+            }
+            int newCapacity = _sendCapacity;
+            while (newCapacity < needed)
+            {
+                newCapacity *= 2;
+            }
+            _send = (nint)NativeMemory.Realloc((void*)_send, (nuint)newCapacity);
+            _sendCapacity = newCapacity;
+        }
+
+        return PgProtocol.WriteQuery(new Span<byte>((void*)_send, _sendCapacity), sql);
     }
 
-    void IValueTaskSource<int>.OnCompleted(
-        Action<object?> continuation,
-        object? state,
-        short token,
-        ValueTaskSourceOnCompletedFlags flags)
+    private unsafe ReadOnlySpan<byte> Body(in Message message)
     {
-        _completion.OnCompleted(continuation, state, token, flags);
+        return new ReadOnlySpan<byte>((void*)(_recv + message.BodyStart), message.BodyLength);
+    }
+
+    private string? ReadFirstField(in Message message)
+    {
+        ReadOnlySpan<byte> body = Body(message);
+        if (!PgProtocol.TryReadFirstField(body, out int offset, out int length) || length < 0)
+        {
+            return null;   // no fields, or SQL NULL
+        }
+        return Encoding.UTF8.GetString(body.Slice(offset, length));
+    }
+
+    private string ReadBodyCString(in Message message)
+    {
+        return PgProtocol.ReadCString(Body(message));
+    }
+
+    private int ReadAuthCode(in Message message)
+    {
+        return PgProtocol.ReadAuthCode(Body(message));
+    }
+
+    private PgException ReadServerError(in Message message)
+    {
+        (string severity, string sqlState, string text) = PgProtocol.ReadError(Body(message));
+        return new PgException(severity, sqlState, text);
+    }
+
+    public unsafe void Dispose()
+    {
+        _socket.Dispose();
+
+        if (_send != 0)
+        {
+            NativeMemory.Free((void*)_send);
+            _send = 0;
+        }
+        if (_recv != 0)
+        {
+            NativeMemory.Free((void*)_recv);
+            _recv = 0;
+        }
     }
 }

@@ -4,22 +4,37 @@ namespace ioxide.utils;
 
 public sealed unsafe class UnmanagedMemoryManager : MemoryManager<byte>
 {
-    private readonly byte* _ptr;
-    private readonly int _length;
+    private byte* _ptr;
+    private int _length;
 
-    public ushort BufferId { get; }
-    
+    public ushort BufferId { get; private set; }
+
+    // Connection generation at enqueue time; lets returns route safely in
+    // incremental mode after pool reuse.
+    public ushort Gen { get; private set; }
+
     public UnmanagedMemoryManager(byte* ptr, int length)
     {
         _ptr = ptr;
         _length = length;
     }
 
-    public UnmanagedMemoryManager(byte* ptr, int length, ushort bufferId)
+    public UnmanagedMemoryManager(byte* ptr, int length, ushort bufferId, ushort gen = 0)
     {
         _ptr = ptr;
         _length = length;
         BufferId = bufferId;
+        Gen = gen;
+    }
+
+    // Re-point a pooled manager at a new slice (ConnectionPipeReader reuses
+    // one manager per held segment instead of allocating per recv).
+    internal void Reset(byte* ptr, int length, ushort bufferId, ushort gen)
+    {
+        _ptr = ptr;
+        _length = length;
+        BufferId = bufferId;
+        Gen = gen;
     }
 
     public override Span<byte> GetSpan() => new(_ptr, _length);

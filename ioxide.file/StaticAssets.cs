@@ -1,31 +1,27 @@
 namespace ioxide.file;
 
 /// <summary>
-/// A reloadable holder around an <see cref="AssetCache"/>. The cache is an immutable snapshot of a
-/// directory; <see cref="Reload"/> builds a fresh snapshot, swaps it in atomically, and closes the
-/// old descriptors after a grace period.
-///
-/// Handlers read the live snapshot through <see cref="TryGet"/> (a volatile read), so a reactor
-/// always sees the whole old snapshot or the whole new one — never a mix — and Content-Length always
-/// matches the body shipped with it. Call <see cref="Reload"/> after a deploy, e.g. from a SIGHUP
-/// handler.
+/// A reloadable holder around an <see cref="AssetCache"/>: <see cref="Reload"/> builds a fresh
+/// snapshot, swaps it atomically, and disposes the old one after a grace. Handlers always see a
+/// whole snapshot, never a mix. Call after a deploy (e.g. SIGHUP).
 /// </summary>
 public sealed class StaticAssets : IDisposable
 {
-    // io_uring holds a reference to a file for any read already submitted, so this grace only has to
-    // outlast the gap between a handler resolving an asset and submitting its read. Deploys are rare,
-    // so a generous window costs nothing.
+    // Must outlast a handler's use of the old snapshot: the gap to a submitted read,
+    // or a whole chunked send of the largest baked response.
     private static readonly TimeSpan ReloadGrace = TimeSpan.FromSeconds(10);
 
     private readonly string _root;
+    private readonly int _maxCachedFileBytes;
     private readonly object _reloadLock = new();
 
     private AssetCache _cache;   // swapped atomically by Reload(), read with Volatile
 
-    public StaticAssets(string rootDir)
+    public StaticAssets(string rootDir, int maxCachedFileBytes = AssetCache.DefaultMaxCachedFileBytes)
     {
         _root = rootDir;
-        _cache = new AssetCache(rootDir);
+        _maxCachedFileBytes = maxCachedFileBytes;
+        _cache = new AssetCache(rootDir, maxCachedFileBytes);
     }
 
     public int Count => Volatile.Read(ref _cache).Count;
@@ -34,6 +30,10 @@ public sealed class StaticAssets : IDisposable
 
     /// <summary>Look up a pre-opened asset by URL path in the live snapshot.</summary>
     public bool TryGet(string urlPath, out AssetCache.Asset asset)
+        => Volatile.Read(ref _cache).TryGet(urlPath, out asset);
+
+    /// <summary>Hot-path lookup straight from request bytes - no per-request string.</summary>
+    public bool TryGet(ReadOnlySpan<byte> urlPath, out AssetCache.Asset asset)
         => Volatile.Read(ref _cache).TryGet(urlPath, out asset);
 
     /// <summary>
@@ -47,7 +47,7 @@ public sealed class StaticAssets : IDisposable
             AssetCache fresh;
             try
             {
-                fresh = new AssetCache(_root);
+                fresh = new AssetCache(_root, _maxCachedFileBytes);
             }
             catch (Exception e)
             {

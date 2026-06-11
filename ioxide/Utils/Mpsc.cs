@@ -5,18 +5,9 @@ using System.Runtime.InteropServices;
 namespace ioxide.utils;
 
 /// <summary>
-/// Bounded lock-free multi-producer / single-consumer queue.
-///
-/// Dmitry Vyukov's bounded MPMC algorithm, specialised to one consumer.
-/// Power-of-two capacity, zero-allocation after construction. Producers claim a
-/// slot via CAS on the enqueue position (a failed TryEnqueue on a full queue
-/// leaves the position untouched — no burned tickets); the single consumer
-/// advances the dequeue position with a plain write. Each slot carries a
-/// sequence number that coordinates ownership between producers and consumer.
-///
-/// One generic queue serves every reactor handoff: Mpsc&lt;ushort&gt; for buffer
-/// returns, Mpsc&lt;int&gt; for flush fds, Mpsc&lt;ulong&gt; for packed incremental
-/// returns. T is unmanaged so each Cell is a blittable value type with no GC refs.
+/// Bounded lock-free MPSC queue - Vyukov's bounded MPMC specialised to one consumer.
+/// Power-of-two capacity, zero allocation after construction; slot sequence numbers
+/// coordinate ownership. T is unmanaged so cells are blittable.
 /// </summary>
 internal sealed class Mpsc<T> where T : unmanaged
 {
@@ -29,8 +20,6 @@ internal sealed class Mpsc<T> where T : unmanaged
     private readonly Cell[] _buffer;
     private readonly int    _mask;
 
-    // PaddedLong is a top-level struct (not nested here) because the CLR forbids
-    // explicit layout on a type nested inside a generic.
     private PaddedLong _enqueuePos;
     private PaddedLong _dequeuePos;
 
@@ -103,11 +92,8 @@ internal sealed class Mpsc<T> where T : unmanaged
     }
 }
 
-/// <summary>
-/// A single long padded to a 64-byte cache line so the producer and consumer
-/// positions never share a line (no false sharing). Top-level and non-generic
-/// so it can legally use explicit layout.
-/// </summary>
+// Padded to a cache line (no false sharing). Top-level: the CLR forbids explicit
+// layout on a type nested inside a generic.
 [StructLayout(LayoutKind.Explicit, Size = 64)]
 internal struct PaddedLong
 {

@@ -6,16 +6,9 @@ using ioxide.utils;
 namespace ioxide;
 
 /// <summary>
-/// Per-connection state. The handler may run on any thread (e.g. resumed by
-/// a thread-pool timer); reactor-only side effects are funnelled through the
-/// MPSC queues on `Reactor`. Coordination uses Interlocked.Exchange on the
-/// arm flags and a sticky `_pending` to close the lost-wakeup race.
-///
-/// Lifetime is pool-managed: the reactor pops a Connection on accept (or new
-/// one if pool is empty), and pushes it back on teardown after `Clear()`. The
-/// `_generation` field is bumped on each `Clear` so stale `ValueTask` tokens
-/// from a previous connection life are detectable and return `Closed()`
-/// instead of leaking the new tenant's state.
+/// Read side. The handler may run on any thread; coordination uses Interlocked on the arm flag
+/// plus a sticky _pending to close the lost-wakeup race. Pool-managed: _generation invalidates
+/// awaiters from a previous life.
 /// </summary>
 public sealed unsafe partial class Connection : IValueTaskSource<RecvSnapshot>
 {
@@ -33,7 +26,7 @@ public sealed unsafe partial class Connection : IValueTaskSource<RecvSnapshot>
     private int _pending;
     private int _closed;
 
-    private readonly SpscRecvRing _recv = new(capacityPow2: 16);
+    private readonly SpscRecvRing _recv;   // sized by ServerConfig.RecvQueueEntries
 
     public ValueTask<RecvSnapshot> ReadAsync()
     {
@@ -54,16 +47,15 @@ public sealed unsafe partial class Connection : IValueTaskSource<RecvSnapshot>
             throw new InvalidOperationException("ReadAsync already armed.");
         }
 
-        // Snapshot the generation as the IVTS token so a future Clear() can
-        // invalidate this awaiter if the connection gets pool-recycled.
+        // Generation is the IVTS token: a Clear() during pool recycle invalidates this awaiter.
         int gen = Volatile.Read(ref _generation);
 
-        // Race recovery: re-check between arming and returning the IVTS task.
+        // Race recovery: re-check between arming and returning the task.
         if (!_recv.IsEmpty() || Volatile.Read(ref _pending) == 1 || Volatile.Read(ref _closed) != 0)
         {
             Volatile.Write(ref _pending, 0);
             Interlocked.Exchange(ref _armed, 0);
-            
+
             return new ValueTask<RecvSnapshot>(
                 new RecvSnapshot(_recv.SnapshotTail(), Volatile.Read(ref _closed) != 0));
         }
@@ -74,9 +66,58 @@ public sealed unsafe partial class Connection : IValueTaskSource<RecvSnapshot>
     public bool TryGetItem(in RecvSnapshot snap, out SpscRecvRing.Item item)
         => _recv.TryDequeueUntil(snap.Tail, out item);
 
+    /// <summary>
+    /// Drain the snapshot into one array of memory views - the multi-item way to reconstruct a
+    /// request that arrived fragmented. Build a sequence with ToReadOnlySequence(), parse, then
+    /// hand everything back with <see cref="ReturnBuffers"/>. Allocates one array per call; the
+    /// raw TryGetItem loop and ConnectionPipeReader remain the allocation-free paths.
+    /// </summary>
+    public UnmanagedMemoryManager[] GetSnapshotMemories(in RecvSnapshot snap)
+    {
+        int count = _recv.CountUntil(snap.Tail);
+        if (count == 0)
+        {
+            return [];
+        }
+
+        var memories = new UnmanagedMemoryManager[count];
+        int n = 0;
+        while (n < count && _recv.TryDequeueUntil(snap.Tail, out SpscRecvRing.Item item))
+        {
+            if (item.HasBuffer)
+            {
+                memories[n++] = item.AsMemoryManager();
+            }
+        }
+
+        if (n == count)
+        {
+            return memories;
+        }
+        Array.Resize(ref memories, n);   // rare: an item carried no buffer
+        return memories;
+    }
+
+    /// <summary>Return every buffer obtained from <see cref="GetSnapshotMemories"/> to its ring.</summary>
+    public void ReturnBuffers(UnmanagedMemoryManager[] memories)
+    {
+        foreach (UnmanagedMemoryManager memory in memories)
+        {
+            if (IncrementalMode)
+            {
+                _reactor.EnqueueReturnQIncremental(ClientFd, memory.Gen, memory.BufferId);
+            }
+            else
+            {
+                _reactor.EnqueueReturnQ(memory.BufferId);
+            }
+        }
+    }
+
     public void ResetRead() => _readSignal.Reset();
 
-    public void Complete(int res, ushort bid, bool hasBuffer, byte* ptr)
+    // Returns false on recv-queue overflow; the reactor then tears the connection down.
+    public bool Complete(int res, ushort bid, bool hasBuffer, byte* ptr)
     {
         if (!_recv.TryEnqueue(new SpscRecvRing.Item
                  {
@@ -87,12 +128,12 @@ public sealed unsafe partial class Connection : IValueTaskSource<RecvSnapshot>
                      Gen = (ushort)Volatile.Read(ref _generation)
                  }))
         {
-            Console.Error.WriteLine("[conn] recv queue overflow.");
-            if (hasBuffer)
+            Console.Error.WriteLine("[conn] recv queue overflow; closing connection.");
+            if (hasBuffer && !IncrementalMode)
             {
-                _reactor.ReturnBufferDirect(bid);
+                _reactor.ReturnBufferDirect(bid);   // per-conn rings are freed wholesale instead
             }
-            Volatile.Write(ref _closed, 1);
+            return false;
         }
 
         if (Interlocked.Exchange(ref _armed, 0) == 1)
@@ -103,12 +144,12 @@ public sealed unsafe partial class Connection : IValueTaskSource<RecvSnapshot>
         {
             Volatile.Write(ref _pending, 1);
         }
+        return true;
     }
-    
+
     internal void DrainRecv()
     {
-        // Return any buffer IDs still sitting in the SPSC ring (handler exited
-        // before draining them, or a recv arrived after _closed was set).
+        // Return buffer IDs still sitting in the SPSC ring at teardown.
         while (_recv.TryDequeue(out SpscRecvRing.Item item))
         {
             if (item.HasBuffer)
@@ -118,25 +159,15 @@ public sealed unsafe partial class Connection : IValueTaskSource<RecvSnapshot>
         }
     }
 
-    // =========================================================================
-    // IValueTaskSource plumbing — token (= snapshot of `_generation` at await
-    // time) is compared against the current `_generation` to detect stale
-    // awaiters from before a Clear()/pool reuse. Stale awaiters get a
-    // sentinel result rather than the new tenant's state.
-    //
-    // For the actual IVTS dispatch we pass `_readSignal.Version` /
-    // `_flushSignal.Version` to the underlying core (not `token`) because the
-    // core's version is bumped by ResetRead/CompleteFlush mid-life and is
-    // unrelated to the cross-life generation guard.
-    // =========================================================================
-
+    // IVTS: token = generation snapshot (cross-life guard); the core's own Version is
+    // passed through for the mid-life dispatch.
     RecvSnapshot IValueTaskSource<RecvSnapshot>.GetResult(short token)
     {
         if (token != (short)Volatile.Read(ref _generation))
         {
             return RecvSnapshot.Closed();
         }
-        
+
         return _readSignal.GetResult(_readSignal.Version);
     }
 
@@ -146,7 +177,7 @@ public sealed unsafe partial class Connection : IValueTaskSource<RecvSnapshot>
         {
             return ValueTaskSourceStatus.Succeeded;
         }
-        
+
         return _readSignal.GetStatus(_readSignal.Version);
     }
 
@@ -154,13 +185,12 @@ public sealed unsafe partial class Connection : IValueTaskSource<RecvSnapshot>
     {
         if (token != (short)Volatile.Read(ref _generation))
         {
-            // Stale — run the continuation now so the awaiter unblocks and
-            // gets RecvSnapshot.Closed() from GetResult.
+            // Stale - unblock now; GetResult returns Closed().
             continuation(state);
-            
+
             return;
         }
-        
+
         _readSignal.OnCompleted(continuation, state, _readSignal.Version, flags);
     }
 }

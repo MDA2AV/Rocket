@@ -13,7 +13,7 @@ public sealed unsafe partial class Connection : IValueTaskSource, IBufferWriter<
     internal int   WriteHead;
     internal int   WriteTail;
     internal int   WriteInFlight;
-    
+
     private readonly UnmanagedMemoryManager _manager;
 
     private ManualResetValueTaskSourceCore<bool> _flushSignal = new()
@@ -22,10 +22,9 @@ public sealed unsafe partial class Connection : IValueTaskSource, IBufferWriter<
     };
     private int _flushArmed;
     private int _flushInProgress;
-    
-    // IBufferWrite<byte>
-#region IBufferWrite<byte>
-    
+
+#region IBufferWriter<byte>
+
     public Memory<byte> GetMemory(int sizeHint = 0)
     {
         if (Volatile.Read(ref _flushInProgress) != 0)
@@ -66,10 +65,9 @@ public sealed unsafe partial class Connection : IValueTaskSource, IBufferWriter<
 
         WriteTail += count;
     }
-    
+
 #endregion
-    
-    // Write to the inner buffer
+
     public void Write(ReadOnlySpan<byte> source)
     {
         if (Volatile.Read(ref _flushInProgress) != 0)
@@ -87,13 +85,10 @@ public sealed unsafe partial class Connection : IValueTaskSource, IBufferWriter<
         WriteTail += len;
     }
 
-    // Flush inner buffer data to the kernel
     public ValueTask FlushAsync()
     {
-        // Connection already torn down (reactor saw EOF/error → MarkClosed): don't flush
-        // a removed connection — the handoff would reach a reactor that no longer knows
-        // this fd and the awaiter would hang. Return completed so the handler unwinds to
-        // its next ReadAsync, sees IsClosed, and exits.
+        // Connection already torn down: complete immediately so the handler unwinds
+        // to its next ReadAsync, sees IsClosed, and exits.
         if (Volatile.Read(ref _closed) == 1)
         {
             return default;
@@ -108,7 +103,7 @@ public sealed unsafe partial class Connection : IValueTaskSource, IBufferWriter<
         if (target == 0)
         {
             Volatile.Write(ref _flushInProgress, 0);
-            
+
             return default;
         }
 
@@ -120,12 +115,14 @@ public sealed unsafe partial class Connection : IValueTaskSource, IBufferWriter<
         _flushSignal.Reset();
         WriteInFlight = target;
 
+        // The generation lets the reactor drop a flush whose connection closed (or
+        // whose fd was reused) before the queue drained.
         int gen = Volatile.Read(ref _generation);
 
-        _reactor.EnqueueFlush(ClientFd);
+        _reactor.EnqueueFlush(ClientFd, gen);
 
-        // Race recovery (mirrors ReadAsync): if close raced in after the guard above,
-        // self-complete so we don't hang waiting on a send the reactor will never make.
+        // Race recovery: if close raced in after the entry guard, self-complete so we
+        // don't hang on a send the reactor will never make.
         if (Volatile.Read(ref _closed) == 1 && Interlocked.Exchange(ref _flushArmed, 0) == 1)
         {
             Volatile.Write(ref _flushInProgress, 0);
@@ -135,7 +132,7 @@ public sealed unsafe partial class Connection : IValueTaskSource, IBufferWriter<
         return new ValueTask(this, (short)gen);
     }
 
-    // Signal the FlushAsync was completed, called by the reactor's dispatcher send branch
+    // Called by the reactor's send-completion path.
     internal void CompleteFlush()
     {
         WriteHead = 0;
@@ -143,20 +140,19 @@ public sealed unsafe partial class Connection : IValueTaskSource, IBufferWriter<
         WriteInFlight = 0;
         Volatile.Write(ref _flushInProgress, 0);
         Interlocked.Exchange(ref _flushArmed, 0);
-        
+
         _flushSignal.SetResult(true);
     }
-    
-    // IValueTaskSource
+
 #region IValueTaskSource
-    
+
     void IValueTaskSource.GetResult(short token)
     {
         if (token != (short)Volatile.Read(ref _generation))
         {
             return;
         }
-        
+
         _flushSignal.GetResult(_flushSignal.Version);
     }
 
@@ -166,7 +162,7 @@ public sealed unsafe partial class Connection : IValueTaskSource, IBufferWriter<
         {
             return ValueTaskSourceStatus.Succeeded;
         }
-        
+
         return _flushSignal.GetStatus(_flushSignal.Version);
     }
 
@@ -175,11 +171,11 @@ public sealed unsafe partial class Connection : IValueTaskSource, IBufferWriter<
         if (token != (short)Volatile.Read(ref _generation))
         {
             continuation(state);
-            
+
             return;
         }
         _flushSignal.OnCompleted(continuation, state, _flushSignal.Version, flags);
     }
-    
+
 #endregion
 }

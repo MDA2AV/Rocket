@@ -14,6 +14,8 @@ public static unsafe class Native {
 
     public const byte IORING_OP_POLL_ADD = 6;
     public const byte IORING_OP_ACCEPT = 13;
+    public const byte IORING_OP_ASYNC_CANCEL = 14;
+    public const byte IORING_OP_CONNECT = 16;
     public const byte IORING_OP_READ   = 22;
     public const byte IORING_OP_WRITE  = 23;
     public const byte IORING_OP_SEND   = 26;
@@ -21,6 +23,11 @@ public static unsafe class Native {
     public const uint IORING_ENTER_GETEVENTS = 1u << 0;
     public const long IORING_OFF_SQ_RING = 0;
     public const long IORING_OFF_SQES    = 0x10000000;
+
+    // MSG_WAITALL on an OP_SEND makes the kernel retry short sends internally,
+    // so a full buffer is acked by a single CQE instead of a userspace
+    // resubmit round-trip per partial send.
+    public const uint MSG_WAITALL = 0x100;
 
     // Multishot / buffer-ring goodies.
     public const ushort IORING_ACCEPT_MULTISHOT = 1 << 0;
@@ -50,6 +57,12 @@ public static unsafe class Native {
     // work and avoids interrupting the reactor with task_work mid-flight.
     public const uint   IORING_SETUP_SINGLE_ISSUER = 1u << 12;
     public const uint   IORING_SETUP_DEFER_TASKRUN = 1u << 13;
+
+    // Kernel 6.6+: drop the SQ indirection array (slot i in the SQ ring is
+    // implicitly SQE i). One fewer store + cache line per submission.
+    public const uint   IORING_SETUP_NO_SQARRAY    = 1u << 16;
+
+    public const int EINVAL = 22;
 
     public const int PROT_READ    = 1;
     public const int PROT_WRITE   = 2;
@@ -92,6 +105,26 @@ public static unsafe class Native {
     [DllImport("libc")] public static extern int   eventfd(uint initval, int flags);
     [DllImport("libc")] public static extern long  write(int fd, void* buf, nuint count);
     [DllImport("libc")] public static extern long  read(int fd, void* buf, nuint count);
+
+    // File open/size for ring-native file clients (the reads themselves go
+    // through the ring; these are one-time, at open).
+    public const int O_RDONLY = 0;
+    private const int SEEK_SET = 0;
+    private const int SEEK_END = 2;
+
+    [DllImport("libc", EntryPoint = "open", SetLastError = true)]
+    public static extern int open([MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags, int mode);
+
+    [DllImport("libc", SetLastError = true)]
+    public static extern long lseek(int fd, long offset, int whence);
+
+    /// <summary>File size via seek-to-end (positional ring reads never use the file position).</summary>
+    public static long FileLength(int fd)
+    {
+        long end = lseek(fd, 0, SEEK_END);
+        lseek(fd, 0, SEEK_SET);
+        return end;
+    }
 
     public static ushort Htons(ushort x) => (ushort)((x << 8) | (x >> 8));
     

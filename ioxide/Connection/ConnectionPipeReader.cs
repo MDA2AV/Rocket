@@ -1,102 +1,210 @@
 using System.Buffers;
 using System.IO.Pipelines;
+using System.Runtime.CompilerServices;
+using System.Threading.Tasks.Sources;
 using ioxide.utils;
-// ReSharper disable SuggestVarOrType_BuiltInTypes
 
 namespace ioxide;
 
 /// <summary>
-/// Adapts Minima's raw <see cref="Connection"/> read API (ReadAsync + TryGetItem
-/// + ReturnBuffer) to a standard <see cref="PipeReader"/>. Recv buffers are
-/// exposed zero-copy as a ReadOnlySequence&lt;byte&gt; (one segment per buffer)
-/// and held until AdvanceTo consumes them, at which point fully-consumed buffers
-/// are returned to the reactor.
-///
-/// Convenience/compat layer for PipeReader consumers — the raw ReadAsync/
-/// TryGetItem path stays the faster one (this adds held-buffer + sequence
-/// bookkeeping per read).
+/// Adapts the raw <see cref="Connection"/> read API to a <see cref="PipeReader"/>, allocation-free
+/// at steady state: a parked read chains onto the connection's value-task source (no async state
+/// machine), recv slices live in pooled segments on a persistent chain, and consumption trims the
+/// chain's front. Honors <c>examined</c>: when everything held has been examined, ReadAsync waits
+/// for new bytes instead of returning the same data again.
 /// </summary>
-public sealed class ConnectionPipeReader : PipeReader
+public sealed unsafe class ConnectionPipeReader : PipeReader, IValueTaskSource<ReadResult>
 {
+    // One pooled object per held recv slice: sequence segment + reusable memory
+    // manager + the original ring item (needed to return the buffer).
+    private sealed class Slice : ReadOnlySequenceSegment<byte>
+    {
+        public readonly UnmanagedMemoryManager Manager = new(null, 0);
+        public SpscRecvRing.Item Item;
+        public Slice? NextSlice;
+
+        public void Set(in SpscRecvRing.Item item)
+        {
+            Item = item;
+            Manager.Reset(item.Ptr, item.Len, item.Bid, item.Gen);
+            Memory = Manager.Memory;
+            Next = null;
+            NextSlice = null;
+            RunningIndex = 0;
+        }
+
+        public void Link(Slice next)
+        {
+            next.RunningIndex = RunningIndex + Memory.Length;
+            Next = next;
+            NextSlice = next;
+        }
+    }
+
     private readonly Connection _conn;
-    private readonly List<Held> _held = new(16);
+
+    // Held slices, oldest first. _headConsumed is the consumed prefix of the
+    // head slice; consumption never mutates segments, it moves the sequence start.
+    private Slice? _head;
+    private Slice? _tail;
+    private int _headConsumed;
+    private long _heldBytes;    // unconsumed bytes across the chain
+    private long _examined;     // of those, how many the caller already examined
+
+    private readonly Stack<Slice> _pool = new();
     private ReadOnlySequence<byte> _lastSequence;
+
+    // Parked-read plumbing: chain onto the connection's IVTS, complete our own.
+    private ManualResetValueTaskSourceCore<ReadResult> _core = new()
+    {
+        RunContinuationsAsynchronously = false,
+    };
+    private ValueTaskAwaiter<RecvSnapshot> _pendingRead;
+    private readonly Action _onRecvReady;
 
     private bool _completed;
     private bool _cancelRequested;
     private bool _connectionClosed;
 
-    private readonly struct Held
-    {
-        public readonly ReadOnlyMemory<byte> Memory;
-        public readonly SpscRecvRing.Item Item;
-
-        public Held(ReadOnlyMemory<byte> memory, SpscRecvRing.Item item)
-        {
-            Memory = memory;
-            Item = item;
-        }
-
-        public Held WithMemory(ReadOnlyMemory<byte> memory) => new(memory, Item);
-    }
-
     public ConnectionPipeReader(Connection connection)
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
+        _onRecvReady = OnRecvReady;
     }
 
-    public override async ValueTask<ReadResult> ReadAsync(CancellationToken cancellationToken = default)
+    public override ValueTask<ReadResult> ReadAsync(CancellationToken cancellationToken = default)
     {
         ThrowIfCompleted();
 
         if (_cancelRequested)
         {
             _cancelRequested = false;
-            return new ReadResult(BuildSequence(), isCanceled: true, isCompleted: _connectionClosed);
+            return new ValueTask<ReadResult>(BuildResult(isCanceled: true));
         }
 
-        // Anything still held from a previous read that wasn't fully consumed.
-        if (_held.Count > 0)
-            return new ReadResult(BuildSequence(), isCanceled: false, isCompleted: _connectionClosed);
-
-        if (_connectionClosed)
-            return new ReadResult(default, isCanceled: false, isCompleted: true);
-
-        RecvSnapshot snap = await _conn.ReadAsync();
-
-        while (_conn.TryGetItem(snap, out SpscRecvRing.Item item))
+        // Unexamined bytes (or a closed connection) complete synchronously.
+        if (_heldBytes > _examined || _connectionClosed)
         {
-            if (item.HasBuffer)
-                _held.Add(new Held(item.AsMemoryManager().Memory, item));
+            return new ValueTask<ReadResult>(BuildResult(isCanceled: false));
+        }
+
+        // Everything held was examined - wait for new bytes.
+        while (true)
+        {
+            ValueTask<RecvSnapshot> pending = _conn.ReadAsync();
+
+            if (!pending.IsCompletedSuccessfully)
+            {
+                _core.Reset();
+                _pendingRead = pending.GetAwaiter();
+                _pendingRead.UnsafeOnCompleted(_onRecvReady);
+                return new ValueTask<ReadResult>(this, _core.Version);
+            }
+
+            if (Ingest(pending.Result) || _connectionClosed || _cancelRequested)
+            {
+                bool canceled = _cancelRequested;
+                _cancelRequested = false;
+                return new ValueTask<ReadResult>(BuildResult(canceled));
+            }
+            // Spurious wake with nothing new: arm again.
+        }
+    }
+
+    // Completion of a parked conn.ReadAsync - runs inline on the reactor.
+    private void OnRecvReady()
+    {
+        RecvSnapshot snapshot = _pendingRead.GetResult();
+
+        if (!Ingest(snapshot) && !_connectionClosed && !_cancelRequested)
+        {
+            // Nothing new: re-arm without completing the caller.
+            while (true)
+            {
+                ValueTask<RecvSnapshot> pending = _conn.ReadAsync();
+
+                if (!pending.IsCompletedSuccessfully)
+                {
+                    _pendingRead = pending.GetAwaiter();
+                    _pendingRead.UnsafeOnCompleted(_onRecvReady);
+                    return;
+                }
+
+                if (Ingest(pending.Result) || _connectionClosed || _cancelRequested)
+                {
+                    break;
+                }
+            }
+        }
+
+        bool canceled = _cancelRequested;
+        _cancelRequested = false;
+        _core.SetResult(BuildResult(canceled));
+    }
+
+    // Drain a snapshot into the chain. Returns true if any bytes were added.
+    private bool Ingest(in RecvSnapshot snapshot)
+    {
+        bool any = false;
+
+        while (_conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+        {
+            if (!item.HasBuffer)
+            {
+                continue;
+            }
+
+            Slice slice = _pool.TryPop(out Slice? pooled) ? pooled : new Slice();
+            slice.Set(in item);
+
+            if (_tail == null)
+            {
+                _head = _tail = slice;
+                _headConsumed = 0;
+            }
+            else
+            {
+                _tail.Link(slice);
+                _tail = slice;
+            }
+
+            _heldBytes += item.Len;
+            any = true;
         }
 
         _conn.ResetRead();
 
-        if (snap.IsClosed)
-            _connectionClosed = true;
-
-        if (_cancelRequested)
+        if (snapshot.IsClosed)
         {
-            _cancelRequested = false;
-            return new ReadResult(BuildSequence(), isCanceled: true, isCompleted: _connectionClosed);
+            _connectionClosed = true;
         }
 
-        return new ReadResult(BuildSequence(), isCanceled: false, isCompleted: _connectionClosed);
+        return any;
+    }
+
+    private ReadResult BuildResult(bool isCanceled)
+    {
+        _lastSequence = _head == null
+            ? default
+            : new ReadOnlySequence<byte>(_head, _headConsumed, _tail!, _tail!.Memory.Length);
+
+        return new ReadResult(_lastSequence, isCanceled, _connectionClosed);
     }
 
     public override bool TryRead(out ReadResult result)
     {
         ThrowIfCompleted();
 
-        if (_held.Count > 0)
+        if (_cancelRequested)
         {
-            result = new ReadResult(BuildSequence(), isCanceled: false, isCompleted: _connectionClosed);
+            _cancelRequested = false;
+            result = BuildResult(isCanceled: true);
             return true;
         }
 
-        if (_connectionClosed)
+        if (_heldBytes > _examined || _connectionClosed)
         {
-            result = new ReadResult(default, isCanceled: false, isCompleted: true);
+            result = BuildResult(isCanceled: false);
             return true;
         }
 
@@ -108,30 +216,48 @@ public sealed class ConnectionPipeReader : PipeReader
 
     public override void AdvanceTo(SequencePosition consumed, SequencePosition examined)
     {
-        if (_held.Count == 0)
-            return;
-
-        long consumedBytes = _lastSequence.Slice(0, consumed).Length;
-
-        while (_held.Count > 0 && consumedBytes > 0)
+        if (_head == null)
         {
-            Held seg = _held[0];
-            int available = seg.Memory.Length;
+            return;
+        }
 
-            if (consumedBytes >= available)
+        long consumedBytes = _lastSequence.GetOffset(consumed);
+        long examinedBytes = _lastSequence.GetOffset(examined);
+        if (examinedBytes < consumedBytes)
+        {
+            examinedBytes = consumedBytes;
+        }
+
+        // Trim fully-consumed slices off the front; their buffers go back to the ring.
+        long remaining = consumedBytes;
+        while (remaining > 0 && _head != null)
+        {
+            int available = _head.Memory.Length - _headConsumed;
+
+            if (remaining >= available)
             {
-                // Whole buffer consumed — return it to the reactor.
-                _conn.ReturnBuffer(seg.Item);
-                _held.RemoveAt(0);
-                consumedBytes -= available;
+                _conn.ReturnBuffer(in _head.Item);
+
+                Slice released = _head;
+                _head = released.NextSlice;
+                if (_head == null)
+                {
+                    _tail = null;
+                }
+                _headConsumed = 0;
+                _pool.Push(released);
+
+                remaining -= available;
             }
             else
             {
-                // Partial — keep the unconsumed tail of this buffer.
-                _held[0] = seg.WithMemory(seg.Memory[(int)consumedBytes..]);
-                consumedBytes = 0;
+                _headConsumed += (int)remaining;
+                remaining = 0;
             }
         }
+
+        _heldBytes -= consumedBytes;
+        _examined = Math.Min(examinedBytes - consumedBytes, _heldBytes);
     }
 
     public override void CancelPendingRead() => _cancelRequested = true;
@@ -139,43 +265,45 @@ public sealed class ConnectionPipeReader : PipeReader
     public override void Complete(Exception? exception = null)
     {
         if (_completed)
+        {
             return;
+        }
 
         _completed = true;
 
-        for (int i = 0; i < _held.Count; i++)
-            _conn.ReturnBuffer(_held[i].Item);
-
-        _held.Clear();
-    }
-
-    private ReadOnlySequence<byte> BuildSequence()
-    {
-        if (_held.Count == 0)
+        while (_head != null)
         {
-            _lastSequence = default;
-            return _lastSequence;
+            _conn.ReturnBuffer(in _head.Item);
+            Slice released = _head;
+            _head = released.NextSlice;
+            _pool.Push(released);
         }
 
-        if (_held.Count == 1)
-        {
-            _lastSequence = new ReadOnlySequence<byte>(_held[0].Memory);
-            return _lastSequence;
-        }
-
-        var head = new RingSegment(_held[0].Memory, _held[0].Item.Bid);
-        RingSegment tail = head;
-
-        for (int i = 1; i < _held.Count; i++)
-            tail = tail.Append(_held[i].Memory, _held[i].Item.Bid);
-
-        _lastSequence = new ReadOnlySequence<byte>(head, 0, tail, tail.Memory.Length);
-        return _lastSequence;
+        _tail = null;
+        _headConsumed = 0;
+        _heldBytes = 0;
+        _examined = 0;
     }
 
     private void ThrowIfCompleted()
     {
         if (_completed)
+        {
             throw new InvalidOperationException("Reading is not allowed after the reader was completed.");
+        }
+    }
+
+    // IValueTaskSource<ReadResult> - forwards to the core armed in ReadAsync.
+    ReadResult IValueTaskSource<ReadResult>.GetResult(short token) => _core.GetResult(token);
+
+    ValueTaskSourceStatus IValueTaskSource<ReadResult>.GetStatus(short token) => _core.GetStatus(token);
+
+    void IValueTaskSource<ReadResult>.OnCompleted(
+        Action<object?> continuation,
+        object? state,
+        short token,
+        ValueTaskSourceOnCompletedFlags flags)
+    {
+        _core.OnCompleted(continuation, state, token, flags);
     }
 }

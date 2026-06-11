@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Architecture - ioxide</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="../assets/highlight-dark.min.css">
+  <script src="../assets/highlight.min.js"></script>
+</head>
+<body>
+
+<nav class="top">
+  <a class="brand" href="../"><span>io</span>xide</a>
+  <div class="links">
+    <a href="architecture.html">Learn</a>
+    <a href="architecture.html">Architecture</a>
+    <a class="gh" href="https://github.com/MDA2AV/uRocket" aria-label="GitHub"><svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
+  </div>
+</nav>
+
+<div class="layout">
+  <aside class="side">
+    <div class="group">Concepts</div>
+    <a href="architecture.html" class="here">Architecture</a>
+    <a href="reactor.html">The Reactor</a>
+    <a href="connection.html">The Connection</a>
+    <a href="clients.html">Ring clients</a>
+    <div class="group">Clients</div>
+    <a href="postgres.html">Postgres</a>
+    <a href="files.html">Files</a>
+  </aside>
+
+  <main class="doc">
+    <h1>Architecture</h1>
+    <p class="lead">One reactor per thread, typically one per core. Each owns an io_uring, a
+    SO_REUSEPORT listener, a connection table, buffer rings, and a connection pool - and is the
+    sole writer of all of them. Nothing is shared between reactors. This page is the system view;
+    <a href="reactor.html">The Reactor</a> and <a href="connection.html">The Connection</a> go
+    inside the classes.</p>
+
+    <h2>The loop</h2>
+    <p>A reactor's life is a single loop: drain the cross-thread queues, enter the kernel once
+    (<code>io_uring_enter</code> - submitting everything staged and waiting for at least one
+    completion), then dispatch the whole completion batch.</p>
+<pre><code class="language-csharp">while (true)
+{
+    // Work handed over by off-reactor handlers. Cheap when empty.
+    DrainReturnQ();      // buffer returns
+    DrainFlushQ();       // flushes
+    DrainRecycleQ();     // connection teardowns
+    DrainRemoteOps();    // client ops
+
+    // One syscall per batch: submit everything staged, wait for &gt;= 1 CQE.
+    Ring.SubmitAndWait(1);
+
+    // Read the CQ tail once, dispatch the whole batch, publish the head once.
+    uint ready = Ring.CqReady();
+
+    for (uint i = 0; i &lt; ready; i++)
+        Dispatch(in Ring.CqeAt(i));
+
+    Ring.CqAdvance(ready);
+}</code></pre>
+    <p>Dispatching a completion frequently <em>runs handler code</em> - that's the inline-resume
+    model below - so by the time the loop re-enters the kernel, the responses those completions
+    triggered are already staged in the submission queue. One syscall carries the whole
+    request/response batch.</p>
+
+    <h2>Ring setup</h2>
+    <ul>
+      <li><b>SINGLE_ISSUER</b> - only this thread submits, so the kernel skips SQ locking.</li>
+      <li><b>DEFER_TASKRUN</b> - completion work runs batched inside <code>enter</code> instead of
+      interrupting the thread as task-work.</li>
+      <li><b>NO_SQARRAY</b> (kernel 6.6+) - drops the SQ indirection array, one store fewer per
+      SQE. Setup falls back automatically on older kernels (EINVAL probe).</li>
+      <li><b>SQ-full handling</b> - if the submission queue fills mid-batch, the reactor flushes it
+      with a no-wait <code>enter</code> and continues; submission never blocks on completions.</li>
+    </ul>
+
+    <h2>Accept, recv, send</h2>
+    <ul>
+      <li><b>Multishot accept</b> - armed once on the listener; every new connection is just a CQE.
+      Accepted sockets get TCP_NODELAY (it doesn't reliably inherit from the listener).</li>
+      <li><b>Multishot recv + provided buffers</b> - armed once per connection. The kernel picks a
+      buffer from a pre-registered ring, fills it, and posts a CQE carrying the buffer id. Handlers
+      consume slices zero-copy and return buffers when done.</li>
+      <li><b>Send with MSG_WAITALL</b> - the kernel retries short sends internally, so a flush is
+      one SQE and one CQE. A genuinely partial send (error paths) is resubmitted from the offset.</li>
+    </ul>
+
+    <h2>Two buffer-ring modes</h2>
+    <p><b>Shared</b> (default): one pool per reactor; every connection draws from it. One recv
+    consumes one whole buffer regardless of size - elastic and simple, but small messages waste
+    space. <b>Incremental</b> (<code>IOU_PBUF_RING_INC</code>, kernel 6.12+): a small ring per
+    connection, and the kernel <em>appends</em> successive recvs into the same buffer until it
+    fills. Dense packing and per-connection isolation, paid for with refcounted recycling - a
+    buffer returns only when the handler has returned every slice <em>and</em> the kernel is done
+    appending (<code>F_BUF_MORE</code> cleared) - plus a ring registration per connection
+    (<code>MaxConnections</code> caps the buffer-group ids). The handler API is identical in both
+    modes; <code>ReturnBuffer(s)</code> routes the right return path.</p>
+
+    <h2>Completion routing: tags and generations</h2>
+    <p>Every SQE carries its routing in <code>user_data</code>:</p>
+<pre><code class="language-plaintext">[63:56] kind     accept · recv · send · wake · client · cancel
+[47:32] gen      the connection's generation at submit time
+[31:0]  fd       (or the client-op slot)</code></pre>
+    <p>Dispatch is an array index (<code>connections[fd]</code> - fds are small dense integers, so
+    an array beats hashing) plus a generation check. The generation is what makes fd reuse safe:
+    when a connection dies, its fd number is immediately reusable, and a straggler CQE from the
+    old life would otherwise reach the new tenant. Stale generation → the CQE is dropped and its
+    buffer returned. The same guard rides the flush queue and incremental buffer returns.</p>
+    <p>Teardown also submits an <code>ASYNC_CANCEL</code> for the connection's multishot recv
+    (matched by exact user_data), so a dead connection can't keep consuming buffers or race the
+    fd's next tenant. If a connection's recv queue overflows - the handler isn't draining - the
+    reactor cancels and tears it down rather than leaving it zombied.</p>
+    <p>Client ops (<code>kind = client</code>) skip the connection table entirely: the low 32 bits
+    index a slot table holding the <a href="clients.html">submission's completion object</a>.</p>
+
+    <h2>Inline resume</h2>
+    <p>Every awaitable - <code>ReadAsync</code>, <code>FlushAsync</code>, every client op - is
+    backed by a reusable <code>IValueTaskSource</code> core with
+    <code>RunContinuationsAsynchronously = false</code>. When the reactor dispatches a CQE and
+    calls <code>SetResult</code>, the awaiting handler continues <em>right there</em>, on the
+    reactor thread, inside the dispatch loop. Zero allocation per await: connections are pooled
+    and their cores are reused, with the connection generation as the token so an awaiter from a
+    previous pool life resolves to a closed result instead of the new tenant's state.</p>
+
+    <h2>Leaving the reactor (and coming back)</h2>
+    <p>Handlers may wander - <code>await Task.Delay</code>, any BCL async - and resume on the
+    thread pool. Every reactor-touching operation checks the current thread: on the reactor it
+    takes the direct path (write the SQE, touch the buf_ring); off it, the operation is queued -
+    lock-free MPSC queues for buffer returns and flushes, a queue for client ops and recycles -
+    and the reactor is woken through an <code>eventfd</code> registered as a multishot poll. The
+    detour costs a queue hop and a syscall; the <code>hop</code> Playground mode runs every
+    request through it, end to end.</p>
+
+    <h2>Connection lifetime</h2>
+    <p>A connection has exactly two owners: the reactor (recv side) and the handler. The refcount
+    starts at 2 on accept; each owner releases once - the reactor on EOF/error, the handler via
+    <code>conn.DecRef()</code> on exit (exactly once, in a <code>finally</code>). Whoever reaches
+    zero hands the connection to the reactor for recycling: cancel the multishot recv, return
+    leftover buffers, close the fd, bump the generation (invalidating stale awaiters and queued
+    work), reset state, and push to the pool (capped by <code>PoolMax</code>; beyond it, native
+    memory is freed). Pooled connections keep their slab and buffer-ring allocations across
+    lives.</p>
+
+    <h2>Wiring and services</h2>
+    <p>Three seams connect an application: <code>Handle</code> (the per-connection loop),
+    <code>OnStart</code> (runs on the reactor thread before serving - open ring-native clients
+    here so they bind to this reactor's ring), and typed services
+    (<code>AddService&lt;T&gt;</code> / <code>GetService&lt;T&gt;</code>) so one reactor can carry
+    any number of clients. The engine never names a client type - see
+    <a href="clients.html">Ring clients</a>.</p>
+
+    <h2>Configuration</h2>
+    <table>
+      <tr><th>Option</th><th>Default</th><th>Meaning</th></tr>
+      <tr><td><code>Port</code></td><td>8080</td><td>SO_REUSEPORT listener port (every reactor binds it)</td></tr>
+      <tr><td><code>ReactorCount</code></td><td>12</td><td>reactors = threads; run one per core</td></tr>
+      <tr><td><code>RingEntries</code></td><td>8192</td><td>io_uring SQ/CQ depth</td></tr>
+      <tr><td><code>RecvBufferSize</code></td><td>32 KB</td><td>shared mode: bytes per recv buffer</td></tr>
+      <tr><td><code>BufferRingEntries</code></td><td>4096</td><td>shared mode: buffers per reactor (power of two)</td></tr>
+      <tr><td><code>WriteSlabSize</code></td><td>16 KB</td><td>per-connection write buffer</td></tr>
+      <tr><td><code>PoolMax</code></td><td>1024</td><td>pooled connection objects per reactor (bounds native memory)</td></tr>
+      <tr><td><code>RecvQueueEntries</code></td><td>64</td><td>per-connection slice queue depth; overflow closes the connection</td></tr>
+      <tr><td><code>Incremental</code></td><td>false</td><td>per-connection buffer rings (kernel 6.12+)</td></tr>
+      <tr><td><code>MaxConnections</code></td><td>4096</td><td>incremental: one buffer-group id per live connection</td></tr>
+      <tr><td><code>ConnBufRingEntries</code></td><td>16</td><td>incremental: buffers per connection ring</td></tr>
+      <tr><td><code>IncRecvBufferSize</code></td><td>4 KB</td><td>incremental: bytes per buffer (kernel appends into it)</td></tr>
+    </table>
+
+    <div class="next"><a href="reactor.html">The Reactor →</a></div>
+  </main>
+</div>
+
+<footer>MIT · Linux 6.1+ · .NET 10 · <a href="https://github.com/MDA2AV/uRocket">github.com/MDA2AV/uRocket</a></footer>
+
+<script>hljs.highlightAll();</script>
+</body>
+</html>

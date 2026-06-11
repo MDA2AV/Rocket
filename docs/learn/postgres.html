@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Postgres - ioxide</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="../assets/highlight-dark.min.css">
+  <script src="../assets/highlight.min.js"></script>
+</head>
+<body>
+
+<nav class="top">
+  <a class="brand" href="../"><span>io</span>xide</a>
+  <div class="links">
+    <a href="architecture.html">Learn</a>
+    <a href="architecture.html">Architecture</a>
+    <a class="gh" href="https://github.com/MDA2AV/uRocket" aria-label="GitHub"><svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
+  </div>
+</nav>
+
+<div class="layout">
+  <aside class="side">
+    <div class="group">Concepts</div>
+    <a href="architecture.html">Architecture</a>
+    <a href="reactor.html">The Reactor</a>
+    <a href="connection.html">The Connection</a>
+    <a href="clients.html">Ring clients</a>
+    <div class="group">Clients</div>
+    <a href="postgres.html" class="here">Postgres</a>
+    <a href="files.html">Files</a>
+  </aside>
+
+  <main class="doc">
+    <h1>Postgres over the ring</h1>
+    <p class="lead"><code>ioxide.pg</code> is a hand-rolled Postgres driver where everything -
+    TCP connect, startup handshake, every query - is an io_uring op on the host reactor's ring,
+    resumed inline. No Npgsql, no socket engine, no thread pool.</p>
+
+    <h2>The pool</h2>
+<pre><code class="language-csharp">var options = new PgOptions
+{
+    Host = "127.0.0.1",      // IPv4 literal - resolve DNS up front
+    User = "bench",
+    Database = "bench",
+    PoolSize = 8,            // connections per reactor
+};
+
+// At startup, on the reactor thread.
+reactor.OnStart = r =&gt; PgPool.Start(r, options);
+
+// In the handler: rent → query → return, in one call.
+var pool   = reactor.GetService&lt;PgPool&gt;();
+var result = await pool.QueryAsync("SELECT 42");
+
+// result.Value: "42" · result.Rows: 1 · result.CommandTag: "SELECT 1"</code></pre>
+
+    <p>One <code>PgConnection</code> is one conversation - one query in flight. The pool is the
+    concurrency: <code>QueryAsync</code> rents a connection, runs the query, returns it; when all
+    are busy, requests queue and resume inline as connections free up. For multi-statement work
+    (transactions), <code>RentAsync</code>/<code>Return</code> directly.</p>
+
+    <p>Warmup is concurrent and non-blocking: <code>Start</code> fires <code>PoolSize</code>
+    ring-native connects; a request that arrives first simply waits in the rent queue until the
+    first connection lands. Total server-side connections = <code>PoolSize × ReactorCount</code>.</p>
+
+    <h2>Failure semantics</h2>
+    <table>
+      <tr><th>Failure</th><th>Behavior</th></tr>
+      <tr><td>Server error (bad SQL, missing table)</td><td><code>PgException</code> with severity + SQLSTATE, thrown <em>after</em> the stream resyncs at ReadyForQuery - the connection stays usable</td></tr>
+      <tr><td>Transport failure (reset, EOF, malformed framing)</td><td>connection marked <code>IsBroken</code>; the pool discards it on return and opens a replacement in the background</td></tr>
+      <tr><td>Database restart</td><td>broken connections get replaced as they're returned - the server heals without a restart</td></tr>
+    </table>
+<pre><code class="language-csharp">try
+{
+    var result = await pool.QueryAsync(sql);
+}
+catch (PgException e) when (e.SqlState == "42P01")
+{
+    // Relation does not exist - the connection is already back in rotation.
+}</code></pre>
+
+    <h2>Wire details</h2>
+    <ul>
+      <li>Simple query protocol, UTF-8 throughout; the parser walks messages incrementally and
+      compacts/grows its native buffer (64KB → 1MB) for large responses.</li>
+      <li><code>PgResult</code> carries the first column of the first row as text, the row count,
+      and the command tag - enough for the common case; a typed row reader is roadmap.</li>
+      <li>Trust authentication only, today. SCRAM, the extended protocol (prepared statements),
+      and pipelining are the driver's roadmap, in that order.</li>
+    </ul>
+
+    <div class="note">Parallel requests overlap their queries across the pool instead of
+    serializing on one connection - see it directly with the Playground's <code>/sleep</code>
+    route and a few concurrent curls.</div>
+
+    <div class="next"><a href="files.html">Files →</a></div>
+  </main>
+</div>
+
+<footer>MIT · Linux 6.1+ · .NET 10 · <a href="https://github.com/MDA2AV/uRocket">github.com/MDA2AV/uRocket</a></footer>
+
+<script>hljs.highlightAll();</script>
+</body>
+</html>

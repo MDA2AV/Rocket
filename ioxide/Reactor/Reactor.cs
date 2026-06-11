@@ -8,18 +8,17 @@ using static ioxide.Native;
 namespace ioxide;
 
 /// <summary>
-/// One reactor = one thread + one io_uring + one listening socket (SO_REUSEPORT)
-/// + one connection map. The reactor thread is the sole writer of the SQ ring,
-/// the kernel-shared buf_ring, and the connection map. Handlers may run on any
-/// thread (e.g. resumed by a thread-pool timer after `await Task.Delay(1)`);
-/// they reach the reactor only through two MPSC queues (`_returnQ`, `_flushQ`)
-/// woken by an `eventfd` registered as a multishot poll in the ring.
+/// One reactor = one thread + one io_uring + one SO_REUSEPORT listener + one connection table.
+/// The reactor thread is the sole writer of the SQ, the buf_ring, and the connection table;
+/// off-reactor handlers reach it through MPSC queues woken by an eventfd poll.
 /// </summary>
 public sealed unsafe partial class Reactor
 {
     public readonly int Id;
-    public Ring Ring = null!;   // created on the reactor's own thread (DEFER_TASKRUN requires same-thread setup+enter)
-    public readonly Dictionary<int,Connection> Connections = new();
+    public Ring Ring = null!;   // created on the reactor thread (DEFER_TASKRUN requires same-thread setup+enter)
+
+    // Connection table indexed by fd (dense small ints - array beats Dictionary per CQE).
+    private Connection?[] _connections = new Connection?[4096];
 
     private int _listenFd;
     private readonly ServerConfig _config;
@@ -28,54 +27,51 @@ public sealed unsafe partial class Reactor
     private readonly bool _incremental;
     private readonly uint RecvBufferSize;
 
-    // CQE user_data layout: kind tag in the high 32 bits, fd in the low 32.
-    private const ulong KindAccept = 1UL << 32;
-    private const ulong KindRecv   = 2UL << 32;
-    private const ulong KindSend   = 3UL << 32;
-    private const ulong KindWake   = 4UL << 32;  // eventfd-based cross-thread wake
+    // user_data: [63:56] kind | [47:32] connection generation | [31:0] fd (or client-op slot).
+    // The generation makes straggler CQEs from a reused fd detectable as stale.
+    private const int  KindShift  = 56;
+    private const int  GenShift   = 32;
+    private const byte KindAccept = 1;
+    private const byte KindRecv   = 2;
+    private const byte KindSend   = 3;
+    private const byte KindWake   = 4;
+    private const byte KindClient = 5;   // low 32 bits = op slot (Reactor.RingHost.cs)
+    private const byte KindCancel = 6;
 
-    // Provided-buffer ring (one per reactor, shared by all its connections).
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong Tag(byte kind, ushort gen, int fd)
+        => ((ulong)kind << KindShift) | ((ulong)gen << GenShift) | (uint)fd;
+
+    // Shared provided-buffer ring (one per reactor).
     private const ushort BgId = 1;
-    private readonly uint BufferRingEntries;                // power of two
-    private byte*  _bufRing;          // io_uring_buf_ring (kernel-shared)
-    private byte*  _bufSlab;          // contiguous slab of recv buffers
+    private readonly uint BufferRingEntries;   // power of two
+    private byte*  _bufRing;                   // io_uring_buf_ring (kernel-shared)
+    private byte*  _bufSlab;
     private uint   _bufRingMask;
     private ushort _bufRingTail;
 
-    // Cross-thread wake mechanism: handlers running off-reactor enqueue work
-    // into these MPSC queues and `eventfd_write` _wakeFd; a multishot poll on
-    // _wakeFd registered with the ring delivers a CQE that wakes the reactor.
-    // When the caller is already the reactor thread (the common case — handler
-    // resumed inline from an IVTS SetResult), the Enqueue* methods bypass
-    // the queue and call the direct op, avoiding 2 syscalls per request.
+    // Off-reactor handoff queues + eventfd wake. Reactor-thread callers take the
+    // direct fast path instead (no queue, no syscall).
     private int _wakeFd;
     private int _reactorThreadId;
-    private readonly Mpsc<ushort> _returnQ = new(1 << 14);   // 16384 slots
-    private readonly Mpsc<int>    _flushQ  = new(1 << 12);   // 4096 slots
+    private readonly Mpsc<ushort> _returnQ = new(1 << 14);
+    private readonly Mpsc<ulong>  _flushQ  = new(1 << 12);   // (gen << 32) | fd
 
-    // Teardown handoff: when a connection's refcount hits 0 off-reactor (handler exited
-    // on the thread pool), the recycle must run on the reactor (it touches the buf_ring
-    // and the reactor-only pool). Connection is a ref type, so this is a ConcurrentQueue
-    // rather than the unmanaged Mpsc<T>.
+    // Recycle must run on the reactor (buf_ring + pool are reactor-owned). Connection is a
+    // ref type, so this queue is a ConcurrentQueue rather than the unmanaged Mpsc<T>.
     private readonly ConcurrentQueue<Connection> _recycleQ = new();
 
-    // Connection pool. Reactor-thread-only — accept and teardown both run on
-    // this reactor, so a plain Stack<T> is sufficient (no MPMC primitive
-    // needed). PoolMax caps the slab footprint per reactor:
-    //   PoolMax × WriteSlabSize × ReactorCount = total reserved native memory.
+    // Connection pool, reactor-thread-only. PoolMax × WriteSlabSize × ReactorCount bounds
+    // the reserved native memory.
     private readonly int PoolMax;
     private readonly Stack<Connection> _pool;
 
-    // Incremental-mode (IOU_PBUF_RING_INC) sizing. Each connection gets its own
-    // ring, so reserved native memory is bounded by:
-    //   PoolMax × ConnBufRingEntries × IncRecvBufferSize × ReactorCount.
-    // Keep entries small — the point of incremental is that one buffer holds
-    // many reads, so you need few of them per connection.
-    private readonly int  MaxConnections;       // GID cap (one bgid per active connection)
-    private readonly int  ConnBufRingEntries;   // buffers per connection ring
-    private readonly uint IncRecvBufferSize;    // bytes per buffer (filled incrementally)
+    // Incremental-mode sizing (see Reactor.Incremental.cs).
+    private readonly int  MaxConnections;       // one bgid per active connection
+    private readonly int  ConnBufRingEntries;
+    private readonly uint IncRecvBufferSize;
 
-    // Transient io_uring_enter errnos (Linux): interrupted, would-block, busy.
+    // Transient io_uring_enter errnos.
     private const int EINTR  = 4;
     private const int EAGAIN = 11;
     private const int EBUSY  = 16;
@@ -96,9 +92,27 @@ public sealed unsafe partial class Reactor
         _pool = new Stack<Connection>(config.PoolMax);
     }
 
-    // =========================================================================
-    // Buffer ring
-    // =========================================================================
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private Connection? ConnAt(int fd, ushort gen)
+    {
+        Connection?[] conns = _connections;
+        Connection? conn = (uint)fd < (uint)conns.Length ? conns[fd] : null;
+        return conn != null && (ushort)conn.Generation == gen ? conn : null;
+    }
+
+    private void Track(int fd, Connection conn)
+    {
+        if (fd >= _connections.Length)
+        {
+            int newLength = _connections.Length;
+            while (newLength <= fd)
+            {
+                newLength *= 2;
+            }
+            Array.Resize(ref _connections, newLength);
+        }
+        _connections[fd] = conn;
+    }
 
     private void InitBufferRing()
     {
@@ -125,9 +139,8 @@ public sealed unsafe partial class Reactor
             throw new InvalidOperationException($"register pbuf_ring failed: ret={ret} errno={err}");
         }
 
-        // Populate every slot once. Slot 0 overlaps with the ring's tail field
-        // at offset 14, but we only write addr/len/bid (offsets 0..13) so tail
-        // stays at zero until we set it explicitly.
+        // Slot 0 overlaps the ring's tail field at offset 14; writing only addr/len/bid
+        // (offsets 0..13) keeps tail zero until published explicitly.
         for (ushort bid = 0; bid < BufferRingEntries; bid++) {
             byte* slot = _bufRing + (uint)bid * 16;
             *(ulong*)(slot + 0)  = (ulong)(_bufSlab + bid * (nuint)RecvBufferSize);
@@ -136,30 +149,35 @@ public sealed unsafe partial class Reactor
         }
         _bufRingTail = (ushort)BufferRingEntries;
 
-        Volatile.Write(ref *(ushort*)(_bufRing + 14), _bufRingTail);
+        PublishBufRingTail();
     }
 
-    // Reactor-thread-only: writes the kernel-shared buf_ring tail directly.
-    // Off-reactor callers must use EnqueueReturnQ instead.
-    internal void ReturnBufferDirect(ushort bid)
+    // Stage a buffer without publishing; batch drains publish once for N buffers.
+    private void ReturnBufferLocal(ushort bid)
     {
         byte* slot = _bufRing + (_bufRingTail & _bufRingMask) * 16;
         *(ulong*)(slot + 0)  = (ulong)(_bufSlab + bid * (nuint)RecvBufferSize);
         *(uint*)(slot + 8)   = RecvBufferSize;
         *(ushort*)(slot + 12) = bid;
         _bufRingTail++;
+    }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void PublishBufRingTail()
+    {
         Volatile.Write(ref *(ushort*)(_bufRing + 14), _bufRingTail);
     }
 
-    // =========================================================================
-    // Cross-thread entry points (safe to call from any thread)
-    // =========================================================================
+    // Reactor-thread-only; off-reactor callers use EnqueueReturnQ.
+    internal void ReturnBufferDirect(ushort bid)
+    {
+        ReturnBufferLocal(bid);
+        PublishBufRingTail();
+    }
 
+    // Safe from any thread.
     public void EnqueueReturnQ(ushort bid)
     {
-        // Fast path: caller is the reactor thread (handler running inline from
-        // an IVTS SetResult). Go straight to the buf_ring — no queue, no syscall.
         if (Environment.CurrentManagedThreadId == _reactorThreadId)
         {
             ReturnBufferDirect(bid);
@@ -170,30 +188,32 @@ public sealed unsafe partial class Reactor
         {
             sw.SpinOnce();
         }
-        //WakeFdWrite();
+        // Without the wake, a queued return waits for an unrelated CQE; if the ring
+        // drains meanwhile, recvs fail with ENOBUFS.
+        WakeFdWrite();
     }
 
-    internal void EnqueueFlush(int fd)
+    internal void EnqueueFlush(int fd, int gen)
     {
-        // Fast path: caller is the reactor thread; write the SQE directly.
         if (Environment.CurrentManagedThreadId == _reactorThreadId)
         {
-            if (Connections.TryGetValue(fd, out var conn))
+            Connection? conn = ConnAt(fd, (ushort)gen);
+            if (conn != null)
             {
-                SubmitSend(fd, conn.WriteBuffer, (uint)conn.WriteInFlight);
+                SubmitSend(fd, (ushort)gen, conn.WriteBuffer, (uint)conn.WriteInFlight);
             }
             return;
         }
+        ulong packed = ((ulong)(ushort)gen << 32) | (uint)fd;
         SpinWait sw = default;
-        while (!_flushQ.TryEnqueue(fd))
+        while (!_flushQ.TryEnqueue(packed))
         {
             sw.SpinOnce();
         }
         WakeFdWrite();
     }
-    
-    // Called by Connection.DecRef when the refcount hits 0. Teardown must run on the
-    // reactor (buf_ring + pool are reactor-owned), so off-reactor callers hand off.
+
+    // Called by Connection.DecRef at refcount 0.
     internal void EnqueueRecycle(Connection conn)
     {
         if (Environment.CurrentManagedThreadId == _reactorThreadId)
@@ -208,30 +228,37 @@ public sealed unsafe partial class Reactor
     private void WakeFdWrite()
     {
         ulong v = 1;
-        // 8-byte write to eventfd increments its counter; the kernel marks the
-        // fd readable, which fires our registered multishot poll's next CQE.
-        write(_wakeFd, &v, 8);
+        write(_wakeFd, &v, 8);   // eventfd becomes readable → multishot poll CQE wakes the loop
     }
 
     private void DrainReturnQ()
     {
+        bool any = false;
         while (_returnQ.TryDequeue(out ushort bid))
         {
-            ReturnBufferDirect(bid);
+            ReturnBufferLocal(bid);
+            any = true;
+        }
+        if (any)
+        {
+            PublishBufRingTail();
         }
     }
 
     private void DrainFlushQ()
     {
-        while (_flushQ.TryDequeue(out int fd))
+        while (_flushQ.TryDequeue(out ulong packed))
         {
-            if (!Connections.TryGetValue(fd, out var conn))
+            int    fd  = (int)(uint)packed;
+            ushort gen = (ushort)(packed >> 32);
+            // Gen check drops flushes for connections that closed (or whose fd was reused)
+            // after queuing.
+            Connection? conn = ConnAt(fd, gen);
+            if (conn == null)
             {
                 continue;
             }
-            // Connection state was set by FlushAsync; the Enqueue/Dequeue pair
-            // establishes the happens-before so WriteInFlight is visible here.
-            SubmitSend(fd, conn.WriteBuffer, (uint)conn.WriteInFlight);
+            SubmitSend(fd, gen, conn.WriteBuffer, (uint)conn.WriteInFlight);
         }
     }
 
@@ -249,14 +276,10 @@ public sealed unsafe partial class Reactor
         Unsafe.InitBlockUnaligned(sqe, 0, 64);
         sqe->opcode    = IORING_OP_POLL_ADD;
         sqe->fd        = _wakeFd;
-        sqe->op_flags  = POLLIN;                  // poll32_events lives at this offset
-        sqe->len       = IORING_POLL_ADD_MULTI;   // multishot — stays armed across CQEs
-        sqe->user_data = KindWake | (uint)_wakeFd;
+        sqe->op_flags  = POLLIN;                  // poll32_events
+        sqe->len       = IORING_POLL_ADD_MULTI;
+        sqe->user_data = Tag(KindWake, 0, _wakeFd);
     }
-
-    // =========================================================================
-    // Main loop
-    // =========================================================================
 
     public void Run()
     {
@@ -280,8 +303,8 @@ public sealed unsafe partial class Reactor
             throw new InvalidOperationException("eventfd failed");
         }
 
-        // Let the application open its ring-native clients (Postgres, files) on this thread,
-        // before serving. They must be created here so they bind to this reactor's ring.
+        // Ring-native clients must be opened on this thread; async opens complete
+        // once the loop starts.
         OnStart?.Invoke(this);
 
         Console.WriteLine($"[r{Id}] listening on 0.0.0.0:{_port} (incremental={_incremental})");
@@ -306,10 +329,10 @@ public sealed unsafe partial class Reactor
     {
         while (true)
         {
-            // Drain MPSC queues from off-reactor handlers. Cheap when empty.
             DrainReturnQ();
             DrainFlushQ();
             DrainRecycleQ();
+            DrainRemoteOps();
 
             int rc = Ring.SubmitAndWait(1);
             if (rc < 0 && rc != -EINTR && rc != -EAGAIN && rc != -EBUSY)
@@ -329,126 +352,146 @@ public sealed unsafe partial class Reactor
 
     private void Dispatch(in IoUringCqe cqe)
     {
-        ulong kind = cqe.user_data & 0xffffffff_00000000UL;
-        int   fd   = (int)(cqe.user_data & 0xffffffffUL);
-        bool  more = (cqe.flags & IORING_CQE_F_MORE) != 0;
+        byte   kind = (byte)(cqe.user_data >> KindShift);
+        ushort gen  = (ushort)(cqe.user_data >> GenShift);
+        int    fd   = (int)(uint)cqe.user_data;
+        bool   more = (cqe.flags & IORING_CQE_F_MORE) != 0;
 
-        if (kind == KindWake)
+        switch (kind)
         {
-            // Drain the eventfd counter so the next write re-triggers POLLIN
-            // (multishot poll is edge-triggered on the user_space side).
-            ulong drain;
-            read(_wakeFd, &drain, 8);
-            // The actual queue drains happen at the top of the next loop
-            // iteration — nothing else to do here.
-            if (!more)
+            case KindRecv:
             {
-                ArmWakePoll();
-            }
-            return;
-        }
+                bool   hasBuf = (cqe.flags & IORING_CQE_F_BUFFER) != 0;
+                ushort bid    = hasBuf ? (ushort)(cqe.flags >> IORING_CQE_BUFFER_SHIFT) : (ushort)0;
 
-        if (kind == KindClient)
-        {
-            // A ring-native client's SEND/RECV/READ/WRITE completed → resume it inline (RCA=false).
-            CompleteClient(fd, cqe.res);
-            return;
-        }
+                Connection? conn = ConnAt(fd, gen);
 
-        if (kind == KindAccept)
-        {
-            if (cqe.res >= 0)
-            {
-                int clientFd = cqe.res;
-                SetNoDelay(clientFd);
-                Connection conn = _pool.TryPop(out var pooled)
-                    ? pooled.SetFd(clientFd)
-                    : new Connection(this, clientFd, _config.WriteSlabSize);
-                Connections[clientFd] = conn;
-                conn.InitRefs();
-                SubmitRecvMultishot(clientFd);
-
-                _ = Handle(this, conn);
-            }
-            else
-            {
-                Console.Error.WriteLine($"[r{Id}] accept error: {cqe.res}");
-            }
-            // Multishot accept stays armed; only re-arm if the kernel terminated it.
-            if (!more)
-            {
-                SubmitAcceptMultishot();
-            }
-        }
-        else if (kind == KindRecv)
-        {
-            bool   hasBuf = (cqe.flags & IORING_CQE_F_BUFFER) != 0;
-            ushort bid    = hasBuf ? (ushort)(cqe.flags >> IORING_CQE_BUFFER_SHIFT) : (ushort)0;
-
-            if (cqe.res <= 0)
-            {
-                // Peer EOF or recv error — reactor owns teardown.
-                if (hasBuf)
+                if (cqe.res <= 0)
                 {
-                    ReturnBufferDirect(bid);
+                    // Peer EOF or recv error - reactor owns teardown.
+                    if (hasBuf)
+                    {
+                        ReturnBufferDirect(bid);
+                    }
+                    if (conn != null)
+                    {
+                        _connections[fd] = null;
+                        conn.MarkClosed();
+                        conn.DecRef();
+                    }
+                    return;
                 }
-                if (Connections.Remove(fd, out var dyingConn))
+
+                if (conn == null)
                 {
-                    dyingConn.MarkClosed();   // signal the handler to exit
-                    dyingConn.DecRef();       // release the reactor's ref; teardown at refs==0
+                    // Stale CQE from the fd's previous tenant.
+                    if (hasBuf)
+                    {
+                        ReturnBufferDirect(bid);
+                    }
+                    return;
+                }
+
+                byte* ptr = hasBuf ? _bufSlab + (nuint)bid * (nuint)RecvBufferSize : null;
+                if (!conn.Complete(cqe.res, bid, hasBuf, ptr))
+                {
+                    // Recv queue overflow - tear down rather than zombify.
+                    _connections[fd] = null;
+                    SubmitCancel(Tag(KindRecv, gen, fd));
+                    conn.MarkClosed();
+                    conn.DecRef();
+                    return;
+                }
+
+                if (!more)
+                {
+                    SubmitRecvMultishot(fd, gen, BgId);
                 }
                 return;
             }
 
-            if (!Connections.TryGetValue(fd, out var conn))
+            case KindSend:
+                OnSendCompletion(fd, gen, cqe.res);
+                return;
+
+            case KindClient:
+                CompleteClient(fd, cqe.res);   // low 32 bits = op slot
+                return;
+
+            case KindAccept:
             {
-                // Straggler buffer for an already-closed connection.
-                if (hasBuf)
+                if (cqe.res >= 0)
                 {
-                    ReturnBufferDirect(bid);
+                    int clientFd = cqe.res;
+                    SetNoDelay(clientFd);
+                    Connection conn = _pool.TryPop(out var pooled)
+                        ? pooled.SetFd(clientFd)
+                        : new Connection(this, clientFd, _config.WriteSlabSize, _config.RecvQueueEntries);
+                    Track(clientFd, conn);
+                    conn.InitRefs();
+                    SubmitRecvMultishot(clientFd, (ushort)conn.Generation, BgId);
+
+                    _ = Handle(this, conn);
+                }
+                else
+                {
+                    Console.Error.WriteLine($"[r{Id}] accept error: {cqe.res}");
+                }
+                if (!more)
+                {
+                    SubmitAcceptMultishot();
                 }
                 return;
             }
 
-            byte* ptr = hasBuf ? _bufSlab + (nuint)bid * (nuint)RecvBufferSize : null;
-            conn.Complete(cqe.res, bid, hasBuf, ptr);
+            case KindWake:
+                OnWakeCompletion(more);
+                return;
 
-            if (!more)
-            {
-                SubmitRecvMultishot(fd);
-            }
-        }
-        else if (kind == KindSend)
-        {
-            if (!Connections.TryGetValue(fd, out var conn))
-            {
+            case KindCancel:
                 return;
-            }
-            if (cqe.res <= 0)
-            {
-                // Send error — release the reactor's ref; teardown when the handler exits too.
-                Connections.Remove(fd);
-                conn.MarkClosed();
-                conn.DecRef();
-                return;
-            }
-            conn.WriteHead += cqe.res;
-            if (conn.WriteHead < conn.WriteInFlight)
-            {
-                // Partial send: resubmit the remainder.
-                SubmitSend(fd, conn.WriteBuffer + conn.WriteHead, (uint)(conn.WriteInFlight - conn.WriteHead));
-                return;
-            }
-            // Full target ack'd — resets buffer state and signals the awaiter.
-            conn.CompleteFlush();
         }
     }
 
-    // =========================================================================
-    // SQE producers (reactor-thread-only — Connection.FlushAsync hands off via
-    // EnqueueFlush, which DrainFlushQ turns into SubmitSend on this thread)
-    // =========================================================================
+    // Shared by both loops.
+    private void OnSendCompletion(int fd, ushort gen, int res)
+    {
+        Connection? conn = ConnAt(fd, gen);
+        if (conn == null)
+        {
+            return;   // stale CQE - never touch the fd's new tenant
+        }
+        if (res <= 0)
+        {
+            _connections[fd] = null;
+            SubmitCancel(Tag(KindRecv, gen, fd));   // the multishot recv is still armed
+            conn.MarkClosed();
+            conn.DecRef();
+            return;
+        }
+        conn.WriteHead += res;
+        if (conn.WriteHead < conn.WriteInFlight)
+        {
+            // Partial send (rare with MSG_WAITALL): resubmit the remainder.
+            SubmitSend(fd, gen, conn.WriteBuffer + conn.WriteHead, (uint)(conn.WriteInFlight - conn.WriteHead));
+            return;
+        }
+        conn.CompleteFlush();
+    }
 
+    private void OnWakeCompletion(bool more)
+    {
+        // Drain the eventfd counter so the next write re-triggers POLLIN; queues
+        // drain at the top of the next loop iteration.
+        ulong drain;
+        read(_wakeFd, &drain, 8);
+        if (!more)
+        {
+            ArmWakePoll();
+        }
+    }
+
+    // SQE producers - reactor-thread-only.
     private IoUringSqe* GetSqeOrFlush()
     {
         IoUringSqe* sqe = Ring.GetSqe();
@@ -475,12 +518,10 @@ public sealed unsafe partial class Reactor
         sqe->opcode    = IORING_OP_ACCEPT;
         sqe->ioprio    = IORING_ACCEPT_MULTISHOT;
         sqe->fd        = _listenFd;
-        sqe->user_data = KindAccept | (uint)_listenFd;
+        sqe->user_data = Tag(KindAccept, 0, _listenFd);
     }
 
-    private void SubmitRecvMultishot(int fd) => SubmitRecvMultishot(fd, BgId);
-
-    private void SubmitRecvMultishot(int fd, ushort bgid)
+    private void SubmitRecvMultishot(int fd, ushort gen, ushort bgid)
     {
         IoUringSqe* sqe = GetSqeOrFlush();
         Unsafe.InitBlockUnaligned(sqe, 0, 64);
@@ -488,11 +529,11 @@ public sealed unsafe partial class Reactor
         sqe->flags     = IOSQE_BUFFER_SELECT;
         sqe->ioprio    = IORING_RECV_MULTISHOT;
         sqe->fd        = fd;
-        sqe->buf_index = bgid;          // buffer-group id (shared BgId, or per-conn in incremental)
-        sqe->user_data = KindRecv | (uint)fd;
+        sqe->buf_index = bgid;
+        sqe->user_data = Tag(KindRecv, gen, fd);
     }
 
-    private void SubmitSend(int fd, byte* buf, uint len)
+    private void SubmitSend(int fd, ushort gen, byte* buf, uint len)
     {
         IoUringSqe* sqe = GetSqeOrFlush();
         Unsafe.InitBlockUnaligned(sqe, 0, 64);
@@ -500,20 +541,30 @@ public sealed unsafe partial class Reactor
         sqe->fd        = fd;
         sqe->addr      = (ulong)buf;
         sqe->len       = len;
-        sqe->user_data = KindSend | (uint)fd;
+        sqe->op_flags  = MSG_WAITALL;   // kernel retries short sends - one CQE per flush
+        sqe->user_data = Tag(KindSend, gen, fd);
+    }
+
+    // Cancel by exact user_data so a dead connection's multishot recv can't keep
+    // consuming buffers or race the fd's next tenant.
+    private void SubmitCancel(ulong targetUserData)
+    {
+        IoUringSqe* sqe = GetSqeOrFlush();
+        Unsafe.InitBlockUnaligned(sqe, 0, 64);
+        sqe->opcode    = IORING_OP_ASYNC_CANCEL;
+        sqe->fd        = -1;
+        sqe->addr      = targetUserData;
+        sqe->user_data = Tag(KindCancel, 0, 0);
     }
 
     private void Recycle(Connection conn, int fd)
     {
-        // Wake awaiters, drain in-flight buffers, close the fd, reset state,
-        // and either push the Connection back to the pool or free its native
-        // WriteBuffer if the pool is full.
         conn.MarkClosed();
+        SubmitCancel(Tag(KindRecv, (ushort)conn.Generation, fd));   // before Clear() bumps the generation
+
         if (_incremental)
         {
-            // The per-connection ring is freed wholesale; no per-buffer return.
-            // Clear() empties the SPSC ring (leftover slices discarded).
-            TeardownConnectionBufRing(conn);
+            TeardownConnectionBufRing(conn);   // per-conn ring freed wholesale
         }
         else
         {
@@ -532,9 +583,7 @@ public sealed unsafe partial class Reactor
         }
     }
 
-    // Disable Nagle on an accepted connection. Must be set per-accepted-socket,
-    // not on the listener — TCP_NODELAY doesn't reliably inherit across accept,
-    // which is why zerg/terraform/rtr all set it on the client fd, not the listener.
+    // Per accepted socket - TCP_NODELAY doesn't reliably inherit from the listener.
     private static void SetNoDelay(int fd)
     {
         int one = 1;

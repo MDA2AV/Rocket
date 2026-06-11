@@ -6,12 +6,9 @@ using ioxide.pg;
 namespace Playground;
 
 /// <summary>
-/// A host for the ioxide engine. It spins up one reactor per slot and wires each with one of three
-/// request handlers, chosen by the PLAYGROUND_MODE environment variable:
-///
-///   raw   (default) — serve a fixed plaintext "ok".
-///   pg              — open a Postgres connection per reactor; answer with "SELECT 42".
-///   file            — open a file per reactor and serve it, read off the ring (the Fractal model).
+/// A host for the ioxide engine. PLAYGROUND_MODE picks the handler: raw (plaintext "ok"),
+/// pg (a PgPool per reactor), file (static files over the asset cache), hop (raw via the thread
+/// pool). Each mode registers its services from OnStart; handlers fetch them with GetService.
 /// </summary>
 internal static class Program
 {
@@ -20,21 +17,36 @@ internal static class Program
         var config = new ServerConfig
         {
             Port = 8080,
-            UsePipe = false,
-            ReactorCount = 2
+            ReactorCount = 12,
+            Incremental = Environment.GetEnvironmentVariable("PLAYGROUND_INCREMENTAL") == "1"
         };
 
         string mode = Environment.GetEnvironmentVariable("PLAYGROUND_MODE") ?? "raw";
         string assetDir = Environment.GetEnvironmentVariable("PLAYGROUND_DIR") ?? "/tmp/ioxide-assets";
+
+        var pgOptions = new PgOptions
+        {
+            Host = Environment.GetEnvironmentVariable("PLAYGROUND_PG_HOST") ?? "127.0.0.1",
+            Port = ushort.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_PG_PORT"), out ushort pgPort) ? pgPort : (ushort)5432,
+            User = Environment.GetEnvironmentVariable("PLAYGROUND_PG_USER") ?? "bench",
+            Database = Environment.GetEnvironmentVariable("PLAYGROUND_PG_DB") ?? "bench",
+            PoolSize = int.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_PG_POOL"), out int poolSize) ? poolSize : 4,
+        };
 
         // The asset cache opens every file once and is shared across all reactors (its descriptors
         // are stable and read positionally). StaticAssets wraps it so it can be reloaded atomically.
         StaticAssets? assets = null;
         if (mode == "file")
         {
+            // PLAYGROUND_CACHE_MAX: per-file byte ceiling for pinning bodies in memory
+            // (0 forces every request through the ring-read path; default 256KB).
+            int cacheMax = int.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_CACHE_MAX"), out int max)
+                ? max
+                : AssetCache.DefaultMaxCachedFileBytes;
+
             Handlers.EnsureSampleDir(assetDir);
-            assets = new StaticAssets(assetDir);
-            Console.WriteLine($"[playground] asset cache: {assets.Count} files under {assets.RootDir}");
+            assets = new StaticAssets(assetDir, cacheMax);
+            Console.WriteLine($"[playground] asset cache: {assets.Count} files under {assets.RootDir} (pin ≤ {cacheMax}B)");
         }
 
         // Reload the assets on SIGHUP (e.g. `kill -HUP <pid>` after a deploy): a fresh snapshot is
@@ -43,7 +55,7 @@ internal static class Program
         {
             ctx.Cancel = true;   // handle it; don't let the default action terminate us
             assets.Reload();
-            Console.WriteLine($"[playground] reloaded — now serving {assets.Count} files");
+            Console.WriteLine($"[playground] reloaded - now serving {assets.Count} files");
         });
 
         Console.WriteLine($"[playground] {config.ReactorCount} reactors on :{config.Port} (mode={mode})");
@@ -54,17 +66,30 @@ internal static class Program
         {
             var reactor = new Reactor(i, config);
 
-            // Pick the handler, and open whatever per-reactor client it needs (on the reactor thread).
+            // Pick the handler, and register whatever per-reactor services it needs. OnStart runs
+            // on the reactor thread, so every client opened there rides that reactor's ring.
             switch (mode)
             {
                 case "pg":
                     reactor.Handle = Handlers.Pg;
-                    reactor.OnStart = r => r.State = PgConnection.Connect(r, "bench", "bench");
+                    reactor.OnStart = r => PgPool.Start(r, pgOptions);
                     break;
 
                 case "file":
                     reactor.Handle = Handlers.File;
-                    reactor.OnStart = r => r.State = FileEndpoint.Open(r, assets!);
+                    reactor.OnStart = r =>
+                    {
+                        r.AddService(assets!);
+                        AssetReader.CreatePool(r, readers: 4, bufferBytes: 1 << 20);
+                    };
+                    break;
+
+                case "pipe":
+                    reactor.Handle = Handlers.Pipe;
+                    break;
+
+                case "hop":
+                    reactor.Handle = Handlers.Hop;
                     break;
 
                 default:

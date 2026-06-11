@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ring clients - ioxide</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="../assets/highlight-dark.min.css">
+  <script src="../assets/highlight.min.js"></script>
+</head>
+<body>
+
+<nav class="top">
+  <a class="brand" href="../"><span>io</span>xide</a>
+  <div class="links">
+    <a href="architecture.html">Learn</a>
+    <a href="architecture.html">Architecture</a>
+    <a class="gh" href="https://github.com/MDA2AV/uRocket" aria-label="GitHub"><svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
+  </div>
+</nav>
+
+<div class="layout">
+  <aside class="side">
+    <div class="group">Concepts</div>
+    <a href="architecture.html">Architecture</a>
+    <a href="reactor.html">The Reactor</a>
+    <a href="connection.html">The Connection</a>
+    <a href="clients.html" class="here">Ring clients</a>
+    <div class="group">Clients</div>
+    <a href="postgres.html">Postgres</a>
+    <a href="files.html">Files</a>
+  </aside>
+
+  <main class="doc">
+    <h1>Ring clients</h1>
+    <p class="lead">The reactor serves HTTP. Everything else a backend talks to - Postgres, Redis,
+    files, an upstream service - is a <em>client</em> riding the same ring, written against one
+    seam. The engine never names a client type, so adding a capability never touches the
+    reactor.</p>
+
+    <h2>The seam: IRingHost</h2>
+<pre><code class="language-csharp">public interface IRingHost
+{
+    // Stream I/O: sockets.
+    void SubmitConnect(int fd, nint sockaddr, int len, IRingCompletion completion);
+    void SubmitSend   (int fd, nint buffer, int len, IRingCompletion completion);
+    void SubmitRecv   (int fd, nint buffer, int len, IRingCompletion completion);
+
+    // Positional I/O: files.
+    void SubmitRead   (int fd, nint buffer, int len, long offset, IRingCompletion completion);
+    void SubmitWrite  (int fd, nint buffer, int len, long offset, IRingCompletion completion);
+}
+
+public interface IRingCompletion
+{
+    void Complete(int result);   // bytes transferred (0 for connect), or a negative errno
+}</code></pre>
+    <p>Every submission carries its own completion object. The reactor stores it in a slot table,
+    puts the slot index in the SQE's <code>user_data</code>, and when the CQE lands calls
+    <code>Complete</code> - inline, on the reactor thread. Routing is <em>per operation</em>, not
+    per descriptor: two concurrent reads of the same file, or a send racing a recv on one socket,
+    never collide, and nothing is registered or unbound around descriptor lifetimes.</p>
+    <ul>
+      <li><b>Buffers cross as <code>nint</code></b> - raw pointers can't survive an
+      <code>await</code>; an address can. Buffers must be native (or pinned) memory that outlives
+      the operation.</li>
+      <li><b>Any thread may submit</b> - off-reactor calls are marshalled to the reactor through
+      its wake queue automatically.</li>
+      <li><b>Results follow io_uring's convention</b> - bytes transferred on success, 0 for a
+      successful connect (or EOF on recv), a negative errno on failure. Clients translate these
+      into their own error semantics.</li>
+    </ul>
+
+    <h2>The kit</h2>
+
+    <h3>RingOpSource - one CQE becomes one await</h3>
+<pre><code class="language-csharp">private readonly RingOpSource _op = new();
+
+public ValueTask&lt;int&gt; ReadAsync(int fd, nint buffer, int length, long offset)
+{
+    var pending = _op.Prepare();                       // arm - zero allocation
+    _host.SubmitRead(fd, buffer, length, offset, _op); // the source IS the completion
+    return pending;                                    // resumes inline on the CQE
+}</code></pre>
+    <p>It implements both <code>IRingCompletion</code> and <code>IValueTaskSource&lt;int&gt;</code>
+    and is reusable across operations. One op in flight per source at a time - a duplex client
+    owns two (one per direction).</p>
+
+    <h3>RingSocket - TCP that lives on the ring</h3>
+    <p><code>CreateTcp(host)</code> makes the descriptor (with TCP_NODELAY);
+    <code>ConnectAsync(ip, port)</code>, <code>SendAsync</code>, and <code>RecvAsync</code> are
+    all ring ops. Even the connect is asynchronous, so a client can dial out - or re-dial after a
+    failure - without ever stalling the reactor. It holds a tx and an rx source, so one send and
+    one recv may overlap. IPv4 literals only: resolve DNS up front, a resolver would block the
+    thread.</p>
+
+    <h3>RingPool&lt;T&gt; - one-conversation clients, N at a time</h3>
+    <p>Most protocol connections carry one exchange at a time. The pool turns that into
+    per-reactor concurrency: <code>RentAsync</code> pops an idle resource or queues the renter
+    FIFO; <code>Return</code> hands it to the oldest waiter, whose continuation runs synchronously
+    - an inline return resumes the next handler inline. Seed it by <code>Return</code>ing freshly
+    created resources.</p>
+
+    <h2>Adding your own client</h2>
+    <p>A ring client is three things: <b>a file descriptor</b>, <b>native buffers</b>, and <b>a
+    protocol state machine</b> that alternates submits and awaits. If you already have an io_uring
+    client in another stack, porting it means swapping its submission/completion layer for
+    <code>IRingHost</code> calls - the protocol logic carries over unchanged. The rules:</p>
+    <ol>
+      <li><b>Open on the right thread.</b> Create the client from <code>Reactor.OnStart</code> so
+      its operations ride that reactor's ring, and register it (or its pool) with
+      <code>reactor.AddService(...)</code>. One client per reactor - shared-nothing applies to
+      clients too.</li>
+      <li><b>Own native memory.</b> Allocate wire buffers with <code>NativeMemory.Alloc</code> and
+      keep addresses as <code>nint</code> fields so async methods can do arithmetic on them.
+      A buffer must stay valid until its operation completes.</li>
+      <li><b>One RingOpSource per concurrent direction.</b> Sequential request/response needs one;
+      full duplex needs two. Never two ops on one source.</li>
+      <li><b>Loop your sends and recvs.</b> A send may be short - loop until done. A recv returns
+      whatever arrived - parse incrementally and recv again until your protocol says the message
+      is complete.</li>
+      <li><b>Translate errors, mark broken.</b> Negative results are errnos; 0 on recv is EOF.
+      A transport failure should mark the client broken so a pool can discard and replace it -
+      see <a href="postgres.html">how PgPool heals</a>.</li>
+      <li><b>Never dispose with an op in flight.</b> The completion slot holds a reference to your
+      source; close only from a known-idle state.</li>
+    </ol>
+
+    <p>Here is a complete minimal Redis client built on those rules - real RESP bytes, real
+    framing, inline resume end to end:</p>
+
+<pre><code class="language-csharp">public sealed class RedisConnection : IDisposable
+{
+    private const int BufferSize = 16 * 1024;
+
+    private readonly RingSocket _socket;
+    private readonly nint _send;
+    private readonly nint _recv;
+    private int _received;
+
+    public bool IsBroken { get; private set; }
+
+    private RedisConnection(RingSocket socket, nint send, nint recv)
+    {
+        _socket = socket;
+        _send = send;
+        _recv = recv;
+    }
+
+    // Call from Reactor.OnStart - the connect rides this reactor's ring.
+    public static async Task&lt;RedisConnection&gt; ConnectAsync(IRingHost host, string ip, ushort port)
+    {
+        var socket = RingSocket.CreateTcp(host);
+
+        int rc = await socket.ConnectAsync(ip, port);
+        if (rc &lt; 0)
+        {
+            socket.Dispose();
+            throw new IOException($"redis connect failed: errno {-rc}");
+        }
+
+        nint send, recv;
+        unsafe
+        {
+            send = (nint)NativeMemory.Alloc(BufferSize);
+            recv = (nint)NativeMemory.Alloc(BufferSize);
+        }
+
+        return new RedisConnection(socket, send, recv);
+    }
+
+    // GET key → bulk string (null when the key is missing).
+    public async ValueTask&lt;string?&gt; GetAsync(string key)
+    {
+        int length = WriteCommand("GET", key);          // RESP into _send
+        await SendAllAsync(length);
+
+        _received = 0;
+        while (true)
+        {
+            int n = await _socket.RecvAsync(_recv + _received, BufferSize - _received);
+            if (n &lt;= 0)
+            {
+                IsBroken = true;
+                throw new IOException(n == 0 ? "redis closed" : $"recv errno {-n}");
+            }
+            _received += n;
+
+            if (TryParseBulkString(out string? value))  // resync per RESP framing
+                return value;
+            // incomplete reply - recv again
+        }
+    }
+
+    private async ValueTask SendAllAsync(int length)
+    {
+        int sent = 0;
+        while (sent &lt; length)
+        {
+            int n = await _socket.SendAsync(_send + sent, length - sent);
+            if (n &lt;= 0)
+            {
+                IsBroken = true;
+                throw new IOException($"send errno {-n}");
+            }
+            sent += n;
+        }
+    }
+
+    private unsafe int WriteCommand(string verb, string key)
+    {
+        // *2\r\n$3\r\nGET\r\n$&lt;len&gt;\r\n&lt;key&gt;\r\n
+        var buffer = new Span&lt;byte&gt;((void*)_send, BufferSize);
+        int p = 0;
+        p += Encoding.ASCII.GetBytes($"*2\r\n${verb.Length}\r\n{verb}\r\n${key.Length}\r\n{key}\r\n",
+                                     buffer);
+        return p;
+    }
+
+    private unsafe bool TryParseBulkString(out string? value)
+    {
+        value = null;
+        var data = new ReadOnlySpan&lt;byte&gt;((void*)_recv, _received);
+
+        // $&lt;len&gt;\r\n&lt;bytes&gt;\r\n   ($-1\r\n = null)
+        if (data.Length &lt; 4 || data[0] != (byte)'$') return false;
+        int eol = data.IndexOf((byte)'\r');
+        if (eol &lt; 0 || data.Length &lt; eol + 2) return false;
+
+        int len = int.Parse(data[1..eol]);
+        if (len == -1) return true;                      // null reply
+
+        int start = eol + 2;
+        if (data.Length &lt; start + len + 2) return false; // body not fully here yet
+
+        value = Encoding.UTF8.GetString(data.Slice(start, len));
+        return true;
+    }
+
+    public unsafe void Dispose()
+    {
+        _socket.Dispose();
+        NativeMemory.Free((void*)_send);
+        NativeMemory.Free((void*)_recv);
+    }
+}</code></pre>
+
+    <p>Wire it exactly like the Postgres pool - open N per reactor, register, rent in handlers:</p>
+<pre><code class="language-csharp">reactor.OnStart = r =&gt;
+{
+    var pool = new RingPool&lt;RedisConnection&gt;();
+    for (int i = 0; i &lt; 4; i++)
+    {
+        _ = RedisConnection.ConnectAsync(r, "127.0.0.1", 6379)
+                           .ContinueWith(t =&gt; pool.Return(t.Result),
+                                         TaskContinuationOptions.OnlyOnRanToCompletion);
+    }
+    r.AddService(pool);
+};
+
+// in the handler:
+var pool  = reactor.GetService&lt;RingPool&lt;RedisConnection&gt;&gt;();
+var redis = await pool.RentAsync();
+try
+{
+    var value = await redis.GetAsync("hello");
+}
+finally
+{
+    pool.Return(redis);
+}</code></pre>
+
+    <h3>Positional clients</h3>
+    <p>For file-like descriptors the shape is even smaller: no connect, no socket - just
+    <code>SubmitRead</code>/<code>SubmitWrite</code> at offsets through a
+    <code>RingOpSource</code>. <code>RingFile</code> (one file) and <code>AssetReader</code> (a
+    pooled buffer reading any cached descriptor) in <code>ioxide.file</code> are the reference
+    implementations - both under 100 lines.</p>
+
+    <h3>Reference implementations</h3>
+    <p><code>ioxide.pg</code> is the full worked example: ring-native connect and handshake,
+    incremental wire parsing with buffer growth and compaction, server-vs-transport error
+    semantics, and pool-managed healing. Start from it when your protocol has a handshake;
+    start from the Redis sketch above when it doesn't.</p>
+
+    <div class="next"><a href="postgres.html">Postgres →</a></div>
+  </main>
+</div>
+
+<footer>MIT · Linux 6.1+ · .NET 10 · <a href="https://github.com/MDA2AV/uRocket">github.com/MDA2AV/uRocket</a></footer>
+
+<script>hljs.highlightAll();</script>
+</body>
+</html>

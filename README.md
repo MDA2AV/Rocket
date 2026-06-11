@@ -1,152 +1,123 @@
-[![NuGet](https://img.shields.io/nuget/v/zerg.svg)](https://www.nuget.org/packages/zerg/)
+# ioxide
 
-# zerg
+**A shared-nothing io_uring runtime for .NET.**
 
-Low-level TCP server framework for C# built on Linux `io_uring`. Direct control over sockets, buffers, and scheduling with no hidden abstractions.
+One ring per reactor thread - run one per core. HTTP, Postgres, and file I/O submit on that
+ring and resume inline on the same thread. No thread pool on the hot path. No native dependencies - raw syscalls, nothing else.
 
-**Requirements:** Linux kernel 6.1+, .NET 8/9/10.
+> Linux 6.1+ · .NET 10 · status `0.0.2` - experimental
 
-## Install
+📖 **[Documentation →](https://mda2av.github.io/uRocket/)** - architecture, guides, the full picture
+
+## Quick start
 
 ```bash
-dotnet add package zerg
-dotnet add package zerg.core
+dotnet run -c Release --project Playground                     # GET / → ok
+
+PLAYGROUND_MODE=pg   dotnet run -c Release --project Playground  # SELECT 42 over the ring
+PLAYGROUND_MODE=file dotnet run -c Release --project Playground  # static files off the ring
 ```
 
-## Quick Start
+## How it works
 
 ```csharp
-using zerg;
-using zerg.core;
-using zerg.Engine;
-using zerg.Engine.Configs;
+var reactor = new Reactor(id, new ServerConfig { Port = 8080 });
 
-var engine = new Engine(new EngineOptions { Port = 8080, ReactorCount = 1 });
-engine.Listen();
+// Clients opened here ride this reactor's ring.
+reactor.OnStart = r => PgPool.Start(r, pgOptions);
 
-while (engine.ServerRunning)
+reactor.Handle = async (r, conn) =>
 {
-    var connection = await engine.AcceptAsync(CancellationToken.None);
-    if (connection is null) continue;
-    _ = HandleAsync(connection);
-}
+    var pool = r.GetService<PgPool>();
 
-static async Task HandleAsync(Connection connection)
-{
+    // Carry for bytes a read leaves behind - the head of a split request.
+    var inflight = new byte[16 * 1024];
+    int inflightTail = 0;
+
     while (true)
     {
-        var result = await connection.ReadAsync();
-        if (result.IsClosed) break;
+        // io_uring recv - resumes inline on the reactor.
+        var snapshot = await conn.ReadAsync();
 
-        var rings = connection.GetAllSnapshotRingsAsUnmanagedMemory(result);
-        // process rings.ToReadOnlySequence() ...
-        rings.ReturnRingBuffers(connection.Reactor);
+        var rings = conn.GetSnapshotMemories(snapshot);
+        if (rings.Length > 0)
+        {
+            ReadOnlySequence<byte> data;
+            if (inflightTail == 0 && rings.Length == 1)
+            {
+                // Hot path: one ring, no carry - a single zero-copy segment.
+                data = new ReadOnlySequence<byte>(rings[0].Memory);
+            }
+            else if (inflightTail == 0)
+            {
+                // Several rings, no carry - chain them, still zero-copy.
+                data = rings.ToReadOnlySequence();
+            }
+            else
+            {
+                // Cold path: the carry goes first so a split request reads whole.
+                var first = new RingSegment(inflight.AsMemory(0, inflightTail), 0);
+                var last  = first;
+                for (int i = 0; i < rings.Length; i++)
+                    last = last.Append(rings[i].Memory, rings[i].BufferId);
+                data = new ReadOnlySequence<byte>(first, 0, last, last.Memory.Length);
+            }
 
-        connection.Write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"u8);
-        await connection.FlushAsync();
-        connection.ResetRead();
+            // Walk every complete request; stop at the first partial one.
+            // TryParseRequest, Request, and SqlFor are YOUR code - ioxide
+            // hands you raw bytes and stays out of HTTP.
+            long consumed = 0;
+            bool respond  = false;
+            while (TryParseRequest(data.Slice(consumed), out Request request, out long length))
+            {
+                consumed += length;
+
+                // io_uring send + recv to Postgres, on the same ring.
+                var rows = await pool.QueryAsync(SqlFor(request.Path));
+
+                // ioxide doesn't speak HTTP for you - you write the bytes.
+                string body = $"db={rows.Value}";
+                conn.Write(Encoding.ASCII.GetBytes(
+                    $"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {body.Length}\r\n\r\n{body}"));
+                respond = true;
+            }
+
+            // Whatever wasn't consumed (a partial request, or everything when
+            // nothing completed) moves to the front of the carry - only then
+            // do the buffers go back to the ring.
+            ReadOnlySequence<byte> rest = data.Slice(consumed);
+            rest.CopyTo(inflight);
+            inflightTail = (int)rest.Length;
+
+            conn.ReturnBuffers(rings);
+
+            if (respond) await conn.FlushAsync();   // io_uring send, once per batch
+        }
+
+        if (snapshot.IsClosed)
+        {
+            conn.DecRef();
+            return;
+        }
+
+        conn.ResetRead();
     }
-}
+};
+
+// One reactor per core.
+new Thread(reactor.Run).Start();
 ```
 
-## Read API
+Every `await` above is a CQE on this core's ring. Nothing hops threads.
 
-```csharp
-using zerg.core;
-
-// High-level: get all buffers as a ReadOnlySequence
-var result = await connection.ReadAsync();
-var rings = connection.GetAllSnapshotRingsAsUnmanagedMemory(result);
-ReadOnlySequence<byte> seq = rings.ToReadOnlySequence();
-rings.ReturnRingBuffers(connection.Reactor);
-connection.ResetRead();
-
-// Low-level: consume one buffer at a time
-while (connection.TryGetRing(result.TailSnapshot, out RingItem ring))
-{
-    ReadOnlySpan<byte> data = ring.AsSpan();
-    connection.ReturnRing(ring.BufferId);
-}
-connection.ResetRead();
-```
-
-**Adapters:**
-
-```csharp
-using zerg.core;
-
-// Zero-copy PipeReader (buffers held until AdvanceTo)
-var reader = new ConnectionPipeReader(connection);
-var result = await reader.ReadAsync();
-reader.AdvanceTo(consumed, examined);
-
-// BCL Stream (one copy per read)
-var stream = new ConnectionStream(connection);
-int n = await stream.ReadAsync(buffer);
-```
-
-## Write API
-
-```csharp
-connection.Write("data"u8);
-await connection.FlushAsync();
-
-// Or via IBufferWriter<byte>
-Span<byte> span = connection.GetSpan(256);
-connection.Advance(bytesWritten);
-await connection.FlushAsync();
-```
-
-## Configuration
-
-```csharp
-var engine = new Engine(new EngineOptions
-{
-    Port = 8080,
-    ReactorCount = 4,
-    AcceptorConfig = new AcceptorConfig(IPVersion: IPVersion.IPv6DualStack),
-    ReactorConfigs = Enumerable.Range(0, 4).Select(_ => new ReactorConfig(
-        RecvBufferSize: 32 * 1024,
-        BufferRingEntries: 16 * 1024,
-        IncrementalBufferConsumption: false  // set true for kernel 6.12+
-    )).ToArray()
-});
-```
-
-Key `ReactorConfig` options:
-
-| Option | Default | Description |
-|---|---|---|
-| `RingEntries` | 8192 | io_uring SQ/CQ depth |
-| `RecvBufferSize` | 32KB | Per-buffer size |
-| `BufferRingEntries` | 16384 | Number of pre-allocated recv buffers |
-| `BatchCqes` | 4096 | Max CQEs per loop iteration |
-| `CqTimeout` | 1ms | Wait timeout (nanoseconds) |
-| `IncrementalBufferConsumption` | false | Per-connection buffer rings (kernel 6.12+) |
-
-## Architecture
-
-One acceptor thread distributes connections round-robin to N reactor threads. Each reactor owns its own `io_uring` instance, buffer ring, and connection map. No locks on hot paths — all cross-thread coordination uses lock-free MPSC queues.
-
-Key features: multishot accept/recv, provided buffer rings, `DEFER_TASKRUN`, `SINGLE_ISSUER`, optional `SQPOLL`, zero-allocation async via `IValueTaskSource`, connection pooling.
-
-## Examples
-
-```bash
-dotnet run --project Examples -- raw          # zero-copy ring API
-dotnet run --project Examples -- pipereader   # PipeReader adapter
-dotnet run --project Examples -- stream       # Stream adapter
-dotnet run --project Examples -- sqpoll       # SQPOLL mode
-```
-
-## Project Structure
+## Projects
 
 ```
-core/           Shared library (utils, ConnectionBase, adapters)
-zerg/           Main library (Engine, Reactor, native io_uring shim)
-terraform/      Alternative pure-C# io_uring implementation (no native deps)
-Examples/       Usage examples
-Tests/          End-to-end tests
+ioxide/        the engine - reactor, connection, IRingHost seam, client kit
+ioxide.pg/     Postgres over the ring: pooled connections, ring-native connect
+ioxide.file/   files over the ring: baked asset snapshots + positional reads
+Playground/    runnable host (raw · pg · file · hop modes)
+Research/      the experimental engines this was distilled from (not referenced)
 ```
 
 ## License

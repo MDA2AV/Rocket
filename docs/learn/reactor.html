@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>The Reactor - ioxide</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="../assets/highlight-dark.min.css">
+  <script src="../assets/highlight.min.js"></script>
+</head>
+<body>
+
+<nav class="top">
+  <a class="brand" href="../"><span>io</span>xide</a>
+  <div class="links">
+    <a href="architecture.html">Learn</a>
+    <a href="architecture.html">Architecture</a>
+    <a class="gh" href="https://github.com/MDA2AV/uRocket" aria-label="GitHub"><svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
+  </div>
+</nav>
+
+<div class="layout">
+  <aside class="side">
+    <div class="group">Concepts</div>
+    <a href="architecture.html">Architecture</a>
+    <a href="reactor.html" class="here">The Reactor</a>
+    <a href="connection.html">The Connection</a>
+    <a href="clients.html">Ring clients</a>
+    <div class="group">Clients</div>
+    <a href="postgres.html">Postgres</a>
+    <a href="files.html">Files</a>
+  </aside>
+
+  <main class="doc">
+    <h1>The Reactor</h1>
+    <p class="lead">One <code>Reactor</code> instance is a closed world: a thread, a ring, and
+    every structure that thread touches. This page walks the class itself.</p>
+
+    <h2>What it owns</h2>
+    <ul>
+      <li><b>The ring</b> - a thin <code>Ring</code> wrapper over the mmapped SQ/CQ:
+      <code>GetSqe()</code> claims a slot, <code>SubmitAndWait(n)</code> publishes the SQ tail and
+      enters the kernel, <code>CqReady/CqeAt/CqAdvance</code> drain completions batched - one
+      acquire-load of the tail and one release-store of the head per batch, not per CQE.</li>
+      <li><b>The connection table</b> - <code>Connection?[]</code> indexed by fd, grown by
+      doubling. Lookup is an array index plus a generation compare, no hashing.</li>
+      <li><b>The buffer ring</b> - the kernel-shared <code>io_uring_buf_ring</code> control area
+      plus one contiguous slab; a buffer id is both the ring slot and the slab offset. Returns
+      stage entries and publish the tail once per drain batch.</li>
+      <li><b>Hand-off queues</b> - lock-free MPSC queues for buffer returns and flushes (flush
+      entries pack <code>(generation &lt;&lt; 32) | fd</code>), plus queues for recycles and
+      off-reactor client ops, all woken by one eventfd registered as a multishot poll.</li>
+      <li><b>The connection pool</b> - a plain <code>Stack&lt;Connection&gt;</code>; accept and
+      teardown both run on this thread, so nothing concurrent is needed. Capped by
+      <code>PoolMax</code>, which bounds the reactor's reserved native memory.</li>
+      <li><b>The client-op slot table</b> - <code>IRingCompletion?[]</code> plus a free-index
+      stack; each client submission parks its completion in a slot whose index rides the SQE.
+      See <a href="clients.html">Ring clients</a>.</li>
+      <li><b>Services</b> - a small typed registry (<code>AddService&lt;T&gt;</code> /
+      <code>GetService&lt;T&gt;</code>) where <code>OnStart</code> leaves clients for handlers.</li>
+    </ul>
+
+    <h2>Startup</h2>
+    <p><code>Run()</code> executes on the reactor's own thread, in a deliberate order: record the
+    thread id (every fast-path check compares against it), create the ring -
+    <code>DEFER_TASKRUN</code> requires that setup and enter happen on the same thread - open the
+    SO_REUSEPORT listener, register the buffer ring (or initialize the per-connection ring
+    machinery in incremental mode), create the eventfd, run <code>OnStart</code> so the
+    application opens its ring-native clients here, then arm the multishot accept and the wake
+    poll and fall into the loop. Client opens started in <code>OnStart</code> may be async: their
+    submissions sit staged in the SQ and complete once the loop begins.</p>
+
+    <h2>Dispatch, kind by kind</h2>
+    <p>Each CQE's <code>user_data</code> unpacks to a kind, a generation, and an fd (or slot):</p>
+    <ul>
+      <li><b>recv</b> - extract the buffer id from <code>cqe.flags &gt;&gt; 16</code>, resolve the
+      connection (generation-checked). EOF or error → teardown. Stale generation → return the
+      buffer, drop the CQE. Otherwise hand the slice to <code>Connection.Complete</code>; if that
+      reports recv-queue overflow, cancel the multishot and tear down rather than zombify. If the
+      kernel ended the multishot (<code>F_MORE</code> clear), re-arm it with the current
+      generation.</li>
+      <li><b>send</b> - generation-checked; stale CQEs are dropped without touching the fd's new
+      tenant. On success advance <code>WriteHead</code>; a short send (rare with MSG_WAITALL) is
+      resubmitted from the offset; a full ack runs <code>CompleteFlush</code>, which resumes the
+      awaiting handler inline. On error, cancel the connection's recv and tear down.</li>
+      <li><b>accept</b> - pop a pooled connection or construct one, set TCP_NODELAY (it doesn't
+      reliably inherit from the listener), register it in the table, init the refcount to 2, arm
+      its multishot recv stamped with its generation, fire the application handler. In incremental
+      mode this is also where the per-connection buffer ring registers.</li>
+      <li><b>client</b> - index the slot table and free the slot <em>before</em> invoking the
+      completion: the inline continuation may immediately submit again and reuse it.</li>
+      <li><b>wake</b> - drain the eventfd counter; the queues drain at the top of the next loop
+      iteration. Re-arm the poll if the kernel ended it.</li>
+      <li><b>cancel</b> - the result of an ASYNC_CANCEL the reactor issued; nothing to route.</li>
+    </ul>
+
+    <h2>Producing SQEs</h2>
+    <p>SQE production is reactor-thread-only - <code>SINGLE_ISSUER</code> is a promise to the
+    kernel. <code>GetSqeOrFlush</code> claims a slot and, if the SQ is full mid-batch, flushes it
+    with a no-wait <code>enter</code> and retries: submission never blocks on completions.
+    Off-reactor callers never touch this path; their work arrives through the queues and becomes
+    SQEs here.</p>
+
+    <h2>Recycling</h2>
+    <p><code>Recycle</code> always runs on the reactor (it touches the buf_ring and the pool):
+    wake any awaiters via <code>MarkClosed</code>, submit an <code>ASYNC_CANCEL</code> for the
+    connection's multishot recv - tagged with the <em>pre-bump</em> generation so it matches the
+    armed SQE - return leftover buffers (shared mode) or unregister the per-connection ring
+    (incremental), close the fd, <code>Clear()</code> the connection (which bumps the generation
+    first, invalidating every stale token and queued reference), then push to the pool or free if
+    the pool is full.</p>
+
+    <div class="next"><a href="connection.html">The Connection →</a></div>
+  </main>
+</div>
+
+<footer>MIT · Linux 6.1+ · .NET 10 · <a href="https://github.com/MDA2AV/uRocket">github.com/MDA2AV/uRocket</a></footer>
+
+<script>hljs.highlightAll();</script>
+</body>
+</html>

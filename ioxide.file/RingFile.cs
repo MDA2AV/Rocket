@@ -1,29 +1,17 @@
-using System.Threading.Tasks.Sources;
-using static ioxide.file.Native;
+using static ioxide.Native;
 
 namespace ioxide.file;
 
 /// <summary>
-/// A file whose reads run on a host io_uring reactor.
-///
-/// The file is opened once with a blocking syscall. Each read is an IORING_OP_READ at an explicit
-/// offset, submitted on the host's ring and awaited through this object's value-task source — so
-/// the read resumes inline on the reactor thread, and the reactor is free to serve other work while
-/// the kernel fetches the pages.
-///
-/// This is what lets an HTTP handler serve a file straight off the ring (the Fractal model), rather
-/// than handing file I/O to a separate thread pool the way epoll-based stacks must.
-///
-/// One in-flight read at a time per <see cref="RingFile"/>.
+/// A file whose reads run on the host's ring: opened once (blocking), then each read is an
+/// IORING_OP_READ at an offset, resumed inline. One read in flight at a time; for per-reactor
+/// concurrency over a directory, pool <see cref="AssetReader"/>s over an <see cref="AssetCache"/>.
 /// </summary>
-public sealed class RingFile : IRingCompletion, IValueTaskSource<int>
+public sealed class RingFile : IDisposable
 {
     private readonly IRingHost _host;
-
-    private ManualResetValueTaskSourceCore<int> _completion = new()
-    {
-        RunContinuationsAsynchronously = false
-    };
+    private readonly RingOpSource _read = new();
+    private int _disposed;
 
     public int Fd { get; }
 
@@ -36,64 +24,36 @@ public sealed class RingFile : IRingCompletion, IValueTaskSource<int>
         Length = length;
     }
 
-    /// <summary>
-    /// Open <paramref name="path"/> read-only and bind it to <paramref name="host"/> so that its
-    /// read completions route here. Blocking open, one-time.
-    /// </summary>
+    /// <summary>Open <paramref name="path"/> read-only. Blocking open, one-time.</summary>
     public static RingFile Open(IRingHost host, string path)
     {
         int fd = open(path, O_RDONLY, 0);
 
         if (fd < 0)
+        {
             throw new InvalidOperationException($"Could not open '{path}'.");
+        }
 
-        long length = FileLength(fd);
-
-        var file = new RingFile(host, fd, length);
-        host.Bind(fd, file);
-
-        return file;
+        return new RingFile(host, fd, FileLength(fd));
     }
 
     /// <summary>
-    /// Read up to <paramref name="length"/> bytes into <paramref name="destination"/>, starting at
-    /// <paramref name="offset"/> in the file. The result is the number of bytes read, which is 0 at
-    /// end of file.
+    /// Read up to <paramref name="length"/> bytes into native memory at
+    /// <paramref name="destination"/>, starting at <paramref name="offset"/> in the file. The
+    /// result is the number of bytes read (0 at end of file) or a negative errno.
     /// </summary>
     public ValueTask<int> ReadAsync(nint destination, int length, long offset)
     {
-        _completion.Reset();
-
-        var pending = new ValueTask<int>(this, _completion.Version);
-
-        _host.SubmitRead(Fd, destination, length, offset);
-
+        ValueTask<int> pending = _read.Prepare();
+        _host.SubmitRead(Fd, destination, length, offset, _read);
         return pending;
     }
 
-    // ── The reactor calls this when a READ on our fd completes ──────────────────────────────
-
-    public void Complete(int result)
+    public void Dispose()
     {
-        _completion.SetResult(result);
-    }
-
-    int IValueTaskSource<int>.GetResult(short token)
-    {
-        return _completion.GetResult(token);
-    }
-
-    ValueTaskSourceStatus IValueTaskSource<int>.GetStatus(short token)
-    {
-        return _completion.GetStatus(token);
-    }
-
-    void IValueTaskSource<int>.OnCompleted(
-        Action<object?> continuation,
-        object? state,
-        short token,
-        ValueTaskSourceOnCompletedFlags flags)
-    {
-        _completion.OnCompleted(continuation, state, token, flags);
+        if (Interlocked.Exchange(ref _disposed, 1) == 0)
+        {
+            close(Fd);
+        }
     }
 }
