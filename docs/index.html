@@ -14,7 +14,6 @@
 <nav class="top">
   <a class="brand" href="./"><span>io</span>xide</a>
   <div class="links">
-    <a href="learn/architecture.html">Learn</a>
     <a href="learn/architecture.html">Architecture</a>
     <a class="gh" href="https://github.com/MDA2AV/uRocket" aria-label="GitHub"><svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
   </div>
@@ -27,9 +26,6 @@
     an HTTP read, a Postgres query, a file read - is a completion on that ring, resumed inline
     on the same thread. No thread pool on the hot path. The ring is the I/O.
   </p>
-  <div class="cta">
-    <a class="btn primary" href="learn/architecture.html">Get started</a>
-  </div>
 </div>
 
 <section class="block">
@@ -37,15 +33,95 @@
   <p class="lead">You write ordinary C#. Underneath, every await is a request placed on this
   core's queue, and your code resumes right where it left off when the kernel answers.</p>
 <div class="tabs">
-  <input type="radio" name="mode-tabs" id="tab-shared" checked>
+  <input type="radio" name="mode-tabs" id="tab-pipe" checked>
+  <input type="radio" name="mode-tabs" id="tab-shared">
   <input type="radio" name="mode-tabs" id="tab-inc">
-  <input type="radio" name="mode-tabs" id="tab-pipe">
   <input type="radio" name="mode-tabs" id="tab-vs">
   <div class="tab-bar">
-    <label for="tab-shared">shared buffer ring</label>
-    <label for="tab-inc">incremental &middot; kernel 6.12+</label>
-    <label for="tab-pipe">pipereader</label>
+    <label for="tab-pipe">pipes</label>
+    <div class="tab-rawgroup">
+      <span class="tab-group">raw &middot; highest performance</span>
+      <div class="tab-rawtabs">
+        <label for="tab-shared">shared buffer ring</label>
+        <label for="tab-inc">incremental &middot; kernel 6.12+</label>
+      </div>
+    </div>
     <label for="tab-vs">shared vs incremental</label>
+  </div>
+  <div class="pane pane-pipe">
+<pre><code class="language-csharp">var config = new ServerConfig
+{
+    Port               = 8080,
+    ReactorCount       = Environment.ProcessorCount,
+
+    RingEntries        = 8192,         // io_uring submission/completion queue depth
+    RecvBufferSize     = 32 * 1024,    // size of each receive buffer
+    BufferRingEntries  = 4096,         // receive buffers shared by a reactor's connections
+    WriteSlabSize      = 16 * 1024,    // per-connection write buffer
+    PoolMax            = 1024,         // connection objects recycled per reactor
+    RecvQueueEntries   = 64,           // per-connection queue of received slices
+
+    Incremental        = false,        // kernel 6.12+: per-connection buffer rings
+    MaxConnections     = 4096,         //   one buffer group per live connection
+    ConnBufRingEntries = 16,           //   buffers per connection ring
+    IncRecvBufferSize  = 4096,         //   bytes per incremental buffer
+};
+
+var reactor = new Reactor(id, config);
+
+// Clients opened here ride this reactor's ring.
+reactor.OnStart = r =&gt; PgPool.Start(r, pgOptions);
+
+reactor.Handle = async (r, conn) =&gt;
+{
+    var pool = r.GetService&lt;PgPool&gt;();
+
+    // Zero-copy pipes over the ring. The reader owns the carry: unconsumed
+    // bytes are held across reads (no copy, no slab) and buffers return to
+    // the ring automatically once fully consumed. The writer stages into the
+    // connection's write slab.
+    var reader = new ConnectionPipeReader(conn);
+    var writer = new ConnectionPipeWriter(conn);
+
+    while (true)
+    {
+        // io_uring recv - resumes inline on the reactor.
+        var result = await reader.ReadAsync();
+        var buffer = result.Buffer;   // every unconsumed byte received so far
+
+        // Walk every complete request; a partial one stays buffered for the
+        // next read. TryParseRequest, Request, and SqlFor are YOUR code -
+        // ioxide hands you raw bytes and stays out of HTTP.
+        bool respond = false;
+        while (TryParseRequest(ref buffer, out Request request))
+        {
+            // io_uring send + recv to Postgres, on the same ring.
+            var rows = await pool.QueryAsync(SqlFor(request.Path));
+
+            // ioxide doesn't speak HTTP for you - you write the bytes.
+            string body = $"db={rows.Value}";
+            writer.Write(Encoding.ASCII.GetBytes(
+                $"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {body.Length}\r\n\r\n{body}"));
+            respond = true;
+        }
+
+        // Consumed bytes release their buffers; the partial tail is kept.
+        reader.AdvanceTo(buffer.Start, buffer.End);
+
+        if (respond) await writer.FlushAsync();   // io_uring send, once per batch
+
+        if (result.IsCompleted)
+        {
+            reader.Complete();
+            writer.Complete();
+            conn.DecRef();
+            return;
+        }
+    }
+};
+
+// One reactor per core.
+new Thread(reactor.Run).Start();</code></pre>
   </div>
   <div class="pane pane-shared">
 <pre><code class="language-csharp">var config = new ServerConfig
@@ -260,78 +336,6 @@ reactor.Handle = async (r, conn) =&gt;
 // One reactor per core.
 new Thread(reactor.Run).Start();</code></pre>
   </div>
-  <div class="pane pane-pipe">
-<pre><code class="language-csharp">var config = new ServerConfig
-{
-    Port               = 8080,
-    ReactorCount       = Environment.ProcessorCount,
-
-    RingEntries        = 8192,         // io_uring submission/completion queue depth
-    RecvBufferSize     = 32 * 1024,    // size of each receive buffer
-    BufferRingEntries  = 4096,         // receive buffers shared by a reactor's connections
-    WriteSlabSize      = 16 * 1024,    // per-connection write buffer
-    PoolMax            = 1024,         // connection objects recycled per reactor
-    RecvQueueEntries   = 64,           // per-connection queue of received slices
-
-    Incremental        = false,        // kernel 6.12+: per-connection buffer rings
-    MaxConnections     = 4096,         //   one buffer group per live connection
-    ConnBufRingEntries = 16,           //   buffers per connection ring
-    IncRecvBufferSize  = 4096,         //   bytes per incremental buffer
-};
-
-var reactor = new Reactor(id, config);
-
-// Clients opened here ride this reactor's ring.
-reactor.OnStart = r =&gt; PgPool.Start(r, pgOptions);
-
-reactor.Handle = async (r, conn) =&gt;
-{
-    var pool = r.GetService&lt;PgPool&gt;();
-
-    // Zero-copy PipeReader over the ring: it owns the carry. Unconsumed
-    // bytes are held across reads (no copy, no slab) and buffers return
-    // to the ring automatically once fully consumed.
-    var reader = new ConnectionPipeReader(conn);
-
-    while (true)
-    {
-        // io_uring recv - resumes inline on the reactor.
-        var result = await reader.ReadAsync();
-        var buffer = result.Buffer;   // every unconsumed byte received so far
-
-        // Walk every complete request; a partial one stays buffered for the
-        // next read. TryParseRequest, Request, and SqlFor are YOUR code -
-        // ioxide hands you raw bytes and stays out of HTTP.
-        bool respond = false;
-        while (TryParseRequest(ref buffer, out Request request))
-        {
-            // io_uring send + recv to Postgres, on the same ring.
-            var rows = await pool.QueryAsync(SqlFor(request.Path));
-
-            // ioxide doesn't speak HTTP for you - you write the bytes.
-            string body = $"db={rows.Value}";
-            conn.Write(Encoding.ASCII.GetBytes(
-                $"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {body.Length}\r\n\r\n{body}"));
-            respond = true;
-        }
-
-        // Consumed bytes release their buffers; the partial tail is kept.
-        reader.AdvanceTo(buffer.Start, buffer.End);
-
-        if (respond) await conn.FlushAsync();   // io_uring send, once per batch
-
-        if (result.IsCompleted)
-        {
-            reader.Complete();
-            conn.DecRef();
-            return;
-        }
-    }
-};
-
-// One reactor per core.
-new Thread(reactor.Run).Start();</code></pre>
-  </div>
   <div class="pane pane-vs">
     <div class="vs">
       <p><b>Shared buffer ring</b> (default, kernel 6.1+): one pool of buffers per reactor,
@@ -354,7 +358,7 @@ new Thread(reactor.Run).Start();</code></pre>
       </table>
       <p>The handler code is identical in both modes - flip <code>Incremental</code> and size the
       per-connection knobs; <code>ReturnBuffers</code> routes the right return path internally.
-      The PipeReader tab is API sugar over either mode: it owns the carry for you.</p>
+      The pipes tab is API sugar over either mode: the reader owns the carry for you.</p>
     </div>
   </div>
 </div>

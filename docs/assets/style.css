@@ -89,10 +89,9 @@ nav.top .links a.gh svg { display: block; }
 }
 
 /* staggered entrance */
-.hero h1, .hero .sub, .hero .cta { animation: rise 0.55s ease-out both; }
+.hero h1, .hero .sub { animation: rise 0.55s ease-out both; }
 .hero h1   { animation-delay: 0.05s; }
 .hero .sub { animation-delay: 0.12s; }
-.hero .cta { animation-delay: 0.2s; }
 
 @keyframes rise {
   from { opacity: 0; transform: translateY(12px); }
@@ -115,25 +114,6 @@ nav.top .links a.gh svg { display: block; }
   font-size: 1.15rem;
 }
 
-.hero .cta {
-  margin-top: 2.2rem;
-  display: flex;
-  gap: 0.9rem;
-  justify-content: center;
-  flex-wrap: wrap;
-}
-
-.btn {
-  display: inline-block;
-  padding: 0.65rem 1.5rem;
-  font-weight: 600;
-  border: 1px solid var(--line);
-  color: var(--text);
-}
-.btn:hover { text-decoration: none; border-color: var(--text-dim); }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-.btn.primary:hover { background: var(--accent-soft); border-color: var(--accent-soft); }
-
 /* ── code tabs ───────────────────────────────────────── */
 
 .tabs { margin: 1.1rem 0; }
@@ -142,8 +122,20 @@ nav.top .links a.gh svg { display: block; }
 .tab-bar {
   display: flex;
   flex-wrap: wrap;
+  align-items: flex-end;
   gap: 2px;
 }
+
+/* fieldset-style box that visibly encloses the two raw tabs */
+.tab-rawgroup {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-bottom: none;
+  background: var(--bg-soft);
+  padding: 0.3rem 0.3rem 0;
+}
+.tab-rawtabs  { display: flex; gap: 2px; }
 .tab-bar label {
   font-size: 0.78rem;
   letter-spacing: 0.06em;
@@ -156,6 +148,16 @@ nav.top .links a.gh svg { display: block; }
   cursor: pointer;
 }
 .tab-bar label:hover { color: var(--text); }
+
+.tab-group {
+  text-align: center;
+  color: var(--accent-soft);
+  font-size: 0.66rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding-bottom: 0.3rem;
+  opacity: 0.9;
+}
 
 #tab-shared:checked ~ .tab-bar label[for="tab-shared"],
 #tab-inc:checked    ~ .tab-bar label[for="tab-inc"],
@@ -194,7 +196,7 @@ section.block h2 { font-size: 1.7rem; letter-spacing: -0.02em; margin-bottom: 0.
 section.block > p.lead { color: var(--text-dim); max-width: 700px; margin-bottom: 1.5rem; }
 
 @media (prefers-reduced-motion: reduce) {
-  .hero h1, .hero .sub, .hero .cta { animation: none; }
+  .hero h1, .hero .sub { animation: none; }
 }
 
 footer {

@@ -3,4 +3,5 @@
   <Project Path="ioxide.pg/ioxide.pg.csproj" />
   <Project Path="ioxide/ioxide.csproj" />
   <Project Path="Playground/Playground.csproj" />
+  <Project Path="Examples/Examples.csproj" />
 </Solution>
