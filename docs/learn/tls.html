@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TLS - ioxide</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="../assets/highlight-dark.min.css">
+  <script src="../assets/highlight.min.js"></script>
+</head>
+<body>
+
+<nav class="top">
+  <a class="brand" href="../"><span>io</span>xide</a>
+  <div class="links">
+    <a href="overview.html">Learn</a>
+    <a href="architecture.html">Architecture</a>
+    <a class="gh" href="https://github.com/MDA2AV/ioxide" aria-label="GitHub"><svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
+  </div>
+</nav>
+
+<div class="layout">
+  <aside class="side">
+    <div class="group">Basics</div>
+    <a href="overview.html">Overview</a>
+    <div class="group">Advanced</div>
+    <a href="architecture.html">Architecture</a>
+    <a href="reactor.html">The Reactor</a>
+    <a href="connection.html">The Connection</a>
+    <a href="multiport.html">Multi-port</a>
+    <a href="clients.html">Ring clients</a>
+    <div class="group">Clients</div>
+    <a href="postgres.html">Postgres</a>
+    <a href="files.html">Files</a>
+    <a href="tls.html" class="here">TLS</a>
+    <a href="redis.html">Redis</a>
+  </aside>
+
+  <main class="doc">
+    <h1>TLS</h1>
+    <p class="lead">ioxide gives you two ways to serve TLS, with a deliberate trade-off between
+    them. <b>kTLS</b> (<code>ioxide.tls</code>) is the fast path: the handshake runs over the ring
+    and the kernel encrypts your responses, zero-copy. <b>SslStream</b> over
+    <code>ConnectionStream</code> is the portable path: fully managed, full-featured, and a bit
+    slower. Both terminate on a <a href="multiport.html">dedicated port</a> and need nothing from
+    the core engine beyond what is already public.</p>
+
+    <table>
+      <tr><th></th><th>kTLS (<code>ioxide.tls</code>)</th><th>SslStream + <code>ConnectionStream</code></th></tr>
+      <tr><td>crypto</td><td>kernel transmit offload</td><td>fully managed</td></tr>
+      <tr><td>copies</td><td>zero-copy send</td><td>buffered both ways</td></tr>
+      <tr><td>TLS versions</td><td>1.3 only</td><td>1.2 and 1.3</td></tr>
+      <tr><td>features</td><td>ALPN</td><td>client certs, resumption, everything</td></tr>
+      <tr><td>dependency</td><td>Linux <code>tls</code> module + OpenSSL 3</td><td>none - portable</td></tr>
+      <tr><td>throughput</td><td>baseline</td><td>~0.65&times; of kTLS (measured)</td></tr>
+      <tr><td>role</td><td><b>fast path</b></td><td><b>compatibility path</b></td></tr>
+    </table>
+
+    <h2>kTLS: the model</h2>
+    <p>Kernel TLS (kTLS) lets the kernel encrypt and decrypt TLS records on an ordinary socket.
+    The catch is that kTLS only handles the <em>record layer</em> - it does not do the handshake.
+    So <code>ioxide.tls</code> splits the work:</p>
+    <ul>
+      <li><b>Handshake in userspace, over the ring.</b> OpenSSL runs the TLS 1.3 handshake through
+      memory BIOs; the ciphertext flows over the connection's normal recv/send. Handshake bytes
+      ride the same io_uring as everything else, and the handshake resumes inline like any await.</li>
+      <li><b>Transmit offloaded to the kernel.</b> Once the handshake completes, the negotiated keys
+      are programmed into the socket. From then on your handler writes <em>plaintext</em> and the
+      kernel produces the TLS records on the existing io_uring send path - no managed crypto, no
+      extra copy.</li>
+      <li><b>Receive stays in userspace.</b> Inbound records are decrypted by OpenSSL. Requests are
+      small, so this is cheap; the heavy direction (responses) is the one the kernel handles.</li>
+    </ul>
+
+    <h2>kTLS: setup</h2>
+    <p>Open a TLS listener with <a href="multiport.html"><code>ExtraPorts</code></a> and start a
+    <code>TlsService</code> per reactor from <code>OnStart</code> (same pattern as any client):</p>
+<pre><code class="language-csharp">var config = new ServerConfig { Port = 8080, ExtraPorts = [8443], ReactorCount = Environment.ProcessorCount };
+
+var options = new TlsOptions
+{
+    CertificatePath = "/certs/server.crt",   // PEM chain
+    KeyPath         = "/certs/server.key",    // PEM private key
+    Alpn            = "http/1.1",
+};
+
+reactor.OnStart = r =&gt; TlsService.Start(r, options);</code></pre>
+
+    <h2>kTLS: the handler</h2>
+    <p>Branch on the listener port. <code>AcceptAsync</code> runs the handshake and the kTLS
+    hand-off, returning a <code>TlsSession</code> for the receive side. After that, writes are
+    plaintext (the kernel encrypts) and each inbound slice is decrypted through the session.</p>
+<pre><code class="language-csharp">reactor.Handle = async (r, conn) =&gt;
+{
+    TlsSession? tls = null;
+    try
+    {
+        if (conn.ListenerPort == 8443)
+        {
+            tls = await r.GetService&lt;TlsService&gt;().AcceptAsync(conn);
+
+            // The client's first request can arrive bundled with its Finished -
+            // anything already decrypted during the handshake is here.
+            Feed(tls.DrainPlaintext());
+        }
+
+        while (true)
+        {
+            var snapshot = await conn.ReadAsync();
+            while (conn.TryGetItem(snapshot, out var item))
+            {
+                if (!item.HasBuffer) continue;
+                // kTLS: decrypt inbound in userspace; raw: item.AsSpan()
+                Feed(tls != null ? tls.Decrypt(item.Ptr, item.Len) : item.AsSpan());
+                conn.ReturnBuffer(in item);
+            }
+
+            conn.Write(response);          // plaintext in; the kernel makes the records
+            await conn.FlushAsync();       // ordinary io_uring send
+
+            if (snapshot.IsClosed || (tls?.Closed ?? false)) return;
+            conn.ResetRead();
+        }
+    }
+    finally { tls?.Dispose(); conn.DecRef(); }
+};</code></pre>
+    <p>Two details worth knowing. First, <b>send first.</b> A request can ride in with the
+    handshake's final flight (returned by <code>DrainPlaintext</code>), so a loop that blocks on a
+    read before answering it would deadlock - structure the loop to answer buffered input before
+    parking on the next read. Second, <b>MSG_WAITALL.</b> The reactor normally sets
+    <code>MSG_WAITALL</code> on sends so the kernel coalesces short writes into one completion -
+    but kTLS rejects that flag (EOPNOTSUPP). <code>ioxide.tls</code> clears the connection's
+    <code>SendOpFlags</code> after the hand-off; the reactor's partial-send loop keeps correctness
+    without it. You do not have to think about either - the handler above is the whole contract.</p>
+
+    <h2>kTLS: how the hand-off works</h2>
+    <p>After <code>SSL_accept</code> completes over the memory BIOs, <code>AcceptAsync</code>:</p>
+    <ol>
+      <li>captures the TLS 1.3 <em>server traffic secret</em> from OpenSSL's keylog callback;</li>
+      <li>derives the AES-128-GCM key and IV with HKDF-Expand-Label (RFC 8446);</li>
+      <li>programs them into the socket - <code>setsockopt(TCP_ULP, "tls")</code> then
+      <code>setsockopt(SOL_TLS, TLS_TX, ...)</code> with record sequence 0;</li>
+      <li>flips the connection to plaintext sends.</li>
+    </ol>
+    <p>From the next write on, the kernel emits the records. Session tickets are disabled
+    (<code>SSL_CTX_set_num_tickets(0)</code>): a ticket would consume a record sequence number after
+    the handshake and desync the hand-off, which assumes the first application record is sequence
+    zero.</p>
+
+    <h2>kTLS: receive, and the one limitation</h2>
+    <p>The transmit side is kernel-offloaded; the <b>receive side is userspace</b>. Each inbound
+    slice is fed to OpenSSL and decrypted with <code>SSL_read</code> (that is what
+    <code>TlsSession.Decrypt</code> does). This is the deliberate boundary of the implementation:</p>
+    <ul>
+      <li><b>Why not offload RX too?</b> kTLS RX can only take over at a clean TLS record boundary
+      with the right sequence number. Because the reactor's multishot recv pulls arbitrary byte
+      ranges into provided buffers, a buffer can split a record across the switch - corrupting the
+      stream. Doing it safely needs to quiesce the recv, check alignment, and fall back to userspace
+      when it is not clean. It is a real feature, not a small one.</li>
+      <li><b>Does it matter?</b> Rarely. The cost of userspace RX is the decryption of the
+      <em>request</em>, which is tiny for an HTTP API - measured around twice the per-byte cost of
+      plaintext, but only on the inbound bytes. It is invisible on response-heavy workloads and only
+      bites large uploads.</li>
+    </ul>
+
+    <h2>kTLS: constraints and requirements</h2>
+    <ul>
+      <li><b>TLS 1.3 only</b>, single cipher suite <code>TLS_AES_128_GCM_SHA256</code> - the kTLS
+      key layout we program requires a fixed, known cipher.</li>
+      <li><b>No session resumption</b> (tickets disabled, see above).</li>
+      <li><b>ALPN</b> is selected from the client's offer (default <code>http/1.1</code>).</li>
+      <li><b>Linux <code>tls</code> kernel module</b> (<code>modprobe tls</code>; standard on
+      mainstream distros) and <b>OpenSSL 3</b> (present in the .NET runtime images).</li>
+    </ul>
+
+    <h2>kTLS: performance</h2>
+    <p>On a plaintext-equivalent workload kTLS runs at roughly two thirds of plaintext throughput.
+    The cost is dominated by the <em>inherent</em> work of encrypting each response - which the
+    kernel does, on the existing send path, with no userspace copy - plus the small fixed cost of
+    decrypting each request. There is no managed-crypto tax and no extra copy on the send side,
+    which is exactly why it beats a userspace TLS stack: those copy plaintext into a TLS library
+    before encrypting; kTLS skips that copy entirely. The remaining gap to plaintext is the AES-GCM
+    work itself, which no TLS implementation avoids.</p>
+
+    <h2>SslStream over ConnectionStream</h2>
+    <p>When you want TLS without the kernel module, or you need TLS 1.2 clients, client
+    certificates, or session resumption, use the BCL's <code>SslStream</code> over a
+    <code>ConnectionStream</code>. <code>ConnectionStream</code> is a general-purpose
+    <code>Stream</code> over a connection (in the core engine), so this path needs nothing from
+    <code>ioxide.tls</code> at all:</p>
+<pre><code class="language-csharp">reactor.Handle = async (r, conn) =&gt;
+{
+    var ssl = new SslStream(new ConnectionStream(conn), leaveInnerStreamOpen: false);
+    await ssl.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
+    {
+        ServerCertificate    = cert,
+        ApplicationProtocols = [SslApplicationProtocol.Http11],
+        EnabledSslProtocols  = SslProtocols.Tls12 | SslProtocols.Tls13,
+    });
+
+    var buffer = new byte[8192];
+    while (true)
+    {
+        int n = await ssl.ReadAsync(buffer);   // SslStream decrypts
+        if (n == 0) break;
+        await ssl.WriteAsync(response);        // SslStream encrypts
+    }
+    ssl.Dispose();
+    conn.DecRef();
+};</code></pre>
+    <p><b>It stays on the reactor.</b> <code>ConnectionStream</code> is built on the same
+    <code>RunContinuationsAsynchronously = false</code> value-task sources as the rest of the
+    engine, and <code>SslStream</code> uses <code>ConfigureAwait(false)</code> and does its crypto
+    inline - so for request/response traffic the whole thing resumes inline on the reactor thread,
+    handshake included. (Measured: zero thread-pool hops across millions of requests.) The one case
+    that would hop is genuinely concurrent read+write on a single <code>SslStream</code> - a
+    full-duplex pattern like WebSockets - where its internal lock parks one side on the pool.
+    Plain HTTP never does that.</p>
+    <p><b>The trade-off is throughput.</b> <code>SslStream</code> buffers and copies on both sides
+    and does all crypto in managed code, so it runs around 0.65&times; the throughput of kTLS on
+    the same workload. In return you get TLS 1.2 and 1.3, client certificates, resumption, and zero
+    native dependencies - portable to any OS. The <code>ConnectionStream</code> bridge itself is
+    allocation-free and is not the bottleneck; the cost is <code>SslStream</code>'s own.</p>
+
+    <h2>Which to use</h2>
+    <ul>
+      <li><b>Maximum TLS throughput on Linux 6+</b> with the <code>tls</code> module available, and
+      TLS 1.3 / ALPN is enough &rarr; <b>kTLS</b> (<code>ioxide.tls</code>).</li>
+      <li><b>Portability, older clients, or full TLS features</b> (client certs, resumption,
+      TLS 1.2), or you just do not want a kernel-module dependency &rarr; <b>SslStream</b> over
+      <code>ConnectionStream</code>.</li>
+    </ul>
+    <p>Both ride a dedicated port via <a href="multiport.html">multi-port</a>, so you can even serve
+    plaintext on one port and either TLS path on another from the same reactors.</p>
+
+    <div class="next"><a href="redis.html">Redis →</a></div>
+  </main>
+</div>
+
+<footer>MIT · Linux 6.1+ · .NET 10 · <a href="https://github.com/MDA2AV/ioxide">github.com/MDA2AV/ioxide</a></footer>
+
+<script>hljs.highlightAll();</script>
+</body>
+</html>
