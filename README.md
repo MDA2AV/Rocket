@@ -7,7 +7,7 @@ ring and resume inline on the same thread. No thread pool on the hot path. No na
 
 > Linux 6.1+ · .NET 10 · status `0.0.1` - experimental
 
-📖 **[Documentation →](https://mda2av.github.io/ioxide/)** - architecture, guides, the full picture
+**[Documentation →](https://mda2av.github.io/ioxide/)** - architecture, guides, the full picture
 
 ## Quick start
 
