@@ -1,0 +1,17 @@
+# GitHub Linguist language stats: count only the ioxide library packages
+# (ioxide, ioxide.pg, ioxide.file, ioxide.tls, ioxide.redis). Everything else -
+# the docs website, research notes, and the sample/host apps - is excluded from
+# the language bar.
+
+docs/**          linguist-documentation
+Research/**      linguist-documentation
+Examples/**      linguist-vendored
+Playground/**    linguist-vendored
+
+# Vendored front-end assets (highlight.js and friends).
+*.min.js         linguist-vendored
+*.min.css        linguist-vendored
+
+# Markdown and CI config are not package code.
+*.md             linguist-documentation
+.github/**       linguist-vendored

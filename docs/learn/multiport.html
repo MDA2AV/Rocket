@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Multi-port - ioxide</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="../assets/highlight-dark.min.css">
+  <script src="../assets/highlight.min.js"></script>
+</head>
+<body>
+
+<nav class="top">
+  <a class="brand" href="../"><span>io</span>xide</a>
+  <div class="links">
+    <a href="overview.html">Learn</a>
+    <a href="architecture.html">Architecture</a>
+    <a class="gh" href="https://github.com/MDA2AV/ioxide" aria-label="GitHub"><svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
+  </div>
+</nav>
+
+<div class="layout">
+  <aside class="side">
+    <div class="group">Basics</div>
+    <a href="overview.html">Overview</a>
+    <div class="group">Advanced</div>
+    <a href="architecture.html">Architecture</a>
+    <a href="reactor.html">The Reactor</a>
+    <a href="connection.html">The Connection</a>
+    <a href="multiport.html" class="here">Multi-port</a>
+    <a href="clients.html">Ring clients</a>
+    <div class="group">Clients</div>
+    <a href="postgres.html">Postgres</a>
+    <a href="files.html">Files</a>
+    <a href="tls.html">TLS</a>
+    <a href="redis.html">Redis</a>
+  </aside>
+
+  <main class="doc">
+    <h1>Multi-port listeners</h1>
+    <p class="lead">One reactor can listen on more than one port and tell your handler which one a
+    connection arrived on. That is all you need to run several entry points - plaintext and TLS,
+    or a public port and an admin port - from the same shared-nothing reactors, without a second
+    fleet of threads.</p>
+
+    <h2>Configuration</h2>
+    <p><code>ServerConfig.Port</code> is the primary listener; <code>ExtraPorts</code> adds more.
+    Every reactor binds each one with SO_REUSEPORT and arms a multishot accept on it.</p>
+<pre><code class="language-csharp">var config = new ServerConfig
+{
+    Port       = 8080,        // plaintext
+    ExtraPorts = [8443],      // TLS, same reactors
+    ReactorCount = Environment.ProcessorCount,
+};</code></pre>
+    <p>With no <code>ExtraPorts</code>, behaviour is exactly as before - one listener, one accept.
+    Adding ports costs nothing on the recv/send hot path; the only extra work happens at accept
+    time.</p>
+
+    <h2>Routing by listener</h2>
+    <p>Each accept completion carries the listener's fd in its <code>user_data</code>. The reactor
+    looks the port up (a tiny table - <code>Port</code> plus <code>ExtraPorts</code>) and stamps it
+    on the connection before your handler runs:</p>
+<pre><code class="language-csharp">reactor.Handle = async (r, conn) =&gt;
+{
+    if (conn.ListenerPort == 8443)
+        await r.GetService&lt;TlsService&gt;().AcceptAsync(conn);   // terminate TLS on this door
+
+    // from here both ports look identical - plaintext in, plaintext out
+};</code></pre>
+    <p>The engine never learns what a port <em>means</em>. <code>ListenerPort</code> is just a
+    number you branch on - terminate TLS on one, serve metrics on another, accept the PROXY
+    protocol on a third. The same connection pool, buffer rings, and inline-resume machinery serve
+    every door.</p>
+
+    <h2>Why not just run two servers?</h2>
+    <p>You can - reactors are shared-nothing, so nothing stops you spawning twelve reactors on
+    :8080 and twelve more on :8443. That is perfectly valid and needs no multi-port support at all.
+    The difference shows only when both ports are <em>hot at the same time</em>: two fleets means
+    twice the threads contending for your cores, breaking the one-reactor-per-core discipline.
+    Multi-port keeps a single set of reactors owning every listener, so a connection on either port
+    is just another connection on that core's ring.</p>
+    <p>If your ports are never busy simultaneously (a common case - benchmark profiles run one at a
+    time), the two approaches perform identically and the two-fleet route is simpler. Reach for
+    multi-port when one set of cores should serve several entry points under concurrent load.</p>
+
+    <h2>Under the hood</h2>
+    <p>At startup the reactor opens one SO_REUSEPORT socket per port and arms a multishot accept on
+    each, tagged with that listener's fd. On an accept completion it resolves the port from the fd,
+    sets <code>conn.ListenerPort</code>, and re-arms the <em>same</em> listener. Teardown closes
+    every listener. The connection's port is reset on recycle, so a pooled connection reused for a
+    new accept always reflects the door it actually came in on. See
+    <a href="reactor.html">The Reactor</a> for the accept path in full.</p>
+
+    <div class="next"><a href="clients.html">Ring clients →</a></div>
+  </main>
+</div>
+
+<footer>MIT · Linux 6.1+ · .NET 10 · <a href="https://github.com/MDA2AV/ioxide">github.com/MDA2AV/ioxide</a></footer>
+
+<script>hljs.highlightAll();</script>
+</body>
+</html>

@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Overview - ioxide</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="../assets/highlight-dark.min.css">
+  <script src="../assets/highlight.min.js"></script>
+</head>
+<body>
+
+<nav class="top">
+  <a class="brand" href="../"><span>io</span>xide</a>
+  <div class="links">
+    <a href="overview.html">Learn</a>
+    <a href="architecture.html">Architecture</a>
+    <a class="gh" href="https://github.com/MDA2AV/ioxide" aria-label="GitHub"><svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
+  </div>
+</nav>
+
+<div class="layout">
+  <aside class="side">
+    <div class="group">Basics</div>
+    <a href="overview.html" class="here">Overview</a>
+    <div class="group">Advanced</div>
+    <a href="architecture.html">Architecture</a>
+    <a href="reactor.html">The Reactor</a>
+    <a href="connection.html">The Connection</a>
+    <a href="multiport.html">Multi-port</a>
+    <a href="clients.html">Ring clients</a>
+    <div class="group">Clients</div>
+    <a href="postgres.html">Postgres</a>
+    <a href="files.html">Files</a>
+    <a href="tls.html">TLS</a>
+    <a href="redis.html">Redis</a>
+  </aside>
+
+  <main class="doc">
+    <h1>Overview</h1>
+    <p class="lead">ioxide is an io_uring runtime for .NET. It runs one reactor per core, each owning
+    its own ring and serving connections with no locks and no thread hops - your handler resumes
+    right where the I/O completed, on the same thread. This page is the gentle introduction;
+    the <a href="architecture.html">Advanced</a> pages go inside the machine.</p>
+
+    <h2>The idea in one minute</h2>
+    <p>Classic async servers cross a syscall (and often a thread) for every read and write.
+    <b>io_uring</b> changes the deal: you stage many operations in a shared submission queue, enter
+    the kernel <em>once</em>, and collect a whole batch of completions. ioxide builds a
+    thread-per-core server on top of that - and adds the part that makes it pleasant to write:
+    when an operation completes, the awaiting handler continues <em>inline</em>, on the reactor
+    thread, with nothing scheduled anywhere.</p>
+    <ul>
+      <li><b>One reactor per core.</b> Each is a thread with its own ring, listener, buffers, and
+      connection pool. Nothing is shared between them - no locks on the hot path.</li>
+      <li><b>Inline resume.</b> <code>await conn.ReadAsync()</code> parks your handler; the moment
+      the recv completes, the reactor calls back into your code directly. No thread pool, no
+      synchronization context.</li>
+      <li><b>Zero-copy where it counts.</b> Received bytes are parsed straight out of kernel-shared
+      buffers; responses are staged in a per-connection slab and sent in one op.</li>
+      <li><b>Zero native dependencies</b> in the core - io_uring is driven through raw syscalls,
+      no liburing.</li>
+    </ul>
+
+    <h2>The shape of a server</h2>
+    <p>You set a config, spawn one reactor per core on its own thread, and give each a
+    <code>Handle</code> - the per-connection loop. That loop reads, does whatever work, writes,
+    and flushes; it can <code>await</code> a database, a cache, or a file, and resume inline.</p>
+<pre><code class="language-csharp">var config = new ServerConfig { Port = 8080, ReactorCount = Environment.ProcessorCount };
+
+var threads = new Thread[config.ReactorCount];
+for (int i = 0; i &lt; config.ReactorCount; i++)
+{
+    var reactor = new Reactor(i, config);
+    reactor.Handle = async (r, conn) =&gt;
+    {
+        try
+        {
+            while (true)
+            {
+                var snapshot = await conn.ReadAsync();          // io_uring recv, resumes inline
+                while (conn.TryGetItem(snapshot, out var item)) // drain the received slices
+                    if (item.HasBuffer) conn.ReturnBuffer(in item);
+
+                conn.Write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"u8);
+                await conn.FlushAsync();                        // io_uring send
+
+                if (snapshot.IsClosed) return;
+                conn.ResetRead();
+            }
+        }
+        finally { conn.DecRef(); }
+    };
+    threads[i] = new Thread(reactor.Run) { IsBackground = false };
+    threads[i].Start();
+}
+foreach (var t in threads) t.Join();</code></pre>
+    <p>ioxide does not speak HTTP for you - you write the response bytes. That is deliberate: the
+    runtime is the I/O engine, and what rides on it is yours. The landing page shows the same loop
+    with real request parsing and a database call.</p>
+
+    <h2>Plugging in backends</h2>
+    <p>Anything your handler talks to - Postgres, Redis, files, an upstream service - is a
+    <em>client</em> that rides the same ring, opened once per reactor and rented per request. The
+    engine never names a client type, so adding one never touches the reactor:</p>
+    <ul>
+      <li><a href="postgres.html"><code>ioxide.pg</code></a> - pooled ring-native Postgres.</li>
+      <li><a href="redis.html"><code>ioxide.redis</code></a> - full RESP2 Redis client.</li>
+      <li><a href="files.html"><code>ioxide.file</code></a> - static files with baked responses.</li>
+      <li><a href="tls.html"><code>ioxide.tls</code></a> - kernel TLS, plus a portable SslStream path.</li>
+      <li><a href="clients.html">Your own</a> - the same seam in under 100 lines.</li>
+    </ul>
+
+    <h2>Where to go next</h2>
+    <p>For the real mechanics - the submit/wait loop, provided buffer rings, completion routing by
+    generation, the connection lifecycle - start with <a href="architecture.html">Architecture</a>,
+    then <a href="reactor.html">The Reactor</a> and <a href="connection.html">The Connection</a>.
+    To run more than one entry point (say plaintext and TLS) from one server, see
+    <a href="multiport.html">Multi-port</a>.</p>
+
+    <div class="next"><a href="architecture.html">Architecture →</a></div>
+  </main>
+</div>
+
+<footer>MIT · Linux 6.1+ · .NET 10 · <a href="https://github.com/MDA2AV/ioxide">github.com/MDA2AV/ioxide</a></footer>
+
+<script>hljs.highlightAll();</script>
+</body>
+</html>
