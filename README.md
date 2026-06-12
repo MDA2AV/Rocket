@@ -13,7 +13,7 @@ ring and resume inline on the same thread. No thread pool on the hot path. No na
 
 > Linux 6.1+ · .NET 10 · status `0.0.3` - experimental
 
-**[Documentation →](https://mda2av.github.io/ioxide/)** - architecture, guides, the full picture
+**[Documentation](https://mda2av.github.io/ioxide/)** - architecture, guides, the full picture
 
 ## Quick start
 
@@ -112,18 +112,6 @@ reactor.Handle = async (r, conn) =>
 
 // One reactor per core.
 new Thread(reactor.Run).Start();
-```
-
-Every `await` above is a CQE on this core's ring. Nothing hops threads.
-
-## Projects
-
-```
-ioxide/        the engine - reactor, connection, IRingHost seam, client kit
-ioxide.pg/     Postgres over the ring: pooled connections, ring-native connect
-ioxide.file/   files over the ring: baked asset snapshots + positional reads
-Playground/    runnable host (raw · pg · file · hop modes)
-Research/      the experimental engines this was distilled from (not referenced)
 ```
 
 ## License
