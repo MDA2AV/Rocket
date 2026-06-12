@@ -1,16 +1,19 @@
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading.Tasks.Sources;
 
 namespace ioxide.redis;
 
 /// <summary>
 /// One Redis connection on a reactor's ring. Connect, auth, and every command run as ring ops with
 /// inline completion resume. The protocol surface is generic - <see cref="ExecuteAsync(string, RedisArg[])"/>
-/// runs any command - with typed helpers (in RedisConnection.Commands.cs) layered on top.
+/// runs any command - with typed helpers (in RedisConnection.Commands.cs) layered on top. Commands are
+/// pipelined: many in flight at once, replies routed FIFO, so one connection stays busy under load.
 /// </summary>
 public sealed partial class RedisConnection : IDisposable
 {
     private const int InitialBufferSize = 16 * 1024;
+    private const int SendBufferSize = 512 * 1024;   // fixed: a pipelined send holds _send's address, so never realloc'd
     private const int MaxBufferSize = 64 * 1024 * 1024;
 
     private readonly RingSocket _socket;
@@ -22,13 +25,21 @@ public sealed partial class RedisConnection : IDisposable
     private int _received;   // valid bytes in _recv
     private int _scan;       // start of the first unparsed reply
 
+    // Pipelining: commands sent back to back, one RESP reply each, routed FIFO. Single-threaded
+    // per reactor, so no locks. _send staged at [_sendOffset, _sendEnd).
+    private readonly Queue<Pending> _inflight = new();
+    private bool _sending;
+    private bool _reading;
+    private int _sendOffset;
+    private int _sendEnd;
+
     public bool IsBroken { get; private set; }
 
     private unsafe RedisConnection(RingSocket socket)
     {
         _socket = socket;
-        _send = (nint)NativeMemory.Alloc(InitialBufferSize);
-        _sendCapacity = InitialBufferSize;
+        _send = (nint)NativeMemory.Alloc(SendBufferSize);
+        _sendCapacity = SendBufferSize;
         _recv = (nint)NativeMemory.Alloc(InitialBufferSize);
         _recvCapacity = InitialBufferSize;
     }
@@ -69,20 +80,37 @@ public sealed partial class RedisConnection : IDisposable
     /// <summary>Run any command and return its reply. Throws on a top-level error reply.</summary>
     public async ValueTask<RespValue> ExecuteAsync(string command, params RedisArg[] args)
     {
-        if (IsBroken)
-        {
-            throw new RedisException("connection is broken");
-        }
-
-        WriteCommand(command, args);
-        await SendAllAsync(_pendingSend);
-
-        RespValue reply = await ReceiveReplyAsync();
+        RespValue reply = await SubmitCore(Encoding.ASCII.GetBytes(command), args);
         if (reply.IsError)
         {
             throw new RedisException(reply.AsString() ?? "redis error");
         }
         return reply;
+    }
+
+    // Stage a command, enqueue its waiter, ensure the sender and reader are running.
+    private ValueTask<RespValue> SubmitCore(ReadOnlySpan<byte> name, RedisArg[] args)
+    {
+        if (IsBroken)
+        {
+            return ValueTask.FromException<RespValue>(new RedisException("connection is broken"));
+        }
+        try
+        {
+            AppendCommand(name, args);
+        }
+        catch (RedisException ex)
+        {
+            return ValueTask.FromException<RespValue>(ex);
+        }
+
+        var pending = new Pending();
+        _inflight.Enqueue(pending);
+
+        if (!_sending) { _sending = true; _ = SenderLoopAsync(); }
+        if (!_reading) { _reading = true; _ = ReaderLoopAsync(); }
+
+        return new ValueTask<RespValue>(pending, pending.Version);
     }
 
     /// <summary>
@@ -97,71 +125,106 @@ public sealed partial class RedisConnection : IDisposable
             throw new RedisException("connection is broken");
         }
 
-        int total = 0;
-        foreach (RedisCommand c in commands)
+        var pending = new ValueTask<RespValue>[commands.Length];
+        for (int i = 0; i < commands.Length; i++)
         {
-            total += RespProtocol.CommandSize(c.NameBytes, c.Args);
+            pending[i] = SubmitCore(commands[i].NameBytes, commands[i].Args);
         }
-        EnsureSendCapacity(total);
-
-        int p = 0;
-        foreach (RedisCommand c in commands)
-        {
-            p += WriteCommandAt(p, c.NameBytes, c.Args);
-        }
-        await SendAllAsync(p);
 
         var replies = new RespValue[commands.Length];
         for (int i = 0; i < commands.Length; i++)
         {
-            replies[i] = await ReceiveReplyAsync();
+            replies[i] = await pending[i];
         }
         return replies;
     }
 
     // -- wire I/O ---------------------------------------------------------
 
-    private int _pendingSend;
-
-    private unsafe void WriteCommand(string command, RedisArg[] args)
+    // Append a RESP command to the pipelined send buffer. Fixed buffer (an in-flight send holds its
+    // address), so this never realloc's - it throws on overflow instead.
+    private unsafe void AppendCommand(ReadOnlySpan<byte> name, RedisArg[] args)
     {
-        ReadOnlySpan<byte> name = Encoding.ASCII.GetBytes(command);
         int size = RespProtocol.CommandSize(name, args);
-        EnsureSendCapacity(size);
-        _pendingSend = RespProtocol.WriteCommand(new Span<byte>((void*)_send, _sendCapacity), name, args);
+        if (size > _sendCapacity)
+        {
+            throw new RedisException($"command exceeds send buffer ({_sendCapacity} bytes)");
+        }
+        if (_sendEnd + size > _sendCapacity)
+        {
+            throw new RedisException("pipelined send buffer full");
+        }
+        int written = RespProtocol.WriteCommand(new Span<byte>((void*)(_send + _sendEnd), _sendCapacity - _sendEnd), name, args);
+        _sendEnd += written;
     }
 
-    private unsafe int WriteCommandAt(int offset, byte[] name, RedisArg[] args) =>
-        RespProtocol.WriteCommand(new Span<byte>((void*)(_send + offset), _sendCapacity - offset), name, args);
-
-    private unsafe void EnsureSendCapacity(int needed)
+    private async Task SenderLoopAsync()
     {
-        if (needed <= _sendCapacity)
+        try
         {
-            return;
-        }
-        int cap = _sendCapacity;
-        while (cap < needed)
-        {
-            cap *= 2;
-        }
-        _send = (nint)NativeMemory.Realloc((void*)_send, (nuint)cap);
-        _sendCapacity = cap;
-    }
-
-    private async ValueTask SendAllAsync(int length)
-    {
-        int sent = 0;
-        while (sent < length)
-        {
-            int n = await _socket.SendAsync(_send + sent, length - sent);
-            if (n <= 0)
+            while (_sendOffset < _sendEnd)
             {
-                IsBroken = true;
-                throw RedisException.Transport("send", n);
+                int n = await _socket.SendAsync(_send + _sendOffset, _sendEnd - _sendOffset);
+                if (n <= 0)
+                {
+                    IsBroken = true;
+                    throw RedisException.Transport("send", n);
+                }
+                _sendOffset += n;
             }
-            sent += n;
+            _sendOffset = 0;   // all staged bytes sent; reuse the buffer from the front
+            _sendEnd = 0;
+            _sending = false;
         }
+        catch (Exception ex)
+        {
+            IsBroken = true;
+            _sending = false;
+            FailAll(ex);
+        }
+    }
+
+    private async Task ReaderLoopAsync()
+    {
+        try
+        {
+            while (_inflight.Count > 0)
+            {
+                RespValue reply = await ReceiveReplyAsync();
+                _inflight.Dequeue().Complete(reply);
+            }
+            _reading = false;
+        }
+        catch (Exception ex)
+        {
+            IsBroken = true;
+            _reading = false;
+            FailAll(ex);
+        }
+    }
+
+    private void FailAll(Exception ex)
+    {
+        RedisException re = ex as RedisException ?? new RedisException(ex.Message);
+        while (_inflight.TryDequeue(out Pending? p))
+        {
+            p.Fail(re);
+        }
+    }
+
+    // One pipelined command: completes its waiter with the RESP reply (inline on the reactor).
+    private sealed class Pending : IValueTaskSource<RespValue>
+    {
+        private ManualResetValueTaskSourceCore<RespValue> _core = new() { RunContinuationsAsynchronously = false };
+
+        public short Version => _core.Version;
+        public void Complete(RespValue reply) => _core.SetResult(reply);
+        public void Fail(RedisException ex) => _core.SetException(ex);
+
+        public RespValue GetResult(short token) => _core.GetResult(token);
+        public ValueTaskSourceStatus GetStatus(short token) => _core.GetStatus(token);
+        public void OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags)
+            => _core.OnCompleted(continuation, state, token, flags);
     }
 
     private async ValueTask<RespValue> ReceiveReplyAsync()
