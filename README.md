@@ -1,5 +1,3 @@
-# ioxide
-
 [![ioxide](https://img.shields.io/nuget/v/ioxide?label=ioxide)](https://www.nuget.org/packages/ioxide/)
 [![ioxide.pg](https://img.shields.io/nuget/v/ioxide.pg?label=ioxide.pg)](https://www.nuget.org/packages/ioxide.pg/)
 [![ioxide.file](https://img.shields.io/nuget/v/ioxide.file?label=ioxide.file)](https://www.nuget.org/packages/ioxide.file/)
@@ -113,7 +111,3 @@ reactor.Handle = async (r, conn) =>
 // One reactor per core.
 new Thread(reactor.Run).Start();
 ```
-
-## License
-
-MIT
