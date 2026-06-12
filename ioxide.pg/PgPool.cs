@@ -1,16 +1,18 @@
 namespace ioxide.pg;
 
 /// <summary>
-/// N Postgres connections on one reactor's ring. Handlers rent, query, return; when all are busy,
-/// renters queue and resume inline as connections come back. Warmup opens connections
-/// concurrently over the ring; broken ones are discarded on return and replaced in the
-/// background. One pool per reactor - create from <c>Reactor.OnStart</c>.
+/// N Postgres connections on one reactor's ring, with pipelining. Commands round-robin across the
+/// connections and each connection multiplexes many in flight, so the connections stay busy under
+/// load instead of one round trip at a time. Broken connections are evicted and replaced. One pool
+/// per reactor - create from <c>Reactor.OnStart</c>.
 /// </summary>
 public sealed class PgPool
 {
-    private readonly RingPool<PgConnection> _pool = new();
+    private readonly List<PgConnection> _connections = new();
     private readonly IRingHost _host;
     private readonly PgOptions _options;
+    private int _next;
+    private TaskCompletionSource<bool>? _opened;   // signalled when a connection becomes available
 
     private PgPool(IRingHost host, PgOptions options)
     {
@@ -22,12 +24,10 @@ public sealed class PgPool
     public static PgPool Start(Reactor reactor, PgOptions options)
     {
         var pool = new PgPool(reactor, options);
-
         for (int i = 0; i < options.PoolSize; i++)
         {
             _ = pool.OpenOneAsync();
         }
-
         reactor.AddService(pool);
         return pool;
     }
@@ -37,65 +37,69 @@ public sealed class PgPool
         try
         {
             PgConnection connection = await PgConnection.ConnectAsync(_host, _options);
-            _pool.Return(connection);
+            _connections.Add(connection);
+            _opened?.TrySetResult(true);
         }
         catch (Exception e)
         {
-            // The pool runs one connection short; queries queue on the remaining ones.
             Console.Error.WriteLine($"[pg] connect to {_options.Host}:{_options.Port} failed: {e.Message}");
         }
     }
 
-    /// <summary>Connections currently idle (for diagnostics).</summary>
-    public int IdleCount => _pool.IdleCount;
+    /// <summary>Live connections (for diagnostics).</summary>
+    public int ConnectionCount => _connections.Count;
 
-    /// <summary>
-    /// Rent a connection for several operations (e.g. a transaction). Pair with
-    /// <see cref="Return"/> in a finally block.
-    /// </summary>
-    public ValueTask<PgConnection> RentAsync()
+    /// <summary>Run one simple query on the next connection (pipelined).</summary>
+    public ValueTask<PgResult> QueryAsync(string sql)
     {
-        return _pool.RentAsync();
+        PgConnection? c = Pick();
+        return c != null ? c.QueryAsync(sql) : QuerySlowAsync(sql);
     }
 
-    /// <summary>Return a rented connection; a broken one is replaced instead of pooled.</summary>
-    public void Return(PgConnection connection)
+    /// <summary>Run one simple query, streaming rows through <paramref name="onRow"/> (pipelined).</summary>
+    public ValueTask<int> QueryRowsAsync(string sql, PgRowHandler onRow)
     {
-        if (connection.IsBroken)
+        PgConnection? c = Pick();
+        return c != null ? c.QueryRowsAsync(sql, onRow) : QueryRowsSlowAsync(sql, onRow);
+    }
+
+    private async ValueTask<PgResult> QuerySlowAsync(string sql)
+        => await (await WaitForConnectionAsync()).QueryAsync(sql);
+
+    private async ValueTask<int> QueryRowsSlowAsync(string sql, PgRowHandler onRow)
+        => await (await WaitForConnectionAsync()).QueryRowsAsync(sql, onRow);
+
+    // Round-robin over healthy connections; evict and replace any found broken.
+    private PgConnection? Pick()
+    {
+        while (_connections.Count > 0)
         {
-            connection.Dispose();
+            int index = (_next++ & 0x7fffffff) % _connections.Count;
+            PgConnection c = _connections[index];
+            if (!c.IsBroken)
+            {
+                return c;
+            }
+            _connections.RemoveAt(index);
+            c.Dispose();
             _ = OpenOneAsync();
-            return;
         }
-
-        _pool.Return(connection);
+        return null;
     }
 
-    /// <summary>Rent → stream a query's rows through <paramref name="onRow"/> → return.</summary>
-    public async ValueTask<int> QueryRowsAsync(string sql, PgRowHandler onRow)
+    // Startup-only: no connection is open yet; wait for the first one.
+    private async ValueTask<PgConnection> WaitForConnectionAsync()
     {
-        PgConnection connection = await RentAsync();
-        try
+        while (true)
         {
-            return await connection.QueryRowsAsync(sql, onRow);
-        }
-        finally
-        {
-            Return(connection);
-        }
-    }
-
-    /// <summary>Rent → run one simple query → return. The everyday path.</summary>
-    public async ValueTask<PgResult> QueryAsync(string sql)
-    {
-        PgConnection connection = await RentAsync();
-        try
-        {
-            return await connection.QueryAsync(sql);
-        }
-        finally
-        {
-            Return(connection);
+            PgConnection? c = Pick();
+            if (c != null)
+            {
+                return c;
+            }
+            _opened ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            await _opened.Task;
+            _opened = null;
         }
     }
 }

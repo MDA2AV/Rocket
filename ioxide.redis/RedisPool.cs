@@ -1,15 +1,18 @@
 namespace ioxide.redis;
 
 /// <summary>
-/// N Redis connections on one reactor's ring. Handlers rent, run commands, return; when all are
-/// busy, renters queue and resume inline as connections come back. Broken connections are replaced
-/// on return. One pool per reactor - create from <c>Reactor.OnStart</c>.
+/// N Redis connections on one reactor's ring, with pipelining. Commands round-robin across the
+/// connections and each connection multiplexes many in flight, so the connections stay busy under
+/// load instead of one round trip at a time. Broken connections are evicted and replaced. One pool
+/// per reactor - create from <c>Reactor.OnStart</c>.
 /// </summary>
 public sealed class RedisPool
 {
-    private readonly RingPool<RedisConnection> _pool = new();
+    private readonly List<RedisConnection> _connections = new();
     private readonly IRingHost _host;
     private readonly RedisOptions _options;
+    private int _next;
+    private TaskCompletionSource<bool>? _opened;
 
     private RedisPool(IRingHost host, RedisOptions options)
     {
@@ -34,7 +37,8 @@ public sealed class RedisPool
         try
         {
             RedisConnection connection = await RedisConnection.ConnectAsync(_host, _options);
-            _pool.Return(connection);
+            _connections.Add(connection);
+            _opened?.TrySetResult(true);
         }
         catch (Exception e)
         {
@@ -42,75 +46,76 @@ public sealed class RedisPool
         }
     }
 
-    public int IdleCount => _pool.IdleCount;
+    /// <summary>Live connections (for diagnostics).</summary>
+    public int ConnectionCount => _connections.Count;
 
-    /// <summary>Rent a connection for several commands (e.g. MULTI/EXEC or a pipeline); return in a finally.</summary>
-    public ValueTask<RedisConnection> RentAsync() => _pool.RentAsync();
-
-    public void Return(RedisConnection connection)
+    /// <summary>Run any command on the next connection (pipelined).</summary>
+    public ValueTask<RespValue> ExecuteAsync(string command, params RedisArg[] args)
     {
-        if (connection.IsBroken)
+        RedisConnection? c = Pick();
+        return c != null ? c.ExecuteAsync(command, args) : ExecuteSlowAsync(command, args);
+    }
+
+    /// <summary>GET (the cache-aside read path).</summary>
+    public ValueTask<string?> GetAsync(string key)
+    {
+        RedisConnection? c = Pick();
+        return c != null ? c.GetAsync(key) : GetSlowAsync(key);
+    }
+
+    /// <summary>SET key value EX seconds (the cache-aside populate path).</summary>
+    public ValueTask SetExAsync(string key, RedisArg value, int seconds)
+    {
+        RedisConnection? c = Pick();
+        return c != null ? c.SetExAsync(key, value, seconds) : SetExSlowAsync(key, value, seconds);
+    }
+
+    /// <summary>DEL (cache invalidation).</summary>
+    public ValueTask<long> DelAsync(params string[] keys)
+    {
+        RedisConnection? c = Pick();
+        return c != null ? c.DelAsync(keys) : DelSlowAsync(keys);
+    }
+
+    private async ValueTask<RespValue> ExecuteSlowAsync(string command, RedisArg[] args)
+        => await (await WaitForConnectionAsync()).ExecuteAsync(command, args);
+    private async ValueTask<string?> GetSlowAsync(string key)
+        => await (await WaitForConnectionAsync()).GetAsync(key);
+    private async ValueTask SetExSlowAsync(string key, RedisArg value, int seconds)
+        => await (await WaitForConnectionAsync()).SetExAsync(key, value, seconds);
+    private async ValueTask<long> DelSlowAsync(string[] keys)
+        => await (await WaitForConnectionAsync()).DelAsync(keys);
+
+    // Round-robin over healthy connections; evict and replace any found broken.
+    private RedisConnection? Pick()
+    {
+        while (_connections.Count > 0)
         {
-            connection.Dispose();
+            int index = (_next++ & 0x7fffffff) % _connections.Count;
+            RedisConnection c = _connections[index];
+            if (!c.IsBroken)
+            {
+                return c;
+            }
+            _connections.RemoveAt(index);
+            c.Dispose();
             _ = OpenOneAsync();
-            return;
         }
-        _pool.Return(connection);
+        return null;
     }
 
-    /// <summary>Rent → run one command → return.</summary>
-    public async ValueTask<RespValue> ExecuteAsync(string command, params RedisArg[] args)
+    private async ValueTask<RedisConnection> WaitForConnectionAsync()
     {
-        RedisConnection connection = await RentAsync();
-        try
+        while (true)
         {
-            return await connection.ExecuteAsync(command, args);
-        }
-        finally
-        {
-            Return(connection);
-        }
-    }
-
-    /// <summary>Rent → GET → return (the cache-aside read path).</summary>
-    public async ValueTask<string?> GetAsync(string key)
-    {
-        RedisConnection connection = await RentAsync();
-        try
-        {
-            return await connection.GetAsync(key);
-        }
-        finally
-        {
-            Return(connection);
-        }
-    }
-
-    /// <summary>Rent → SET key value EX seconds → return (the cache-aside populate path).</summary>
-    public async ValueTask SetExAsync(string key, RedisArg value, int seconds)
-    {
-        RedisConnection connection = await RentAsync();
-        try
-        {
-            await connection.SetExAsync(key, value, seconds);
-        }
-        finally
-        {
-            Return(connection);
-        }
-    }
-
-    /// <summary>Rent → DEL → return (cache invalidation).</summary>
-    public async ValueTask<long> DelAsync(params string[] keys)
-    {
-        RedisConnection connection = await RentAsync();
-        try
-        {
-            return await connection.DelAsync(keys);
-        }
-        finally
-        {
-            Return(connection);
+            RedisConnection? c = Pick();
+            if (c != null)
+            {
+                return c;
+            }
+            _opened ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            await _opened.Task;
+            _opened = null;
         }
     }
 }

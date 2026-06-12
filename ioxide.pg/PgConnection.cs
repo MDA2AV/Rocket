@@ -1,18 +1,21 @@
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading.Tasks.Sources;
 
 namespace ioxide.pg;
 
 /// <summary>
 /// A Postgres connection that runs entirely on the host's ring - connect and handshake included,
-/// so opening one never blocks the reactor. One query in flight at a time; concurrency comes from
-/// <see cref="PgPool"/>. A server ErrorResponse throws but leaves the connection usable (the
+/// so opening one never blocks the reactor. Commands are pipelined - many in flight at once,
+/// sent back to back, replies routed to waiters in FIFO order - so one connection stays busy under
+/// load instead of one round trip at a time. A server ErrorResponse throws but leaves the connection usable (the
 /// stream resyncs at ReadyForQuery); a transport failure marks it <see cref="IsBroken"/> and the
 /// pool replaces it.
 /// </summary>
 public sealed class PgConnection : IDisposable
 {
     private const int InitialBufferSize = 64 * 1024;
+    private const int SendBufferSize = 512 * 1024;   // fixed: a pipelined send holds _send's address, so it is never realloc'd
     private const int MaxBufferSize = 1 << 20;
 
     private readonly RingSocket _socket;
@@ -27,14 +30,22 @@ public sealed class PgConnection : IDisposable
     private int _received;   // valid bytes in _recv
     private int _scan;       // start of the first unparsed message
 
+    // Pipelining: commands sent back to back, replies routed FIFO. Single-threaded per reactor,
+    // so the queue and flags need no locks. _send is staged at [_sendOffset, _sendEnd).
+    private readonly Queue<Pending> _inflight = new();
+    private bool _sending;
+    private bool _reading;
+    private int _sendOffset;
+    private int _sendEnd;
+
     /// <summary>Transport-level failure happened; the connection must be discarded, not reused.</summary>
     public bool IsBroken { get; private set; }
 
     private unsafe PgConnection(RingSocket socket)
     {
         _socket = socket;
-        _send = (nint)NativeMemory.Alloc(InitialBufferSize);
-        _sendCapacity = InitialBufferSize;
+        _send = (nint)NativeMemory.Alloc(SendBufferSize);
+        _sendCapacity = SendBufferSize;
         _recv = (nint)NativeMemory.Alloc(InitialBufferSize);
         _recvCapacity = InitialBufferSize;
     }
@@ -136,55 +147,148 @@ public sealed class PgConnection : IDisposable
     /// and the command tag). Throws <see cref="PgException"/> on a server error - after consuming
     /// the rest of the response, so the connection stays usable.
     /// </summary>
-    public async ValueTask<PgResult> QueryAsync(string sql)
+    /// <summary>Run one simple query, pipelined onto this connection. Resumes inline on the reactor.</summary>
+    public ValueTask<PgResult> QueryAsync(string sql) => SubmitAsync(sql, null);
+
+    // Stage the command, enqueue its waiter, and make sure the sender and reader are running.
+    private ValueTask<PgResult> SubmitAsync(string sql, PgRowHandler? onRow)
     {
         if (IsBroken)
         {
-            throw new PgException("connection is broken");
+            return ValueTask.FromException<PgResult>(new PgException("connection is broken"));
         }
 
-        int length = WriteQuery(sql);
-        await SendAllAsync(length);
-
-        string? value = null;
-        bool valueCaptured = false;
-        int rows = 0;
-        string commandTag = "";
-        PgException? serverError = null;
-
-        while (true)
+        try
         {
-            Message message = await ReceiveMessageAsync();
-
-            switch (message.Tag)
-            {
-                case PgProtocol.DataRow:
-                    rows++;
-                    if (!valueCaptured)
-                    {
-                        valueCaptured = true;
-                        value = ReadFirstField(message);
-                    }
-                    break;
-
-                case PgProtocol.CommandComplete:
-                    commandTag = ReadBodyCString(message);
-                    break;
-
-                case PgProtocol.ErrorResponse:
-                    // Don't throw yet: consume until ReadyForQuery so the stream
-                    // is resynchronized and the connection can serve the next query.
-                    serverError = ReadServerError(message);
-                    break;
-
-                case PgProtocol.ReadyForQuery:
-                    if (serverError != null)
-                    {
-                        throw serverError;
-                    }
-                    return new PgResult(value, rows, commandTag);
-            }
+            WriteQueryAt(sql);   // append to _send; throws on overflow before any state changes
         }
+        catch (PgException ex)
+        {
+            return ValueTask.FromException<PgResult>(ex);
+        }
+
+        var pending = new Pending(onRow);
+        _inflight.Enqueue(pending);
+
+        if (!_sending) { _sending = true; _ = SenderLoopAsync(); }
+        if (!_reading) { _reading = true; _ = ReaderLoopAsync(); }
+
+        return new ValueTask<PgResult>(pending, pending.Version);
+    }
+
+    // Drains the staged send buffer; picks up commands appended while a send was in flight.
+    private async Task SenderLoopAsync()
+    {
+        try
+        {
+            while (_sendOffset < _sendEnd)
+            {
+                int n = await _socket.SendAsync(_send + _sendOffset, _sendEnd - _sendOffset);
+                if (n <= 0)
+                {
+                    IsBroken = true;
+                    throw PgException.Transport("send", n);
+                }
+                _sendOffset += n;
+            }
+            _sendOffset = 0;   // all staged bytes sent; reuse the buffer from the front
+            _sendEnd = 0;
+            _sending = false;
+        }
+        catch (Exception ex)
+        {
+            IsBroken = true;
+            _sending = false;
+            FailAll(ex);
+        }
+    }
+
+    // Reads replies and routes each to the front in-flight command; completes it at ReadyForQuery.
+    private async Task ReaderLoopAsync()
+    {
+        try
+        {
+            while (_inflight.Count > 0)
+            {
+                Message message = await ReceiveMessageAsync();
+                Pending front = _inflight.Peek();
+
+                switch (message.Tag)
+                {
+                    case PgProtocol.DataRow:
+                        front.Rows++;
+                        if (front.OnRow != null)
+                        {
+                            InvokeRow(front.OnRow, in message);
+                        }
+                        else if (!front.ValueCaptured)
+                        {
+                            front.ValueCaptured = true;
+                            front.Value = ReadFirstField(message);
+                        }
+                        break;
+
+                    case PgProtocol.CommandComplete:
+                        front.CommandTag = ReadBodyCString(message);
+                        break;
+
+                    case PgProtocol.ErrorResponse:
+                        // Per-query in the simple protocol: the next pipelined query still runs.
+                        front.Error = ReadServerError(message);
+                        break;
+
+                    case PgProtocol.ReadyForQuery:
+                        _inflight.Dequeue();
+                        front.Complete();
+                        break;
+                }
+            }
+            _reading = false;
+        }
+        catch (Exception ex)
+        {
+            IsBroken = true;
+            _reading = false;
+            FailAll(ex is PgException p ? p : new PgException(ex.Message));
+        }
+    }
+
+    private void FailAll(Exception ex)
+    {
+        PgException pe = ex as PgException ?? new PgException(ex.Message);
+        while (_inflight.TryDequeue(out Pending? p))
+        {
+            p.Fail(pe);
+        }
+    }
+
+    // One pipelined command: accumulates its reply and completes its waiter (inline on the reactor).
+    private sealed class Pending : IValueTaskSource<PgResult>
+    {
+        private ManualResetValueTaskSourceCore<PgResult> _core = new() { RunContinuationsAsynchronously = false };
+
+        public readonly PgRowHandler? OnRow;
+        public string? Value;
+        public bool ValueCaptured;
+        public int Rows;
+        public string CommandTag = "";
+        public PgException? Error;
+
+        public Pending(PgRowHandler? onRow) => OnRow = onRow;
+        public short Version => _core.Version;
+
+        public void Complete()
+        {
+            if (Error != null) _core.SetException(Error);
+            else _core.SetResult(new PgResult(Value, Rows, CommandTag));
+        }
+
+        public void Fail(PgException ex) => _core.SetException(ex);
+
+        public PgResult GetResult(short token) => _core.GetResult(token);
+        public ValueTaskSourceStatus GetStatus(short token) => _core.GetStatus(token);
+        public void OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags)
+            => _core.OnCompleted(continuation, state, token, flags);
     }
 
     private readonly record struct Message(byte Tag, int BodyStart, int BodyLength);
@@ -290,45 +394,11 @@ public sealed class PgConnection : IDisposable
     /// reactor) and returning the row count. Server errors throw after the stream resyncs at
     /// ReadyForQuery, same as <see cref="QueryAsync"/>.
     /// </summary>
+    /// <summary>Run one simple query, streaming each DataRow to <paramref name="onRow"/>; pipelined.</summary>
     public async ValueTask<int> QueryRowsAsync(string sql, PgRowHandler onRow)
     {
-        if (IsBroken)
-        {
-            throw new PgException("connection is broken");
-        }
-
-        int length = WriteQuery(sql);
-        await SendAllAsync(length);
-
-        int rows = 0;
-        PgException? serverError = null;
-
-        while (true)
-        {
-            Message message = await ReceiveMessageAsync();
-
-            switch (message.Tag)
-            {
-                case PgProtocol.DataRow:
-                    rows++;
-                    if (serverError == null)
-                    {
-                        InvokeRow(onRow, in message);
-                    }
-                    break;
-
-                case PgProtocol.ErrorResponse:
-                    serverError = ReadServerError(message);
-                    break;
-
-                case PgProtocol.ReadyForQuery:
-                    if (serverError != null)
-                    {
-                        throw serverError;
-                    }
-                    return rows;
-            }
-        }
+        PgResult result = await SubmitAsync(sql, onRow);
+        return result.Rows;
     }
 
     private unsafe void InvokeRow(PgRowHandler onRow, in Message message)
@@ -365,25 +435,21 @@ public sealed class PgConnection : IDisposable
         return PgProtocol.WriteStartup(new Span<byte>((void*)_send, _sendCapacity), user, database);
     }
 
-    private unsafe int WriteQuery(string sql)
+    // Append a Query message to the pipelined send buffer. Fixed buffer (an in-flight send holds its
+    // address), so this never realloc's - it throws on overflow instead.
+    private unsafe void WriteQueryAt(string sql)
     {
         int needed = PgProtocol.QueryLength(sql);
         if (needed > _sendCapacity)
         {
-            if (needed > MaxBufferSize)
-            {
-                throw new PgException($"query exceeds {MaxBufferSize} bytes");
-            }
-            int newCapacity = _sendCapacity;
-            while (newCapacity < needed)
-            {
-                newCapacity *= 2;
-            }
-            _send = (nint)NativeMemory.Realloc((void*)_send, (nuint)newCapacity);
-            _sendCapacity = newCapacity;
+            throw new PgException($"query exceeds send buffer ({_sendCapacity} bytes)");
         }
-
-        return PgProtocol.WriteQuery(new Span<byte>((void*)_send, _sendCapacity), sql);
+        if (_sendEnd + needed > _sendCapacity)
+        {
+            throw new PgException("pipelined send buffer full");
+        }
+        int written = PgProtocol.WriteQuery(new Span<byte>((void*)(_send + _sendEnd), _sendCapacity - _sendEnd), sql);
+        _sendEnd += written;
     }
 
     private unsafe ReadOnlySpan<byte> Body(in Message message)
