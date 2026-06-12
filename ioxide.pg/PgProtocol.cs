@@ -21,6 +21,8 @@ internal static class PgProtocol
     public const byte RowDescription  = (byte)'T';
     public const byte DataRow         = (byte)'D';
     public const byte CommandComplete = (byte)'C';
+    public const byte ParseComplete   = (byte)'1';   // extended protocol: Parse acknowledged
+    public const byte BindComplete    = (byte)'2';   // extended protocol: Bind acknowledged
 
     /// <summary>
     /// Write a StartupMessage carrying the user and database parameters, returning its total
@@ -104,6 +106,108 @@ internal static class PgProtocol
     public static int QueryLength(string sql)
     {
         return 5 + Encoding.UTF8.GetByteCount(sql) + 1;
+    }
+
+    /// <summary>
+    /// Write one extended-protocol command: an optional Parse (when the statement is new), then
+    /// Bind (text-format params, text-format results), Execute (all rows), and Sync. The Sync makes
+    /// the server answer with one ReadyForQuery, so the command routes like a simple query.
+    /// </summary>
+    public static int WriteExtended(Span<byte> buffer, bool parse, string statementName, string sql, ReadOnlySpan<PgParam> args)
+    {
+        int position = 0;
+        if (parse)
+        {
+            position += WriteParse(buffer, statementName, sql);
+        }
+        position += WriteBind(buffer[position..], statementName, args);
+        position += WriteExecute(buffer[position..]);
+        position += WriteSync(buffer[position..]);
+        return position;
+    }
+
+    /// <summary>An upper bound on the bytes <see cref="WriteExtended"/> needs (params sized to their max text length).</summary>
+    public static int ExtendedLength(bool parse, string statementName, string sql, ReadOnlySpan<PgParam> args)
+    {
+        int nameLen = Encoding.UTF8.GetByteCount(statementName) + 1;
+        int total = 0;
+        if (parse)
+        {
+            total += 5 + nameLen + Encoding.UTF8.GetByteCount(sql) + 1 + 2;   // Parse: name, sql, int16 param-type count
+        }
+        int paramBytes = 0;
+        foreach (PgParam a in args)
+        {
+            paramBytes += 4 + a.MaxBytes;        // int32 length prefix + value
+        }
+        total += 5 + 1 + nameLen + 2 + 2 + paramBytes + 2;   // Bind: portal, stmt, fmt-count, param-count, params, result-fmt-count
+        total += 5 + 1 + 4;                                  // Execute: portal, max-rows
+        total += 5;                                          // Sync
+        return total;
+    }
+
+    // Parse ('P'): statement name, the SQL with $n placeholders, and an int16 0 = infer parameter types.
+    private static int WriteParse(Span<byte> buffer, string statementName, string sql)
+    {
+        buffer[0] = (byte)'P';
+        int position = 5;
+        position += WriteCString(buffer, position, statementName);
+        position += WriteCString(buffer, position, sql);
+        BinaryPrimitives.WriteInt16BigEndian(buffer[position..], 0);
+        position += 2;
+        BinaryPrimitives.WriteInt32BigEndian(buffer[1..], position - 1);
+        return position;
+    }
+
+    // Bind ('B'): unnamed portal, the statement, all-text params, then all-text results.
+    private static int WriteBind(Span<byte> buffer, string statementName, ReadOnlySpan<PgParam> args)
+    {
+        buffer[0] = (byte)'B';
+        int position = 5;
+        buffer[position++] = 0;                              // portal "" (NUL only)
+        position += WriteCString(buffer, position, statementName);
+        BinaryPrimitives.WriteInt16BigEndian(buffer[position..], 0);   // 0 param format codes = all text
+        position += 2;
+        BinaryPrimitives.WriteInt16BigEndian(buffer[position..], (short)args.Length);
+        position += 2;
+        foreach (PgParam a in args)
+        {
+            if (a.IsNull)
+            {
+                BinaryPrimitives.WriteInt32BigEndian(buffer[position..], -1);
+                position += 4;
+            }
+            else
+            {
+                int written = a.WriteText(buffer[(position + 4)..]);
+                BinaryPrimitives.WriteInt32BigEndian(buffer[position..], written);
+                position += 4 + written;
+            }
+        }
+        BinaryPrimitives.WriteInt16BigEndian(buffer[position..], 0);   // 0 result format codes = all text
+        position += 2;
+        BinaryPrimitives.WriteInt32BigEndian(buffer[1..], position - 1);
+        return position;
+    }
+
+    // Execute ('E'): unnamed portal, max-rows 0 = return every row.
+    private static int WriteExecute(Span<byte> buffer)
+    {
+        buffer[0] = (byte)'E';
+        int position = 5;
+        buffer[position++] = 0;                              // portal ""
+        BinaryPrimitives.WriteInt32BigEndian(buffer[position..], 0);
+        position += 4;
+        BinaryPrimitives.WriteInt32BigEndian(buffer[1..], position - 1);
+        return position;
+    }
+
+    // Sync ('S'): a bare 4-byte length.
+    private static int WriteSync(Span<byte> buffer)
+    {
+        buffer[0] = (byte)'S';
+        BinaryPrimitives.WriteInt32BigEndian(buffer[1..], 4);
+        return 5;
     }
 
     private static int WriteCString(Span<byte> buffer, int position, string text)

@@ -38,6 +38,11 @@ public sealed class PgConnection : IDisposable
     private int _sendOffset;
     private int _sendEnd;
 
+    // Auto-prepared statements: SQL text -> server statement name. Parse once per connection, then
+    // Bind/Execute on every reuse. Single-threaded per reactor, so no lock is needed.
+    private readonly Dictionary<string, string> _prepared = new();
+    private int _statementCounter;
+
     /// <summary>Transport-level failure happened; the connection must be discarded, not reused.</summary>
     public bool IsBroken { get; private set; }
 
@@ -150,6 +155,55 @@ public sealed class PgConnection : IDisposable
     /// <summary>Run one simple query, pipelined onto this connection. Resumes inline on the reactor.</summary>
     public ValueTask<PgResult> QueryAsync(string sql) => SubmitAsync(sql, null);
 
+    /// <summary>
+    /// Run a parameterized query as a prepared statement - auto-Parse on first use of this SQL on
+    /// this connection, then Bind/Execute on every reuse, so the server plans it once. Pipelined and
+    /// resumes inline on the reactor, same as <see cref="QueryAsync(string)"/>.
+    /// </summary>
+    public ValueTask<PgResult> QueryAsync(string sql, ReadOnlySpan<PgParam> args) => SubmitParamAsync(sql, args, null);
+
+    /// <summary>
+    /// Prepared parameterized query, streaming each DataRow to <paramref name="onRow"/> (inline). Read
+    /// the row count from <see cref="PgResult.Rows"/> on the awaited result.
+    /// </summary>
+    public ValueTask<PgResult> QueryAsync(string sql, ReadOnlySpan<PgParam> args, PgRowHandler onRow) => SubmitParamAsync(sql, args, onRow);
+
+    // Stage an extended-protocol command (Parse on first use + Bind + Execute + Sync), enqueue its
+    // waiter, and make sure the loops run. Synchronous: args is consumed into _send before returning,
+    // so the span never crosses an await.
+    private ValueTask<PgResult> SubmitParamAsync(string sql, ReadOnlySpan<PgParam> args, PgRowHandler? onRow)
+    {
+        if (IsBroken)
+        {
+            return ValueTask.FromException<PgResult>(new PgException("connection is broken"));
+        }
+
+        bool parse = !_prepared.TryGetValue(sql, out string? name);
+        name ??= "s" + _statementCounter++;
+
+        try
+        {
+            WriteExtendedAt(parse, name, sql, args);   // append to _send; throws on overflow before any state changes
+        }
+        catch (PgException ex)
+        {
+            return ValueTask.FromException<PgResult>(ex);
+        }
+
+        if (parse)
+        {
+            _prepared[sql] = name;
+        }
+
+        var pending = new Pending(onRow) { PreparedSql = parse ? sql : null };
+        _inflight.Enqueue(pending);
+
+        if (!_sending) { _sending = true; _ = SenderLoopAsync(); }
+        if (!_reading) { _reading = true; _ = ReaderLoopAsync(); }
+
+        return new ValueTask<PgResult>(pending, pending.Version);
+    }
+
     // Stage the command, enqueue its waiter, and make sure the sender and reader are running.
     private ValueTask<PgResult> SubmitAsync(string sql, PgRowHandler? onRow)
     {
@@ -176,23 +230,38 @@ public sealed class PgConnection : IDisposable
         return new ValueTask<PgResult>(pending, pending.Version);
     }
 
-    // Drains the staged send buffer; picks up commands appended while a send was in flight.
+    // Drains the staged send buffer; picks up commands appended while a send was in flight, and
+    // reclaims the sent prefix every cycle so the buffer doesn't march to capacity under a sustained
+    // submit rate (it is append-only, and resetting only on a full drain rarely happens under load).
     private async Task SenderLoopAsync()
     {
         try
         {
             while (_sendOffset < _sendEnd)
             {
-                int n = await _socket.SendAsync(_send + _sendOffset, _sendEnd - _sendOffset);
-                if (n <= 0)
+                int end = _sendEnd;   // snapshot; more may be appended (at _sendEnd) while we send
+                while (_sendOffset < end)
                 {
-                    IsBroken = true;
-                    throw PgException.Transport("send", n);
+                    int n = await _socket.SendAsync(_send + _sendOffset, end - _sendOffset);
+                    if (n <= 0)
+                    {
+                        IsBroken = true;
+                        throw PgException.Transport("send", n);
+                    }
+                    _sendOffset += n;
                 }
-                _sendOffset += n;
+
+                // The snapshot is fully sent and nothing is in flight, so the consumed prefix is free:
+                // slide any bytes appended during the send to the front and continue from there. The
+                // reactor is single-threaded, so no append interleaves with this move.
+                int tail = _sendEnd - end;
+                if (tail > 0)
+                {
+                    CompactSend(end, tail);
+                }
+                _sendOffset = 0;
+                _sendEnd = tail;
             }
-            _sendOffset = 0;   // all staged bytes sent; reuse the buffer from the front
-            _sendEnd = 0;
             _sending = false;
         }
         catch (Exception ex)
@@ -201,6 +270,13 @@ public sealed class PgConnection : IDisposable
             _sending = false;
             FailAll(ex);
         }
+    }
+
+    // Move [from, from+length) to the front of the send buffer. CopyTo is memmove-safe for the
+    // (rare) case where the appended tail overlaps the front.
+    private unsafe void CompactSend(int from, int length)
+    {
+        new Span<byte>((void*)(_send + from), length).CopyTo(new Span<byte>((void*)_send, length));
     }
 
     // Reads replies and routes each to the front in-flight command; completes it at ReadyForQuery.
@@ -232,9 +308,19 @@ public sealed class PgConnection : IDisposable
                         front.CommandTag = ReadBodyCString(message);
                         break;
 
+                    case PgProtocol.ParseComplete:
+                    case PgProtocol.BindComplete:
+                        break;   // extended-protocol acks; nothing to collect
+
                     case PgProtocol.ErrorResponse:
-                        // Per-query in the simple protocol: the next pipelined query still runs.
+                        // Per-command: the stream resyncs at the next ReadyForQuery, so siblings still run.
                         front.Error = ReadServerError(message);
+                        if (front.PreparedSql != null)
+                        {
+                            // The Parse failed - the statement was never created, so drop it and a retry re-parses.
+                            _prepared.Remove(front.PreparedSql);
+                            front.PreparedSql = null;
+                        }
                         break;
 
                     case PgProtocol.ReadyForQuery:
@@ -273,6 +359,7 @@ public sealed class PgConnection : IDisposable
         public int Rows;
         public string CommandTag = "";
         public PgException? Error;
+        public string? PreparedSql;   // set when this command included a Parse, so it can be evicted on error
 
         public Pending(PgRowHandler? onRow) => OnRow = onRow;
         public short Version => _core.Version;
@@ -449,6 +536,25 @@ public sealed class PgConnection : IDisposable
             throw new PgException("pipelined send buffer full");
         }
         int written = PgProtocol.WriteQuery(new Span<byte>((void*)(_send + _sendEnd), _sendCapacity - _sendEnd), sql);
+        _sendEnd += written;
+    }
+
+    // Append an extended-protocol command (Parse? + Bind + Execute + Sync) to the pipelined send
+    // buffer. Fixed buffer like WriteQueryAt: throws on overflow rather than realloc'ing, since an
+    // in-flight send holds the buffer's address.
+    private unsafe void WriteExtendedAt(bool parse, string statementName, string sql, ReadOnlySpan<PgParam> args)
+    {
+        int needed = PgProtocol.ExtendedLength(parse, statementName, sql, args);
+        if (needed > _sendCapacity)
+        {
+            throw new PgException($"query exceeds send buffer ({_sendCapacity} bytes)");
+        }
+        if (_sendEnd + needed > _sendCapacity)
+        {
+            throw new PgException("pipelined send buffer full");
+        }
+        int written = PgProtocol.WriteExtended(
+            new Span<byte>((void*)(_send + _sendEnd), _sendCapacity - _sendEnd), parse, statementName, sql, args);
         _sendEnd += written;
     }
 
