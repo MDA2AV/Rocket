@@ -63,11 +63,33 @@ public sealed class PgPool
         return c != null ? c.QueryRowsAsync(sql, onRow) : QueryRowsSlowAsync(sql, onRow);
     }
 
+    /// <summary>Run a prepared parameterized query on the next connection (pipelined).</summary>
+    public ValueTask<PgResult> QueryAsync(string sql, ReadOnlySpan<PgParam> args)
+    {
+        PgConnection? c = Pick();
+        // Slow path is startup-only (no connection open yet); copying the params to the heap there is
+        // fine, and keeps the span off the async state machine.
+        return c != null ? c.QueryAsync(sql, args) : QuerySlowAsync(sql, args.ToArray());
+    }
+
+    /// <summary>Run a prepared parameterized query, streaming rows through <paramref name="onRow"/>. Read the count from the result.</summary>
+    public ValueTask<PgResult> QueryAsync(string sql, ReadOnlySpan<PgParam> args, PgRowHandler onRow)
+    {
+        PgConnection? c = Pick();
+        return c != null ? c.QueryAsync(sql, args, onRow) : QueryRowsSlowAsync(sql, args.ToArray(), onRow);
+    }
+
     private async ValueTask<PgResult> QuerySlowAsync(string sql)
         => await (await WaitForConnectionAsync()).QueryAsync(sql);
 
     private async ValueTask<int> QueryRowsSlowAsync(string sql, PgRowHandler onRow)
         => await (await WaitForConnectionAsync()).QueryRowsAsync(sql, onRow);
+
+    private async ValueTask<PgResult> QuerySlowAsync(string sql, PgParam[] args)
+        => await (await WaitForConnectionAsync()).QueryAsync(sql, args);
+
+    private async ValueTask<PgResult> QueryRowsSlowAsync(string sql, PgParam[] args, PgRowHandler onRow)
+        => await (await WaitForConnectionAsync()).QueryAsync(sql, args, onRow);
 
     // Round-robin over healthy connections; evict and replace any found broken.
     private PgConnection? Pick()
