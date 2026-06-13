@@ -28,6 +28,8 @@ public sealed unsafe class AssetReader : IDisposable
     /// <summary>
     /// Read up to <see cref="Capacity"/> bytes of <paramref name="fd"/> from
     /// <paramref name="offset"/> into <see cref="Buffer"/>; returns bytes read or a negative errno.
+    /// One call never returns more than <see cref="Capacity"/> bytes - to serve a file larger than
+    /// the buffer, call repeatedly at advancing offsets (<c>offset += bytesRead</c>) until done.
     /// </summary>
     public ValueTask<int> ReadAsync(int fd, long offset)
     {

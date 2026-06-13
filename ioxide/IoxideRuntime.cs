@@ -7,7 +7,7 @@ namespace ioxide;
 /// </summary>
 public static class IoxideRuntime
 {
-    public const string Version = "0.0.4";
+    public const string Version = "0.0.5";
 
     // Wiring (a builder API will eventually wrap this):
     //   var reactor = new Reactor(id, config);               // implements IRingHost
@@ -15,6 +15,6 @@ public static class IoxideRuntime
     //   reactor.OnStart = r => PgPool.Start(r, pgOptions);   // clients open on the reactor thread
     //   reactor.Run();
     //
-    // Roadmap: BCL bridge (per-reactor SyncContext) · SCRAM · extended protocol · Redis · TLS ·
-    // fixed files / send-zc · builder API.
+    // Roadmap: BCL bridge (per-reactor SyncContext) · per-command timeouts · fixed files / send-zc ·
+    // builder API. (SCRAM, the extended/prepared protocol, Redis, and TLS have shipped.)
 }

@@ -22,4 +22,11 @@ public sealed record RedisOptions
     /// at a time, so this is the reactor's Redis concurrency; total = PoolSize × ReactorCount.
     /// </summary>
     public int PoolSize { get; init; } = 8;
+
+    /// <summary>
+    /// Per-command timeout in milliseconds: a connection whose oldest in-flight command exceeds this
+    /// is torn down and its waiters fail with a diagnostic error, so a silent server can't park a
+    /// command forever. 0 disables. Default 30000.
+    /// </summary>
+    public int CommandTimeoutMs { get; init; } = 30_000;
 }

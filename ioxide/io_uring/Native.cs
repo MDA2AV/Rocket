@@ -13,6 +13,7 @@ public static unsafe class Native {
     private const long SYS_IO_URING_REGISTER = 427;
 
     public const byte IORING_OP_POLL_ADD = 6;
+    public const byte IORING_OP_TIMEOUT = 11;
     public const byte IORING_OP_ACCEPT = 13;
     public const byte IORING_OP_ASYNC_CANCEL = 14;
     public const byte IORING_OP_CONNECT = 16;
@@ -183,6 +184,10 @@ public static unsafe class Native {
         public ushort flags;
         public ulong  resv1, resv2, resv3;
     }
+
+    // include/uapi/linux/time_types.h - the timespec IORING_OP_TIMEOUT reads.
+    [StructLayout(LayoutKind.Sequential)]
+    public struct __kernel_timespec { public long tv_sec; public long tv_nsec; }
 
     [StructLayout(LayoutKind.Sequential)]
     public struct in_addr { public uint s_addr; }

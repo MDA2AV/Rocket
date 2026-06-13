@@ -6,13 +6,16 @@ namespace ioxide.redis;
 public enum RespKind { Null, SimpleString, Error, Integer, BulkString, Array }
 
 /// <summary>
-/// A parsed RESP2 reply. Bulk/simple strings and arrays are materialized (they outlive the receive
-/// buffer); accessors convert on demand. <see cref="IsNull"/> covers both null bulk strings
-/// (<c>$-1</c>) and null arrays (<c>*-1</c>).
+/// A parsed RESP2 reply. A <b>value type</b>, so parsing a reply allocates no per-node object:
+/// integers, nulls and booleans are entirely allocation-free; bulk/simple strings and arrays carry
+/// the bytes (or element array) materialized during parse, which outlive the receive buffer.
+/// Accessors convert on demand. <see cref="IsNull"/> covers both null bulk strings (<c>$-1</c>) and
+/// null arrays (<c>*-1</c>). (Layout follows StackExchange.Redis's allocation-light RedisValue.)
 /// </summary>
-public sealed class RespValue
+public readonly struct RespValue
 {
-    public static readonly RespValue Null = new(RespKind.Null, 0, null, null);
+    /// <summary>The RESP null (a null bulk string or array); equivalent to <c>default</c>.</summary>
+    public static readonly RespValue Null = default;
 
     public RespKind Kind { get; }
     public long Integer { get; }
@@ -48,14 +51,34 @@ public sealed class RespValue
     {
         RespKind.Integer => Integer,
         RespKind.BulkString or RespKind.SimpleString when _bytes is not null
-            && Utf8Parser.TryParse(_bytes, out long n, out _) => n,
-        _ => throw new RedisException($"reply is {Kind}, not an integer"),
+            && Utf8Parser.TryParse(_bytes, out long n, out int c) && c == _bytes.Length => n,
+        _ => throw new RedisException($"reply ({Kind}) is not an integer"),
     };
 
-    public double AsDouble() => Kind == RespKind.BulkString && _bytes is not null
-            && Utf8Parser.TryParse(_bytes, out double d, out _)
-        ? d
-        : throw new RedisException($"reply is {Kind}, not a double");
+    /// <summary>
+    /// A numeric reply as a double. Accepts integers, and the bulk/simple-string forms Redis uses for
+    /// scores - including the non-finite tokens <c>inf</c>/<c>+inf</c>/<c>-inf</c>/<c>nan</c> that
+    /// <see cref="Utf8Parser"/> won't parse (e.g. a ZSCORE of +inf).
+    /// </summary>
+    public double AsDouble()
+    {
+        if (Kind == RespKind.Integer)
+        {
+            return Integer;
+        }
+        if (_bytes is not null && (Kind == RespKind.BulkString || Kind == RespKind.SimpleString))
+        {
+            if (Utf8Parser.TryParse(_bytes, out double d, out int n) && n == _bytes.Length)
+            {
+                return d;
+            }
+            ReadOnlySpan<byte> b = _bytes;
+            if (b.SequenceEqual("inf"u8) || b.SequenceEqual("+inf"u8)) return double.PositiveInfinity;
+            if (b.SequenceEqual("-inf"u8)) return double.NegativeInfinity;
+            if (b.SequenceEqual("nan"u8)) return double.NaN;
+        }
+        throw new RedisException($"reply ({Kind}) is not a double");
+    }
 
     public bool AsBool() => AsInteger() != 0;
 

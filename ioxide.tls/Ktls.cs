@@ -14,11 +14,18 @@ internal static unsafe class Ktls
     private const int TCP_ULP = 31;
     private const int SOL_TLS = 282;
     private const int TLS_TX = 1;
+    private const int TLS_SET_RECORD_TYPE = 1;
     private const ushort TLS_1_3_VERSION = 0x0304;
     private const ushort TLS_CIPHER_AES_GCM_128 = 51;
+    private const byte TLS_RECORD_TYPE_ALERT = 21;
+    private const int MSG_NOSIGNAL = 0x4000;
+    private const int MSG_DONTWAIT = 0x40;
 
     [DllImport("libc", SetLastError = true)]
     private static extern int setsockopt(int fd, int level, int optname, void* optval, uint optlen);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern nint sendmsg(int fd, Msghdr* msg, int flags);
 
     /// <summary>tls12_crypto_info_aes_gcm_128 - the layout the kernel expects (40 bytes).</summary>
     [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -32,6 +39,27 @@ internal static unsafe class Ktls
         public fixed byte RecSeq[8];
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Iovec
+    {
+        public nint Base;
+        public nuint Len;
+    }
+
+    // Linux x86-64 Msghdr (msg_namelen is followed by 4 bytes of padding before msg_iov).
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Msghdr
+    {
+        public nint Name;
+        public uint NameLen;
+        public uint Pad;
+        public nint Iov;
+        public nuint IovLen;
+        public nint Control;
+        public nuint ControlLen;
+        public int Flags;
+    }
+
     /// <summary>Enable kTLS TX with keys derived from the TLS 1.3 server traffic secret.</summary>
     public static void EnableTx(int fd, byte[] serverTrafficSecret)
     {
@@ -43,26 +71,71 @@ internal static unsafe class Ktls
             Version = TLS_1_3_VERSION,
             CipherType = TLS_CIPHER_AES_GCM_128,
         };
-        for (int i = 0; i < 16; i++) info.Key[i] = key[i];
-        for (int i = 0; i < 4; i++) info.Salt[i] = nonce[i];      // nonce[0..4]
-        for (int i = 0; i < 8; i++) info.Iv[i] = nonce[4 + i];    // nonce[4..12]
-        // RecSeq stays 0: session tickets are disabled, so no server record was
-        // sent under the application traffic key before the handoff.
 
-        ReadOnlySpan<byte> ulp = "tls"u8;
-        fixed (byte* p = ulp)
+        try
         {
-            if (setsockopt(fd, SOL_TCP, TCP_ULP, p, 3) != 0)
+            for (int i = 0; i < 16; i++) info.Key[i] = key[i];
+            for (int i = 0; i < 4; i++) info.Salt[i] = nonce[i];      // nonce[0..4]
+            for (int i = 0; i < 8; i++) info.Iv[i] = nonce[4 + i];    // nonce[4..12]
+            // RecSeq stays 0: session tickets are disabled, so no server record was
+            // sent under the application traffic key before the handoff.
+
+            ReadOnlySpan<byte> ulp = "tls"u8;
+            fixed (byte* p = ulp)
             {
-                throw new IOException(
-                    $"kTLS: TCP_ULP failed (errno {Marshal.GetLastPInvokeError()}); is the 'tls' kernel module available?");
+                if (setsockopt(fd, SOL_TCP, TCP_ULP, p, 3) != 0)
+                {
+                    throw new IOException(
+                        $"kTLS: TCP_ULP failed (errno {Marshal.GetLastPInvokeError()}); is the 'tls' kernel module available?");
+                }
+            }
+
+            if (setsockopt(fd, SOL_TLS, TLS_TX, &info, (uint)sizeof(CryptoInfoAesGcm128)) != 0)
+            {
+                throw new IOException($"kTLS: TLS_TX failed (errno {Marshal.GetLastPInvokeError()})");
             }
         }
-
-        if (setsockopt(fd, SOL_TLS, TLS_TX, &info, (uint)sizeof(CryptoInfoAesGcm128)) != 0)
+        finally
         {
-            throw new IOException($"kTLS: TLS_TX failed (errno {Marshal.GetLastPInvokeError()})");
+            // The keys are in the kernel now - don't leave copies on the heap/stack.
+            CryptographicOperations.ZeroMemory(key);
+            CryptographicOperations.ZeroMemory(nonce);
+            CryptographicOperations.ZeroMemory(serverTrafficSecret);
+            CryptoInfoAesGcm128* ip = &info;
+            CryptographicOperations.ZeroMemory(new Span<byte>(ip, sizeof(CryptoInfoAesGcm128)));
         }
+    }
+
+    /// <summary>
+    /// Best-effort TLS 1.3 close_notify over kTLS: a {warning, close_notify} alert sent as a control
+    /// message (SOL_TLS / TLS_SET_RECORD_TYPE = alert). Non-fatal - on a clean server-side close it
+    /// lets the peer distinguish a real end-of-stream from a truncation; the peer may already be gone.
+    /// </summary>
+    public static void SendCloseNotify(int fd)
+    {
+        byte* alert = stackalloc byte[2];
+        alert[0] = 1;   // level: warning
+        alert[1] = 0;   // description: close_notify
+
+        const int cmsgLen = 17;     // CMSG_LEN(1):   sizeof(cMsghdr=16) + 1
+        const int cmsgSpace = 24;   // CMSG_SPACE(1): align8(16) + align8(1)
+        byte* control = stackalloc byte[cmsgSpace];
+        new Span<byte>(control, cmsgSpace).Clear();
+        *(nuint*)(control + 0) = cmsgLen;               // cmsg_len
+        *(int*)(control + 8) = SOL_TLS;                 // cmsg_level
+        *(int*)(control + 12) = TLS_SET_RECORD_TYPE;    // cmsg_type
+        control[16] = TLS_RECORD_TYPE_ALERT;            // CMSG_DATA[0]: this record is an alert
+
+        var iov = new Iovec { Base = (nint)alert, Len = 2 };
+        var msg = new Msghdr
+        {
+            Iov = (nint)(&iov),
+            IovLen = 1,
+            Control = (nint)control,
+            ControlLen = cmsgSpace,
+            Flags = 0,
+        };
+        sendmsg(fd, &msg, MSG_NOSIGNAL | MSG_DONTWAIT);
     }
 
     /// <summary>RFC 8446 HKDF-Expand-Label with an empty context.</summary>

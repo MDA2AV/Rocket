@@ -124,6 +124,7 @@ internal static class Handlers
                 string sql = path switch
                 {
                     "/sleep" => "SELECT 42 FROM pg_sleep(0.1)",
+                    "/hang"  => "SELECT pg_sleep(10)",
                     "/err"   => "SELECT * FROM this_table_does_not_exist",
                     _        => "SELECT 42",
                 };
@@ -166,38 +167,24 @@ internal static class Handlers
             {
                 RecvSnapshot snapshot = await conn.ReadAsync();
 
-                if (!FindAsset(conn, snapshot, assets, out AssetCache.Asset asset))
+                // Hold the snapshot for the whole request so a concurrent reload can't free the fd
+                // or baked response out from under an in-flight read/send.
+                using (StaticAssets.Lease lease = assets.Acquire())
                 {
-                    conn.Write(NotFound);
-                    await conn.FlushAsync();
-                }
-                else if (asset.Response != 0)
-                {
-                    // Hot path: the whole response (header + body) is baked into the
-                    // snapshot - no file I/O, no header formatting, no allocation.
-                    await SendChunked(conn, asset.Response, asset.ResponseLength);
-                }
-                else
-                {
-                    AssetReader reader = await readers.RentAsync();
-                    try
+                    if (!FindAsset(conn, snapshot, lease, out AssetCache.Asset asset))
                     {
-                        int read = await reader.ReadAsync(asset.Fd, offset: 0);
-                        if (read >= 0)
-                        {
-                            WriteAssetHeader(conn, asset, read);
-                            await SendChunked(conn, reader.Buffer, read);
-                        }
-                        else
-                        {
-                            // e.g. the descriptor went stale across a reload race
-                            conn.Write(ServerError);
-                            await conn.FlushAsync();
-                        }
+                        conn.Write(NotFound);
+                        await conn.FlushAsync();
                     }
-                    finally
+                    else if (asset.Response != 0)
                     {
-                        readers.Return(reader);
+                        // Hot path: the whole response (header + body) is baked into the
+                        // snapshot - no file I/O, no header formatting, no allocation.
+                        await SendChunked(conn, asset.Response, asset.ResponseLength);
+                    }
+                    else
+                    {
+                        await SendFromDisk(conn, readers, asset);
                     }
                 }
 
@@ -208,6 +195,42 @@ internal static class Handlers
         finally
         {
             conn.DecRef();
+        }
+    }
+
+    // Stream a large (non-baked) asset off the ring. Files bigger than the reader's buffer are read
+    // in successive chunks at advancing offsets, so they're served whole instead of truncated.
+    private static async Task SendFromDisk(Connection conn, RingPool<AssetReader> readers, AssetCache.Asset asset)
+    {
+        AssetReader reader = await readers.RentAsync();
+        try
+        {
+            int first = await reader.ReadAsync(asset.Fd, offset: 0);
+            if (first < 0)
+            {
+                conn.Write(ServerError);
+                await conn.FlushAsync();
+                return;
+            }
+
+            WriteAssetHeader(conn, asset, (int)asset.Length);   // full length up front
+            await SendChunked(conn, reader.Buffer, first);
+
+            long offset = first;
+            while (offset < asset.Length)
+            {
+                int read = await reader.ReadAsync(asset.Fd, offset);
+                if (read <= 0)
+                {
+                    break;   // EOF or mid-stream error; the response is already committed
+                }
+                await SendChunked(conn, reader.Buffer, read);
+                offset += read;
+            }
+        }
+        finally
+        {
+            readers.Return(reader);
         }
     }
 
@@ -272,7 +295,7 @@ internal static class Handlers
     // Drain the recv, resolving the request target against the cache while the bytes are still
     // valid (the lookup is span-based - no string - so it must happen before the buffer goes
     // back to the ring).
-    private static bool FindAsset(Connection conn, RecvSnapshot snapshot, StaticAssets assets, out AssetCache.Asset asset)
+    private static bool FindAsset(Connection conn, RecvSnapshot snapshot, StaticAssets.Lease lease, out AssetCache.Asset asset)
     {
         bool found = false;
         asset = default;
@@ -283,7 +306,7 @@ internal static class Handlers
             {
                 if (!found && TryParseTarget(item.AsSpan(), out ReadOnlySpan<byte> target))
                 {
-                    found = assets.TryGet(target, out asset);
+                    found = lease.TryGet(target, out asset);
                 }
 
                 conn.ReturnBuffer(in item);

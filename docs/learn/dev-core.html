@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Core internals - ioxide</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="../assets/highlight-dark.min.css">
+  <script src="../assets/highlight.min.js"></script>
+</head>
+<body>
+
+<nav class="top">
+  <a class="brand" href="../"><span>io</span>xide</a>
+  <div class="links">
+    <a href="overview.html">Learn</a>
+    <a href="dev-core.html">Developer</a>
+    <a class="gh" href="https://github.com/MDA2AV/ioxide" aria-label="GitHub"><svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
+  </div>
+</nav>
+
+<div class="layout">
+  <aside class="side">
+    <div class="group">Basics</div>
+    <a href="overview.html">Overview</a>
+    <div class="group">Advanced</div>
+    <a href="architecture.html">Architecture</a>
+    <a href="reactor.html">The Reactor</a>
+    <a href="connection.html">The Connection</a>
+    <a href="multiport.html">Multi-port</a>
+    <a href="clients.html">Ring clients</a>
+    <div class="group">Clients</div>
+    <a href="postgres.html">Postgres</a>
+    <a href="files.html">Files</a>
+    <a href="tls.html">TLS</a>
+    <a href="redis.html">Redis</a>
+    <div class="group">Developer</div>
+    <a href="dev-core.html" class="here">Core internals</a>
+    <a href="dev-pg.html">Postgres internals</a>
+    <a href="dev-redis.html">Redis internals</a>
+    <a href="dev-tls.html">TLS internals</a>
+    <a href="dev-file.html">File internals</a>
+  </aside>
+
+  <main class="doc">
+    <h1>Core internals</h1>
+    <p class="lead">A class-by-class tour of the <code>ioxide</code> core - the reactor, the ring,
+    the connection, and the plumbing that lets a normal <code>async</code> handler run with no
+    thread pool underneath it. This is the deep version of <a href="reactor.html">The Reactor</a>
+    and <a href="connection.html">The Connection</a>: every type, what it is, and how it works.</p>
+
+    <h2>The model in one paragraph</h2>
+    <p>One <code>Reactor</code> = one OS thread + one io_uring + one SO_REUSEPORT listener + one
+    connection table. You run one reactor per core. The reactor thread is the <em>sole</em> issuer of
+    submission-queue entries (SQEs) and the sole owner of every structure it touches, so nothing on
+    the hot path takes a lock. Each <code>await</code> in your handler - a socket read, a Postgres
+    query, a file read - submits an SQE and parks its continuation on a reusable
+    <code>IValueTaskSource</code>; when the matching completion (CQE) arrives, the reactor calls
+    <code>SetResult</code> and your code resumes <em>inline on the same thread</em>. Off-reactor
+    threads never submit; they hand work to the reactor through lock-free queues woken by an eventfd.</p>
+
+    <h2>Native &middot; <span class="dim">io_uring/Native.cs</span></h2>
+    <p>All raw interop in one file: the three io_uring syscalls (<code>io_uring_setup</code>,
+    <code>io_uring_enter</code>, <code>io_uring_register</code>) issued through <code>syscall()</code>,
+    the libc socket/mmap/eventfd calls, the kernel struct layouts (<code>IoUringSqe</code> at a fixed
+    64-byte explicit layout, <code>IoUringCqe</code>, the SQ/CQ ring offsets, <code>sockaddr_in</code>,
+    <code>io_uring_buf_reg</code>, <code>__kernel_timespec</code>), and the opcode/flag constants.
+    There is no liburing - just these P/Invokes. Key flags it sets: <code>SINGLE_ISSUER</code> (one
+    submitting thread, so the kernel skips SQ locking), <code>DEFER_TASKRUN</code> (completion work is
+    deferred until <code>enter(GETEVENTS)</code>, so the kernel batches and never interrupts the
+    reactor mid-flight), and <code>NO_SQARRAY</code> (6.6+: the SQ index is implicit, dropping a store
+    per submission). <code>MSG_WAITALL</code> on sends makes the kernel coalesce short sends into one
+    CQE. The provided-buffer-ring flags (<code>IORING_REGISTER_PBUF_RING</code>,
+    <code>IOU_PBUF_RING_INC</code>, <code>CQE_F_BUF_MORE</code>) drive the recv path.</p>
+
+    <h2>Ring &middot; <span class="dim">io_uring/Ring.cs</span></h2>
+    <p>A thin <code>unsafe</code> wrapper over the mmapped submission and completion queues.
+    <code>Create(entries)</code> calls <code>io_uring_setup</code> (preferring <code>NO_SQARRAY</code>,
+    falling back on <code>EINVAL</code> for older kernels), then mmaps the SQ ring, the CQ ring, and
+    the SQE array, and caches pointers to the head/tail/mask fields the kernel shares.</p>
+    <ul>
+      <li><code>GetSqe()</code> - claims the next SQE slot if the ring isn't full
+      (<code>tail - head &lt; entries</code>), writing the implicit SQ-array slot when
+      <code>NO_SQARRAY</code> isn't available. Returns <code>null</code> when full. Aggressively
+      inlined.</li>
+      <li><code>SubmitAndWait(waitFor)</code> - publishes the SQ tail with a release store, then
+      <code>io_uring_enter</code> submitting the staged SQEs and (when <code>waitFor &gt; 0</code>)
+      blocking for at least that many completions.</li>
+      <li><code>CqReady()</code> / <code>CqeAt(i)</code> / <code>CqAdvance(n)</code> - the batched CQ
+      drain (the liburing <code>for_each_cqe</code> pattern): read the kernel-written tail once
+      (acquire), process the whole batch, publish the consumed head once (release) - one barrier per
+      batch, not per CQE.</li>
+    </ul>
+
+    <h2>Reactor &middot; <span class="dim">Reactor/Reactor.cs (+ .Incremental, .RingHost, .Handler)</span></h2>
+    <p>The reactor is one class split across four partial files. <code>Reactor.cs</code> holds the
+    loop, dispatch, and SQE producers; <code>Reactor.Incremental.cs</code> the per-connection
+    buffer-ring path; <code>Reactor.RingHost.cs</code> the <code>IRingHost</code> implementation for
+    ring-native clients; <code>Reactor.Handler.cs</code> a deliberately <em>non-<code>unsafe</code></em>
+    part holding the one method that must <code>await</code> (you can't <code>await</code> inside an
+    unsafe context).</p>
+
+    <h3>user_data: the routing key</h3>
+    <p>Every SQE carries a 64-bit <code>user_data</code> that comes back on its CQE, packed as
+    <code>[kind:8 | generation:16 | fd:32]</code> (or, for client ops, the low 32 bits are a slot
+    index). The <em>generation</em> is the crux of lifetime safety: a pooled <code>Connection</code>
+    bumps its generation every time it is recycled, so a straggler CQE from a closed-and-reused fd
+    carries a stale generation and is detected and dropped instead of corrupting the fd's new tenant.
+    Kinds: accept, recv, send, wake, client, cancel, timer.</p>
+
+    <h3>Startup - <code>Run()</code></h3>
+    <p>Runs on the reactor's own thread, in order: record the managed thread id (every fast-path
+    "am I on the reactor?" check compares against it); create the <code>Ring</code>
+    (<code>DEFER_TASKRUN</code> requires setup and enter on the same thread); open one
+    SO_REUSEPORT listener per port (<code>Port</code> + <code>ExtraPorts</code>); register the shared
+    buffer ring (or the incremental machinery); create the wake eventfd; run <code>OnStart</code> so
+    the app opens its ring-native clients <em>here</em> (they ride this reactor's ring); arm the
+    multishot accept, the wake poll, and the periodic timer; then fall into the loop.</p>
+
+    <h3>The loop and dispatch</h3>
+    <p><code>LoopShared</code> / <code>LoopIncremental</code> drain the hand-off queues, then
+    <code>SubmitAndWait(1)</code>, then dispatch every ready CQE by kind:</p>
+    <ul>
+      <li><b>recv</b> - pull the buffer id from <code>flags &gt;&gt; 16</code>; generation-check the
+      connection. <code>res &le; 0</code> is EOF/error → teardown. A stale generation → return the
+      buffer, drop the CQE. Otherwise <code>Connection.Complete</code> enqueues the slice; if its
+      recv queue overflows, cancel the multishot and tear down rather than zombify. Re-arm the
+      multishot when the kernel ended it (<code>F_MORE</code> clear).</li>
+      <li><b>send</b> - generation-checked; advance <code>WriteHead</code>; a short send (rare under
+      MSG_WAITALL) resubmits the remainder; a full ack runs <code>CompleteFlush</code>, resuming the
+      handler inline. Error → cancel recv + tear down.</li>
+      <li><b>accept</b> - pop a pooled connection (or build one), set <code>TCP_NODELAY</code>,
+      register it, init its refcount to 2, arm its multishot recv stamped with its generation, and
+      start the handler via <code>RunHandlerAsync</code>. Incremental mode also registers the
+      per-connection buffer ring here.</li>
+      <li><b>client</b> - free the op slot <em>before</em> invoking the completion, so the inline
+      continuation can submit its next op into the same slot without aliasing.</li>
+      <li><b>wake</b> - drain the eventfd counter (the queues drain at the top of the next iteration);
+      re-arm the multishot poll if needed.</li>
+      <li><b>timer</b> - run the registered tickers, then re-arm. See below.</li>
+      <li><b>cancel</b> - the ack of an ASYNC_CANCEL the reactor issued; nothing to route.</li>
+    </ul>
+
+    <h3>The periodic timer and tickers</h3>
+    <p>A single-shot <code>IORING_OP_TIMEOUT</code> (a native <code>__kernel_timespec</code> the
+    reactor owns) fires every ~250&nbsp;ms, re-armed each time. On fire, <code>OnTimerTick</code> runs
+    every callback registered via <code>AddTicker(Action)</code> - on the reactor thread - then
+    re-arms. This is how the pg/redis pools sweep per-command timeouts and replenish connections
+    without a thread-per-command or any cross-thread timer: one timeout SQE per reactor, negligible
+    cost, and the tickers see reactor-owned state directly.</p>
+
+    <h3>SQE production and back-pressure</h3>
+    <p><code>GetSqeOrFlush</code> is the one place SQEs are produced, reactor-thread-only
+    (<code>SINGLE_ISSUER</code> is a promise to the kernel). If the SQ is full mid-batch it flushes
+    with a no-wait <code>enter</code> and retries in a bounded loop - submission never blocks on
+    completions, and a transient full ring back-pressures instead of crashing.</p>
+
+    <h3>Off-reactor hand-off</h3>
+    <p>Four queues carry work from other threads to the reactor, each woken by writing the eventfd
+    (a multishot <code>POLL_ADD</code> turns that into a CQE): a bounded lock-free
+    <code>Mpsc&lt;ushort&gt;</code> for buffer returns, an <code>Mpsc&lt;ulong&gt;</code> for flushes
+    (packing <code>(generation &lt;&lt; 32) | fd</code>), and <code>ConcurrentQueue</code>s for
+    connection recycles and client-op submissions (ref types). Every public entry point first checks
+    <code>CurrentManagedThreadId == reactorThreadId</code> and takes a direct, queue-free fast path
+    when already on the reactor.</p>
+
+    <h3>Recycling</h3>
+    <p><code>Recycle</code> always runs on the reactor: <code>MarkClosed</code> wakes any awaiters,
+    an <code>ASYNC_CANCEL</code> is submitted for the connection's multishot recv tagged with the
+    <em>pre-bump</em> generation (so it matches the armed SQE), leftover buffers return (shared) or
+    the per-connection ring unregisters (incremental), the fd closes, and <code>Clear()</code> bumps
+    the generation - invalidating every stale token and queued reference at once - before the
+    connection is pushed back to the pool (or freed if the pool is at <code>PoolMax</code>).</p>
+
+    <h2>Connection &middot; <span class="dim">Connection/Connection.cs (+ .Read, .Write, .Incremental)</span></h2>
+    <p>One connection is a <code>sealed unsafe partial class</code> that is at once an
+    <code>IValueTaskSource&lt;RecvSnapshot&gt;</code> (the read side) and an
+    <code>IValueTaskSource</code> + <code>IBufferWriter&lt;byte&gt;</code> (the write side). It owns a
+    native write slab, an <code>SpscRecvRing</code> of received slices, and - in incremental mode -
+    its own buffer ring.</p>
+    <ul>
+      <li><b>Two-owner refcount</b> - <code>_refs</code> starts at 2 on accept (the reactor's recv
+      side and the handler). Teardown runs only when it hits 0 via <code>DecRef</code>, so a
+      connection is never recycled under a live handler.</li>
+      <li><b>Generation as the IVTS token</b> - the value-task token handed to an awaiter is the
+      connection's generation snapshot. After a pool recycle bumps the generation,
+      <code>GetResult</code>/<code>GetStatus</code>/<code>OnCompleted</code> see the token mismatch
+      and resolve the stale awaiter to <code>Closed()</code> instead of a torn result.</li>
+      <li><b>Lost-wakeup-free read</b> - <code>ReadAsync</code> uses an <code>_armed</code> flag plus
+      a sticky <code>_pending</code>, with a re-check between arming and returning the task, so a
+      completion that races the arm is never lost. Continuations are synchronous
+      (<code>RunContinuationsAsynchronously = false</code>) - that's what makes resume inline.</li>
+      <li><b>Read snapshot</b> - <code>ReadAsync</code> returns a <code>RecvSnapshot</code> (a tail
+      marker + closed flag). The handler then drains slices up to that tail with
+      <code>TryGetItem</code> / <code>GetSnapshotMemories</code>, and returns their buffers with
+      <code>ReturnBuffers</code> - which routes to the shared ring or the per-connection ring by
+      mode.</li>
+      <li><b>Write side</b> - <code>Write</code>/<code>GetSpan</code>/<code>Advance</code> stage into
+      the fixed write slab; <code>FlushAsync</code> arms the flush IVTS and asks the reactor to submit
+      the send. <code>CompleteFlush</code> (from the send CQE) resets the slab and resumes the
+      handler. A <code>_flushInProgress</code> guard rejects writes mid-flush.</li>
+      <li><b>SendOpFlags</b> - per-connection send flags, defaulting to <code>MSG_WAITALL</code>;
+      <code>ioxide.tls</code> clears it after the kTLS handoff (kTLS rejects MSG_WAITALL).</li>
+    </ul>
+
+    <h2>SpscRecvRing &middot; <span class="dim">Utils/SpscRecvRing.cs</span></h2>
+    <p>A single-producer/single-consumer ring of recv <code>Item</code>s (pointer, buffer id, length,
+    a <code>HasBuffer</code> flag, and the connection generation at enqueue time). The reactor
+    produces (one recv CQE = one enqueue); the handler consumes. Power-of-two capacity, lock-free via
+    a volatile tail/head. <code>SnapshotTail</code> lets a reader capture "everything received so far"
+    and drain exactly up to it with <code>TryDequeueUntil</code> / <code>CountUntil</code>, which is
+    what <code>RecvSnapshot</code> carries. Overflow (the handler falling too far behind) is reported
+    to the reactor, which tears the connection down rather than dropping data silently.</p>
+
+    <h2>Mpsc &middot; <span class="dim">Utils/Mpsc.cs</span></h2>
+    <p>A bounded lock-free multi-producer/single-consumer queue - Vyukov's bounded MPMC specialized to
+    one consumer. Power-of-two capacity, zero allocation after construction; each cell carries a
+    sequence number that coordinates ownership between producers (CAS on the enqueue position) and the
+    lone consumer (plain reads/writes). <code>T</code> is <code>unmanaged</code> so cells are
+    blittable. The enqueue/dequeue positions are cache-line-padded (<code>PaddedLong</code>) to avoid
+    false sharing. Used for the buffer-return and flush hand-off queues.</p>
+
+    <h2>The ring-native client plumbing</h2>
+    <p>How Postgres, Redis, and file I/O run on the same ring as the server.</p>
+    <ul>
+      <li><b>IRingHost</b> (<code>IRingHost.cs</code>) - the contract a reactor implements so clients
+      can submit on it: <code>SubmitConnect/Send/Recv/Read/Write(fd, nint buffer, ..., completion)</code>.
+      Buffers cross as <code>nint</code> because raw pointers can't survive an <code>await</code>.
+      Routing is per-operation (a slot in <code>user_data</code>), so concurrent ops on one fd never
+      collide. Safe from any thread - off-reactor callers are marshalled. <b>IRingCompletion</b> is
+      the one-method callback the reactor invokes on the CQE.</li>
+      <li><b>RingOpSource</b> (<code>Client/RingOpSource.cs</code>) - the awaitable half of a single
+      ring op, reusable across ops and zero-allocation: <code>Prepare()</code> arms it (throwing if
+      one is already in flight), you hand it to a submit as the completion, and you await the returned
+      <code>ValueTask&lt;int&gt;</code>. Continuations are synchronous, so the awaiter resumes inline
+      on the reactor. It clears its in-flight flag <em>before</em> <code>SetResult</code> so the inline
+      continuation can immediately <code>Prepare()</code> the next op.</li>
+      <li><b>RingSocket</b> (<code>Client/RingSocket.cs</code>) - a client TCP socket whose connect,
+      sends, and receives all run on the host's ring. It holds two <code>RingOpSource</code>s
+      (<code>_tx</code>, <code>_rx</code>) so one send and one recv can be in flight at once. Connect
+      takes an IPv4 literal (DNS would block the reactor - resolve up front). The building block for
+      every ring-native protocol client.</li>
+      <li><b>RingPool&lt;T&gt;</b> (<code>Client/RingPool.cs</code>) - a tiny rent/return pool of
+      ring-native resources for one reactor (e.g. file readers). Waiter continuations run synchronously
+      on the returning thread, so an inline return resumes the next renter inline - the
+      no-thread-pool property holds even under contention.</li>
+    </ul>
+
+    <h2>Zero-copy adapters</h2>
+    <ul>
+      <li><b>UnmanagedMemoryManager</b> (<code>Utils/UnmanagedMemoryManager.cs</code>) - a
+      <code>MemoryManager&lt;byte&gt;</code> over a native pointer, so a ring buffer can be exposed as
+      <code>Memory&lt;byte&gt;</code> / <code>ReadOnlySequence&lt;byte&gt;</code> with no copy. Carries
+      the buffer id and generation for safe return; <code>Reset</code> re-points a pooled manager so
+      the pipe reader reuses one instance per held slice instead of allocating per recv.</li>
+      <li><b>RingSegment</b> + <b>RingMemoryExtensions</b> (<code>Utils/</code>) - a
+      <code>ReadOnlySequenceSegment&lt;byte&gt;</code> and <code>ToReadOnlySequence()</code> that
+      stitch several recv buffers into one logical <code>ReadOnlySequence</code>, so a parser sees a
+      fragmented request whole - still pointing straight at the ring buffers (parse before you return
+      them).</li>
+    </ul>
+
+    <h2>BCL bridges</h2>
+    <ul>
+      <li><b>ConnectionPipeReader</b> (<code>Connection/ConnectionPipeReader.cs</code>) - adapts the
+      raw read API to <code>System.IO.Pipelines.PipeReader</code>, allocation-free at steady state: a
+      parked read chains onto the connection's value-task source (no async state machine), recv slices
+      live in pooled segments on a persistent chain, and <code>AdvanceTo</code> trims the consumed
+      front and returns those buffers. It honors <code>examined</code> - when everything held has been
+      examined, it waits for new bytes instead of returning the same data.</li>
+      <li><b>ConnectionPipeWriter</b> / <b>ConnectionStream</b> / <b>ConnectionDualPipe</b>
+      (<code>Connection/</code>) - a <code>PipeWriter</code> over the write slab, a
+      <code>Stream</code> (so <code>SslStream</code> and other BCL code can ride a connection - see
+      <a href="dev-tls.html">TLS internals</a>), and a duplex pipe pairing.</li>
+    </ul>
+
+    <h2>Configuration &middot; <span class="dim">ServerConfig.cs, IoxideRuntime.cs</span></h2>
+    <p><code>ServerConfig</code> is the record of tunables: <code>Port</code> + <code>ExtraPorts</code>,
+    <code>ReactorCount</code>, <code>RingEntries</code> (SQ/CQ depth), the shared-ring knobs
+    (<code>RecvBufferSize</code>, <code>BufferRingEntries</code>), <code>WriteSlabSize</code>,
+    <code>PoolMax</code>, <code>RecvQueueEntries</code>, <code>ListenBacklog</code>, and the
+    incremental-mode knobs (<code>Incremental</code>, <code>MaxConnections</code>,
+    <code>ConnBufRingEntries</code>, <code>IncRecvBufferSize</code>). <code>RecvSnapshot</code> is the
+    readonly struct a read returns (tail + closed flag). <code>IoxideRuntime</code> is the version /
+    wiring doc surface.</p>
+
+    <div class="next"><a href="dev-pg.html">Postgres internals →</a></div>
+  </main>
+</div>
+
+<footer>MIT · Linux 6.1+ · .NET 10 · <a href="https://github.com/MDA2AV/ioxide">github.com/MDA2AV/ioxide</a></footer>
+
+<script>hljs.highlightAll();</script>
+</body>
+</html>

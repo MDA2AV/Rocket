@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Redis internals - ioxide</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="../assets/highlight-dark.min.css">
+  <script src="../assets/highlight.min.js"></script>
+</head>
+<body>
+
+<nav class="top">
+  <a class="brand" href="../"><span>io</span>xide</a>
+  <div class="links">
+    <a href="overview.html">Learn</a>
+    <a href="dev-core.html">Developer</a>
+    <a class="gh" href="https://github.com/MDA2AV/ioxide" aria-label="GitHub"><svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
+  </div>
+</nav>
+
+<div class="layout">
+  <aside class="side">
+    <div class="group">Basics</div>
+    <a href="overview.html">Overview</a>
+    <div class="group">Advanced</div>
+    <a href="architecture.html">Architecture</a>
+    <a href="reactor.html">The Reactor</a>
+    <a href="connection.html">The Connection</a>
+    <a href="multiport.html">Multi-port</a>
+    <a href="clients.html">Ring clients</a>
+    <div class="group">Clients</div>
+    <a href="postgres.html">Postgres</a>
+    <a href="files.html">Files</a>
+    <a href="tls.html">TLS</a>
+    <a href="redis.html">Redis</a>
+    <div class="group">Developer</div>
+    <a href="dev-core.html">Core internals</a>
+    <a href="dev-pg.html">Postgres internals</a>
+    <a href="dev-redis.html" class="here">Redis internals</a>
+    <a href="dev-tls.html">TLS internals</a>
+    <a href="dev-file.html">File internals</a>
+  </aside>
+
+  <main class="doc">
+    <h1>Redis internals</h1>
+    <p class="lead"><code>ioxide.redis</code> is a lean RESP2 client on the same ring as everything
+    else. Its design mirrors <a href="dev-pg.html">the Postgres driver's</a> pipelining and pooling;
+    the value/parse layer borrows the allocation discipline of StackExchange.Redis. Every class
+    below.</p>
+
+    <h2>RedisConnection &middot; <span class="dim">RedisConnection.cs (+ .Commands)</span></h2>
+    <p>One Redis connection over a <code>RingSocket</code>. <code>ConnectAsync</code> connects, then
+    AUTH (ACL-aware) and SELECT inline before returning a ready connection. The generic surface is
+    <code>ExecuteAsync(command, args)</code>; typed helpers (GET/SET/INCR/HSET/LRANGE/ZADD/…) layer on
+    top in <code>RedisConnection.Commands.cs</code>.</p>
+
+    <h3>Pipelining</h3>
+    <p>Identical shape to the pg driver: <code>SubmitCore</code> appends the encoded command into a
+    <b>fixed 512&nbsp;KB</b> native send buffer (overflow throws, never realloc - a pipelined send
+    holds its address), enqueues a <code>Pending</code> (<code>IValueTaskSource&lt;RespValue&gt;</code>),
+    and kicks the sender/reader loops. <code>SenderLoopAsync</code> drains the staged bytes;
+    <code>ReaderLoopAsync</code> pulls one reply per in-flight entry and completes the dequeued
+    <code>Pending</code> FIFO (Redis guarantees reply order on one connection). A documented invariant:
+    there is no <code>await</code> between the sender loop's final drain check and clearing
+    <code>_sending</code>, and completions resume inline, so no command can be stranded - it depends on
+    <code>RingOpSource</code> keeping synchronous continuations. <code>PipelineAsync</code> sends several
+    commands back to back and awaits all replies - one round trip.</p>
+
+    <h3>Command encoding</h3>
+    <p>Command names are a tiny fixed set, so their full pre-framed RESP token
+    (<code>$3\r\nGET\r\n</code>) is computed once and cached in a static
+    <code>ConcurrentDictionary&lt;string, byte[]&gt;</code> - the hot path memcpy's the whole token in
+    one shot, no per-call encoding or framing allocation.</p>
+
+    <h3>Receiving with an examined cursor</h3>
+    <p><code>ReceiveReplyAsync</code> reads into a growable native recv buffer (up to 64&nbsp;MB),
+    compacting the unparsed tail before growth. <code>TryParse</code> reports, on an incomplete reply,
+    how many bytes are needed before a re-parse can make progress (the examined cursor), so a large
+    reply arriving over many recvs isn't re-scanned from the start each time.</p>
+
+    <h3>Timeouts and breakage</h3>
+    <p>Each <code>Pending</code> stamps <code>EnqueuedAtMs</code>; the pool's ticker calls
+    <code>CheckTimeout</code> to tear down a connection whose oldest in-flight command has aged past
+    <code>CommandTimeoutMs</code> (diagnostic <code>RedisException</code>; closing the fd cancels the
+    stuck recv). A transport failure marks <code>IsBroken</code> and the pool evicts.</p>
+
+    <h2>RespProtocol &middot; <span class="dim">RespProtocol.cs</span></h2>
+    <p>The RESP2 codec, a pure static. <code>CommandSize</code>/<code>WriteCommand</code> write a
+    command as a RESP array of bulk strings (the pre-framed name token + each arg). <code>FrameName</code>
+    builds the cached name token. <code>TryParse</code> recursively parses one reply -
+    <code>+</code> simple string, <code>-</code> error, <code>:</code> integer, <code>$</code> bulk
+    (with <code>$-1</code> null), <code>*</code> array (with <code>*-1</code> null), and <code>_</code>
+    (RESP3 null, tolerated) - returning <code>false</code> with a needed-bytes count when the reply
+    isn't fully buffered. <code>ParseLong</code> is strict: optional sign then ASCII digits, with
+    overflow-checked accumulation, so a malformed length breaks the connection cleanly instead of
+    computing a garbage size and wedging. Bulk/array lengths are range-guarded.</p>
+
+    <h2>RespValue &middot; <span class="dim">RespValue.cs</span></h2>
+    <p>A parsed reply, as a <b>value type</b> (struct), so parsing allocates no per-node object -
+    integers, nulls, and booleans are entirely allocation-free; bulk/simple strings and arrays carry
+    the bytes (or element array) they materialized during parse, which outlive the recv buffer.
+    Accessors convert on demand: <code>AsString</code>, <code>Bytes</code>, <code>AsInteger</code>
+    (accepts integer replies and numeric strings, length-checked), <code>AsDouble</code> (accepts
+    integers, numeric strings, and the non-finite tokens <code>inf</code>/<code>-inf</code>/<code>nan</code>
+    that <code>Utf8Parser</code> won't parse - e.g. a ZSCORE of +inf), <code>AsBool</code>,
+    <code>Items</code>, <code>IsNull</code>, <code>IsError</code>.</p>
+
+    <h2>RedisPool &middot; <span class="dim">RedisPool.cs</span></h2>
+    <p>N connections per reactor with round-robin and pipelining, mirroring <code>PgPool</code>:
+    bounded fail-fast opens (<code>WaitForConnectionAsync</code> throws after
+    <code>MaxConnectAttempts</code> instead of hanging), a reactor ticker that sweeps command timeouts
+    and replenishes with jittered backoff, and the cache-aside surface (<code>GetAsync</code>,
+    <code>SetExAsync</code>, <code>DelAsync</code>) plus <code>ExecuteAsync</code> and
+    <code>PipelineAsync</code> (the latter picks one connection so the batch is a real single round
+    trip). One pool per reactor, reactor-thread-only.</p>
+
+    <h2>The value types</h2>
+    <ul>
+      <li><b>RedisArg</b> (<code>RedisArg.cs</code>) - a value-type command argument with implicit
+      conversions from string/byte[]/int/long/double/bool, rendered to bytes for the wire (double via
+      round-trip "R", bool as "1"/"0").</li>
+      <li><b>RedisCommand</b> (in <code>RedisConnection.cs</code>) - a (name, args) pair for
+      <code>PipelineAsync</code>; the name is pre-framed to its RESP token at construction.</li>
+      <li><b>RedisOptions</b> (<code>RedisOptions.cs</code>) - host/port, password + optional ACL user,
+      database index, <code>PoolSize</code>, <code>CommandTimeoutMs</code>.</li>
+      <li><b>RedisException</b> (<code>RedisException.cs</code>) - a <code>-ERR</code> reply or a
+      transport failure.</li>
+    </ul>
+
+    <p class="lead" style="margin-top:2rem">Note: RESP2 only (no <code>HELLO</code>), and the FIFO
+    one-reply-per-request model has no out-of-band/push path - pub/sub on a RESP2 connection would
+    need a dedicated connection, as StackExchange.Redis does.</p>
+
+    <div class="next"><a href="dev-tls.html">TLS internals →</a></div>
+  </main>
+</div>
+
+<footer>MIT · Linux 6.1+ · .NET 10 · <a href="https://github.com/MDA2AV/ioxide">github.com/MDA2AV/ioxide</a></footer>
+
+<script>hljs.highlightAll();</script>
+</body>
+</html>

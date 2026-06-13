@@ -16,6 +16,9 @@ public sealed record ServerConfig
     // io_uring SQ/CQ depth.
     public uint   RingEntries  { get; init; } = 8192;
 
+    /// <summary>listen() backlog per SO_REUSEPORT listener - the accept-queue depth for connection bursts.</summary>
+    public int    ListenBacklog { get; init; } = 1024;
+
     // Shared buffer ring (Incremental == false).
     public int    RecvBufferSize    { get; init; } = 32 * 1024;
     public int    BufferRingEntries { get; init; } = 4096;

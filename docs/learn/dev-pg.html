@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Postgres internals - ioxide</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="../assets/highlight-dark.min.css">
+  <script src="../assets/highlight.min.js"></script>
+</head>
+<body>
+
+<nav class="top">
+  <a class="brand" href="../"><span>io</span>xide</a>
+  <div class="links">
+    <a href="overview.html">Learn</a>
+    <a href="dev-core.html">Developer</a>
+    <a class="gh" href="https://github.com/MDA2AV/ioxide" aria-label="GitHub"><svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
+  </div>
+</nav>
+
+<div class="layout">
+  <aside class="side">
+    <div class="group">Basics</div>
+    <a href="overview.html">Overview</a>
+    <div class="group">Advanced</div>
+    <a href="architecture.html">Architecture</a>
+    <a href="reactor.html">The Reactor</a>
+    <a href="connection.html">The Connection</a>
+    <a href="multiport.html">Multi-port</a>
+    <a href="clients.html">Ring clients</a>
+    <div class="group">Clients</div>
+    <a href="postgres.html">Postgres</a>
+    <a href="files.html">Files</a>
+    <a href="tls.html">TLS</a>
+    <a href="redis.html">Redis</a>
+    <div class="group">Developer</div>
+    <a href="dev-core.html">Core internals</a>
+    <a href="dev-pg.html" class="here">Postgres internals</a>
+    <a href="dev-redis.html">Redis internals</a>
+    <a href="dev-tls.html">TLS internals</a>
+    <a href="dev-file.html">File internals</a>
+  </aside>
+
+  <main class="doc">
+    <h1>Postgres internals</h1>
+    <p class="lead"><code>ioxide.pg</code> is a compact Postgres v3 driver built directly on
+    <a href="dev-core.html">the core's</a> <code>RingSocket</code>: connect, handshake, and every
+    query run on the per-reactor ring and resume inline. It pipelines, auto-prepares, and times out -
+    here is every class.</p>
+
+    <h2>PgConnection &middot; <span class="dim">PgConnection.cs</span></h2>
+    <p>One Postgres connection over one <code>RingSocket</code>. Opening it never blocks the reactor
+    (connect and the startup handshake are ring ops). The class is the pipelining engine.</p>
+
+    <h3>Buffers</h3>
+    <p>Two native buffers, held as <code>nint</code> so the async flow can do address arithmetic
+    without an unsafe context (only small parse/format helpers go unsafe). <code>_send</code> is a
+    <b>fixed 512&nbsp;KB</b> block that is <em>never</em> realloc'd - a pipelined send holds its
+    address across an <code>await</code>, so growth would dangle; overflow throws instead.
+    <code>_recv</code> starts at 64&nbsp;KB and grows by doubling, reclaiming the consumed prefix
+    first, up to <code>PgOptions.MaxReceiveBytes</code> (default 64&nbsp;MB) - a single backend message
+    larger than that breaks the connection.</p>
+
+    <h3>Pipelining</h3>
+    <p>Each query is fire-and-stage: the message is formatted synchronously into <code>_send</code>,
+    a <code>Pending</code> (an <code>IValueTaskSource&lt;PgResult&gt;</code>) is enqueued on
+    <code>_inflight</code>, and two self-perpetuating loops are kicked if not already running.
+    <code>SenderLoopAsync</code> drains <code>[_sendOffset, _sendEnd)</code>, snapshotting
+    <code>_sendEnd</code> so commands appended mid-send are picked up next cycle, and compacts the
+    consumed prefix each cycle so the fixed buffer doesn't march to capacity under sustained load.
+    <code>ReaderLoopAsync</code> reads one message at a time and routes it to
+    <code>_inflight.Peek()</code>, completing and dequeuing the front waiter at
+    <code>ReadyForQuery</code>. FIFO routing is correct because Postgres guarantees in-order replies
+    on one connection. Everything is single-threaded per reactor, so the queue and the
+    <code>_sending</code>/<code>_reading</code> flags need no locks.</p>
+
+    <h3>Simple vs extended (prepared)</h3>
+    <p><code>QueryAsync(sql)</code> sends a simple <code>Query</code> ('Q'). The parameterized
+    overload <code>QueryAsync(sql, args)</code> uses the extended protocol: <code>SubmitParamAsync</code>
+    auto-prepares - SQL text maps to a server statement name (<code>s0</code>, <code>s1</code>, …)
+    cached per connection in <code>_prepared</code>; first use emits <code>Parse</code> + <code>Bind</code>
+    + <code>Execute</code> + <code>Sync</code>, reuse skips straight to <code>Bind</code>/<code>Execute</code>.
+    The trailing <code>Sync</code> makes each command produce exactly one <code>ReadyForQuery</code>, so
+    it routes through the same FIFO machinery. The parameter span is consumed into <code>_send</code>
+    <em>before</em> the first await, so it never crosses one. The cache is bounded
+    (<code>MaxPreparedStatements</code>): past the cap, new SQL uses the unnamed statement (re-parsed
+    each call, never accumulated) so a connection can't leak server-side statements; a cached
+    statement invalidated server-side (SQLSTATE <code>0A000</code>/<code>26000</code>) is evicted so the
+    next call re-parses instead of failing forever.</p>
+
+    <h3>Row results</h3>
+    <p>For the default single-value path, the reader captures the first field of the first row
+    (zero-copy via a <code>ref struct</code> view) into <code>PgResult.Value</code>. For the
+    row-streaming overloads (an <code>onRow</code> handler), each <code>DataRow</code> is handed to the
+    callback inline as a <code>PgRow</code>; and the <code>RowDescription</code> is parsed into
+    <code>PgColumn[]</code> (names + type OIDs) <em>only</em> when streaming - the single-value path
+    skips it entirely, so it stays allocation-free.</p>
+
+    <h3>Timeouts and breakage</h3>
+    <p>A server <code>ErrorResponse</code> throws a <code>PgException</code> but leaves the connection
+    usable - the stream resyncs at the next <code>ReadyForQuery</code>. A transport failure (or
+    malformed framing) sets <code>IsBroken</code> and the pool evicts it. Each <code>Pending</code>
+    stamps <code>EnqueuedAtMs</code>; <code>CheckTimeout</code> (called by the pool's reactor-thread
+    ticker) tears the connection down with a diagnostic <code>PgException</code> if its oldest
+    in-flight command has aged past <code>CommandTimeoutMs</code> - closing the fd cancels the stuck
+    ring recv, so a silent backend can't park a query forever.</p>
+
+    <h2>PgProtocol &middot; <span class="dim">PgProtocol.cs</span></h2>
+    <p>A pure (no I/O) format/parse layer - "knows nothing about io_uring, reactors, or sockets."
+    <code>WriteStartup</code> sends protocol 3.0 with user + database. <code>WriteQuery</code> frames a
+    simple query. <code>WriteExtended</code> frames the optional <code>Parse</code> + <code>Bind</code>
+    (text-format params and results) + <code>Execute</code> (all rows) + <code>Sync</code>;
+    <code>ExtendedLength</code> sizes it up front. <code>TryReadMessage</code> walks the
+    self-describing length to frame one backend message (throwing on malformed framing).
+    <code>ParseRowDescription</code> turns a <code>'T'</code> body into <code>PgColumn[]</code>;
+    <code>TryReadFirstField</code> locates the first <code>DataRow</code> field; <code>ReadError</code>
+    parses an <code>ErrorResponse</code> into severity + SQLSTATE + message (folding in DETAIL/HINT,
+    often the most useful part). The SASL helpers (<code>WriteSaslInitialResponse</code> /
+    <code>WriteSaslResponse</code> / <code>OffersScramSha256</code>) bridge to <code>PgScram</code>.</p>
+
+    <h2>PgPool &middot; <span class="dim">PgPool.cs</span></h2>
+    <p>N connections on one reactor (default 8), round-robin across them so each multiplexes many
+    in-flight commands - the connections stay busy instead of one round-trip at a time. One pool per
+    reactor, created from <code>OnStart</code>; not thread-safe by design (every member runs on the
+    owning reactor thread).</p>
+    <ul>
+      <li><b>Pick</b> - round-robin over healthy connections, evicting and replacing any found broken
+      (which kicks a background re-open).</li>
+      <li><b>Fail-fast open</b> - opens are coalesced (one in flight at a time when the pool is empty).
+      <code>WaitForConnectionAsync</code> drives bounded connect attempts and throws a clear
+      <code>PgException</code> after <code>MaxConnectAttempts</code> rather than parking a query
+      forever when the backend is unreachable.</li>
+      <li><b>The ticker</b> - registered with <code>reactor.AddTicker</code>, it runs every ~250&nbsp;ms
+      on the reactor: it sweeps connections for command timeouts (tearing down + disposing the casualty)
+      and replenishes the pool toward <code>PoolSize</code> with a jittered backoff, so a recovering
+      backend isn't hammered by every reactor in lockstep.</li>
+    </ul>
+
+    <h2>PgScram &middot; <span class="dim">PgScram.cs</span></h2>
+    <p>A correct RFC 7677 SCRAM-SHA-256 implementation (no channel binding): the <code>n,,</code> gs2
+    header, a 144-bit client nonce, PBKDF2 salted password, ClientKey/StoredKey/ClientSignature/proof,
+    and a constant-time server-signature verify (<code>FixedTimeEquals</code>). Trust auth (code 0) is
+    the other supported path; MD5, cleartext, GSS, and SASL channel binding are explicitly unsupported
+    and fail with a clear error rather than a silent hang.</p>
+
+    <h2>The value types</h2>
+    <ul>
+      <li><b>PgResult</b> (<code>PgResult.cs</code>) - a <code>readonly record struct</code>:
+      <code>Value</code> (first column of the first row, text), <code>Rows</code> (count),
+      <code>CommandTag</code> (e.g. "SELECT 1"), and <code>Columns</code> (metadata for row-streaming
+      queries; empty otherwise).</li>
+      <li><b>PgRow</b> (<code>PgRow.cs</code>) - a <code>readonly ref struct</code> viewing one
+      <code>DataRow</code> in place over the receive buffer, valid only during the callback. Fields are
+      text-format bytes by index (<code>Field(int)</code>, bounds-checked) or by name
+      (<code>Field(string)</code> / <code>Ordinal(name)</code>, requiring captured columns). No
+      per-row allocation.</li>
+      <li><b>PgColumn</b> (<code>PgColumn.cs</code>) - one column's metadata from a RowDescription:
+      name, table OID, column attribute, type OID, size, modifier, format code.</li>
+      <li><b>PgParam</b> (<code>PgParam.cs</code>) - a value-type parameter (<code>Int</code>,
+      <code>Text</code>, or <code>Null</code>), text-encoded on the wire, sized via a
+      <code>MaxBytes</code> upper bound so the send buffer can be pre-checked.</li>
+      <li><b>PgOptions</b> (<code>PgOptions.cs</code>) - host/port/user/database/password,
+      <code>PoolSize</code>, <code>MaxReceiveBytes</code>, <code>CommandTimeoutMs</code>.</li>
+      <li><b>PgException</b> (<code>PgException.cs</code>) - server errors carry severity + SQLSTATE;
+      transport errors carry the failed op + errno. Server errors leave the connection usable;
+      transport errors mark it broken.</li>
+    </ul>
+
+    <div class="next"><a href="dev-redis.html">Redis internals →</a></div>
+  </main>
+</div>
+
+<footer>MIT · Linux 6.1+ · .NET 10 · <a href="https://github.com/MDA2AV/ioxide">github.com/MDA2AV/ioxide</a></footer>
+
+<script>hljs.highlightAll();</script>
+</body>
+</html>

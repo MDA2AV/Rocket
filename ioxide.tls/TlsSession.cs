@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+
 namespace ioxide.tls;
 
 /// <summary>
@@ -6,11 +8,23 @@ namespace ioxide.tls;
 /// </summary>
 public sealed unsafe class TlsSession : IDisposable
 {
+    // Defensive cap on plaintext produced by a single Decrypt. In normal operation this is bounded
+    // by the ciphertext slice fed per call (one recv buffer) - decryption never expands - so the cap
+    // is a guard against a pathological stream, not the everyday bound.
+    private const int MaxPlaintextBytes = 8 * 1024 * 1024;
+
     private readonly nint _ssl;
     private readonly nint _rbio;
     private byte[] _plain = new byte[16 * 1024];
     private int _plainLen;
     private bool _disposed;
+
+    private GCHandle _handle;   // roots this session so the keylog callback can reach it via SSL ex_data
+    private int _fd = -1;       // set once kTLS TX is enabled - the fd for the teardown close_notify
+    private bool _txEnabled;
+
+    /// <summary>The captured TLS 1.3 server traffic secret (set by the keylog callback during the handshake).</summary>
+    internal byte[]? ServerSecret;
 
     /// <summary>True once the peer sent close_notify.</summary>
     public bool Closed { get; private set; }
@@ -19,6 +33,14 @@ public sealed unsafe class TlsSession : IDisposable
     {
         _ssl = ssl;
         _rbio = rbio;
+    }
+
+    internal void AttachHandle(GCHandle handle) => _handle = handle;
+
+    internal void MarkTxEnabled(int fd)
+    {
+        _fd = fd;
+        _txEnabled = true;
     }
 
     /// <summary>
@@ -42,7 +64,11 @@ public sealed unsafe class TlsSession : IDisposable
         {
             if (_plain.Length - _plainLen < 4 * 1024)
             {
-                Array.Resize(ref _plain, _plain.Length * 2);
+                if (_plain.Length >= MaxPlaintextBytes)
+                {
+                    throw new IOException($"TLS plaintext exceeds {MaxPlaintextBytes} bytes in one decrypt");
+                }
+                Array.Resize(ref _plain, Math.Min(_plain.Length * 2, MaxPlaintextBytes));
             }
 
             int n;
@@ -73,6 +99,18 @@ public sealed unsafe class TlsSession : IDisposable
             return;
         }
         _disposed = true;
+
+        // Clean server-side teardown: send close_notify so the peer can tell end-of-stream from a
+        // truncation. Skip if the peer already closed, or if kTLS TX was never enabled (no record path).
+        if (_txEnabled && !Closed)
+        {
+            Ktls.SendCloseNotify(_fd);
+        }
+
         OpenSsl.SSL_free(_ssl);   // frees both BIOs
+        if (_handle.IsAllocated)
+        {
+            _handle.Free();
+        }
     }
 }

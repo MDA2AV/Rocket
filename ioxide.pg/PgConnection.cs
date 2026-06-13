@@ -16,7 +16,10 @@ public sealed class PgConnection : IDisposable
 {
     private const int InitialBufferSize = 64 * 1024;
     private const int SendBufferSize = 512 * 1024;   // fixed: a pipelined send holds _send's address, so it is never realloc'd
-    private const int MaxBufferSize = 1 << 20;
+
+    // Auto-prepared statement cache cap; past it, new SQL uses the unnamed statement (re-parsed each
+    // call, not cached) so a connection can't accumulate unbounded server-side prepared statements.
+    private const int MaxPreparedStatements = 256;
 
     private readonly RingSocket _socket;
 
@@ -26,6 +29,7 @@ public sealed class PgConnection : IDisposable
     private int _sendCapacity;
     private nint _recv;
     private int _recvCapacity;
+    private readonly int _maxBufferSize;   // ceiling on a single backend message (PgOptions.MaxReceiveBytes)
 
     private int _received;   // valid bytes in _recv
     private int _scan;       // start of the first unparsed message
@@ -46,9 +50,10 @@ public sealed class PgConnection : IDisposable
     /// <summary>Transport-level failure happened; the connection must be discarded, not reused.</summary>
     public bool IsBroken { get; private set; }
 
-    private unsafe PgConnection(RingSocket socket)
+    private unsafe PgConnection(RingSocket socket, int maxBufferSize)
     {
         _socket = socket;
+        _maxBufferSize = maxBufferSize;
         _send = (nint)NativeMemory.Alloc(SendBufferSize);
         _sendCapacity = SendBufferSize;
         _recv = (nint)NativeMemory.Alloc(InitialBufferSize);
@@ -63,7 +68,7 @@ public sealed class PgConnection : IDisposable
     public static async Task<PgConnection> ConnectAsync(IRingHost host, PgOptions options)
     {
         RingSocket socket = RingSocket.CreateTcp(host);
-        var connection = new PgConnection(socket);
+        var connection = new PgConnection(socket, options.MaxReceiveBytes);
 
         try
         {
@@ -148,11 +153,11 @@ public sealed class PgConnection : IDisposable
     }
 
     /// <summary>
-    /// Run one simple query and collect its result (first column of the first row, the row count,
-    /// and the command tag). Throws <see cref="PgException"/> on a server error - after consuming
-    /// the rest of the response, so the connection stays usable.
+    /// Run one simple query, pipelined onto this connection (resumes inline on the reactor): collects
+    /// the first column of the first row, the row count, and the command tag. Throws
+    /// <see cref="PgException"/> on a server error - after the stream resyncs at ReadyForQuery, so the
+    /// connection stays usable.
     /// </summary>
-    /// <summary>Run one simple query, pipelined onto this connection. Resumes inline on the reactor.</summary>
     public ValueTask<PgResult> QueryAsync(string sql) => SubmitAsync(sql, null);
 
     /// <summary>
@@ -177,25 +182,36 @@ public sealed class PgConnection : IDisposable
         {
             return ValueTask.FromException<PgResult>(new PgException("connection is broken"));
         }
+        if (args.Length > short.MaxValue)
+        {
+            return ValueTask.FromException<PgResult>(
+                new PgException($"too many parameters ({args.Length}); the Bind message caps at {short.MaxValue}"));
+        }
 
         bool parse = !_prepared.TryGetValue(sql, out string? name);
-        name ??= "s" + _statementCounter++;
+        if (parse)
+        {
+            // Cache full: fall back to the unnamed statement - the server re-parses it each call and
+            // never accumulates, so distinct-SQL churn can't leak server-side prepared statements.
+            name = _prepared.Count < MaxPreparedStatements ? "s" + _statementCounter++ : "";
+        }
 
         try
         {
-            WriteExtendedAt(parse, name, sql, args);   // append to _send; throws on overflow before any state changes
+            WriteExtendedAt(parse, name!, sql, args);   // append to _send; throws on overflow before any state changes
         }
         catch (PgException ex)
         {
             return ValueTask.FromException<PgResult>(ex);
         }
 
-        if (parse)
+        bool cached = parse && name!.Length != 0;
+        if (cached)
         {
-            _prepared[sql] = name;
+            _prepared[sql] = name!;
         }
 
-        var pending = new Pending(onRow) { PreparedSql = parse ? sql : null };
+        var pending = new Pending(onRow) { PreparedSql = cached ? sql : null, Sql = sql, EnqueuedAtMs = Environment.TickCount64 };
         _inflight.Enqueue(pending);
 
         if (!_sending) { _sending = true; _ = SenderLoopAsync(); }
@@ -221,7 +237,7 @@ public sealed class PgConnection : IDisposable
             return ValueTask.FromException<PgResult>(ex);
         }
 
-        var pending = new Pending(onRow);
+        var pending = new Pending(onRow) { EnqueuedAtMs = Environment.TickCount64 };
         _inflight.Enqueue(pending);
 
         if (!_sending) { _sending = true; _ = SenderLoopAsync(); }
@@ -291,11 +307,20 @@ public sealed class PgConnection : IDisposable
 
                 switch (message.Tag)
                 {
+                    case PgProtocol.RowDescription:
+                        // Materialize columns only when the caller streams rows; the single-value path
+                        // skips this so QueryAsync(sql) stays allocation-free.
+                        if (front.OnRow != null)
+                        {
+                            front.Columns = PgProtocol.ParseRowDescription(Body(message));
+                        }
+                        break;
+
                     case PgProtocol.DataRow:
                         front.Rows++;
                         if (front.OnRow != null)
                         {
-                            InvokeRow(front.OnRow, in message);
+                            InvokeRow(front.OnRow, front.Columns, in message);
                         }
                         else if (!front.ValueCaptured)
                         {
@@ -320,6 +345,12 @@ public sealed class PgConnection : IDisposable
                             // The Parse failed - the statement was never created, so drop it and a retry re-parses.
                             _prepared.Remove(front.PreparedSql);
                             front.PreparedSql = null;
+                        }
+                        else if (front.Sql != null && IsStaleStatement(front.Error))
+                        {
+                            // A cached statement was invalidated server-side (e.g. a schema change):
+                            // evict it so the next call re-parses instead of failing on every call.
+                            _prepared.Remove(front.Sql);
                         }
                         break;
 
@@ -348,6 +379,28 @@ public sealed class PgConnection : IDisposable
         }
     }
 
+    // Reactor-thread (pool ticker): if the oldest in-flight command is older than the timeout, tear
+    // the connection down - fail its waiters with a diagnostic error and mark it broken. The pool then
+    // disposes it, and closing the fd cancels the stuck ring recv/send. Returns true if it timed out.
+    internal bool CheckTimeout(long nowMs, int timeoutMs, string host, ushort port)
+    {
+        if (timeoutMs <= 0 || _inflight.Count == 0)
+        {
+            return false;
+        }
+        long age = nowMs - _inflight.Peek().EnqueuedAtMs;
+        if (age <= timeoutMs)
+        {
+            return false;
+        }
+
+        int inflight = _inflight.Count;
+        IsBroken = true;
+        FailAll(new PgException(
+            $"pg command timed out after {timeoutMs} ms ({inflight} in flight on {host}:{port}, oldest sent ~{age} ms ago)"));
+        return true;
+    }
+
     // One pipelined command: accumulates its reply and completes its waiter (inline on the reactor).
     private sealed class Pending : IValueTaskSource<PgResult>
     {
@@ -360,6 +413,9 @@ public sealed class PgConnection : IDisposable
         public string CommandTag = "";
         public PgException? Error;
         public string? PreparedSql;   // set when this command included a Parse, so it can be evicted on error
+        public string? Sql;           // SQL text (extended protocol) - for stale-statement cache eviction
+        public PgColumn[]? Columns;   // captured from RowDescription for row-streaming queries
+        public long EnqueuedAtMs;     // Environment.TickCount64 at enqueue - drives the command-timeout sweep
 
         public Pending(PgRowHandler? onRow) => OnRow = onRow;
         public short Version => _core.Version;
@@ -367,7 +423,7 @@ public sealed class PgConnection : IDisposable
         public void Complete()
         {
             if (Error != null) _core.SetException(Error);
-            else _core.SetResult(new PgResult(Value, Rows, CommandTag));
+            else _core.SetResult(new PgResult(Value, Rows, CommandTag, Columns ?? []));
         }
 
         public void Fail(PgException ex) => _core.SetException(ex);
@@ -466,10 +522,10 @@ public sealed class PgConnection : IDisposable
             return;
         }
 
-        if (_recvCapacity >= MaxBufferSize)
+        if (_recvCapacity >= _maxBufferSize)
         {
             IsBroken = true;
-            throw new PgException($"backend message exceeds {MaxBufferSize} bytes");
+            throw new PgException($"backend message exceeds {_maxBufferSize} bytes");
         }
 
         _recvCapacity *= 2;
@@ -478,20 +534,24 @@ public sealed class PgConnection : IDisposable
 
     /// <summary>
     /// Run one simple query, streaming every DataRow to <paramref name="onRow"/> (inline, on the
-    /// reactor) and returning the row count. Server errors throw after the stream resyncs at
-    /// ReadyForQuery, same as <see cref="QueryAsync"/>.
+    /// reactor) and returning the row count. <see cref="PgRow.Columns"/> is populated for by-name
+    /// access. Server errors throw after the stream resyncs at ReadyForQuery, like <see cref="QueryAsync(string)"/>.
     /// </summary>
-    /// <summary>Run one simple query, streaming each DataRow to <paramref name="onRow"/>; pipelined.</summary>
     public async ValueTask<int> QueryRowsAsync(string sql, PgRowHandler onRow)
     {
         PgResult result = await SubmitAsync(sql, onRow);
         return result.Rows;
     }
 
-    private unsafe void InvokeRow(PgRowHandler onRow, in Message message)
+    private unsafe void InvokeRow(PgRowHandler onRow, PgColumn[]? columns, in Message message)
     {
-        onRow(new PgRow(new ReadOnlySpan<byte>((void*)(_recv + message.BodyStart), message.BodyLength)));
+        onRow(new PgRow(new ReadOnlySpan<byte>((void*)(_recv + message.BodyStart), message.BodyLength), columns));
     }
+
+    // SQLSTATEs that mean a cached prepared statement is no longer valid - its plan/result type
+    // changed (0A000) or it doesn't exist on the server (26000). Evicting lets the next call re-Parse.
+    private static bool IsStaleStatement(PgException error) =>
+        error.SqlState is "0A000" or "26000";
 
     private unsafe bool ScramOffered(in Message message)
     {

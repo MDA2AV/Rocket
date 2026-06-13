@@ -17,6 +17,7 @@ internal static unsafe partial class OpenSsl
     public const int TLS1_3_VERSION = 0x0304;
     public const int SSL_TLSEXT_ERR_OK = 0;
     public const int SSL_TLSEXT_ERR_NOACK = 3;
+    public const int CRYPTO_EX_INDEX_SSL = 0;
 
     [LibraryImport(Ssl)] public static partial nint TLS_server_method();
     [LibraryImport(Ssl)] public static partial nint SSL_CTX_new(nint method);
@@ -39,6 +40,12 @@ internal static unsafe partial class OpenSsl
     [LibraryImport(Ssl)] public static partial int SSL_read(nint ssl, byte* buf, int num);
     [LibraryImport(Ssl)] public static partial int SSL_get_error(nint ssl, int ret);
 
+    // Per-SSL user data: associate a managed object (a GCHandle) with an SSL so the static keylog
+    // callback can find the right session without a global, pointer-keyed map.
+    [LibraryImport(Ssl)] public static partial int SSL_set_ex_data(nint ssl, int idx, nint data);
+    [LibraryImport(Ssl)] public static partial nint SSL_get_ex_data(nint ssl, int idx);
+    [LibraryImport(Crypto)] public static partial int CRYPTO_get_ex_new_index(int classIndex, long argl, nint argp, nint newFunc, nint dupFunc, nint freeFunc);
+
     [LibraryImport(Crypto)] public static partial nint BIO_new(nint type);
     [LibraryImport(Crypto)] public static partial nint BIO_s_mem();
     [LibraryImport(Crypto)] public static partial int BIO_write(nint bio, byte* data, int dlen);
@@ -51,11 +58,19 @@ internal static unsafe partial class OpenSsl
     {
         ulong code = ERR_get_error();
         if (code == 0) return "no OpenSSL error";
+
         Span<byte> buf = stackalloc byte[256];
+        string message;
         fixed (byte* p = buf)
         {
             ERR_error_string_n(code, p, (nuint)buf.Length);
-            return Marshal.PtrToStringUTF8((nint)p) ?? code.ToString();
+            message = Marshal.PtrToStringUTF8((nint)p) ?? code.ToString();
         }
+
+        // Drain any piggy-backed errors so the next LastError() isn't stale.
+        while (ERR_get_error() != 0)
+        {
+        }
+        return message;
     }
 }
