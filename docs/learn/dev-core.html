@@ -13,41 +13,37 @@
 <nav class="top">
   <a class="brand" href="../"><span>io</span>xide</a>
   <div class="links">
-    <a href="overview.html">Learn</a>
-    <a href="dev-core.html">Developer</a>
+    <a href="../">Home</a>
     <a class="gh" href="https://github.com/MDA2AV/ioxide" aria-label="GitHub"><svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
   </div>
 </nav>
 
 <div class="layout">
   <aside class="side">
-    <div class="group">Basics</div>
-    <a href="overview.html">Overview</a>
-    <div class="group">Advanced</div>
-    <a href="architecture.html">Architecture</a>
-    <a href="reactor.html">The Reactor</a>
-    <a href="connection.html">The Connection</a>
-    <a href="multiport.html">Multi-port</a>
-    <a href="clients.html">Ring clients</a>
-    <div class="group">Clients</div>
+    <div class="group">Guide</div>
+    <a href="overview.html">Introduction</a>
     <a href="postgres.html">Postgres</a>
-    <a href="files.html">Files</a>
-    <a href="tls.html">TLS</a>
     <a href="redis.html">Redis</a>
-    <div class="group">Developer</div>
-    <a href="dev-core.html" class="here">Core internals</a>
-    <a href="dev-pg.html">Postgres internals</a>
-    <a href="dev-redis.html">Redis internals</a>
-    <a href="dev-tls.html">TLS internals</a>
-    <a href="dev-file.html">File internals</a>
+    <a href="tls.html">TLS</a>
+    <a href="files.html">Static files</a>
+    <a href="multiport.html">Multi-port</a>
+    <a href="clients.html">Custom clients</a>
+    <div class="group lead">Internals</div>
+    <a href="architecture.html">Architecture</a>
+    <div class="group sub">Packages</div>
+    <a href="dev-core.html" class="pkg here">ioxide <span class="muted">core</span></a>
+    <a href="dev-pg.html" class="pkg">ioxide.pg</a>
+    <a href="dev-redis.html" class="pkg">ioxide.redis</a>
+    <a href="dev-tls.html" class="pkg">ioxide.tls</a>
+    <a href="dev-file.html" class="pkg">ioxide.file</a>
   </aside>
 
   <main class="doc">
     <h1>Core internals</h1>
     <p class="lead">A class-by-class tour of the <code>ioxide</code> core - the reactor, the ring,
     the connection, and the plumbing that lets a normal <code>async</code> handler run with no
-    thread pool underneath it. This is the deep version of <a href="reactor.html">The Reactor</a>
-    and <a href="connection.html">The Connection</a>: every type, what it is, and how it works.</p>
+    thread pool underneath it. This is the class-level companion to the
+    <a href="architecture.html">Architecture</a> overview: every type, what it is, and how it works.</p>
 
     <h2>The model in one paragraph</h2>
     <p>One <code>Reactor</code> = one OS thread + one io_uring + one SO_REUSEPORT listener + one
@@ -91,6 +87,24 @@
       (acquire), process the whole batch, publish the consumed head once (release) - one barrier per
       batch, not per CQE.</li>
     </ul>
+<p class="src"><b>Ring.cs</b> · claim the next SQE slot, or return null when the ring is full</p>
+<pre><code class="language-csharp">[MethodImpl(MethodImplOptions.AggressiveInlining)]
+public IoUringSqe* GetSqe()
+{
+    uint head = Volatile.Read(ref *_sqHead);
+    if (_sqeTail - head &gt;= _sqEntries)
+    {
+        return null;                 // full - the caller must flush and retry
+    }
+
+    uint slot = _sqeTail &amp; _sqMask;
+    if (_hasSqArray)
+    {
+        _sqArray[slot] = slot;       // skipped under NO_SQARRAY (6.6+)
+    }
+    _sqeTail++;
+    return &amp;_sqes[slot];
+}</code></pre>
 
     <h2>Reactor &middot; <span class="dim">Reactor/Reactor.cs (+ .Incremental, .RingHost, .Handler)</span></h2>
     <p>The reactor is one class split across four partial files. <code>Reactor.cs</code> holds the
@@ -107,6 +121,17 @@
     bumps its generation every time it is recycled, so a straggler CQE from a closed-and-reused fd
     carries a stale generation and is detected and dropped instead of corrupting the fd's new tenant.
     Kinds: accept, recv, send, wake, client, cancel, timer.</p>
+<p class="src"><b>Reactor.cs</b> · packing the routing key into user_data, and unpacking it on the CQE</p>
+<pre><code class="language-csharp">private const int KindShift = 56;
+private const int GenShift  = 32;
+
+private static ulong Tag(byte kind, ushort gen, int fd)
+    =&gt; ((ulong)kind &lt;&lt; KindShift) | ((ulong)gen &lt;&lt; GenShift) | (uint)fd;
+
+// ...and on dispatch the CQE's user_data unpacks straight back out:
+byte   kind = (byte)(cqe.user_data &gt;&gt; KindShift);
+ushort gen  = (ushort)(cqe.user_data &gt;&gt; GenShift);
+int    fd   = (int)(uint)cqe.user_data;</code></pre>
 
     <h3>Startup - <code>Run()</code></h3>
     <p>Runs on the reactor's own thread, in order: record the managed thread id (every fast-path
@@ -120,6 +145,31 @@
     <h3>The loop and dispatch</h3>
     <p><code>LoopShared</code> / <code>LoopIncremental</code> drain the hand-off queues, then
     <code>SubmitAndWait(1)</code>, then dispatch every ready CQE by kind:</p>
+<p class="src"><b>Reactor.cs</b> · the loop - drain the hand-offs, one syscall, then a batched dispatch</p>
+<pre><code class="language-csharp">private void LoopShared()
+{
+    while (true)
+    {
+        DrainReturnQ();      // buffer returns from off-reactor handlers
+        DrainFlushQ();       // flushes
+        DrainRecycleQ();     // connection teardowns
+        DrainRemoteOps();    // client-op submissions
+
+        int rc = Ring.SubmitAndWait(1);   // submit everything staged, wait for &gt;= 1 CQE
+        if (rc &lt; 0 &amp;&amp; rc != -EINTR &amp;&amp; rc != -EAGAIN &amp;&amp; rc != -EBUSY)
+        {
+            Console.Error.WriteLine($"[r{Id}] io_uring_enter failed: {rc}");
+            break;
+        }
+
+        uint ready = Ring.CqReady();      // read the CQ tail once
+        for (uint i = 0; i &lt; ready; i++)
+        {
+            Dispatch(in Ring.CqeAt(i));   // dispatching frequently runs handler code inline
+        }
+        Ring.CqAdvance(ready);            // publish the consumed head once
+    }
+}</code></pre>
     <ul>
       <li><b>recv</b> - pull the buffer id from <code>flags &gt;&gt; 16</code>; generation-check the
       connection. <code>res &le; 0</code> is EOF/error → teardown. A stale generation → return the
@@ -148,12 +198,51 @@
     re-arms. This is how the pg/redis pools sweep per-command timeouts and replenish connections
     without a thread-per-command or any cross-thread timer: one timeout SQE per reactor, negligible
     cost, and the tickers see reactor-owned state directly.</p>
+<p class="src"><b>Reactor.cs</b> · a single-shot IORING_OP_TIMEOUT, re-armed after every tick</p>
+<pre><code class="language-csharp">private void ArmTimer()
+{
+    IoUringSqe* sqe = GetSqeOrFlush();
+    sqe-&gt;opcode    = IORING_OP_TIMEOUT;
+    sqe-&gt;addr      = (ulong)_timerTs;     // a __kernel_timespec the reactor owns
+    sqe-&gt;len       = 1;
+    sqe-&gt;user_data = Tag(KindTimer, 0, 0);
+}
+
+private void OnTimerTick()
+{
+    for (int i = 0; i &lt; _tickers.Count; i++)
+    {
+        _tickers[i]();                    // pg/redis pools sweep timeouts + replenish here
+    }
+    ArmTimer();                           // single-shot: re-arm for the next interval
+}</code></pre>
 
     <h3>SQE production and back-pressure</h3>
     <p><code>GetSqeOrFlush</code> is the one place SQEs are produced, reactor-thread-only
     (<code>SINGLE_ISSUER</code> is a promise to the kernel). If the SQ is full mid-batch it flushes
     with a no-wait <code>enter</code> and retries in a bounded loop - submission never blocks on
     completions, and a transient full ring back-pressures instead of crashing.</p>
+<p class="src"><b>Reactor.cs</b> · GetSqeOrFlush - flush and retry when the SQ fills mid-batch</p>
+<pre><code class="language-csharp">private IoUringSqe* GetSqeOrFlush()
+{
+    IoUringSqe* sqe = Ring.GetSqe();
+    if (sqe != null)
+    {
+        return sqe;
+    }
+
+    for (int attempt = 0; attempt &lt; 16 &amp;&amp; sqe == null; attempt++)
+    {
+        Ring.SubmitAndWait(0);     // submit staged SQEs, don't wait - just make room
+        sqe = Ring.GetSqe();
+    }
+
+    if (sqe == null)
+    {
+        throw new InvalidOperationException("io_uring SQ still full after repeated flush");
+    }
+    return sqe;
+}</code></pre>
 
     <h3>Off-reactor hand-off</h3>
     <p>Four queues carry work from other threads to the reactor, each woken by writing the eventfd
@@ -163,6 +252,22 @@
     connection recycles and client-op submissions (ref types). Every public entry point first checks
     <code>CurrentManagedThreadId == reactorThreadId</code> and takes a direct, queue-free fast path
     when already on the reactor.</p>
+<p class="src"><b>Reactor.cs</b> · every hand-off entry point fast-paths when it is already on the reactor thread</p>
+<pre><code class="language-csharp">public void EnqueueReturnQ(ushort bid)
+{
+    if (Environment.CurrentManagedThreadId == _reactorThreadId)
+    {
+        ReturnBufferDirect(bid);     // already home - no queue, no wake
+        return;
+    }
+
+    SpinWait sw = default;
+    while (!_returnQ.TryEnqueue(bid))
+    {
+        sw.SpinOnce();
+    }
+    WakeFdWrite();                   // nudge the reactor's eventfd
+}</code></pre>
 
     <h3>Recycling</h3>
     <p><code>Recycle</code> always runs on the reactor: <code>MarkClosed</code> wakes any awaiters,
@@ -171,6 +276,22 @@
     the per-connection ring unregisters (incremental), the fd closes, and <code>Clear()</code> bumps
     the generation - invalidating every stale token and queued reference at once - before the
     connection is pushed back to the pool (or freed if the pool is at <code>PoolMax</code>).</p>
+<p class="src"><b>Reactor.cs / Connection.cs</b> · cancel by the pre-bump generation, then bump it to void every stale token</p>
+<pre><code class="language-csharp">// Reactor.Recycle - cancel the armed recv BEFORE the generation moves, so it matches the SQE:
+SubmitCancel(Tag(KindRecv, (ushort)conn.Generation, fd));
+// ...
+conn.Clear();
+
+// Connection.Clear:
+internal void Clear()
+{
+    // Bump first: stale IVTS tokens now resolve to Closed(), stale CQEs fail the gen check.
+    Interlocked.Increment(ref _generation);
+
+    Volatile.Write(ref _armed, 0);
+    Volatile.Write(ref _closed, 0);
+    // ...reset the rest of the per-connection state
+}</code></pre>
 
     <h2>Connection &middot; <span class="dim">Connection/Connection.cs (+ .Read, .Write, .Incremental)</span></h2>
     <p>One connection is a <code>sealed unsafe partial class</code> that is at once an
@@ -245,6 +366,22 @@
       on the returning thread, so an inline return resumes the next renter inline - the
       no-thread-pool property holds even under contention.</li>
     </ul>
+<p class="src"><b>RingOpSource.cs</b> · synchronous continuations, and clearing the in-flight flag before SetResult</p>
+<pre><code class="language-csharp">public sealed class RingOpSource : IRingCompletion, IValueTaskSource&lt;int&gt;
+{
+    private ManualResetValueTaskSourceCore&lt;int&gt; _core = new()
+    {
+        RunContinuationsAsynchronously = false   // resume the awaiter inline, on the reactor
+    };
+
+    private volatile bool _inFlight;
+
+    public void Complete(int result)
+    {
+        _inFlight = false;        // cleared first: the inline continuation may Prepare() the next op
+        _core.SetResult(result);
+    }
+}</code></pre>
 
     <h2>Zero-copy adapters</h2>
     <ul>
@@ -284,7 +421,7 @@
     readonly struct a read returns (tail + closed flag). <code>IoxideRuntime</code> is the version /
     wiring doc surface.</p>
 
-    <div class="next"><a href="dev-pg.html">Postgres internals →</a></div>
+    <div class="next"><a href="dev-pg.html">ioxide.pg internals →</a></div>
   </main>
 </div>
 

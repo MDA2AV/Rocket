@@ -226,10 +226,16 @@ aside.side {
   align-self: start;
   height: fit-content;
 }
-aside.side .group { color: var(--text-dim); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; margin: 1.2rem 0 0.4rem; }
-aside.side a { display: block; color: var(--text-dim); padding: 0.28rem 0; font-size: 0.95rem; }
+aside.side .group { color: var(--text-dim); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; margin: 1.2rem 0 0.4rem; padding-left: 0.8rem; }
+/* the two audiences: a stronger divider + heading before the contributor section */
+aside.side .group.lead { margin-top: 1.8rem; padding-top: 1.3rem; border-top: 1px solid var(--line); color: var(--text); font-weight: 700; }
+aside.side .group.sub { margin-top: 0.9rem; opacity: 0.75; }
+aside.side a { display: block; color: var(--text-dim); padding: 0.28rem 0 0.28rem 0.8rem; font-size: 0.95rem; border-left: 2px solid transparent; }
 aside.side a:hover { color: var(--text); text-decoration: none; }
-aside.side a.here { color: var(--accent-soft); font-weight: 600; }
+aside.side a.here { color: var(--accent-soft); font-weight: 600; border-left-color: var(--accent); }
+/* package ids read as monospace tokens, echoing the source layout */
+aside.side a.pkg { font-family: ui-monospace, "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace; font-size: 0.9rem; }
+aside.side a.pkg .muted { color: var(--text-dim); font-style: normal; }
 
 main.doc { padding: 2.2rem 0 4rem; min-width: 0; }
 main.doc h1 { font-size: 2rem; letter-spacing: -0.02em; margin-bottom: 0.4rem; }
@@ -245,6 +251,26 @@ main.doc th { background: var(--bg-card); }
 main.doc td { color: var(--text-dim); }
 main.doc td:first-child { color: var(--text); }
 
+/* the "· file.cs" tag inside an internals heading */
+main.doc h2 .dim, main.doc h3 .dim {
+  color: var(--text-dim);
+  font-weight: 400;
+  font-size: 0.8rem;
+  letter-spacing: 0;
+  font-family: ui-monospace, "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+}
+
+/* source caption sitting just above a code excerpt */
+main.doc p.src {
+  color: var(--text-dim);
+  font-size: 0.82rem;
+  margin: 1.4rem 0 0;
+  font-family: ui-monospace, "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+}
+main.doc p.src::before { content: "› "; color: var(--accent-soft); }
+main.doc p.src b { color: var(--accent-soft); font-weight: 600; }
+main.doc p.src + pre { margin-top: 0.45rem; }
+
 .note {
   border-left: 3px solid var(--accent);
   background: var(--bg-card);
@@ -253,6 +279,21 @@ main.doc td:first-child { color: var(--text); }
   color: var(--text-dim);
   font-size: 0.95rem;
 }
+
+/* a small "see also" rail linking guide ⇄ internals */
+.xref {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin: 1.4rem 0;
+  padding: 0.7rem 1rem;
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: 0.9rem;
+  color: var(--text-dim);
+}
+.xref b { color: var(--text); font-weight: 600; }
 
 .next {
   margin-top: 3rem;

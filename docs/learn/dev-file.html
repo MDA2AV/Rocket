@@ -13,33 +13,29 @@
 <nav class="top">
   <a class="brand" href="../"><span>io</span>xide</a>
   <div class="links">
-    <a href="overview.html">Learn</a>
-    <a href="dev-core.html">Developer</a>
+    <a href="../">Home</a>
     <a class="gh" href="https://github.com/MDA2AV/ioxide" aria-label="GitHub"><svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
   </div>
 </nav>
 
 <div class="layout">
   <aside class="side">
-    <div class="group">Basics</div>
-    <a href="overview.html">Overview</a>
-    <div class="group">Advanced</div>
-    <a href="architecture.html">Architecture</a>
-    <a href="reactor.html">The Reactor</a>
-    <a href="connection.html">The Connection</a>
-    <a href="multiport.html">Multi-port</a>
-    <a href="clients.html">Ring clients</a>
-    <div class="group">Clients</div>
+    <div class="group">Guide</div>
+    <a href="overview.html">Introduction</a>
     <a href="postgres.html">Postgres</a>
-    <a href="files.html">Files</a>
-    <a href="tls.html">TLS</a>
     <a href="redis.html">Redis</a>
-    <div class="group">Developer</div>
-    <a href="dev-core.html">Core internals</a>
-    <a href="dev-pg.html">Postgres internals</a>
-    <a href="dev-redis.html">Redis internals</a>
-    <a href="dev-tls.html">TLS internals</a>
-    <a href="dev-file.html" class="here">File internals</a>
+    <a href="tls.html">TLS</a>
+    <a href="files.html">Static files</a>
+    <a href="multiport.html">Multi-port</a>
+    <a href="clients.html">Custom clients</a>
+    <div class="group lead">Internals</div>
+    <a href="architecture.html">Architecture</a>
+    <div class="group sub">Packages</div>
+    <a href="dev-core.html" class="pkg">ioxide <span class="muted">core</span></a>
+    <a href="dev-pg.html" class="pkg">ioxide.pg</a>
+    <a href="dev-redis.html" class="pkg">ioxide.redis</a>
+    <a href="dev-tls.html" class="pkg">ioxide.tls</a>
+    <a href="dev-file.html" class="pkg here">ioxide.file</a>
   </aside>
 
   <main class="doc">
@@ -73,6 +69,71 @@
       closed, native blocks freed - only when the last reference is dropped. This is what makes reloads
       safe (below).</li>
     </ul>
+<p class="src"><b>AssetCache.cs</b> · baking - read the body, format the header, concatenate into one native block</p>
+<pre><code class="language-csharp">private static unsafe (nint Response, int Length) BuildResponse(SafeFileHandle handle, int bodyLength, string path)
+{
+    nint scratch = (nint)NativeMemory.Alloc((nuint)Math.Max(bodyLength, 1));
+    int read = 0;
+    while (read &lt; bodyLength)
+    {
+        int n = RandomAccess.Read(handle, new Span&lt;byte&gt;((void*)(scratch + read), bodyLength - read), read);
+        if (n &lt;= 0) break;
+        read += n;                                       // body first - Content-Length matches what ships
+    }
+
+    Span&lt;byte&gt; header = stackalloc byte[256];
+    int h = WriteResponseHeader(header, path, read);     // the one place asset headers are formatted
+
+    nint response = (nint)NativeMemory.Alloc((nuint)(h + read));
+    header[..h].CopyTo(new Span&lt;byte&gt;((void*)response, h));
+    Buffer.MemoryCopy((void*)scratch, (void*)(response + h), read, read);
+    NativeMemory.Free((void*)scratch);
+    return (response, h + read);                          // header + body, one contiguous block
+}</code></pre>
+<p class="src"><b>AssetCache.cs</b> · the hot path - resolve straight from the recv bytes, zero string allocation</p>
+<pre><code class="language-csharp">public bool TryGet(ReadOnlySpan&lt;byte&gt; urlPath, out Asset asset)
+{
+    if (urlPath.Length is 0 or &gt; 1024)
+    {
+        asset = default;
+        return false;
+    }
+
+    Span&lt;char&gt; chars = stackalloc char[urlPath.Length];
+    if (Ascii.ToUtf16(urlPath, chars, out int written) != OperationStatus.Done)
+    {
+        asset = default;
+        return false;   // keys are ASCII URL paths; anything else can't match
+    }
+
+    return _assets.GetAlternateLookup&lt;ReadOnlySpan&lt;char&gt;&gt;().TryGetValue(chars[..written], out asset);
+}</code></pre>
+<p class="src"><b>AssetCache.cs</b> · enumeration skips reparse points, so a symlink can't escape the root</p>
+<pre><code class="language-csharp">var walk = new EnumerationOptions
+{
+    RecurseSubdirectories = true,
+    AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.Hidden | FileAttributes.System,
+};</code></pre>
+<p class="src"><b>AssetCache.cs</b> · a lock-free refcount - the snapshot frees only when the last hold drops</p>
+<pre><code class="language-csharp">internal bool TryAddRef()
+{
+    int r;
+    do
+    {
+        r = Volatile.Read(ref _refs);
+        if (r == 0) return false;        // already releasing - don't resurrect
+    }
+    while (Interlocked.CompareExchange(ref _refs, r + 1, r) != r);
+    return true;
+}
+
+internal void Release()
+{
+    if (Interlocked.Decrement(ref _refs) == 0)
+    {
+        DisposeCore();                   // close every fd, free every native block
+    }
+}</code></pre>
 
     <h2>StaticAssets &middot; <span class="dim">StaticAssets.cs</span></h2>
     <p>A reloadable holder around an <code>AssetCache</code>. <code>Reload</code> builds a fresh snapshot,
@@ -87,6 +148,35 @@
       <code>TryGet</code> overloads don't lease and are only safe when <code>Reload</code> isn't called
       concurrently.</li>
     </ul>
+<p class="src"><b>StaticAssets.cs</b> · Acquire leases the live snapshot; Reload swaps a fresh one in atomically</p>
+<pre><code class="language-csharp">public Lease Acquire()
+{
+    while (true)
+    {
+        AssetCache cache = Volatile.Read(ref _cache);
+        if (cache.TryAddRef())
+        {
+            return new Lease(cache);
+        }
+        // the snapshot we read was swapped out and is releasing; re-read the live one
+    }
+}
+
+public void Reload()
+{
+    lock (_reloadLock)
+    {
+        AssetCache fresh;
+        try { fresh = new AssetCache(_root, _maxCachedFileBytes); }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($"[ioxide] asset reload failed, keeping current snapshot: {e.Message}");
+            return;
+        }
+        AssetCache old = Interlocked.Exchange(ref _cache, fresh);
+        old.Dispose();   // drops the live ref; old frees once every outstanding lease releases
+    }
+}</code></pre>
 
     <h2>AssetReader &middot; <span class="dim">AssetReader.cs</span></h2>
     <p>One unit of file-serving capacity: a <code>RingOpSource</code> plus a native read buffer. It reads
@@ -95,6 +185,13 @@
     requests don't serialize on one in-flight read. One <code>ReadAsync</code> returns up to
     <code>Capacity</code> bytes at the given offset; for a file larger than the buffer the caller loops
     at advancing offsets until the whole file is sent (so big files aren't truncated).</p>
+<p class="src"><b>AssetReader.cs</b> · one positional read on the ring, resumed inline</p>
+<pre><code class="language-csharp">public ValueTask&lt;int&gt; ReadAsync(int fd, long offset)
+{
+    ValueTask&lt;int&gt; pending = _read.Prepare();
+    _host.SubmitRead(fd, Buffer, Capacity, offset, _read);   // positional IORING_OP_READ
+    return pending;                                          // caller loops offset += n for big files
+}</code></pre>
 
     <h2>RingFile &middot; <span class="dim">RingFile.cs</span></h2>
     <p>A single file whose reads run on the host's ring: opened once (a blocking, one-time
@@ -108,7 +205,7 @@
     path and async. The small-file baked path is allocation- and copy-free per request; large files take
     one copy (kernel → native buffer → write slab).</p>
 
-    <div class="next"><a href="dev-core.html">Back to Core internals →</a></div>
+    <div class="next"><a href="overview.html">Back to the Guide →</a></div>
   </main>
 </div>
 
