@@ -13,33 +13,29 @@
 <nav class="top">
   <a class="brand" href="../"><span>io</span>xide</a>
   <div class="links">
-    <a href="overview.html">Learn</a>
-    <a href="dev-core.html">Developer</a>
+    <a href="../">Home</a>
     <a class="gh" href="https://github.com/MDA2AV/ioxide" aria-label="GitHub"><svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
   </div>
 </nav>
 
 <div class="layout">
   <aside class="side">
-    <div class="group">Basics</div>
-    <a href="overview.html">Overview</a>
-    <div class="group">Advanced</div>
-    <a href="architecture.html">Architecture</a>
-    <a href="reactor.html">The Reactor</a>
-    <a href="connection.html">The Connection</a>
-    <a href="multiport.html">Multi-port</a>
-    <a href="clients.html">Ring clients</a>
-    <div class="group">Clients</div>
+    <div class="group">Guide</div>
+    <a href="overview.html">Introduction</a>
     <a href="postgres.html">Postgres</a>
-    <a href="files.html">Files</a>
-    <a href="tls.html">TLS</a>
     <a href="redis.html">Redis</a>
-    <div class="group">Developer</div>
-    <a href="dev-core.html">Core internals</a>
-    <a href="dev-pg.html" class="here">Postgres internals</a>
-    <a href="dev-redis.html">Redis internals</a>
-    <a href="dev-tls.html">TLS internals</a>
-    <a href="dev-file.html">File internals</a>
+    <a href="tls.html">TLS</a>
+    <a href="files.html">Static files</a>
+    <a href="multiport.html">Multi-port</a>
+    <a href="clients.html">Custom clients</a>
+    <div class="group lead">Internals</div>
+    <a href="architecture.html">Architecture</a>
+    <div class="group sub">Packages</div>
+    <a href="dev-core.html" class="pkg">ioxide <span class="muted">core</span></a>
+    <a href="dev-pg.html" class="pkg here">ioxide.pg</a>
+    <a href="dev-redis.html" class="pkg">ioxide.redis</a>
+    <a href="dev-tls.html" class="pkg">ioxide.tls</a>
+    <a href="dev-file.html" class="pkg">ioxide.file</a>
   </aside>
 
   <main class="doc">
@@ -61,6 +57,42 @@
     <code>_recv</code> starts at 64&nbsp;KB and grows by doubling, reclaiming the consumed prefix
     first, up to <code>PgOptions.MaxReceiveBytes</code> (default 64&nbsp;MB) - a single backend message
     larger than that breaks the connection.</p>
+<p class="src"><b>PgConnection.cs</b> · staging into the fixed send buffer - overflow throws, never realloc</p>
+<pre><code class="language-csharp">private unsafe void WriteQueryAt(string sql)
+{
+    int needed = PgProtocol.QueryLength(sql);
+    if (needed &gt; _sendCapacity)
+        throw new PgException($"query exceeds send buffer ({_sendCapacity} bytes)");
+    if (_sendEnd + needed &gt; _sendCapacity)
+        throw new PgException("pipelined send buffer full");   // _send's address is held across awaits
+    int written = PgProtocol.WriteQuery(
+        new Span&lt;byte&gt;((void*)(_send + _sendEnd), _sendCapacity - _sendEnd), sql);
+    _sendEnd += written;
+}</code></pre>
+<p class="src"><b>PgConnection.cs</b> · the recv buffer compacts before it grows, and is bounded by MaxReceiveBytes</p>
+<pre><code class="language-csharp">private unsafe void EnsureRecvSpace()
+{
+    if (_received &lt; _recvCapacity)
+        return;
+
+    // Full, with a partial message at the end: reclaim the consumed prefix before growing.
+    if (_scan &gt; 0)
+    {
+        Buffer.MemoryCopy((void*)(_recv + _scan), (void*)_recv, _recvCapacity, _received - _scan);
+        _received -= _scan;
+        _scan = 0;
+        return;
+    }
+
+    if (_recvCapacity &gt;= _maxBufferSize)
+    {
+        IsBroken = true;
+        throw new PgException($"backend message exceeds {_maxBufferSize} bytes");
+    }
+
+    _recvCapacity *= 2;   // only when a single message outsizes the whole buffer
+    _recv = (nint)NativeMemory.Realloc((void*)_recv, (nuint)_recvCapacity);
+}</code></pre>
 
     <h3>Pipelining</h3>
     <p>Each query is fire-and-stage: the message is formatted synchronously into <code>_send</code>,
@@ -74,6 +106,52 @@
     <code>ReadyForQuery</code>. FIFO routing is correct because Postgres guarantees in-order replies
     on one connection. Everything is single-threaded per reactor, so the queue and the
     <code>_sending</code>/<code>_reading</code> flags need no locks.</p>
+<p class="src"><b>PgConnection.cs</b> · the sender drains a snapshot of _sendEnd so mid-send appends are picked up next cycle</p>
+<pre><code class="language-csharp">private async Task SenderLoopAsync()
+{
+    try
+    {
+        while (_sendOffset &lt; _sendEnd)
+        {
+            int end = _sendEnd;                 // snapshot; more may be appended while we send
+            while (_sendOffset &lt; end)
+            {
+                int n = await _socket.SendAsync(_send + _sendOffset, end - _sendOffset);
+                if (n &lt;= 0) { IsBroken = true; throw PgException.Transport("send", n); }
+                _sendOffset += n;
+            }
+            // ...reclaim the sent prefix, slide any appended tail to the front...
+        }
+        _sending = false;
+    }
+    catch (Exception ex) { IsBroken = true; FailAll(ex); }
+}</code></pre>
+<p class="src"><b>PgConnection.cs</b> · the reader routes each message to the FIFO front, completing it at ReadyForQuery</p>
+<pre><code class="language-csharp">private async Task ReaderLoopAsync()
+{
+    while (_inflight.Count &gt; 0)
+    {
+        Message message = await ReceiveMessageAsync();
+        Pending front = _inflight.Peek();
+
+        switch (message.Tag)
+        {
+            case PgProtocol.RowDescription:
+                if (front.OnRow != null)
+                    front.Columns = PgProtocol.ParseRowDescription(Body(message));
+                break;
+            case PgProtocol.DataRow:
+                front.Rows++;
+                if (front.OnRow != null)
+                    InvokeRow(front.OnRow, front.Columns, in message);
+                break;
+            case PgProtocol.ReadyForQuery:
+                _inflight.Dequeue();
+                front.Complete();               // resume the awaiter inline, in order
+                break;
+        }
+    }
+}</code></pre>
 
     <h3>Simple vs extended (prepared)</h3>
     <p><code>QueryAsync(sql)</code> sends a simple <code>Query</code> ('Q'). The parameterized
@@ -88,6 +166,15 @@
     each call, never accumulated) so a connection can't leak server-side statements; a cached
     statement invalidated server-side (SQLSTATE <code>0A000</code>/<code>26000</code>) is evicted so the
     next call re-parses instead of failing forever.</p>
+<p class="src"><b>PgConnection.cs</b> · a server-invalidated statement is evicted so the next call re-parses</p>
+<pre><code class="language-csharp">// In the reader, on an ErrorResponse for a prepared statement:
+else if (front.Sql != null &amp;&amp; IsStaleStatement(front.Error))
+{
+    _prepared.Remove(front.Sql);   // e.g. a schema change invalidated it - drop and re-Parse next time
+}
+
+private static bool IsStaleStatement(PgException error) =&gt;
+    error.SqlState is "0A000" or "26000";   // feature-not-supported / invalid-schema-name</code></pre>
 
     <h3>Row results</h3>
     <p>For the default single-value path, the reader captures the first field of the first row
@@ -105,6 +192,21 @@
     ticker) tears the connection down with a diagnostic <code>PgException</code> if its oldest
     in-flight command has aged past <code>CommandTimeoutMs</code> - closing the fd cancels the stuck
     ring recv, so a silent backend can't park a query forever.</p>
+<p class="src"><b>PgConnection.cs</b> · the reactor ticker checks the age of the oldest in-flight command</p>
+<pre><code class="language-csharp">internal bool CheckTimeout(long nowMs, int timeoutMs, string host, ushort port)
+{
+    if (timeoutMs &lt;= 0 || _inflight.Count == 0)
+        return false;
+    long age = nowMs - _inflight.Peek().EnqueuedAtMs;
+    if (age &lt;= timeoutMs)
+        return false;
+
+    int inflight = _inflight.Count;
+    IsBroken = true;
+    FailAll(new PgException(
+        $"pg command timed out after {timeoutMs} ms ({inflight} in flight on {host}:{port}, oldest sent ~{age} ms ago)"));
+    return true;   // the pool disposes us; closing the fd cancels the stuck recv
+}</code></pre>
 
     <h2>PgProtocol &middot; <span class="dim">PgProtocol.cs</span></h2>
     <p>A pure (no I/O) format/parse layer - "knows nothing about io_uring, reactors, or sockets."
@@ -143,6 +245,21 @@
     and a constant-time server-signature verify (<code>FixedTimeEquals</code>). Trust auth (code 0) is
     the other supported path; MD5, cleartext, GSS, and SASL channel binding are explicitly unsupported
     and fail with a clear error rather than a silent hang.</p>
+<p class="src"><b>PgScram.cs</b> · the proof is ClientKey XOR ClientSignature; the server's signature is checked in constant time</p>
+<pre><code class="language-csharp">// client-final: prove knowledge of the password without ever sending it
+byte[] clientKey       = HMACSHA256.HashData(_saltedPassword, "Client Key"u8.ToArray());
+byte[] storedKey       = SHA256.HashData(clientKey);
+byte[] clientSignature = HMACSHA256.HashData(storedKey, Encoding.UTF8.GetBytes(authMessage));
+
+var proof = new byte[32];
+for (int i = 0; i &lt; 32; i++)
+    proof[i] = (byte)(clientKey[i] ^ clientSignature[i]);
+
+// server-final: verify the server proved it too
+byte[] serverKey = HMACSHA256.HashData(_saltedPassword, "Server Key"u8.ToArray());
+byte[] expected  = HMACSHA256.HashData(serverKey, Encoding.UTF8.GetBytes(_authMessage));
+if (!CryptographicOperations.FixedTimeEquals(expected, Convert.FromBase64String(v)))
+    throw new PgException("SCRAM: server signature verification failed");</code></pre>
 
     <h2>The value types</h2>
     <ul>
@@ -167,7 +284,7 @@
       transport errors mark it broken.</li>
     </ul>
 
-    <div class="next"><a href="dev-redis.html">Redis internals →</a></div>
+    <div class="next"><a href="dev-redis.html">ioxide.redis internals →</a></div>
   </main>
 </div>
 
