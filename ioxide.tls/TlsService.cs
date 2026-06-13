@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using ioxide.utils;
 
@@ -15,12 +14,18 @@ namespace ioxide.tls;
 public sealed class TlsService
 {
     private readonly nint _ctx;
+    private readonly GCHandle _alpnHandle;   // roots the ALPN wire bytes the select callback reads via its arg
 
-    // ssl* -> captured traffic secret, filled by the keylog callback during the handshake.
-    private static readonly ConcurrentDictionary<nint, byte[]> ServerSecrets = new();
-    private static readonly byte[] AlpnWire = BuildAlpnWire("http/1.1");
+    // A per-SSL ex_data slot holds a GCHandle to the TlsSession, so the static keylog callback can
+    // find the right session for an SSL without a process-global, recycled-pointer-keyed map.
+    private static readonly int SslSessionIndex =
+        OpenSsl.CRYPTO_get_ex_new_index(OpenSsl.CRYPTO_EX_INDEX_SSL, 0, 0, 0, 0, 0);
 
-    private TlsService(nint ctx) => _ctx = ctx;
+    private TlsService(nint ctx, GCHandle alpnHandle)
+    {
+        _ctx = ctx;
+        _alpnHandle = alpnHandle;
+    }
 
     /// <summary>Create the per-reactor service and register it. Call from <c>Reactor.OnStart</c>.</summary>
     public static TlsService Start(Reactor reactor, TlsOptions options)
@@ -52,16 +57,21 @@ public sealed class TlsService
             throw new IOException($"private key '{options.KeyPath}': {OpenSsl.LastError()}");
         }
 
+        // The ALPN protocol to select is handed to the (static) callback via its arg, so the
+        // configured TlsOptions.Alpn is honored instead of being hard-coded.
+        byte[] alpnWire = BuildAlpnWire(options.Alpn);
+        GCHandle alpnHandle = GCHandle.Alloc(alpnWire);
+
         unsafe
         {
             delegate* unmanaged<nint, nint, void> keylog = &KeylogCallback;
             OpenSsl.SSL_CTX_set_keylog_callback(ctx, (nint)keylog);
 
             delegate* unmanaged<nint, nint, nint, nint, uint, nint, int> alpn = &AlpnSelectCallback;
-            OpenSsl.SSL_CTX_set_alpn_select_cb(ctx, (nint)alpn, 0);
+            OpenSsl.SSL_CTX_set_alpn_select_cb(ctx, (nint)alpn, GCHandle.ToIntPtr(alpnHandle));
         }
 
-        var service = new TlsService(ctx);
+        var service = new TlsService(ctx, alpnHandle);
         reactor.AddService(service);
         return service;
     }
@@ -87,11 +97,18 @@ public sealed class TlsService
 
         var session = new TlsSession(ssl, rbio);
 
+        // Associate the session with this SSL so the keylog callback writes the secret onto it
+        // directly (no global map). The handle is freed in TlsSession.Dispose.
+        GCHandle handle = GCHandle.Alloc(session);
+        OpenSsl.SSL_set_ex_data(ssl, SslSessionIndex, GCHandle.ToIntPtr(handle));
+        session.AttachHandle(handle);
+
         try
         {
             while (true)
             {
                 int ret = OpenSsl.SSL_accept(ssl);
+                int err = ret == 1 ? 0 : OpenSsl.SSL_get_error(ssl, ret);   // read immediately, before other OpenSSL calls
 
                 await FlushOutbound(conn, wbio);   // server flights stage into the slab
 
@@ -99,8 +116,6 @@ public sealed class TlsService
                 {
                     break;
                 }
-
-                int err = OpenSsl.SSL_get_error(ssl, ret);
                 if (err != OpenSsl.SSL_ERROR_WANT_READ)
                 {
                     throw new IOException($"TLS handshake failed: {OpenSsl.LastError()}");
@@ -121,23 +136,21 @@ public sealed class TlsService
             // rbio - decrypt it now so the handler starts with a clean slate.
             session.DrainPending();
 
-            byte[] secret = ServerSecrets.TryRemove(ssl, out byte[]? s)
-                ? s
-                : throw new IOException("TLS handshake completed but no server traffic secret was captured");
+            byte[] secret = session.ServerSecret
+                ?? throw new IOException("TLS handshake completed but no server traffic secret was captured");
 
-            // Everything the handshake needed to send is flushed; from the next
-            // write on, the kernel produces the records. kTLS rejects MSG_WAITALL,
-            // so switch this connection's sends to plain (the reactor still loops
-            // on short sends).
+            // Everything the handshake needed to send is flushed; from the next write on, the kernel
+            // produces the records. kTLS rejects MSG_WAITALL, so switch this connection's sends to
+            // plain (the reactor still loops on short sends). EnableTx zeros 'secret' once programmed.
             Ktls.EnableTx(conn.ClientFd, secret);
             conn.SendOpFlags = 0;
+            session.MarkTxEnabled(conn.ClientFd);
 
             return session;
         }
         catch
         {
-            ServerSecrets.TryRemove(ssl, out _);
-            session.Dispose();
+            session.Dispose();   // frees the ex_data GCHandle and the SSL (+ BIOs)
             throw;
         }
     }
@@ -191,29 +204,38 @@ public sealed class TlsService
     private static void KeylogCallback(nint ssl, nint line)
     {
         string? text = Marshal.PtrToStringUTF8(line);
-        if (text == null)
+        if (text == null || !text.StartsWith("SERVER_TRAFFIC_SECRET_0 ", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        // Resolve the session from the SSL's ex_data (set in AcceptAsync) - no global pointer map.
+        nint data = OpenSsl.SSL_get_ex_data(ssl, SslSessionIndex);
+        if (data == 0 || GCHandle.FromIntPtr(data).Target is not TlsSession session)
         {
             return;
         }
 
         // "SERVER_TRAFFIC_SECRET_0 <client_random_hex> <secret_hex>"
-        if (text.StartsWith("SERVER_TRAFFIC_SECRET_0 ", StringComparison.Ordinal))
+        int lastSpace = text.LastIndexOf(' ');
+        if (lastSpace > 0)
         {
-            int lastSpace = text.LastIndexOf(' ');
-            if (lastSpace > 0)
-            {
-                ServerSecrets[ssl] = Convert.FromHexString(text.AsSpan(lastSpace + 1).TrimEnd());
-            }
+            session.ServerSecret = Convert.FromHexString(text.AsSpan(lastSpace + 1).TrimEnd());
         }
     }
 
     [UnmanagedCallersOnly]
     private static unsafe int AlpnSelectCallback(nint ssl, nint outPtr, nint outLen, nint inPtr, uint inLen, nint arg)
     {
+        if (arg == 0 || GCHandle.FromIntPtr(arg).Target is not byte[] wire)
+        {
+            return OpenSsl.SSL_TLSEXT_ERR_NOACK;
+        }
+
         // Find our protocol in the client's length-prefixed offer list and point
         // *out into the client buffer (standard practice - it outlives the callback).
         var offered = new ReadOnlySpan<byte>((void*)inPtr, (int)inLen);
-        ReadOnlySpan<byte> want = AlpnWire.AsSpan(1);   // skip our length prefix
+        ReadOnlySpan<byte> want = wire.AsSpan(1);   // skip the length prefix
 
         int i = 0;
         while (i < offered.Length)

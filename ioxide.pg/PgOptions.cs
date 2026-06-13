@@ -22,4 +22,18 @@ public sealed record PgOptions
     /// reactor's query concurrency; total server-side connections = PoolSize × ReactorCount.
     /// </summary>
     public int PoolSize { get; init; } = 8;
+
+    /// <summary>
+    /// Hard ceiling on a single backend message; the receive buffer grows up to this (from 64 KB).
+    /// A single row or value larger than this breaks the connection. Default 64 MB - raise it for
+    /// large bytea/text workloads.
+    /// </summary>
+    public int MaxReceiveBytes { get; init; } = 64 * 1024 * 1024;
+
+    /// <summary>
+    /// Per-command timeout in milliseconds: a connection whose oldest in-flight command exceeds this
+    /// is torn down and its waiters fail with a diagnostic error, so a silent backend can't park a
+    /// query forever. 0 disables. Default 30000.
+    /// </summary>
+    public int CommandTimeoutMs { get; init; } = 30_000;
 }

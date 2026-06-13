@@ -6,13 +6,24 @@ namespace ioxide.pg;
 /// load instead of one round trip at a time. Broken connections are evicted and replaced. One pool
 /// per reactor - create from <c>Reactor.OnStart</c>.
 /// </summary>
+/// <remarks>
+/// Not thread-safe by design: every member must run on the owning reactor thread - queries arrive
+/// from reactor-thread handlers and connect completions resume there too. Do not call the pool from
+/// off-reactor code.
+/// </remarks>
 public sealed class PgPool
 {
+    // Bound the slow-path wait so a pool that can't reach Postgres fails fast with a clear error
+    // instead of parking queries forever; each attempt drives one coalesced connect try.
+    private const int MaxConnectAttempts = 10;
+
     private readonly List<PgConnection> _connections = new();
     private readonly IRingHost _host;
     private readonly PgOptions _options;
     private int _next;
-    private TaskCompletionSource<bool>? _opened;   // signalled when a connection becomes available
+    private int _opening;                          // in-flight connect attempts (coalesces opens)
+    private long _reopenAtMs;                       // jittered backoff gate for background replenishment
+    private TaskCompletionSource<bool>? _opened;   // completed when any open attempt finishes
 
     private PgPool(IRingHost host, PgOptions options)
     {
@@ -26,10 +37,18 @@ public sealed class PgPool
         var pool = new PgPool(reactor, options);
         for (int i = 0; i < options.PoolSize; i++)
         {
-            _ = pool.OpenOneAsync();
+            pool.StartOpen();
         }
         reactor.AddService(pool);
+        reactor.AddTicker(pool.Sweep);   // per-command timeout sweep + background replenishment
         return pool;
+    }
+
+    // Begin one connect attempt; OpenOneAsync clears the in-flight count and wakes waiters when done.
+    private void StartOpen()
+    {
+        _opening++;
+        _ = OpenOneAsync();
     }
 
     private async Task OpenOneAsync()
@@ -38,11 +57,22 @@ public sealed class PgPool
         {
             PgConnection connection = await PgConnection.ConnectAsync(_host, _options);
             _connections.Add(connection);
-            _opened?.TrySetResult(true);
+            _reopenAtMs = 0;   // healthy - allow immediate replenishment
         }
         catch (Exception e)
         {
             Console.Error.WriteLine($"[pg] connect to {_options.Host}:{_options.Port} failed: {e.Message}");
+            _reopenAtMs = Environment.TickCount64 + BackoffMs();   // jittered backoff before the next attempt
+        }
+        finally
+        {
+            _opening--;
+            // Wake every slow-path waiter whether the attempt succeeded or failed, so a run of
+            // failures surfaces as a fast error instead of a permanent hang. Swap the field out
+            // before completing so a fresh waiter arms a new signal.
+            TaskCompletionSource<bool>? signal = _opened;
+            _opened = null;
+            signal?.TrySetResult(true);
         }
     }
 
@@ -104,24 +134,65 @@ public sealed class PgPool
             }
             _connections.RemoveAt(index);
             c.Dispose();
-            _ = OpenOneAsync();
+            StartOpen();
         }
         return null;
     }
 
-    // Startup-only: no connection is open yet; wait for the first one.
+    // No live connection (cold start, or every connection broke). Drive coalesced connect attempts
+    // and wait for one to finish; fail fast after MaxConnectAttempts so queries never hang.
     private async ValueTask<PgConnection> WaitForConnectionAsync()
     {
-        while (true)
+        for (int attempt = 1; ; attempt++)
         {
             PgConnection? c = Pick();
             if (c != null)
             {
                 return c;
             }
+
+            if (attempt > MaxConnectAttempts)
+            {
+                throw new PgException(
+                    $"pg pool: no connection to {_options.Host}:{_options.Port} after {MaxConnectAttempts} attempts");
+            }
+
             _opened ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            await _opened.Task;
-            _opened = null;
+            Task wait = _opened.Task;
+            if (_opening == 0)
+            {
+                StartOpen();   // nothing live and nothing opening - kick one off
+            }
+            await wait;
         }
     }
+
+    // Reactor-thread ticker (~250 ms): time out stuck connections and replenish toward PoolSize.
+    private void Sweep()
+    {
+        long now = Environment.TickCount64;
+
+        int timeoutMs = _options.CommandTimeoutMs;
+        if (timeoutMs > 0)
+        {
+            for (int i = _connections.Count - 1; i >= 0; i--)
+            {
+                if (_connections[i].CheckTimeout(now, timeoutMs, _options.Host, _options.Port))
+                {
+                    PgConnection c = _connections[i];
+                    _connections.RemoveAt(i);
+                    c.Dispose();   // closes the fd - unsticks the connection's stuck send/recv loops
+                }
+            }
+        }
+
+        // Background replenishment toward PoolSize, gated by a jittered backoff so a recovering
+        // server isn't hammered by every reactor at once.
+        if (_connections.Count < _options.PoolSize && _opening == 0 && now >= _reopenAtMs)
+        {
+            StartOpen();
+        }
+    }
+
+    private static int BackoffMs() => 200 + Random.Shared.Next(400);   // jittered ~200-600 ms
 }

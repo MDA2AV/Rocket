@@ -8,7 +8,7 @@
     <RootNamespace>ioxide.tls</RootNamespace>
 
     <PackageId>ioxide.tls</PackageId>
-    <Version>0.0.4</Version>
+    <Version>0.0.5</Version>
     <Authors>MDA2AV</Authors>
     <Description>TLS for the ioxide io_uring runtime: OpenSSL handshake driven over the ring, then kernel TLS (kTLS) transmit offload - handlers keep writing plaintext through the same connection API. Requires Linux kTLS (tls module) and OpenSSL 3.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>

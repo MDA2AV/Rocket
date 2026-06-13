@@ -28,6 +28,7 @@ public sealed class AssetCache : IDisposable
     private readonly SafeFileHandle[] _handles;
     private readonly nint[] _responses;
     private int _disposed;
+    private int _refs = 1;   // the "live" reference held by StaticAssets; leases add/drop more
 
     /// <summary>The absolute root directory the cache was built over.</summary>
     public string RootDir { get; }
@@ -50,7 +51,16 @@ public sealed class AssetCache : IDisposable
 
         // Open every file under the root, keyed by its URL path relative to the root. The managed
         // handle is held for the cache's lifetime so the raw fd stays valid.
-        foreach (string path in Directory.EnumerateFiles(RootDir, "*", SearchOption.AllDirectories))
+        //
+        // Skip symlinks (files and directories): a symlink could resolve outside the root, so not
+        // following them blocks traversal/escape. With RecurseSubdirectories, a skipped (symlinked)
+        // directory is also not descended into.
+        var walk = new EnumerationOptions
+        {
+            RecurseSubdirectories = true,
+            AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.Hidden | FileAttributes.System,
+        };
+        foreach (string path in Directory.EnumerateFiles(RootDir, "*", walk))
         {
             SafeFileHandle handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read);
             handles.Add(handle);
@@ -165,7 +175,38 @@ public sealed class AssetCache : IDisposable
         return _assets.GetAlternateLookup<ReadOnlySpan<char>>().TryGetValue(chars[..written], out asset);
     }
 
-    public unsafe void Dispose()
+    /// <summary>
+    /// Take a reference so this snapshot can't be freed while it's in use; false if it's already
+    /// being torn down (the caller should re-read the live snapshot). Pair with <see cref="Release"/>.
+    /// </summary>
+    internal bool TryAddRef()
+    {
+        int r;
+        do
+        {
+            r = Volatile.Read(ref _refs);
+            if (r == 0)
+            {
+                return false;   // already releasing - don't resurrect
+            }
+        }
+        while (Interlocked.CompareExchange(ref _refs, r + 1, r) != r);
+        return true;
+    }
+
+    /// <summary>Drop a reference; the snapshot is freed when the last one goes.</summary>
+    internal void Release()
+    {
+        if (Interlocked.Decrement(ref _refs) == 0)
+        {
+            DisposeCore();
+        }
+    }
+
+    /// <summary>Drops the "live" reference; the snapshot frees once all outstanding leases release too.</summary>
+    public void Dispose() => Release();
+
+    private unsafe void DisposeCore()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
         {

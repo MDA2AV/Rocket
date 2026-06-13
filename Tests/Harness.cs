@@ -1,0 +1,222 @@
+using System.Net.Security;
+using System.Net.Sockets;
+using System.Security.Authentication;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using System.Text;
+using ioxide;
+
+namespace Ioxide.E2E;
+
+/// <summary>
+/// Starts an ioxide server on a unique loopback port and waits for it to listen. Reactors have no
+/// clean stop, so each test server runs on a background thread until the process exits - fine for a
+/// test run. Tiny buffers keep many concurrent test servers cheap.
+/// </summary>
+internal static class TestServer
+{
+    private static int _nextPort = 18080;
+
+    public static int Start(Func<Reactor, Connection, Task> handle, Action<Reactor>? onStart = null)
+    {
+        int port = Interlocked.Increment(ref _nextPort);
+
+        var config = new ServerConfig
+        {
+            Port = (ushort)port,
+            ReactorCount = 1,
+            RecvBufferSize = 4096,
+            BufferRingEntries = 256,
+            WriteSlabSize = 16 * 1024,
+            PoolMax = 64,
+            RecvQueueEntries = 64,
+        };
+
+        var reactor = new Reactor(0, config)
+        {
+            OnStart = onStart,
+            Handle = handle,
+        };
+
+        var thread = new Thread(reactor.Run)
+        {
+            IsBackground = true,
+            Name = $"test-reactor-{port}",
+        };
+        thread.Start();
+
+        WaitForListen(port);
+        return port;
+    }
+
+    private static void WaitForListen(int port)
+    {
+        for (int attempt = 0; attempt < 100; attempt++)
+        {
+            try
+            {
+                using var probe = new TcpClient();
+                probe.Connect("127.0.0.1", port);
+                return;
+            }
+            catch
+            {
+                Thread.Sleep(50);
+            }
+        }
+
+        throw new Exception($"server on :{port} never started listening");
+    }
+}
+
+/// <summary>A minimal HTTP/1.1 client over a raw socket (and over TLS), used to drive the servers.</summary>
+internal static class Client
+{
+    public static (int Status, string Body) Get(int port, string path, int timeoutMs = 6000)
+    {
+        using var client = new TcpClient();
+        client.Connect("127.0.0.1", port);
+        client.ReceiveTimeout = timeoutMs;
+
+        NetworkStream stream = client.GetStream();
+        Send(stream, path);
+        return ReadResponse(stream);
+    }
+
+    public static (int Status, string Body) GetTls(int port, string path, int timeoutMs = 6000)
+    {
+        using var client = new TcpClient();
+        client.Connect("127.0.0.1", port);
+        client.ReceiveTimeout = timeoutMs;
+
+        using var ssl = new SslStream(client.GetStream(), leaveInnerStreamOpen: false, (_, _, _, _) => true);
+        ssl.AuthenticateAsClient(new SslClientAuthenticationOptions
+        {
+            TargetHost = "localhost",
+            EnabledSslProtocols = SslProtocols.Tls13,
+        });
+
+        Send(ssl, path);
+        return ReadResponse(ssl);
+    }
+
+    // Several requests over one connection (lock-step), to exercise the handler's keep-alive loop.
+    public static List<(int Status, string Body)> GetKeepAlive(int port, string path, int count, int timeoutMs = 6000)
+    {
+        using var client = new TcpClient();
+        client.Connect("127.0.0.1", port);
+        client.ReceiveTimeout = timeoutMs;
+
+        NetworkStream stream = client.GetStream();
+        var results = new List<(int, string)>(count);
+        for (int i = 0; i < count; i++)
+        {
+            Send(stream, path);
+            results.Add(ReadResponse(stream));
+        }
+
+        return results;
+    }
+
+    private static void Send(Stream stream, string path)
+    {
+        stream.Write(Encoding.ASCII.GetBytes($"GET {path} HTTP/1.1\r\nHost: test\r\n\r\n"));
+    }
+
+    // Read the status line and the Content-Length body in full.
+    private static (int Status, string Body) ReadResponse(Stream stream)
+    {
+        var buffer = new byte[64 * 1024];
+        int filled = 0;
+        int headerEnd = -1;
+
+        while (headerEnd < 0)
+        {
+            int n = stream.Read(buffer, filled, buffer.Length - filled);
+            if (n <= 0)
+            {
+                throw new Exception("connection closed before headers arrived");
+            }
+
+            filled += n;
+            headerEnd = new ReadOnlySpan<byte>(buffer, 0, filled).IndexOf("\r\n\r\n"u8);
+        }
+
+        string head = Encoding.ASCII.GetString(buffer, 0, headerEnd);
+        int status = int.Parse(head.AsSpan(9, 3));   // "HTTP/1.1 NNN ..."
+        int contentLength = ContentLength(head);
+        int bodyStart = headerEnd + 4;
+
+        while (filled - bodyStart < contentLength)
+        {
+            int n = stream.Read(buffer, filled, buffer.Length - filled);
+            if (n <= 0)
+            {
+                break;
+            }
+            filled += n;
+        }
+
+        string body = Encoding.ASCII.GetString(buffer, bodyStart, Math.Min(contentLength, filled - bodyStart));
+        return (status, body);
+    }
+
+    private static int ContentLength(string head)
+    {
+        foreach (string line in head.Split("\r\n"))
+        {
+            if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
+            {
+                return int.Parse(line.AsSpan("Content-Length:".Length).Trim());
+            }
+        }
+        return 0;
+    }
+}
+
+/// <summary>Reachability checks so sidecar-backed tests skip cleanly when the dependency is absent.</summary>
+internal static class Sidecars
+{
+    public static bool Reachable(string host, int port)
+    {
+        try
+        {
+            using var probe = new TcpClient();
+            probe.Connect(host, port);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    // kTLS needs the kernel's 'tls' module; the loaded module shows up here.
+    public static bool KtlsAvailable() => Directory.Exists("/sys/module/tls");
+}
+
+/// <summary>A throwaway self-signed cert for the TLS test, written to PEM (ioxide.tls wants paths).</summary>
+internal static class TestCert
+{
+    public static (string CertPath, string KeyPath) Ensure()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "ioxide-e2e-tls");
+        Directory.CreateDirectory(dir);
+
+        string certPath = Path.Combine(dir, "test.crt");
+        string keyPath = Path.Combine(dir, "test.key");
+
+        if (!File.Exists(certPath))
+        {
+            using var rsa = RSA.Create(2048);
+            var request = new CertificateRequest("CN=localhost", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+            using X509Certificate2 cert = request.CreateSelfSigned(
+                DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
+
+            File.WriteAllText(certPath, cert.ExportCertificatePem());
+            File.WriteAllText(keyPath, rsa.ExportPkcs8PrivateKeyPem());
+        }
+
+        return (certPath, keyPath);
+    }
+}

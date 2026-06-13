@@ -5,11 +5,14 @@ namespace ioxide.redis;
 /// <summary>RESP2 wire format: write a command as an array of bulk strings; parse one reply.</summary>
 internal static class RespProtocol
 {
-    /// <summary>Bytes needed to encode a command (name + args) as a RESP array of bulk strings.</summary>
-    public static int CommandSize(ReadOnlySpan<byte> name, ReadOnlySpan<RedisArg> args)
+    /// <summary>
+    /// Bytes needed to encode a command as a RESP array of bulk strings, given a pre-framed name
+    /// token (<c>$len\r\nNAME\r\n</c>, see <see cref="FrameName"/>) plus the argument list.
+    /// </summary>
+    public static int CommandSize(ReadOnlySpan<byte> nameToken, ReadOnlySpan<RedisArg> args)
     {
         int size = 1 + IntLen(args.Length + 1) + 2;       // *<n>\r\n
-        size += BulkSize(name.Length);
+        size += nameToken.Length;                          // name is already framed
         foreach (RedisArg arg in args)
         {
             size += BulkSize(arg.Bytes.Length);
@@ -18,7 +21,7 @@ internal static class RespProtocol
     }
 
     /// <summary>Write a command into <paramref name="dst"/> (sized by <see cref="CommandSize"/>).</summary>
-    public static int WriteCommand(Span<byte> dst, ReadOnlySpan<byte> name, ReadOnlySpan<RedisArg> args)
+    public static int WriteCommand(Span<byte> dst, ReadOnlySpan<byte> nameToken, ReadOnlySpan<RedisArg> args)
     {
         int p = 0;
         dst[p++] = (byte)'*';
@@ -26,12 +29,25 @@ internal static class RespProtocol
         dst[p++] = (byte)'\r';
         dst[p++] = (byte)'\n';
 
-        p += WriteBulk(dst[p..], name);
+        nameToken.CopyTo(dst[p..]);   // pre-framed $len\r\nNAME\r\n - one memcpy, no per-call framing
+        p += nameToken.Length;
+
         foreach (RedisArg arg in args)
         {
             p += WriteBulk(dst[p..], arg.Bytes);
         }
         return p;
+    }
+
+    /// <summary>
+    /// Frame a command name as a RESP bulk-string token (<c>$len\r\nNAME\r\n</c>). Computed once per
+    /// command name and cached, so the hot path memcpy's the whole token instead of re-framing it.
+    /// </summary>
+    public static byte[] FrameName(ReadOnlySpan<byte> name)
+    {
+        byte[] token = new byte[BulkSize(name.Length)];
+        WriteBulk(token, name);
+        return token;
     }
 
     private static int WriteBulk(Span<byte> dst, ReadOnlySpan<byte> payload)
@@ -66,11 +82,14 @@ internal static class RespProtocol
     /// <summary>
     /// Parse one complete reply (recursively, for arrays) from <paramref name="buffer"/>. False if
     /// the reply isn't fully buffered yet; on true, <paramref name="consumed"/> is its byte length.
+    /// On false, <paramref name="needed"/> is the buffer length required before a re-parse can make
+    /// progress (0 = unknown), so the caller can avoid re-scanning until enough bytes arrive.
     /// </summary>
-    public static bool TryParse(ReadOnlySpan<byte> buffer, out RespValue value, out int consumed)
+    public static bool TryParse(ReadOnlySpan<byte> buffer, out RespValue value, out int consumed, out int needed)
     {
         int pos = 0;
-        if (TryParseAt(buffer, ref pos, out value!))
+        needed = 0;
+        if (TryParseAt(buffer, ref pos, out value, ref needed))
         {
             consumed = pos;
             return true;
@@ -79,9 +98,9 @@ internal static class RespProtocol
         return false;
     }
 
-    private static bool TryParseAt(ReadOnlySpan<byte> buffer, ref int pos, out RespValue? value)
+    private static bool TryParseAt(ReadOnlySpan<byte> buffer, ref int pos, out RespValue value, ref int needed)
     {
-        value = null;
+        value = default;
         if (pos >= buffer.Length)
         {
             return false;
@@ -122,8 +141,15 @@ internal static class RespProtocol
                     pos = afterLine;
                     return true;
                 }
+                if (len < -1)
+                {
+                    throw new RedisException($"invalid bulk length {len}");
+                }
                 if (afterLine + len + 2 > buffer.Length)
                 {
+                    // Body not fully buffered: report how many bytes are needed so the reader can
+                    // skip re-parsing until they arrive, instead of re-scanning on every recv.
+                    needed = afterLine + (int)len + 2;
                     return false;
                 }
                 value = RespValue.Bulk(buffer.Slice(afterLine, (int)len).ToArray());
@@ -140,34 +166,54 @@ internal static class RespProtocol
                     pos = afterLine;
                     return true;
                 }
+                if (count < -1 || count > int.MaxValue)
+                {
+                    throw new RedisException($"invalid array length {count}");
+                }
                 var items = new RespValue[count];
                 int p = afterLine;
                 for (int i = 0; i < count; i++)
                 {
-                    if (!TryParseAt(buffer, ref p, out RespValue? item))
+                    if (!TryParseAt(buffer, ref p, out RespValue item, ref needed))
                     {
                         return false;
                     }
-                    items[i] = item!;
+                    items[i] = item;
                 }
                 value = RespValue.Arr(items);
                 pos = p;
                 return true;
             }
 
+            case (byte)'_':   // RESP3 null; tolerated even though we negotiate RESP2
+                value = RespValue.Null;
+                pos = afterLine;
+                return true;
+
             default:
-                throw new RedisException($"unexpected RESP type byte 0x{type:x2}");
+                throw new RedisException($"unexpected RESP type byte 0x{type:x2} (RESP2 expected)");
         }
     }
 
+    // Strict: RESP integers and bulk/array lengths are an optional '-' then ASCII digits. Anything
+    // else is a malformed reply - throw so the reader breaks the connection cleanly instead of
+    // computing a garbage length and wedging (or slicing out of range).
     private static long ParseLong(ReadOnlySpan<byte> s)
     {
         bool neg = s.Length > 0 && s[0] == (byte)'-';
         if (neg) s = s[1..];
+        if (s.IsEmpty)
+        {
+            throw new RedisException("malformed RESP integer");
+        }
         long n = 0;
         foreach (byte c in s)
         {
-            n = n * 10 + (c - '0');
+            if (c < (byte)'0' || c > (byte)'9')
+            {
+                throw new RedisException($"malformed RESP integer (byte 0x{c:x2})");
+            }
+            n = checked(n * 10 + (c - '0'));
         }
         return neg ? -n : n;
     }

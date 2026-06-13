@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TLS internals - ioxide</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="../assets/highlight-dark.min.css">
+  <script src="../assets/highlight.min.js"></script>
+</head>
+<body>
+
+<nav class="top">
+  <a class="brand" href="../"><span>io</span>xide</a>
+  <div class="links">
+    <a href="overview.html">Learn</a>
+    <a href="dev-core.html">Developer</a>
+    <a class="gh" href="https://github.com/MDA2AV/ioxide" aria-label="GitHub"><svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
+  </div>
+</nav>
+
+<div class="layout">
+  <aside class="side">
+    <div class="group">Basics</div>
+    <a href="overview.html">Overview</a>
+    <div class="group">Advanced</div>
+    <a href="architecture.html">Architecture</a>
+    <a href="reactor.html">The Reactor</a>
+    <a href="connection.html">The Connection</a>
+    <a href="multiport.html">Multi-port</a>
+    <a href="clients.html">Ring clients</a>
+    <div class="group">Clients</div>
+    <a href="postgres.html">Postgres</a>
+    <a href="files.html">Files</a>
+    <a href="tls.html">TLS</a>
+    <a href="redis.html">Redis</a>
+    <div class="group">Developer</div>
+    <a href="dev-core.html">Core internals</a>
+    <a href="dev-pg.html">Postgres internals</a>
+    <a href="dev-redis.html">Redis internals</a>
+    <a href="dev-tls.html" class="here">TLS internals</a>
+    <a href="dev-file.html">File internals</a>
+  </aside>
+
+  <main class="doc">
+    <h1>TLS internals</h1>
+    <p class="lead"><code>ioxide.tls</code> terminates TLS 1.3 with a deliberate split: the handshake
+    and inbound records go through OpenSSL in userspace, while outbound bulk is offloaded to the kernel
+    (kTLS) so responses are encrypted inline on the io_uring send - zero-copy, no managed crypto.
+    Requests are small and responses big, so the kernel does the heavy direction.</p>
+
+    <h2>TlsService &middot; <span class="dim">TlsService.cs</span></h2>
+    <p>Per-reactor TLS termination, holding one <code>SSL_CTX</code> shared across that reactor's
+    connections (created in <code>OnStart</code>). The context is TLS 1.3 only, one suite
+    (<code>TLS_AES_128_GCM_SHA256</code> - kTLS needs a known key layout), with session tickets
+    disabled (they would advance the server's record sequence after the handshake and break the kTLS
+    handoff, which programs sequence 0).</p>
+
+    <h3>The handshake</h3>
+    <p><code>AcceptAsync</code> drives a standard memory-BIO server handshake as an ordinary reactor
+    await: <code>SSL_accept</code> → read its error <em>immediately</em> → drain the write BIO into the
+    connection's write slab and <code>FlushAsync</code> → on <code>WANT_READ</code>, recv more
+    ciphertext and feed the read BIO - loop until done. Handshake bytes ride the same ring recv/send as
+    application data, so there's no separate I/O path.</p>
+
+    <h3>Per-session secret via ex_data (no global map)</h3>
+    <p>kTLS keys are derived from the TLS 1.3 server traffic secret, which OpenSSL surfaces through a
+    keylog callback. The callback is a static function pointer with no instance, so to find the right
+    session it reads a <code>GCHandle</code> to the <code>TlsSession</code> stored on the
+    <code>SSL</code> via <code>SSL_set_ex_data</code> / <code>SSL_get_ex_data</code> (the index
+    allocated once with <code>CRYPTO_get_ex_new_index</code>). The callback parses
+    <code>SERVER_TRAFFIC_SECRET_0</code> and stores it on that session directly - no process-global,
+    recycled-pointer-keyed map, so two reactors that get the same recycled <code>SSL</code> address
+    can't collide. The handle is freed on <code>TlsSession.Dispose</code>.</p>
+
+    <h3>ALPN</h3>
+    <p>The configured <code>TlsOptions.Alpn</code> is honored: the wire bytes are passed to the (static)
+    select callback via its <code>arg</code> (a <code>GCHandle</code>), so the protocol isn't
+    hard-coded. The callback finds it in the client's offer list and points <code>*out</code> into the
+    client buffer.</p>
+
+    <h3>The kTLS handoff</h3>
+    <p>Once the handshake is done and all server flights are flushed, <code>Ktls.EnableTx</code>
+    programs the TX keys into the socket and <code>conn.SendOpFlags = 0</code> clears
+    <code>MSG_WAITALL</code> (kTLS rejects it; the reactor's partial-send loop preserves correctness).
+    From the next write on, the handler writes <em>plaintext</em> through <code>conn.Write</code> /
+    <code>FlushAsync</code> and the kernel produces the records on the io_uring send path. Faults are
+    surfaced (a missing kernel <code>tls</code> module shows up as a logged handshake failure rather
+    than a silent drop).</p>
+
+    <h2>TlsSession &middot; <span class="dim">TlsSession.cs</span></h2>
+    <p>The receive half after the handoff (one per connection, reactor-thread only). Inbound bytes are
+    still TLS records, decrypted in userspace: <code>Decrypt(ciphertext, length)</code> feeds the read
+    BIO and drains <code>SSL_read</code> into a reusable plaintext buffer, returning the span (valid
+    until the next call). The buffer is bounded per-decrypt (a defensive cap; in practice one decrypt
+    processes one recv-buffer-sized slice and decryption never expands). <code>SSL_ERROR_ZERO_RETURN</code>
+    sets <code>Closed</code> (the peer's close_notify). On a clean server-side teardown,
+    <code>Dispose</code> sends a close_notify alert over kTLS (best-effort) so the peer can tell
+    end-of-stream from a truncation, then <code>SSL_free</code>s (which frees both BIOs) and releases
+    the ex_data handle.</p>
+
+    <h2>Ktls &middot; <span class="dim">Ktls.cs</span></h2>
+    <p>The kernel-TLS transmit offload. <code>EnableTx</code> derives the record key (16B) and IV (12B)
+    from the server traffic secret with RFC 8446 HKDF-Expand-Label (the 12-byte TLS 1.3 nonce is split
+    into the kernel's salt[4] + iv[8]; the record sequence stays 0, valid because tickets are off),
+    then <code>setsockopt(SOL_TCP, TCP_ULP, "tls")</code> attaches the ULP and
+    <code>setsockopt(SOL_TLS, TLS_TX, &amp;cryptoInfo)</code> installs the keys. All key material -
+    the derived key/iv, the crypto-info struct, and the captured secret - is zeroed in a
+    <code>finally</code> with <code>CryptographicOperations.ZeroMemory</code> once programmed.
+    <code>SendCloseNotify</code> sends a <code>{warning, close_notify}</code> alert as a control
+    message (<code>sendmsg</code> with a <code>SOL_TLS / TLS_SET_RECORD_TYPE = alert</code> cmsg),
+    best-effort.</p>
+
+    <h2>OpenSsl &middot; <span class="dim">OpenSsl.cs</span></h2>
+    <p>The minimal OpenSSL 3 P/Invoke surface (via <code>[LibraryImport]</code> source-gen): context
+    setup (<code>SSL_CTX_new</code>, protocol/ciphersuite/ticket controls, cert/key file loads, the
+    keylog and ALPN callback setters), the per-connection objects (<code>SSL_new</code>/<code>_free</code>,
+    <code>SSL_set_bio</code>/<code>_accept_state</code>/<code>_accept</code>/<code>_read</code>/<code>_get_error</code>),
+    the ex_data accessors, and the memory BIOs (<code>BIO_new</code>/<code>_s_mem</code>/<code>_read</code>/<code>_write</code>/<code>_ctrl_pending</code>).
+    <code>LastError</code> formats the first queued error and drains the rest so the next report isn't
+    stale.</p>
+
+    <h2>TlsOptions &middot; <span class="dim">TlsOptions.cs</span></h2>
+    <p>The PEM certificate-chain path, the private-key path, and the ALPN protocol to advertise.</p>
+
+    <p class="lead" style="margin-top:2rem">An alternative, fully-managed path exists with no kTLS or
+    native dependency: a BCL <code>SslStream</code> over <code>ConnectionStream</code> (everything
+    encrypted in userspace, ~0.65x kTLS throughput) - see the <code>tls-sslstream</code> example.</p>
+
+    <div class="next"><a href="dev-file.html">File internals →</a></div>
+  </main>
+</div>
+
+<footer>MIT · Linux 6.1+ · .NET 10 · <a href="https://github.com/MDA2AV/ioxide">github.com/MDA2AV/ioxide</a></footer>
+
+<script>hljs.highlightAll();</script>
+</body>
+</html>

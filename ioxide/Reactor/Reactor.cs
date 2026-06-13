@@ -38,6 +38,7 @@ public sealed unsafe partial class Reactor
     private const byte KindWake   = 4;
     private const byte KindClient = 5;   // low 32 bits = op slot (Reactor.RingHost.cs)
     private const byte KindCancel = 6;
+    private const byte KindTimer  = 7;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static ulong Tag(byte kind, ushort gen, int fd)
@@ -55,6 +56,13 @@ public sealed unsafe partial class Reactor
     // direct fast path instead (no queue, no syscall).
     private int _wakeFd;
     private int _reactorThreadId;
+
+    // Periodic timer driving registered tickers (per-command timeout sweeps, pool replenishment).
+    // Single-shot, re-armed each fire. One timer in flight per reactor.
+    private __kernel_timespec* _timerTs;
+    private const long TimerIntervalNs = 250_000_000;   // 250 ms
+    private readonly List<Action> _tickers = new();
+
     private readonly Mpsc<ushort> _returnQ = new(1 << 14);
     private readonly Mpsc<ulong>  _flushQ  = new(1 << 12);   // (gen << 32) | fd
 
@@ -298,7 +306,7 @@ public sealed unsafe partial class Reactor
         }
         for (int i = 0; i < _listenFds.Length; i++)
         {
-            _listenFds[i] = OpenReusePortListener(_listenPorts[i]);
+            _listenFds[i] = OpenReusePortListener(_listenPorts[i], _config.ListenBacklog);
         }
 
         if (_incremental)
@@ -327,6 +335,11 @@ public sealed unsafe partial class Reactor
         }
         ArmWakePoll();
 
+        _timerTs = (__kernel_timespec*)NativeMemory.Alloc((nuint)sizeof(__kernel_timespec));
+        _timerTs->tv_sec  = 0;
+        _timerTs->tv_nsec = TimerIntervalNs;
+        ArmTimer();
+
         if (_incremental)
         {
             LoopIncremental();
@@ -341,6 +354,11 @@ public sealed unsafe partial class Reactor
             close(listenFd);
         }
         close(_wakeFd);
+        if (_timerTs != null)
+        {
+            NativeMemory.Free(_timerTs);
+            _timerTs = null;
+        }
         Ring.Dispose();
     }
 
@@ -451,7 +469,7 @@ public sealed unsafe partial class Reactor
                     conn.ListenerPort = PortOf(fd);
                     SubmitRecvMultishot(clientFd, (ushort)conn.Generation, BgId);
 
-                    _ = Handle(this, conn);
+                    _ = RunHandlerAsync(conn);
                 }
                 else
                 {
@@ -466,6 +484,10 @@ public sealed unsafe partial class Reactor
 
             case KindWake:
                 OnWakeCompletion(more);
+                return;
+
+            case KindTimer:
+                OnTimerTick();
                 return;
 
             case KindCancel:
@@ -511,6 +533,39 @@ public sealed unsafe partial class Reactor
         }
     }
 
+    /// <summary>
+    /// Register a callback invoked on the reactor thread every timer interval (~250 ms). Call from
+    /// <c>OnStart</c>. Pools use it to sweep per-command timeouts and replenish connections.
+    /// </summary>
+    public void AddTicker(Action ticker) => _tickers.Add(ticker);
+
+    private void OnTimerTick()
+    {
+        for (int i = 0; i < _tickers.Count; i++)
+        {
+            try
+            {
+                _tickers[i]();
+            }
+            catch (Exception e)
+            {
+                Console.Error.WriteLine($"[r{Id}] ticker faulted: {e.Message}");
+            }
+        }
+        ArmTimer();   // single-shot timer; re-arm for the next interval
+    }
+
+    private void ArmTimer()
+    {
+        IoUringSqe* sqe = GetSqeOrFlush();
+        Unsafe.InitBlockUnaligned(sqe, 0, 64);
+        sqe->opcode    = IORING_OP_TIMEOUT;
+        sqe->addr      = (ulong)_timerTs;
+        sqe->len       = 1;
+        sqe->off       = 0;            // pure time-based (no completion-count trigger)
+        sqe->user_data = Tag(KindTimer, 0, 0);
+    }
+
     // SQE producers - reactor-thread-only.
     private IoUringSqe* GetSqeOrFlush()
     {
@@ -520,12 +575,18 @@ public sealed unsafe partial class Reactor
             return sqe;
         }
 
-        Ring.SubmitAndWait(0);
-        sqe = Ring.GetSqe();
+        // SQ is full: flush queued SQEs to the kernel (which frees ring slots) and retry. A few
+        // submit rounds clear the transient fullness a large CQE batch can cause; only a genuinely
+        // stuck ring falls through to throw, instead of crashing the reactor on the first miss.
+        for (int attempt = 0; attempt < 16 && sqe == null; attempt++)
+        {
+            Ring.SubmitAndWait(0);
+            sqe = Ring.GetSqe();
+        }
 
         if (sqe == null)
         {
-            throw new InvalidOperationException("SQ full after flush");
+            throw new InvalidOperationException("io_uring SQ still full after repeated flush");
         }
 
         return sqe;
@@ -623,7 +684,7 @@ public sealed unsafe partial class Reactor
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(int));
     }
 
-    private static int OpenReusePortListener(ushort port)
+    private static int OpenReusePortListener(ushort port, int backlog)
     {
         int fd = socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0)
@@ -645,7 +706,7 @@ public sealed unsafe partial class Reactor
             throw new InvalidOperationException("bind failed");
         }
 
-        if (listen(fd, 128) < 0)
+        if (listen(fd, backlog) < 0)
         {
             throw new InvalidOperationException("listen failed");
         }

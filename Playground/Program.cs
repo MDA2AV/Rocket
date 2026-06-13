@@ -31,6 +31,7 @@ internal static class Program
             User = Environment.GetEnvironmentVariable("PLAYGROUND_PG_USER") ?? "bench",
             Database = Environment.GetEnvironmentVariable("PLAYGROUND_PG_DB") ?? "bench",
             PoolSize = int.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_PG_POOL"), out int poolSize) ? poolSize : 4,
+            CommandTimeoutMs = int.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_PG_TIMEOUT"), out int pgTimeout) ? pgTimeout : 30_000,
         };
 
         // The asset cache opens every file once and is shared across all reactors (its descriptors

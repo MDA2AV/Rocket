@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>File internals - ioxide</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="../assets/highlight-dark.min.css">
+  <script src="../assets/highlight.min.js"></script>
+</head>
+<body>
+
+<nav class="top">
+  <a class="brand" href="../"><span>io</span>xide</a>
+  <div class="links">
+    <a href="overview.html">Learn</a>
+    <a href="dev-core.html">Developer</a>
+    <a class="gh" href="https://github.com/MDA2AV/ioxide" aria-label="GitHub"><svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
+  </div>
+</nav>
+
+<div class="layout">
+  <aside class="side">
+    <div class="group">Basics</div>
+    <a href="overview.html">Overview</a>
+    <div class="group">Advanced</div>
+    <a href="architecture.html">Architecture</a>
+    <a href="reactor.html">The Reactor</a>
+    <a href="connection.html">The Connection</a>
+    <a href="multiport.html">Multi-port</a>
+    <a href="clients.html">Ring clients</a>
+    <div class="group">Clients</div>
+    <a href="postgres.html">Postgres</a>
+    <a href="files.html">Files</a>
+    <a href="tls.html">TLS</a>
+    <a href="redis.html">Redis</a>
+    <div class="group">Developer</div>
+    <a href="dev-core.html">Core internals</a>
+    <a href="dev-pg.html">Postgres internals</a>
+    <a href="dev-redis.html">Redis internals</a>
+    <a href="dev-tls.html">TLS internals</a>
+    <a href="dev-file.html" class="here">File internals</a>
+  </aside>
+
+  <main class="doc">
+    <h1>File internals</h1>
+    <p class="lead"><code>ioxide.file</code> serves static files off the ring: small files are served
+    from a fully precomputed HTTP response in native memory (no I/O at all), large files are read with
+    positional <code>IORING_OP_READ</code>s. Reloads swap whole snapshots, and a lease keeps a snapshot
+    alive across an in-flight read. Every class below.</p>
+
+    <h2>AssetCache &middot; <span class="dim">AssetCache.cs</span></h2>
+    <p>An immutable snapshot of a directory, keyed by URL path. At build time it walks the root and, for
+    each file, opens a descriptor (held for the snapshot's lifetime so the raw fd stays valid - one fd
+    per file, mind <code>RLIMIT_NOFILE</code>). Files at or below <code>maxCachedFileBytes</code>
+    (default 256&nbsp;KB) get their <em>entire</em> HTTP response - header + body - baked into one
+    contiguous native block at build time, so the hot path serves them with no file I/O, no header
+    formatting, and no allocation. Larger files keep just the fd and are read off the ring.</p>
+    <ul>
+      <li><b>Baking</b> - <code>BuildResponse</code> reads the body first (so a file truncated under us
+      still yields a consistent Content-Length), formats the header with <code>WriteResponseHeader</code>
+      (the one place asset headers are formatted - baking and ring-read serving both use it), and
+      concatenates into one native block.</li>
+      <li><b>Hot-path lookup</b> - <code>TryGet(ReadOnlySpan&lt;byte&gt; urlPath)</code> resolves
+      straight from the recv buffer: ASCII→UTF16 via a stack buffer, then a dictionary
+      <code>GetAlternateLookup&lt;ReadOnlySpan&lt;char&gt;&gt;</code> - zero per-request string
+      allocation. A string overload exists for convenience.</li>
+      <li><b>Symlink safety</b> - enumeration skips reparse points
+      (<code>AttributesToSkip = ReparsePoint</code>), so a symlink can't point outside the root and a
+      symlinked directory isn't descended into - traversal is blocked.</li>
+      <li><b>Refcounting</b> - the snapshot is reference-counted (<code>TryAddRef</code> /
+      <code>Release</code>, starting at 1 for the live reference). It is actually freed - descriptors
+      closed, native blocks freed - only when the last reference is dropped. This is what makes reloads
+      safe (below).</li>
+    </ul>
+
+    <h2>StaticAssets &middot; <span class="dim">StaticAssets.cs</span></h2>
+    <p>A reloadable holder around an <code>AssetCache</code>. <code>Reload</code> builds a fresh snapshot,
+    swaps it in atomically (<code>Interlocked.Exchange</code>), and drops the live reference on the old
+    one - which is then freed only once every outstanding lease on it is released. No timer, no grace
+    window: an in-flight read on the old snapshot can never hit a closed fd or freed memory.</p>
+    <ul>
+      <li><b>Acquire / Lease</b> - <code>Acquire()</code> returns a <code>Lease</code> (a refcounted
+      hold) on the live snapshot; the handler holds it for the whole request - lookup → ring read →
+      send - and disposes it when the response is fully sent. <code>TryAddRef</code> fails if the
+      snapshot is already releasing, so <code>Acquire</code> simply re-reads the live one. The bare
+      <code>TryGet</code> overloads don't lease and are only safe when <code>Reload</code> isn't called
+      concurrently.</li>
+    </ul>
+
+    <h2>AssetReader &middot; <span class="dim">AssetReader.cs</span></h2>
+    <p>One unit of file-serving capacity: a <code>RingOpSource</code> plus a native read buffer. It reads
+    any descriptor (typically an <code>AssetCache</code> fd) at an offset, resumed inline.
+    <code>CreatePool</code> builds a per-reactor <code>RingPool&lt;AssetReader&gt;</code> so concurrent
+    requests don't serialize on one in-flight read. One <code>ReadAsync</code> returns up to
+    <code>Capacity</code> bytes at the given offset; for a file larger than the buffer the caller loops
+    at advancing offsets until the whole file is sent (so big files aren't truncated).</p>
+
+    <h2>RingFile &middot; <span class="dim">RingFile.cs</span></h2>
+    <p>A single file whose reads run on the host's ring: opened once (a blocking, one-time
+    <code>open</code>), then each read is an <code>IORING_OP_READ</code> at an offset, resumed inline.
+    One read in flight at a time (it isn't safe to share concurrently - pool
+    <code>AssetReader</code>s over an <code>AssetCache</code> for per-reactor concurrency). The
+    minimal building block when you have a single file rather than a directory.</p>
+
+    <p class="lead" style="margin-top:2rem">Reads use positional <code>IORING_OP_READ</code> (pread
+    semantics) into native memory; opens are one-time and blocking (off the hot path), reads are the hot
+    path and async. The small-file baked path is allocation- and copy-free per request; large files take
+    one copy (kernel → native buffer → write slab).</p>
+
+    <div class="next"><a href="dev-core.html">Back to Core internals →</a></div>
+  </main>
+</div>
+
+<footer>MIT · Linux 6.1+ · .NET 10 · <a href="https://github.com/MDA2AV/ioxide">github.com/MDA2AV/ioxide</a></footer>
+
+<script>hljs.highlightAll();</script>
+</body>
+</html>

@@ -51,6 +51,12 @@ public static class KtlsExample
                 conn.ResetRead();
             }
         }
+        catch (Exception e)
+        {
+            // The reactor invokes handlers fire-and-forget, so a thrown handshake/handler error would
+            // otherwise vanish silently (this is how a missing 'tls' kernel module manifested earlier).
+            Console.Error.WriteLine($"[tls] connection handler failed: {e.Message}");
+        }
         finally
         {
             tls?.Dispose();

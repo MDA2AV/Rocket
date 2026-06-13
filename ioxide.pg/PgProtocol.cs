@@ -304,6 +304,47 @@ internal static class PgProtocol
     }
 
     /// <summary>
+    /// Parse a RowDescription ('T') body into column metadata: an int16 field count, then per field a
+    /// NUL-terminated name, table OID (int32), column attribute (int16), type OID (int32), type size
+    /// (int16), type modifier (int32), and format code (int16).
+    /// </summary>
+    public static PgColumn[] ParseRowDescription(ReadOnlySpan<byte> body)
+    {
+        if (body.Length < 2)
+        {
+            return [];
+        }
+        short count = BinaryPrimitives.ReadInt16BigEndian(body);
+        if (count <= 0)
+        {
+            return [];
+        }
+
+        var columns = new PgColumn[count];
+        int p = 2;
+        for (int i = 0; i < count; i++)
+        {
+            int nameEnd = body[p..].IndexOf((byte)0);
+            if (nameEnd < 0 || p + nameEnd + 1 + 18 > body.Length)
+            {
+                throw new PgException("malformed RowDescription");
+            }
+            string name = Encoding.UTF8.GetString(body.Slice(p, nameEnd));
+            p += nameEnd + 1;
+
+            int tableOid = BinaryPrimitives.ReadInt32BigEndian(body[p..]);       p += 4;
+            short colAttr = BinaryPrimitives.ReadInt16BigEndian(body[p..]);      p += 2;
+            int typeOid = BinaryPrimitives.ReadInt32BigEndian(body[p..]);        p += 4;
+            short typeSize = BinaryPrimitives.ReadInt16BigEndian(body[p..]);     p += 2;
+            int typeMod = BinaryPrimitives.ReadInt32BigEndian(body[p..]);        p += 4;
+            short formatCode = BinaryPrimitives.ReadInt16BigEndian(body[p..]);   p += 2;
+
+            columns[i] = new PgColumn(name, tableOid, colAttr, typeOid, typeSize, typeMod, formatCode);
+        }
+        return columns;
+    }
+
+    /// <summary>
     /// Parse an ErrorResponse (or NoticeResponse) body: a sequence of (field-type byte,
     /// NUL-terminated string) pairs ending with a lone NUL. Reports severity, SQLSTATE, message.
     /// </summary>
@@ -312,6 +353,8 @@ internal static class PgProtocol
         string severity = "";
         string sqlState = "";
         string message = "";
+        string detail = "";
+        string hint = "";
 
         int i = 0;
         while (i < body.Length && body[i] != 0)
@@ -332,8 +375,13 @@ internal static class PgProtocol
                 case 'S': severity = value; break;
                 case 'C': sqlState = value; break;
                 case 'M': message  = value; break;
+                case 'D': detail   = value; break;   // detail and hint are often the most useful part
+                case 'H': hint     = value; break;
             }
         }
+
+        if (detail.Length > 0) message += $" DETAIL: {detail}";
+        if (hint.Length > 0)   message += $" HINT: {hint}";
 
         return (severity, sqlState, message);
     }
