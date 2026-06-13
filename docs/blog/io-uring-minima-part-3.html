@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>C# Networking Deep Dive With io_uring &mdash; Part 3 &mdash; zerg</title>
+    <link rel="stylesheet" href="../assets/style.css">
+    <link rel="stylesheet" href="../assets/highlight-dark.min.css">
+    <link rel="stylesheet" href="blog.css">
+    <script src="../assets/highlight.min.js"></script>
+</head>
+<body>
+    <nav class="top">
+  <a class="brand" href="../"><span>io</span>xide</a>
+  <div class="links">
+    <a href="../learn/overview.html">Documentation</a>
+    <a href="index.html" class="active">Blog</a>
+    <a class="gh" href="https://github.com/MDA2AV/ioxide" aria-label="GitHub"><svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
+  </div>
+</nav>
+
+    <div class="layout">
+    <aside class="side">
+    <div class="group">Blog</div>
+    <a href="index.html">All posts</a>
+    <div class="group sub">The series</div>
+    <a href="io-uring-minima-part-1.html"><span class="part-num">Part 1</span>io_uring from scratch</a>
+    <a href="io-uring-minima-part-2.html"><span class="part-num">Part 2</span>Bridge the Async Model</a>
+    <a href="io-uring-minima-part-3.html" class="here"><span class="part-num">Part 3</span>Touching the Bytes</a>
+    <a href="io-uring-minima-part-4.html"><span class="part-num">Part 4</span>Zero Copy Receive</a>
+    <a href="io-uring-minima-part-5.html"><span class="part-num">Part 5</span>io_uring and the Thread Pool</a>
+    <a href="io-uring-minima-part-6.html"><span class="part-num">Part 6</span>Numbers</a>
+    <a href="io-uring-minima-part-7.html"><span class="part-num">Part 7</span>fractal</a>
+  </aside>
+
+    <main class="page">
+        <a href="index.html" class="back-link">&larr; All posts</a>
+
+        <article>
+            <img src="images/part-3-hero.png" alt="" class="post-hero">
+
+            <header class="post-header">
+                <h1>C# Networking Deep Dive With io_uring &mdash; Part 3: Touching the Bytes</h1>
+                <div class="post-meta">2026-05-13 &middot; Part 3</div>
+            </header>
+
+            <div class="glossary" aria-label="Glossary">
+                <div><span class="term">CQE</span><span class="def">Completion Queue Entry</span></div>
+                <div><span class="term">DMA</span><span class="def">Direct Memory Access</span></div>
+                <div><span class="term">BCL</span><span class="def">.NET Base Class Library</span></div>
+            </div>
+
+            <div class="post-body">
+                <p>In part 2 we introduced an asynchronous API for reading data from the wire, where only the number of received bytes was considered. On this part 3 let's extend it to access the actual received data.</p>
+
+                <p>As usual, the entire source code can be found at <a href="https://github.com/MDA2AV/zerg/tree/main/Minima">Minima</a></p>
+
+                <p>Data will be pushed to the CQ shared ring buffers by the kernel whenever data arrives from the wire, this can represent a partial, complete or more than one request. By request I mean it could be a HTTP/1.1, HTTP/2, gRPC, websocket, etc pretty much a request from any protocol. Whenever we call a <code>ReadAsync</code>, we receive a <code>RecvSnapshot</code>, a frozen view of the CQE metadata accumulated so far, currently this metadata only includes the number of bytes from each CQE, we need to add a <code>byte*</code> pointing to where the data is.</p>
+
+<pre><code class="language-csharp">public struct Item
+{
+    public byte* Ptr; // new
+    public ushort Bid;
+    public int Len;
+    public bool HasBuffer;
+
+    public ReadOnlySpan&lt;byte&gt; AsSpan() =&gt; new(Ptr, Len); // new
+}</code></pre>
+
+                <p>then on the reactor's dispatch receive branch</p>
+
+<pre><code class="language-csharp">else if (kind == KindRecv)
+{
+    bool   hasBuf = (cqe.flags &amp; IORING_CQE_F_BUFFER) != 0;
+    ushort bid    = hasBuf ? (ushort)(cqe.flags &gt;&gt; IORING_CQE_BUFFER_SHIFT) : (ushort)0;
+
+    (...)
+
+    byte* ptr = hasBuf ? _bufSlab + (nuint)bid * (nuint)BufferSize : null;
+    conn.Complete(cqe.res, bid, hasBuf, ptr);
+
+    (...)
+}</code></pre>
+
+                <p><code>hasBuf</code> - True when the kernel attached a provided buffer to this completion.</p>
+
+                <p><code>bid</code> - the index of the buffer slot the kernel picked from the provided-buffer ring for this recv.</p>
+
+                <p><code>_bufSlab</code> - The contiguous unmanaged memory block backing every recv buffer the kernel can DMA into for this reactor.</p>
+
+                <p>So <code>ptr</code> points to the "slot" which can be calculated by knowing the buffer Id and the size of each buffer. These slots are contiguous memory allocated during initialization.</p>
+
+                <p><code>conn.Complete</code> adds a new Item to our SPSC ring. In case you don't remember previous parts, each CQE has a "kind", <code>kind==KindRecv</code> means that this CQE signals data was received from the wire.</p>
+
+                <p>Now for each received CQE we can access the byte* where kernel stored the received data, each <code>ReadAsync</code> will return a snapshot that contains one or more Items, each Item contains the metadata for one CQE. On the handler side we must consume this data. We don't want to be dealing with pointers though, that would force us to use unsafe everywhere we touch the received data.</p>
+
+                <p>We already have the <code>ReadOnlySpan</code> view of the data via the <code>AsSpan()</code> but spans are ref structs and can't be freely used anywhere. Why is that? Spans are used to create views over stack allocated data unlike its heap allocated counterpart <code>Memory</code>/<code>ReadOnlyMemory</code>, we can't directly use <code>ReadOnlyMemory</code> because it can't be directly created from a <code>byte*</code> even though this byte* points at unmanaged memory allocated upfront in each reactor's <code>_bufSlab</code>.</p>
+
+                <p>Enter <code>UnmanagedMemoryManager</code></p>
+
+<pre><code class="language-csharp">internal sealed unsafe class UnmanagedMemoryManager : MemoryManager&lt;byte&gt;
+{
+    private readonly byte* _ptr;
+    private readonly int _length;
+
+    public ushort BufferId { get; }
+
+    public UnmanagedMemoryManager(byte* ptr, int length, ushort bufferId)
+    {
+        _ptr = ptr;
+        _length = length;
+        BufferId = bufferId;
+    }
+
+    public override Span&lt;byte&gt; GetSpan() =&gt; new(_ptr, _length);
+
+    public override MemoryHandle Pin(int elementIndex = 0) =&gt; new(_ptr + elementIndex);
+
+    public override void Unpin() { }
+
+    protected override void Dispose(bool disposing) { }
+}</code></pre>
+
+                <p>Similar to Span and Memory, <code>UnmanagedMemoryManager</code> is a view over memory, the abstract method implementations are just ceremony, the data already comes pinned by default. Pin is essentially a struct construction, zero cost at runtime. It exists purely to satisfy the contract. <code>Dispose</code> is empty because the manager is a view, not an owner, the buffer's lifetime is managed by <code>BufferId</code>.</p>
+
+                <p>The actual cost is creating a new <code>UnmanagedMemoryManager</code> for each Item, this can also be avoided by pre-allocating all the possible <code>UnmanagedMemoryManager</code>s. Every bid maps to a fixed address in the slab: <code>_bufSlab + bid * BufferSize</code>. The pointer for a given bid never changes. Only <code>Len</code> varies per recv. So we can pre-allocate one manager per slot at reactor init and reuse it forever.</p>
+
+                <p><code>UnmanagedMemoryManager</code> is the bridge between safe and unsafe code, by inheriting from <code>MemoryManager</code> it can be exposed as Memory and plugged into the entire BCL ecosystem for free:</p>
+
+                <ul>
+                    <li>PipeReader / PipeWriter</li>
+                    <li>Stream.ReadAsync(Memory) / WriteAsync(ReadOnlyMemory)</li>
+                    <li>ReadOnlySequence (built from ReadOnlyMemory segments)</li>
+                    <li>IBufferWriter</li>
+                    <li>Any async API that takes Memory</li>
+                </ul>
+
+                <p>This is especially useful for <code>ReadOnlySequence</code> which is very handy when dealing with TCP fragmentation.</p>
+
+                <p>This is how zero allocation is achieved on the receiving branch, the data is written to pre-allocated slots and we directly read from them. While this is zero copy in user space, the kernel itself still copies the bytes from the socket receive buffer into <code>_bufSlab[bid]</code>, avoiding that copy requires different mechanisms (<a href="https://docs.kernel.org/networking/iou-zcrx.html">io_uring zcrx</a>) which are outside Part 3's scope. This data can be parsed by slicing over it and is valid until we return the CQE's buffer Id as can be seen in the snippet below through reactor.ReturnBuffer. After returning each buffer, the kernel may reuse that "slot" for new incoming data so its data can be invalid/overwritten.</p>
+
+                <p>So, how does the handler look now?</p>
+
+<pre><code class="language-csharp">public static async Task HandleAsync(Reactor reactor, int fd, Connection conn)
+{
+    try
+    {
+        while (true)
+        {
+            RecvSnapshot snap = await conn.ReadAsync();
+
+            while (conn.TryGetItem(snap, out SpscRecvRing.Item item))
+            {
+                if (item.HasBuffer)
+                {
+                    UnmanagedMemoryManager mem = item.AsMemoryManager();
+                    ReadOnlyMemory&lt;byte&gt; data = mem.Memory;
+                    // data is now usable with any BCL Memory&lt;byte&gt;/async API
+                    _ = data.Length;
+
+                    reactor.ReturnBuffer(mem.BufferId);
+                }
+                conn.QueueResponse(fd);
+            }
+
+            if (snap.IsClosed)
+            {
+                conn.Close(fd);
+                return;
+            }
+
+            conn.ResetRead();
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"[r{reactor.Id}] handler crash on fd={fd}: {ex}");
+        conn.Close(fd);
+    }
+}</code></pre>
+
+                <p>The possibilities are now endless, we can build a <code>ReadOnlySequence</code> from all the data to facilitate slicing across multiple segments, also in the case of incomplete requests we can again create a <code>ReadOnlySequence</code>, call another <code>ReadAsync</code> and add the received segments to the already existing <code>ReadOnlySequence</code>. We'll put this to use in Part 4 when we parse a real HTTP request that spans multiple segments.</p>
+            </div>
+        </article>
+    </main>
+    </div>
+
+    <footer>
+        <a href="index.html">&larr; All posts</a>
+        &nbsp;&middot;&nbsp;
+        <a href="../">ioxide docs</a>
+    </footer>
+
+    <script>hljs.highlightAll();</script>
+</body>
+</html>

@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>io_uring from scratch in C# &mdash; Part 1 &mdash; zerg</title>
+    <link rel="stylesheet" href="../assets/style.css">
+    <link rel="stylesheet" href="../assets/highlight-dark.min.css">
+    <link rel="stylesheet" href="blog.css">
+    <script src="../assets/highlight.min.js"></script>
+</head>
+<body>
+    <nav class="top">
+  <a class="brand" href="../"><span>io</span>xide</a>
+  <div class="links">
+    <a href="../learn/overview.html">Documentation</a>
+    <a href="index.html" class="active">Blog</a>
+    <a class="gh" href="https://github.com/MDA2AV/ioxide" aria-label="GitHub"><svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
+  </div>
+</nav>
+
+    <div class="layout">
+    <aside class="side">
+    <div class="group">Blog</div>
+    <a href="index.html">All posts</a>
+    <div class="group sub">The series</div>
+    <a href="io-uring-minima-part-1.html" class="here"><span class="part-num">Part 1</span>io_uring from scratch</a>
+    <a href="io-uring-minima-part-2.html"><span class="part-num">Part 2</span>Bridge the Async Model</a>
+    <a href="io-uring-minima-part-3.html"><span class="part-num">Part 3</span>Touching the Bytes</a>
+    <a href="io-uring-minima-part-4.html"><span class="part-num">Part 4</span>Zero Copy Receive</a>
+    <a href="io-uring-minima-part-5.html"><span class="part-num">Part 5</span>io_uring and the Thread Pool</a>
+    <a href="io-uring-minima-part-6.html"><span class="part-num">Part 6</span>Numbers</a>
+    <a href="io-uring-minima-part-7.html"><span class="part-num">Part 7</span>fractal</a>
+  </aside>
+
+    <main class="page">
+        <a href="index.html" class="back-link">&larr; All posts</a>
+
+        <article>
+            <img src="images/part-1-hero.png" alt="" class="post-hero">
+
+            <header class="post-header">
+                <h1>io_uring from scratch in C# &mdash; Part 1</h1>
+                <div class="post-meta">2026-04-29 &middot; Part 1</div>
+            </header>
+
+            <div class="glossary" aria-label="Glossary">
+                <div><span class="term">CQ</span><span class="def">Completion Queue</span></div>
+                <div><span class="term">SQ</span><span class="def">Submission Queue</span></div>
+                <div><span class="term">CQE</span><span class="def">Completion Queue Entry</span></div>
+                <div><span class="term">SQE</span><span class="def">Submission Queue Entry</span></div>
+            </div>
+
+            <div class="post-body">
+                <p>This post is the first part in a deep dive series on io_uring, it describes a basic example on how to bypass every abstraction and directly use the kernel interface for highest possible efficiency TCP networking using C# on Linux with io_uring. The source code used in this post can be found at <a href="https://github.com/MDA2AV/zerg/tree/main/Minima">zerg</a>, project Minima &mdash; a simplified lightweight single threaded, lower performance version of zerg for learning purposes, do not use it for benchmarking purposes. The second and third parts will dive into more complex high performance cases and leveraging C# async I/O via <code>IValueTaskSource</code>.</p>
+
+                <p>io_uring is a modern Linux asynchronous I/O interface, the current traditional path is <code>epoll_wait</code> (to find out which sockets are ready) plus a separate <code>read</code>/<code>write</code>/<code>accept</code> syscall to actually move bytes. Each of those crosses from user to kernel mode and back, this round trip is expensive. io_uring's novelty is to skip the syscalls on the hot path entirely. At startup we allocate two ring buffers in shared memory between our process and the kernel, a submission queue SQ to write descriptions of the work we want done and a completion queue CQ where the kernel posts the results, simple enough.</p>
+
+                <p>The following snippets reference the <code>Ring</code> class, a minimum viable io_uring wrapper written in C#. <code>Ring</code> owns the references to the completion and submission queues plus the logic for pushing entries onto one and reading completions off the other.</p>
+
+                <p>The queues are allocated by the kernel but they live in memory shared with our process.</p>
+
+<pre><code class="language-csharp">IoUringParams ioUringParams = default;
+int fd = io_uring_setup(entries, &amp;ioUringParams);</code></pre>
+
+                <p><code>io_uring_setup</code> is the syscall that creates both queues inside the kernel. The kernel decides their sizes (rounding entries up to a power of two), allocates the memory, and returns a file descriptor plus a struct (<code>ioUringParams</code>) telling us where inside that memory every field lives: head, tail, mask, the SQE array, the CQE array. At this point the queues exist but we can't touch them yet.</p>
+
+                <h3>Mapping them into our address space</h3>
+
+<pre><code class="language-csharp">void* ringMem = mmap(null, ringBytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, IORING_OFF_SQ_RING);   // SQ + CQ metadata
+void* sqeMem  = mmap(null, sqeBytes,  PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, IORING_OFF_SQES);     // SQE array</code></pre>
+
+                <p>The first call maps both the SQ ring metadata and the entire CQ, typically these share one single region on modern kernels. The second call maps the SQE array which is a separate region. After these two calls the same physical memory is now visible to our process and the kernel. One subtle detail here is that CQEs are never "created", they are written to slots that already exist, the CQ is a ring buffer of pre-allocated empty CQE structs.</p>
+
+                <p>Then just cache the pointers to each specific field and our <code>Ring</code> is ready.</p>
+
+<pre><code class="language-csharp">byte* ringPointer = (byte*)ringMem;
+ring._sqHead  = (uint*)(ringPointer + ioUringParams.sq_off.head);
+ring._sqTail  = (uint*)(ringPointer + ioUringParams.sq_off.tail);
+ring._sqArray = (uint*)(ringPointer + ioUringParams.sq_off.array);
+ring._sqMask  = *(uint*)(ringPointer + ioUringParams.sq_off.ring_mask);
+
+ring._cqHead = (uint*)(ringPointer + ioUringParams.cq_off.head);
+ring._cqTail = (uint*)(ringPointer + ioUringParams.cq_off.tail);
+ring._cqes   = (IoUringCqe*)(ringPointer + ioUringParams.cq_off.cqes);
+ring._cqMask = *(uint*)(ringPointer + ioUringParams.cq_off.ring_mask);</code></pre>
+
+                <h2>The Socket</h2>
+
+                <p>The socket itself is not an io_uring concept, it is a plain Berkeley socket created with libc. io_uring does not reinvent the <code>socket</code>/<code>bind</code>/<code>listen</code> concepts and there is no gain in doing so as these are one-time setup calls, the syscall round-trip costs only matter when something runs millions of times per second.</p>
+
+                <p>A basic config TCP socket listening at loopback:</p>
+
+<pre><code class="language-csharp">private static int OpenListener(ushort port) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd &lt; 0) throw new InvalidOperationException($"socket failed: {fd}");
+
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &amp;one, sizeof(int));
+
+    sockaddr_in addr = default;
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = Htons(port);
+    addr.sin_addr.s_addr = 0; // 0.0.0.0
+
+    if (bind(fd, &amp;addr, (uint)sizeof(sockaddr_in)) &lt; 0)
+        throw new InvalidOperationException("bind failed");
+
+    if (listen(fd, Backlog) &lt; 0)
+        throw new InvalidOperationException("listen failed");
+    return fd;
+}</code></pre>
+
+                <p>We have our socket and ring, now what?</p>
+
+                <p>Minima does not use io_uring multishot, this is a key feature that eliminates the need of a submission for every completion which drastically improves the overall performance. In this example for the sake of learning, it will not be used.</p>
+
+                <h2>Submitting an accept SQE</h2>
+
+                <p>Instead of calling <code>accept</code> and blocking as we would normally do with epoll, the SQE is described as an accept and we let the kernel fulfil it asynchronously.</p>
+
+<pre><code class="language-csharp">private static void SubmitAccept(Ring ring, int listenFd) {
+    IoUringSqe* sqe = ring.GetSqe();
+    if (sqe == null) throw new InvalidOperationException("SQ full");
+
+    Unsafe.InitBlockUnaligned(sqe, 0, 64);
+    sqe-&gt;opcode    = IORING_OP_ACCEPT;
+    sqe-&gt;fd        = listenFd;
+    sqe-&gt;user_data = KindAccept | (uint)listenFd;
+}</code></pre>
+
+                <p><code>GetSqe()</code> reserves a slot in the SQE array and returns a pointer to it. Here we fill the SQE, nothing has been sent to the kernel yet, just the local tail has been bumped.</p>
+
+                <p><code>opcode = IORING_OP_ACCEPT; fd = listenFd</code> means we are accepting on this listening fd.</p>
+
+                <p><code>user_data</code> is opaque to the kernel, whatever we write here comes back unchanged on the matching CQE. This way we know the kind of operation and fd on the CQE.</p>
+
+                <p>The SQE is now sitting in the array but the kernel has not seen it yet, submission will only happen when <code>SubmitAndWait</code> writes the kernel-visible tail, this means that we can queue as many SQEs cheaply and then flush them as a batch in one <code>io_uring_enter</code> call. This is half of the io_uring performance story.</p>
+
+                <h2>The main loop</h2>
+
+<pre><code class="language-csharp">while (true) {
+    int rc = ring.SubmitAndWait(1); // submit pending SQEs and block until 1+ CQE
+
+    if (rc &lt; 0 &amp;&amp; rc != -4 /* EINTR */) {
+        Console.Error.WriteLine($"[minima] io_uring_enter failed: {rc}");
+        break;
+    }
+
+    while (ring.TryGetCqe(out IoUringCqe cqe)) {
+        Dispatch(ring, listenFd, in cqe);
+        ring.CqeSeen();
+    }
+}</code></pre>
+
+                <p>Two loops, one syscall per outer iteration that publishes every queued SQE and blocks until the kernel posts at least one completion (CQE). Again, in a high performance scenario this would be done very differently, avoiding checking for completions entirely in the hot path, as will be covered in part 2.</p>
+
+<pre><code class="language-csharp">public int SubmitAndWait(uint waitFor) {
+    uint published = *_sqTail;
+    uint toSubmit  = _sqeTail - published;
+
+    if (toSubmit &gt; 0)
+        Volatile.Write(ref *_sqTail, _sqeTail);
+
+    if (toSubmit == 0 &amp;&amp; waitFor == 0) return 0;
+
+    uint flags = waitFor &gt; 0 ? IORING_ENTER_GETEVENTS : 0;
+    return io_uring_enter(_fd, toSubmit, waitFor, flags);
+}</code></pre>
+
+                <p><code>_sqeTail</code> is our local cursor that we bump inside <code>GetSqe</code>, <code>*_sqTail</code> is the kernel-visible cursor inside the mmap, the calculated difference between them is how many SQEs we have filled but not "announced".</p>
+
+                <p><code>Volatile.Write</code> is a release fence, it ensures that the kernel sees every byte written into those SQE slots before it sees the new tail. Without this ordering there is a chance that the kernel could read the bumped tail and process an SQE that still contains stale data from a previous op.</p>
+
+                <p>After the fence, <code>io_uring_enter</code> does the rest, submits everything between the old and new tail and blocks until at least one CQE has been posted, both directions in a single call.</p>
+
+                <h3>Reading completions</h3>
+
+<pre><code class="language-csharp">public bool TryGetCqe(out IoUringCqe cqe) {
+    uint head = *_cqHead;
+    uint tail = Volatile.Read(ref *_cqTail);
+
+    if (head == tail) { cqe = default; return false; }
+
+    cqe = _cqes[head &amp; _cqMask];
+    return true;
+}
+
+public void CqeSeen() =&gt; Volatile.Write(ref *_cqHead, *_cqHead + 1);</code></pre>
+
+                <p>Again, the <code>Volatile</code> fence matches the acquire fence, so the moment we observe a new tail value the CQE data the kernel wrote is guaranteed visible. If head equals tail we fall back to the outer <code>SubmitAndWait</code>, otherwise we read the CQE at <code>head &amp; mask</code> which is very cheap as the ring is always power-of-two sized, hand it to <code>Dispatch</code> and bump <code>_cqHead</code>. This bump is what tells the kernel that slot is free to reuse for a future CQE.</p>
+
+                <h3>Dispatching</h3>
+
+<pre><code class="language-csharp">private static void Dispatch(Ring ring, int listenFd, in IoUringCqe cqe) {
+    ulong kind = cqe.user_data &amp; 0xffffffff_00000000UL;
+    int   fd   = (int)(cqe.user_data &amp; 0xffffffffUL);
+
+    if (kind == KindAccept) {
+        if (cqe.res &gt;= 0) {
+            int clientFd = cqe.res;
+            var conn = new Conn { Buffer = (byte*)NativeMemory.Alloc((nuint)BufferSize) };
+            s_conns[clientFd] = conn;
+            SubmitRecv(ring, clientFd, conn.Buffer, BufferSize);
+        }
+        SubmitAccept(ring, listenFd); // re-arm
+    } else if (kind == KindRecv) {
+        if (!s_conns.TryGetValue(fd, out var conn)) return;
+        if (cqe.res &lt;= 0) { CloseConn(fd, conn); return; }
+        SubmitSend(ring, fd, conn.Buffer, (uint)cqe.res);
+    } else if (kind == KindSend) {
+        if (!s_conns.TryGetValue(fd, out var conn)) return;
+        if (cqe.res &lt;= 0) { CloseConn(fd, conn); return; }
+        SubmitRecv(ring, fd, conn.Buffer, BufferSize);
+    }
+}</code></pre>
+
+                <p>Here we crack the opaque <code>user_data</code> apart, retrieving the kind (high 32 bits) and fd (low 32 bits). Three branches, each moves the protocol forward by submitting the next SQE.</p>
+
+                <p>None of these <code>SubmitX</code> calls inside <code>Dispatch</code> enter the kernel, they just reserve a slot, fill it and bump the local tail, as we've seen before. Again, the flush only happens on the next outer iteration when <code>SubmitAndWait</code> runs, which means that a single <code>io_uring_enter</code> can absorb many completions and emit many submissions in a single go. This is one of the io_uring core concepts that make it scalable.</p>
+
+                <p>Going through what the dispatch branches do is not very important for this part 1 but:</p>
+
+                <ul>
+                    <li><strong>KindAccept</strong> &mdash; accepts new connections</li>
+                    <li><strong>KindRecv</strong> &mdash; receive data</li>
+                    <li><strong>KindSend</strong> &mdash; kernel notifies about data we tried to send</li>
+                </ul>
+
+                <p>In this example we are not really doing anything with the received data, this will be covered in the following parts: how to avoid allocations by directly reading from kernel shared memory, use modern io_uring features for zero-allocation send and incremental buffers to reuse rings on small data reads.</p>
+            </div>
+        </article>
+    </main>
+    </div>
+
+    <footer>
+        <a href="index.html">&larr; All posts</a>
+        &nbsp;&middot;&nbsp;
+        <a href="../">ioxide docs</a>
+    </footer>
+
+    <script>hljs.highlightAll();</script>
+</body>
+</html>

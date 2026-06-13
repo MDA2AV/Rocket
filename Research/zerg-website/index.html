@@ -532,6 +532,60 @@
         .when-card.zerg-card li::before { background: var(--accent-zerg); }
         .when-card.terraform-card li::before { background: var(--accent-terraform); }
 
+        /* BLOG */
+        .blog-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 1.5rem;
+        }
+        .blog-card {
+            display: flex;
+            flex-direction: column;
+            gap: 0.6rem;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem 1.75rem;
+            text-decoration: none;
+            color: inherit;
+            transition: border-color 0.2s, transform 0.2s;
+        }
+        .blog-card:hover { border-color: var(--accent-zerg); transform: translateY(-2px); }
+        .blog-meta {
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--accent-zerg);
+        }
+        .blog-card-title {
+            font-size: 1.05rem;
+            font-weight: 700;
+            color: var(--text);
+            line-height: 1.35;
+        }
+        .blog-card-excerpt {
+            font-size: 0.88rem;
+            color: var(--text-muted);
+            line-height: 1.6;
+        }
+        .blog-card-excerpt code {
+            font-family: var(--font-mono);
+            font-size: 0.82em;
+            background: var(--bg-code);
+            padding: 0.1em 0.35em;
+            border-radius: 4px;
+        }
+        .blog-all { margin-top: 2.5rem; }
+        .blog-all a {
+            font-family: var(--font-mono);
+            font-size: 0.9rem;
+            color: var(--accent-zerg);
+            text-decoration: none;
+        }
+        .blog-all a:hover { text-decoration: underline; }
+        @media (max-width: 768px) { .blog-grid { grid-template-columns: 1fr; } }
+
         /* FOOTER */
         footer {
             border-top: 1px solid var(--border);
@@ -1002,6 +1056,55 @@ engine.<span class="method">Listen</span>();
                     </ul>
                 </div>
             </div>
+        </div>
+    </section>
+
+    <!-- BLOG -->
+    <section id="blog">
+        <div class="container">
+            <div class="section-label">Writing</div>
+            <h2 class="section-title">From the blog</h2>
+            <p class="section-subtitle">A deep-dive series on io_uring, low-level networking, and the internals behind zerg &mdash; built up from scratch in C#.</p>
+
+            <div class="blog-grid">
+                <a class="blog-card" href="blog/io-uring-minima-part-1.html">
+                    <span class="blog-meta">2026-04-29 &middot; Part 1</span>
+                    <div class="blog-card-title">io_uring from scratch</div>
+                    <div class="blog-card-excerpt">Bypassing every abstraction and using the kernel interface directly for high-efficiency TCP networking on Linux.</div>
+                </a>
+                <a class="blog-card" href="blog/io-uring-minima-part-2.html">
+                    <span class="blog-meta">2026-05-10 &middot; Part 2</span>
+                    <div class="blog-card-title">Bridge the Async Model</div>
+                    <div class="blog-card-excerpt">Wrapping the io_uring loop with C# async/await via <code>IValueTaskSource</code>.</div>
+                </a>
+                <a class="blog-card" href="blog/io-uring-minima-part-3.html">
+                    <span class="blog-meta">2026-05-13 &middot; Part 3</span>
+                    <div class="blog-card-title">Touching the Bytes</div>
+                    <div class="blog-card-excerpt">Extending the async model from part 2 to expose the received bytes themselves.</div>
+                </a>
+                <a class="blog-card" href="blog/io-uring-minima-part-4.html">
+                    <span class="blog-meta">2026-05-18 &middot; Part 4</span>
+                    <div class="blog-card-title">Zero Copy Receive</div>
+                    <div class="blog-card-excerpt">A theoretical side-quest into io_uring zero copy receive (zcrx), where the NIC DMAs payload straight into registered user memory so the kernel never copies it.</div>
+                </a>
+                <a class="blog-card" href="blog/io-uring-minima-part-5.html">
+                    <span class="blog-meta">2026-05-24 &middot; Part 5</span>
+                    <div class="blog-card-title">io_uring and the Thread Pool</div>
+                    <div class="blog-card-excerpt">A rant, not the planned Kestrel integration. Why io_uring's frightening speed in the pinned-reactor model is conditional.</div>
+                </a>
+                <a class="blog-card" href="blog/io-uring-minima-part-6.html">
+                    <span class="blog-meta">2026-05-27 &middot; Part 6</span>
+                    <div class="blog-card-title">Numbers</div>
+                    <div class="blog-card-excerpt">Six implementations on the same i9 14900k box, two workloads, measured with wrk and gcannon.</div>
+                </a>
+                <a class="blog-card" href="blog/io-uring-minima-part-7.html">
+                    <span class="blog-meta">2026-06-01 &middot; Part 7</span>
+                    <div class="blog-card-title">fractal</div>
+                    <div class="blog-card-excerpt">Building fractal, a thread-per-core static file server on io_uring with an eye on being the fastest at its one job.</div>
+                </a>
+            </div>
+
+            <div class="blog-all"><a href="blog/index.html">All posts &rarr;</a></div>
         </div>
     </section>
 

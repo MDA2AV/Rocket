@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>C# Networking Deep Dive With io_uring &mdash; Part 2 &mdash; zerg</title>
+    <link rel="stylesheet" href="../assets/style.css">
+    <link rel="stylesheet" href="../assets/highlight-dark.min.css">
+    <link rel="stylesheet" href="blog.css">
+    <script src="../assets/highlight.min.js"></script>
+</head>
+<body>
+    <nav class="top">
+  <a class="brand" href="../"><span>io</span>xide</a>
+  <div class="links">
+    <a href="../learn/overview.html">Documentation</a>
+    <a href="index.html" class="active">Blog</a>
+    <a class="gh" href="https://github.com/MDA2AV/ioxide" aria-label="GitHub"><svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
+  </div>
+</nav>
+
+    <div class="layout">
+    <aside class="side">
+    <div class="group">Blog</div>
+    <a href="index.html">All posts</a>
+    <div class="group sub">The series</div>
+    <a href="io-uring-minima-part-1.html"><span class="part-num">Part 1</span>io_uring from scratch</a>
+    <a href="io-uring-minima-part-2.html" class="here"><span class="part-num">Part 2</span>Bridge the Async Model</a>
+    <a href="io-uring-minima-part-3.html"><span class="part-num">Part 3</span>Touching the Bytes</a>
+    <a href="io-uring-minima-part-4.html"><span class="part-num">Part 4</span>Zero Copy Receive</a>
+    <a href="io-uring-minima-part-5.html"><span class="part-num">Part 5</span>io_uring and the Thread Pool</a>
+    <a href="io-uring-minima-part-6.html"><span class="part-num">Part 6</span>Numbers</a>
+    <a href="io-uring-minima-part-7.html"><span class="part-num">Part 7</span>fractal</a>
+  </aside>
+
+    <main class="page">
+        <a href="index.html" class="back-link">&larr; All posts</a>
+
+        <article>
+            <header class="post-header">
+                <h1>C# Networking Deep Dive With io_uring &mdash; Part 2: Bridge the Async Model</h1>
+                <div class="post-meta">2026-05-10 &middot; Part 2</div>
+            </header>
+
+            <div class="glossary" aria-label="Glossary">
+                <div><span class="term">CQE</span><span class="def">Completion Queue Entry</span></div>
+                <div><span class="term">SPSC</span><span class="def">Single Producer Single Consumer</span></div>
+                <div><span class="term">BCL</span><span class="def">.NET Base Class Library</span></div>
+            </div>
+
+            <div class="post-body">
+                <p>In part 1 we built the minimal io_uring loop: setup, mmaps, SQE/CQE draining, accept/recv/send via opcode dispatch.This was the first step to understanding how the kernel interface works but the dispatch logic was basically hand coded, a state machine that would not scale.</p>
+
+                <p>This second part is all about introducing the asynchronous model to await data pushed by the kernel. For simplicity, in this article scope we will simply return the number of bytes received, in later parts it will be described how to adapt this to return the actual request data and parse it.</p>
+
+                <p>As usual, the full source code can be found at https://github.com/MDA2AV/zerg/tree/main/Minima</p>
+
+                <h2>Why not just use Task?</h2>
+
+                <p>The direct option would be to just return a Task&lt;int&gt;, completed by the dispatcher when a CQE arrives, to avoid the allocations this would cause for every asynchronous read we are going with the zero allocation option. ValueTask&lt;T&gt; over a reusable source, the high performance path, the source is a single object that lives as long as the TCP connection.</p>
+
+<pre><code class="language-csharp">public interface IValueTaskSource&lt;out TResult&gt;
+{
+   TResult GetResult(short token);
+
+   ValueTaskSourceStatus GetStatus(short token);
+
+   void OnCompleted(Action&lt;object?&gt; continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags);
+
+}</code></pre>
+
+                <p>These three methods are all the runtime needs to drive the await "machinery". The token is just a safety net, every Reset() bumps an internal version, like a generation counter so that a stale awaiter passing an old token gets caught.</p>
+
+                <p>Typically we don't need to implement these three methods from scratch, the BCL provides ManualResetValueTaskSourceCore&lt;T&gt;, a struct that holds/owns the value, version, captured continuation and the scheduling context.</p>
+
+                <p>We can delegate the interface methods to it</p>
+
+<pre><code class="language-csharp">private ManualResetValueTaskSourceCore&lt;RecvSnapshot&gt; _readSignal;
+
+RecvSnapshot IValueTaskSource&lt;RecvSnapshot&gt;.GetResult(short token) =&gt; _readSignal.GetResult(token);
+
+ValueTaskSourceStatus IValueTaskSource&lt;RecvSnapshot&gt;.GetStatus(short token) =&gt; _readSignal.GetStatus(token);
+
+void IValueTaskSource&lt;RecvSnapshot&gt;.OnCompleted(Action&lt;object?&gt; c, object? s, short t, ValueTaskSourceOnCompletedFlags f)
+      =&gt; _readSignal.OnCompleted(c, s, t, f);</code></pre>
+
+                <p>The generic T is RecvSnapshot, a small struct that captures what is available to read, the handler awaits this snapshot and drains the items it covers. This will be covered further on, for now just think of it as a snapshot that points to a circular buffer tail, the reason we need this and can't just drain the entire buffer is because we can receive data as we process this, the tail can change anytime and that would potentially cause a desync when extracting data.</p>
+
+                <p>_readSignal exposes Version, Reset(), SetResult(value) and SetException(ex), that is the whole API surface we will use. The "Manual" in ManualResetValueTaskSourceCore is the contract, Reset() must be called between completions, without it the next SetResult() would throw, this is intentional design, reuses without explicit resets could mask state management bugs.</p>
+
+                <h2>Meeting point</h2>
+
+                <p>Each Connection has two sides:</p>
+
+                <ul>
+                    <li>Producer, the CQE dispatcher. When a CQE arrives it must be delivered.</li>
+                    <li>Consumer, the application handler parked on await ReadAsync(), waiting for that result.</li>
+                </ul>
+
+                <p>Most of the time these two are synchronized in the simplest case: the consumer parks waiting for data, the producer wakes it. There are however gaps that need to be addressed.</p>
+
+                <ul>
+                    <li>Consumer calls ReadAsync() to park but the producer already had a result read from a previous CQE. In this case we don't want to block/await, we want to return the buffered result synchronously.</li>
+                    <li>Producer fires a result but the consumer hasn't called ReadAsync() yet. This can typically happen between two consumer awaits, we can't drop the result or overwrite it if more than one CQE arrives back to back.</li>
+                </ul>
+
+                <p>Both cases boil down to the same issue/need, a buffer between the producer and consumer so that data is preserved no matter what runs first. A solution is a bounded single producer single consumer ring, producer enqueues from the dispatcher and the consumer dequeues from ReadAsync, this structure implementation can be found at SpscRecvRing.cs.</p>
+
+<pre><code class="language-csharp">internal sealed class SpscRecvRing
+{
+   public struct Item { public ushort Bid; public int Len; public bool HasBuffer; }
+
+   public bool TryEnqueue(in Item item);
+   public bool TryDequeue(out Item item);
+   public long SnapshotTail();
+   public bool TryDequeueUntil(long tailSnapshot, out Item item);
+   public bool IsEmpty();
+}</code></pre>
+
+                <p>One important characteristic is that this is a ring or circular buffer, which size must be a power of 2, this removes the need to ever need to clear or reset the buffer.</p>
+
+                <p>In this part 2 scope we only care about Len, the number of bytes received, Bid(Buffer Id) and HasBuffer are for returning the buffer to the kernel ring and will be properly covered in part 3.</p>
+
+                <p>The two interesting methods are SnapshotTail and TryDequeueUntil, together they let the consumer take a "picture" of what was available at that moment and drain everything up to that point in a single batch, without chasing a moving tail, as was explained above.</p>
+
+<pre><code class="language-csharp">internal readonly struct RecvSnapshot
+{
+   public readonly long Tail;
+   public readonly bool IsClosed;
+   public RecvSnapshot(long tail, bool isClosed) { Tail = tail; IsClosed = isClosed; }
+   public static RecvSnapshot Closed() =&gt; new(0, isClosed: true);
+}</code></pre>
+
+                <p>Before moving on I'd like to leave a "small" paragraph here, I've been confronted many times with "but why do you say run synchronously? Don't we want everything asynchronously to be more efficient?", so.. typically when we hear about asynchronous execution  we think about parallelism, thread pool and multi threading, this is generally not wrong but not precise either. The typical async workflow is to tell the CPU to execute a piece of code/logic in the "future", a callback, promise or however we many name it, in C# this callback will execute in a thread from the thread pool (as typically .ConfigureAwait is set with false) and you could say that is one of the core mechanisms of c# await/async model which makes it so good. But in the end of the day if we can avoid this future callback and immediately execute the logic which can happen if the CQE was received before we call ReadAsync, this would be the most efficient scenario as we have if there is data already available when we call ReadAsync, short circuiting the whole callback and immediately execute it.</p>
+
+                <p>Delegating the Task execution to the thread pool sounds great but it comes with a price which becomes noticeable when we want to deal with millions of requests per second and more important, more threads does not always mean faster. Software runs on a CPU which has a limited number of CPU threads typically the same number of physical cores or 2x that value. While we can create thousands or tens of thousands of software threads in C#, those will run in a limited number of CPU threads. Here is where IValueTaskSource&lt;T&gt; can shine, by default it is set to run the OnCompleted callback synchronously but do not get confused here, this synchronously means the callback will run on the same thread of the caller, not that will block the await.</p>
+
+                <p>Before moving into how IValueTaskSource is bridged between the handler and the reactor loop let's first understand the four flags/states owned by the Connection class.</p>
+
+<pre><code class="language-csharp">private ManualResetValueTaskSourceCore&lt;RecvSnapshot&gt; _readSignal;     // wake signal carrying the snapshot
+private int _armed;                                                    // 1 when handler is parked
+private int _closed;                                                   // sticky once recv returned &lt;=0 or send failed
+private readonly SpscRecvRing _recv = new(capacityPow2: 16);           // buffered recv items</code></pre>
+
+                <p>_armed means the consumer is parked. After enqueueing the data into the ring, the producer checks _armed, if set, it fires SetResult with a fresh snapshot to wake the consumer. If not armed, the data just sits in the ring waiting for the next ReadAsync to pick it up via the synchronous fast path. There is no pending data mechanism, the SPSC ring is the bridge from edge triggered wakes (one CQE at a time) to level-triggered consumption (the handler reads when it can).</p>
+
+                <p>_closed is sticky, once set all future ReadAsync will return immediately.</p>
+
+                <h2>On the producer side</h2>
+
+<pre><code class="language-csharp">public void Complete(int res, ushort bid, bool hasBuffer) {
+   if (res &lt;= 0) {
+       _closed = 1;
+       if (hasBuffer) _reactor.ReturnBuffer(bid);   // defensive: kernel rarely attaches a buffer here
+   }
+   else if (!_recv.TryEnqueue(new SpscRecvRing.Item { Bid = bid, Len = res, HasBuffer = hasBuffer })) {
+       _closed = 1;
+       if (hasBuffer) _reactor.ReturnBuffer(bid);   // overflow → handler can't keep up; return the buffer, close
+   }
+
+   if (_armed == 1) {
+       _armed = 0;
+       _readSignal.SetResult(new RecvSnapshot(_recv.SnapshotTail(), _closed != 0));
+   }
+}</code></pre>
+
+                <p>On failure path (res&lt;=0 or can't enqueue the Item) we hand the buffer back to the kernel ring so that it doesn't slowly run out of recv buffers. If the consumer is already parked, wake it with SetResult and pass a snapshot of the ring's tail at this moment. The snapshot is what makes this meaningful, it basically tells the handler "everything from your current head up to this tail can be drained in s single batch", if three CQEs arrived back to back while the handler was busy, all three are visible in the next snapshot.</p>
+
+                <h2>The consumer side</h2>
+
+<pre><code class="language-csharp">public ValueTask&lt;RecvSnapshot&gt; ReadAsync() {
+   if (!_recv.IsEmpty())  // synchronous fast path
+       return new ValueTask&lt;RecvSnapshot&gt;(new RecvSnapshot(_recv.SnapshotTail(), _closed != 0));
+
+   if (_closed != 0)
+       return new ValueTask&lt;RecvSnapshot&gt;(RecvSnapshot.Closed());
+
+   if (_armed == 1)
+       throw new InvalidOperationException("ReadAsync already armed.");
+   _armed = 1;
+
+   return new ValueTask&lt;RecvSnapshot&gt;(this, _readSignal.Version);
+}</code></pre>
+
+                <p>If the ring has data, take a fresh snapshot and return it as a complete ValueTask, no state machine yeild, allocation or wake required, the synchronous fast path.</p>
+
+                <p>If the ring is empty and the connection is closed, return a closed snapshot.</p>
+
+                <p>The check on _armed==1 is a guardrail, two simultaneous ReadAsync calls on the same connection would "clobber" each other's continuation.</p>
+
+                <p>Then the typical case, set _armed and handle the awaiter a ValueTask&lt;RecvSnapshot&gt;(this, _readSignal.Version), the handler suspends, the runtime stores the continuation on _readSignal and the thread is freed.</p>
+
+                <h2>Draining the snapshot</h2>
+
+                <p>So, once the handler receives a snapshot it pulls items out one by one with TryGetItem.</p>
+
+<pre><code class="language-csharp">public bool TryGetItem(in RecvSnapshot snap, out SpscRecvRing.Item item)
+   =&gt; _recv.TryDequeueUntil(snap.Tail, out item);</code></pre>
+
+                <p>TryDequeueUntil advances the consumer's head as far as snapshot's tail even if the producer has since moved ahead. The handler always sees a stable batch.</p>
+
+<pre><code class="language-csharp">RecvSnapshot snap = await conn.ReadAsync();
+
+while (conn.TryGetItem(snap, out SpscRecvRing.Item item)) {
+  // process item.Len bytes; in part 3 we will also use item.Bid to read the data
+   if (item.HasBuffer) reactor.ReturnBuffer(item.Bid);
+   conn.QueueResponse(fd);
+}
+
+if (snap.IsClosed) { conn.Close(fd); return; }
+conn.ResetRead();</code></pre>
+
+                <h2>IValueTaskSource&lt;T&gt; "magic"</h2>
+
+                <p>In simple terms, the "trick" here is that the continuation callback will always run on the same thread, avoiding the thread pool cost. The reactor/dispatcher loop always runs on the same software AND CPU thread even though it is asynchronous and await boundaries are hit.</p>
+
+                <p>When a recv CQE arrives, the reactor calls Complete which enqueues into the ring and calls SetResult with a fresh snapshot. With RunContinuationsAsynchronously left at its default false and no captured SynchronizationContext, the stored continuation is invoked inline, on the reactor thread:</p>
+
+<pre><code>Reactor.Run
+--Dispatch(recv_cqe)
+----Connection.Complete(res, bid, hasBuffer)
+------_recv.TryEnqueue(...)
+------_readSignal.SetResult(new RecvSnapshot(tail, isClosed))
+--------continuation(state)              ← function pointer call
+----------HandleAsync.MoveNext           ← state machine resumes after the await
+------------RecvSnapshot snap = result;  ← GetResult returns the snapshot
+------------while (TryGetItem(...)) { ... process, send response, return buffer ... }
+------------ResetRead, await ReadAsync
+------------// ...the loop starts over, still on the reactor thread</code></pre>
+
+                <p>The handler runs on top of the reactor's call stack. No thread-pool hop, no scheduler. SetResult is, mechanically, just a function call into the handler's continuation that happens to carry a snapshot as its payload. When the handler finishes draining, hits the next await and parks, the stack unwinds back to Dispatch which moves on to the next CQE.</p>
+
+                <p>The reactor/dispatcher loop always runs on the same software AND CPU thread, and so does the handler, even though the code is fully asynchronous and await boundaries are hit on every iteration.</p>
+            </div>
+        </article>
+    </main>
+    </div>
+
+    <footer>
+        <a href="index.html">&larr; All posts</a>
+        &nbsp;&middot;&nbsp;
+        <a href="../">ioxide docs</a>
+    </footer>
+
+    <script>hljs.highlightAll();</script>
+</body>
+</html>

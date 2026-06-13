@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>C# Networking Deep Dive With io_uring &mdash; Part 5 &mdash; zerg</title>
+    <link rel="stylesheet" href="../assets/style.css">
+    <link rel="stylesheet" href="../assets/highlight-dark.min.css">
+    <link rel="stylesheet" href="blog.css">
+    <script src="../assets/highlight.min.js"></script>
+</head>
+<body>
+    <nav class="top">
+  <a class="brand" href="../"><span>io</span>xide</a>
+  <div class="links">
+    <a href="../learn/overview.html">Documentation</a>
+    <a href="index.html" class="active">Blog</a>
+    <a class="gh" href="https://github.com/MDA2AV/ioxide" aria-label="GitHub"><svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
+  </div>
+</nav>
+
+    <div class="layout">
+    <aside class="side">
+    <div class="group">Blog</div>
+    <a href="index.html">All posts</a>
+    <div class="group sub">The series</div>
+    <a href="io-uring-minima-part-1.html"><span class="part-num">Part 1</span>io_uring from scratch</a>
+    <a href="io-uring-minima-part-2.html"><span class="part-num">Part 2</span>Bridge the Async Model</a>
+    <a href="io-uring-minima-part-3.html"><span class="part-num">Part 3</span>Touching the Bytes</a>
+    <a href="io-uring-minima-part-4.html"><span class="part-num">Part 4</span>Zero Copy Receive</a>
+    <a href="io-uring-minima-part-5.html" class="here"><span class="part-num">Part 5</span>io_uring and the Thread Pool</a>
+    <a href="io-uring-minima-part-6.html"><span class="part-num">Part 6</span>Numbers</a>
+    <a href="io-uring-minima-part-7.html"><span class="part-num">Part 7</span>fractal</a>
+  </aside>
+
+    <main class="page">
+        <a href="index.html" class="back-link">&larr; All posts</a>
+
+        <article>
+            <img src="images/part-5-hero.png" alt="A wide seascape where two bodies of water with different colours meet along a visible line, deep blue on one side and bright turquoise on the other, without mixing." class="post-hero">
+
+            <header class="post-header">
+                <h1>C# Networking Deep Dive With io_uring &mdash; Part 5: io_uring and the Thread Pool</h1>
+                <div class="post-meta">2026-05-24 &middot; Part 5</div>
+            </header>
+
+            <div class="glossary" aria-label="Glossary">
+                <div><span class="term">SQE</span><span class="def">Submission Queue Entry</span></div>
+                <div><span class="term">CQE</span><span class="def">Completion Queue Entry</span></div>
+                <div><span class="term">SQPOLL</span><span class="def">kernel submission-queue poller</span></div>
+                <div><span class="term">eventfd</span><span class="def">kernel event / wait fd</span></div>
+            </div>
+
+            <div class="post-body">
+                <p>Part 5 was going to be about integrating with Kestrel. I actually did it, the integration is done and tested, and it even came out ahead on some benchmarks, but overall the performance lands not far from Kestrel's stock Socket transport. So instead of a walkthrough, this turned into a rant about io_uring and the thread pool.</p>
+
+                <p>This story doesn't begin with io_uring. To be honest with you, I love epoll (plot twist :o), and the reason I've been experimenting with and researching io_uring for 7 months now is to understand whether it's truly a better alternative to epoll... for networking.</p>
+
+                <p>Now, don't get me wrong, io_uring is great. I love so many things about it. It was originally created for disk/file I/O and excels at it, but in my humble opinion it can be a mismatch for typical networking and back-end applications.</p>
+
+                <p>So at this point you're probably wondering what the hell is going on, and why I'm saying this when so many people treat io_uring as their coca-cola in the desert. For benchmark enthusiasts who want to push and squeeze numbers, io_uring is indeed fast. But that's exactly where it shines, micro-benchmarks.</p>
+
+                <p>io_uring is a perfect match for the reactor pattern we've been exploring in this series. It performs especially fast when the reactor is pinned to a thread for its entire lifetime, which, again, lines up perfectly with how <code>IValueTaskSource</code> works. I haven't shared any benchmarks with you yet, but let me tell you, Minima is fast. Frighteningly fast. I'll save the numbers for a future part.</p>
+
+                <p>This speed comes with a shackle, though.</p>
+
+                <p>io_uring's speed in this model (Minima's multi-reactor) is conditional. Two things have to hold at the same time, the reactor is the sole submitter of the ring (<code>SINGLE_ISSUER</code> with <code>DEFER_TASKRUN</code>), and the handler runs inline on the reactor thread, so the <code>IValueTaskSource</code> resumes without ever leaving it. Both hold only as long as the handler never leaves the reactor. But guess what? The entire .NET backend world is built on leaving it, the thread pool, async/await resuming off-thread, and of course Kestrel, whose whole model is "hand the connection to the pool." So the moment we await any real async work, the handler moves off the reactor thread, the response can no longer be submitted from that thread, and we're forced into a cross-thread handoff. And now that we're juggling multiple threads, every kind of race condition and deadlock becomes possible, and fixing them is not free.</p>
+
+                <h2>The reactor deadlock</h2>
+
+                <p>Putting an SQE in the ring and bumping the SQ tail does nothing by itself. The kernel only looks at the SQ when you call <code>io_uring_enter</code> (assuming no SQPOLL), which is an explicit syscall that, in Minima's model, only the reactor can make. The reactor's wake-up, however, is gated on completions (CQEs), the loop blocks in <code>io_uring_enter(to_submit, min_complete=1, GETEVENTS)</code>, submits whatever is pending, and then sleeps in the kernel until at least one CQE is available.</p>
+
+                <p><strong>Let's dissect,</strong></p>
+
+                <ol>
+                    <li>All connections are idle (keep-alive, no in-flight requests). Every reactor is asleep inside <code>io_uring_enter</code>, waiting for any completion.</li>
+                    <li>A handler finishes on a pool thread and needs to send a response on connection C (owned by reactor R). It produces a SEND SQE and writes it into R's ring, bumping the tail.</li>
+                    <li>But it does not call <code>io_uring_enter</code> (single-issuer, so only R may submit). The SEND SQE now sits in the ring, unsubmitted.</li>
+                    <li>R won't run again until a CQE wakes it, and the only CQE that would wake it is the completion of that SEND, which is never submitted, because R is the one that submits and R is asleep. If C was the only connection with work, no other completion is coming.</li>
+                </ol>
+
+                <p>So to sum up, the pool thread is waiting for the reactor to submit its SQE, and the reactor is waiting for a completion that only that submission would produce. Each waits on the other. Deadlock.</p>
+
+                <p>There are ways to avoid this, though. One is to use a wait syscall that accepts a timeout, if no CQE arrives, it simply times out and the reactor loop comes back around. This is zerg's solution, and it has an obvious problem, we might hit that timeout too often. If the timeout is too large, latency takes a hit, if it's too small, we keep waking up for nothing when traffic is low, burning CPU.</p>
+
+                <p>Minima's solution is more elegant, an eventfd wake. The reactor keeps a multishot poll armed on an eventfd inside its own ring. After enqueuing the work, the pool thread does a small <code>write()</code> to that eventfd, the write makes it readable, the armed poll turns that into a CQE, and the reactor wakes. It comes with an ironic cost though, an extra syscall. The very thing we were trying to escape from epoll.</p>
+
+                <h2>Can SQPOLL solve this problem?</h2>
+
+                <p>On paper, it does, a kernel thread polls the submission queue, so the pool thread's SQE gets picked up and submitted without the reactor ever calling <code>io_uring_enter</code>. No sleeping reactor to wake. But the irony kicks in again. The poller itself can go to sleep, and then it needs a wake-up of its own, which is the same problem all over again. On top of that, SQPOLL and <code>DEFER_TASKRUN</code> are mutually exclusive, so we'd surrender the very completion-batching that makes the model fast in the first place. So SQPOLL doesn't remove the wake, it relocates it, burns a kernel thread per reactor, and makes us give up <code>DEFER_TASKRUN</code> on the way.</p>
+
+                <p>We could set SQPOLL so it never sleeps, or build a more complex mechanism to wake it automatically. I might explore that in a future part, but to be honest, io_uring with SQPOLL has been subpar in my own tests, so I'd rather just go with epoll.</p>
+
+                <p>Now, epoll sidesteps all of this because it never separates <em>doing</em> the I/O from <em>submitting</em> it. <code>send</code> and <code>recv</code> are plain syscalls that any thread calls directly. A much cleaner model, no hacks.</p>
+
+                <p>So how much faster than epoll is io_uring, really? On a micro-benchmark where the work isn't delegated to the thread pool, it can be a tad faster, 5-10% in my own benchmarks. But on a real workload, it's as fast at best, and given everything io_uring drags along (security concerns, restricted kernel access, recent-kernel requirements, and implementation complexity), as of today it just ain't worth it, in my opinion. I might change my mind with more research.</p>
+
+                <p>Regardless, io_uring has its place when the handler/endpoint logic is lightweight, such as websockets, or the kind of mostly-synchronous workloads that reactor/event-loop servers like nginx and Redis are built for (and it's no accident that those live on an event-loop model).</p>
+
+                <p>For the next parts I'll keep going with Minima and explore the reactor pattern and the send branch. Even though io_uring may not be a great fit for Kestrel, it can still shine in the right kind of application.</p>
+            </div>
+        </article>
+    </main>
+    </div>
+
+    <footer>
+        <a href="index.html">&larr; All posts</a>
+        &nbsp;&middot;&nbsp;
+        <a href="../">ioxide docs</a>
+    </footer>
+
+    <script>hljs.highlightAll();</script>
+</body>
+</html>
