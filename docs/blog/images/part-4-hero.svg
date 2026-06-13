@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" font-family="'JetBrains Mono','Fira Code','Cascadia Code','Consolas',monospace">
+  <defs>
+    <marker id="aAccent" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="9" markerHeight="9" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#7c5cfc"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="300" fill="#0a0a0f"/>
+
+  <text x="70" y="58" fill="#7c5cfc" font-size="14" font-weight="700" letter-spacing="3">IO_URING &#183; ZERO COPY RECEIVE</text>
+
+  <rect x="130" y="120" width="210" height="80" rx="8" fill="#12121a" stroke="#1e1e30"/>
+  <text x="235" y="168" fill="#e0e0e8" font-size="22" font-weight="700" text-anchor="middle">NIC</text>
+
+  <rect x="860" y="120" width="240" height="80" rx="8" fill="rgba(124,92,252,0.10)" stroke="#7c5cfc" stroke-width="1.5"/>
+  <text x="980" y="166" fill="#e0e0e8" font-size="16" font-weight="700" text-anchor="middle">registered memory</text>
+
+  <line x1="340" y1="160" x2="858" y2="160" stroke="#7c5cfc" stroke-width="4" stroke-linecap="round" marker-end="url(#aAccent)"/>
+  <text x="600" y="140" fill="#7c5cfc" font-size="14" font-weight="700" letter-spacing="2" text-anchor="middle">DMA</text>
+
+  <text x="600" y="238" fill="#8888a0" font-size="15" text-anchor="middle">kernel copy</text>
+  <line x1="543" y1="233" x2="657" y2="233" stroke="#8888a0" stroke-width="1.5"/>
+</svg>

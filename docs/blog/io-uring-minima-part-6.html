@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>C# Networking Deep Dive With io_uring &mdash; Part 6 &mdash; zerg</title>
+    <link rel="stylesheet" href="../assets/style.css">
+    <link rel="stylesheet" href="../assets/highlight-dark.min.css">
+    <link rel="stylesheet" href="blog.css">
+    <script src="../assets/highlight.min.js"></script>
+</head>
+<body>
+    <nav class="top">
+  <a class="brand" href="../"><span>io</span>xide</a>
+  <div class="links">
+    <a href="../learn/overview.html">Documentation</a>
+    <a href="index.html" class="active">Blog</a>
+    <a class="gh" href="https://github.com/MDA2AV/ioxide" aria-label="GitHub"><svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
+  </div>
+</nav>
+
+    <div class="layout">
+    <aside class="side">
+    <div class="group">Blog</div>
+    <a href="index.html">All posts</a>
+    <div class="group sub">The series</div>
+    <a href="io-uring-minima-part-1.html"><span class="part-num">Part 1</span>io_uring from scratch</a>
+    <a href="io-uring-minima-part-2.html"><span class="part-num">Part 2</span>Bridge the Async Model</a>
+    <a href="io-uring-minima-part-3.html"><span class="part-num">Part 3</span>Touching the Bytes</a>
+    <a href="io-uring-minima-part-4.html"><span class="part-num">Part 4</span>Zero Copy Receive</a>
+    <a href="io-uring-minima-part-5.html"><span class="part-num">Part 5</span>io_uring and the Thread Pool</a>
+    <a href="io-uring-minima-part-6.html" class="here"><span class="part-num">Part 6</span>Numbers</a>
+    <a href="io-uring-minima-part-7.html"><span class="part-num">Part 7</span>fractal</a>
+  </aside>
+
+    <main class="page">
+        <a href="index.html" class="back-link">&larr; All posts</a>
+
+        <article>
+            <img src="images/part-6-hero.png" alt="A dense, chaotic scattering of black numerals on a white background, overlapping at every angle." class="post-hero">
+
+            <header class="post-header">
+                <h1>C# Networking Deep Dive With io_uring &mdash; Part 6: Numbers</h1>
+                <div class="post-meta">2026-05-27 &middot; Part 6</div>
+            </header>
+
+            <div class="post-body">
+                <p>For part 6 let's do some benchmarks;</p>
+
+                <p class="note">These values are not "scientific", just a ballpark estimate.</p>
+
+                <h2>What is going to be benchmarked</h2>
+
+                <ul>
+                    <li>io_uring read+write with IVTS reactor inline continuations (RunAsynchrounousContinuation = false)</li>
+                    <li>io_uring read+write without IVTS reactor inline continuations (threadpool) (RunAsynchrounousContinuation = true)</li>
+                    <li>io_uring read + libc send write without IVTS reactor inline continuations (threadpool) (RunAsynchrounousContinuation = true)</li>
+                    <li>epoll read+write with IVTS reactor inline continuations</li>
+                    <li>epoll read+write without IVTS reactor inline continuations</li>
+                    <li>System.Net.Socket (Kestrel stock) - epoll threadpool</li>
+                </ul>
+
+                <h2>Tests</h2>
+
+                <p>(No pipelining)</p>
+
+                <ul>
+                    <li>Synchronous lightweight plaintext "OK" response.</li>
+                    <li>Asynchronous workload: <code>_ = await Task.Run(static () =&gt; JsonSerializer.Serialize("Hello World!"));</code></li>
+                </ul>
+
+                <p>The purpose of the async workload is to force the continuation onto the threadpool, not to model a heavy async workload.</p>
+
+                <h2>Hardware</h2>
+
+                <p>i9 14900k<br>
+                64GB DDR5 6400MHz<br>
+                Linux Kernel 6.17.0-22-generic</p>
+
+                <p>Tests are done through localhost loopback (no NIC influence)<br>
+                MTU 1500</p>
+
+                <h2>Load generators</h2>
+
+                <p>Http/1.1 no TLS</p>
+
+                <p>
+                    <a href="https://github.com/wg/wrk">wrk (epoll)</a><br>
+                    <a href="https://github.com/MDA2AV/gcannon">gcannon (io_uring)</a>
+                </p>
+
+                <h2>io_uring configuration</h2>
+
+                <p>All io_uring variants share the same ring setup:</p>
+
+                <ul>
+                    <li><code>SINGLE_ISSUER</code> + <code>DEFER_TASKRUN</code></li>
+                    <li>Multishot accept and multishot recv (send is one-shot per response)</li>
+                    <li>No zero copy receive, no zero copy send</li>
+                    <li>Incremental buffer consumption disabled, similar performance for this specific benchmark</li>
+                </ul>
+
+                <h2>io_uring read+write with IVTS reactor inline continuations</h2>
+
+                <p>This is the exact model explored throughout the series, expected to deliver high performance on synchronous test.</p>
+
+                <p><strong>Reactor count: 12</strong></p>
+
+                <h3>Sync workload</h3>
+
+                <div class="table-scroll"><table>
+                    <thead><tr><th>Metric</th><th>wrk</th><th>gcannon</th></tr></thead>
+                    <tbody>
+                        <tr><td>Latency Avg</td><td>121.45us</td><td>129us</td></tr>
+                        <tr><td>Latency Stdev</td><td>178.81us</td><td>&mdash;</td></tr>
+                        <tr><td>Latency Max</td><td>8.32ms</td><td>&mdash;</td></tr>
+                        <tr><td>Latency p50</td><td>&mdash;</td><td>125us</td></tr>
+                        <tr><td>Latency p90</td><td>&mdash;</td><td>185us</td></tr>
+                        <tr><td>Latency p99</td><td>&mdash;</td><td>245us</td></tr>
+                        <tr><td>Latency p99.9</td><td>&mdash;</td><td>317us</td></tr>
+                        <tr><td>Req/Sec Avg</td><td>3.59M</td><td>3.95M</td></tr>
+                        <tr><td>Requests Total</td><td>18,299,278</td><td>19,735,722</td></tr>
+                        <tr><td>Duration</td><td>5.10s</td><td>5.00s</td></tr>
+                        <tr><td>Transfer/Bandwidth</td><td>225.84MB/s</td><td>248.42MB/s</td></tr>
+                    </tbody>
+                </table></div>
+
+                <h3>Async workload (very unstable)</h3>
+
+                <div class="table-scroll"><table>
+                    <thead><tr><th>Metric</th><th>wrk</th><th>gcannon</th></tr></thead>
+                    <tbody>
+                        <tr><td>Latency Avg</td><td>435.74us</td><td>185us</td></tr>
+                        <tr><td>Latency Stdev</td><td>795.84us</td><td>&mdash;</td></tr>
+                        <tr><td>Latency Max</td><td>12.73ms</td><td>&mdash;</td></tr>
+                        <tr><td>Latency p50</td><td>&mdash;</td><td>135us</td></tr>
+                        <tr><td>Latency p90</td><td>&mdash;</td><td>229us</td></tr>
+                        <tr><td>Latency p99</td><td>&mdash;</td><td>1.84ms</td></tr>
+                        <tr><td>Latency p99.9</td><td>&mdash;</td><td>4.10ms</td></tr>
+                        <tr><td>Req/Sec Avg</td><td>2.53M</td><td>2.76M</td></tr>
+                        <tr><td>Requests Total</td><td>12,883,294</td><td>13,797,048</td></tr>
+                        <tr><td>Duration</td><td>5.10s</td><td>5.00s</td></tr>
+                        <tr><td>Transfer/Bandwidth</td><td>159.05MB/s</td><td>173.67MB/s</td></tr>
+                    </tbody>
+                </table></div>
+
+                <h2>io_uring read+write without IVTS reactor inline</h2>
+
+                <p>Similar model explored throughout the series but with RunAsynchronousContinuation set to true on both IVTS, expected to deliver close results on both tests.</p>
+
+                <p><strong>Reactor count: 12</strong></p>
+
+                <h3>Sync workload</h3>
+
+                <div class="table-scroll"><table>
+                    <thead><tr><th>Metric</th><th>wrk</th><th>gcannon</th></tr></thead>
+                    <tbody>
+                        <tr><td>Latency Avg</td><td>515.72us</td><td>211us</td></tr>
+                        <tr><td>Latency Stdev</td><td>821.99us</td><td>&mdash;</td></tr>
+                        <tr><td>Latency Max</td><td>12.67ms</td><td>&mdash;</td></tr>
+                        <tr><td>Latency p50</td><td>&mdash;</td><td>164us</td></tr>
+                        <tr><td>Latency p90</td><td>&mdash;</td><td>273us</td></tr>
+                        <tr><td>Latency p99</td><td>&mdash;</td><td>1.55ms</td></tr>
+                        <tr><td>Latency p99.9</td><td>&mdash;</td><td>3.79ms</td></tr>
+                        <tr><td>Req/Sec Avg</td><td>1.95M</td><td>2.41M</td></tr>
+                        <tr><td>Requests Total</td><td>9,946,282</td><td>12,080,236</td></tr>
+                        <tr><td>Duration</td><td>5.10s</td><td>5.00s</td></tr>
+                        <tr><td>Transfer/Bandwidth</td><td>122.80MB/s</td><td>151.97MB/s</td></tr>
+                    </tbody>
+                </table></div>
+
+                <h3>Async workload</h3>
+
+                <div class="table-scroll"><table>
+                    <thead><tr><th>Metric</th><th>wrk</th><th>gcannon</th></tr></thead>
+                    <tbody>
+                        <tr><td>Latency Avg</td><td>530.17us</td><td>213us</td></tr>
+                        <tr><td>Latency Stdev</td><td>842.05us</td><td>&mdash;</td></tr>
+                        <tr><td>Latency Max</td><td>13.37ms</td><td>&mdash;</td></tr>
+                        <tr><td>Latency p50</td><td>&mdash;</td><td>146us</td></tr>
+                        <tr><td>Latency p90</td><td>&mdash;</td><td>265us</td></tr>
+                        <tr><td>Latency p99</td><td>&mdash;</td><td>2.27ms</td></tr>
+                        <tr><td>Latency p99.9</td><td>&mdash;</td><td>4.38ms</td></tr>
+                        <tr><td>Req/Sec Avg</td><td>1.93M</td><td>2.39M</td></tr>
+                        <tr><td>Requests Total</td><td>9,726,083</td><td>11,952,675</td></tr>
+                        <tr><td>Duration</td><td>5.03s</td><td>5.00s</td></tr>
+                        <tr><td>Transfer/Bandwidth</td><td>121.82MB/s</td><td>150.45MB/s</td></tr>
+                    </tbody>
+                </table></div>
+
+                <h2>io_uring read + libc send write without IVTS reactor inline continuations</h2>
+
+                <p>Similar model explored throughout the series but with RunAsynchronousContinuation set to true on both IVTS and the write branch is not io_uring, instead we use the libc's send, expected to deliver close results on both tests. This is an hybrid approach and should be the middle ground between the first two models.</p>
+
+                <p><strong>Reactor count: 12</strong></p>
+
+                <h3>Sync workload</h3>
+
+                <div class="table-scroll"><table>
+                    <thead><tr><th>Metric</th><th>wrk</th><th>gcannon</th></tr></thead>
+                    <tbody>
+                        <tr><td>Latency Avg</td><td>410.23us</td><td>154us</td></tr>
+                        <tr><td>Latency Stdev</td><td>782.03us</td><td>&mdash;</td></tr>
+                        <tr><td>Latency Max</td><td>12.08ms</td><td>&mdash;</td></tr>
+                        <tr><td>Latency p50</td><td>&mdash;</td><td>84us</td></tr>
+                        <tr><td>Latency p90</td><td>&mdash;</td><td>176us</td></tr>
+                        <tr><td>Latency p99</td><td>&mdash;</td><td>2.68ms</td></tr>
+                        <tr><td>Latency p99.9</td><td>&mdash;</td><td>4.32ms</td></tr>
+                        <tr><td>Req/Sec Avg</td><td>2.82M</td><td>3.31M</td></tr>
+                        <tr><td>Requests Total</td><td>14,361,239</td><td>16,551,871</td></tr>
+                        <tr><td>Duration</td><td>5.10s</td><td>5.00s</td></tr>
+                        <tr><td>Transfer/Bandwidth</td><td>0.88GB read</td><td>208.27MB/s</td></tr>
+                    </tbody>
+                </table></div>
+
+                <h3>Async workload</h3>
+
+                <div class="table-scroll"><table>
+                    <thead><tr><th>Metric</th><th>wrk</th><th>gcannon</th></tr></thead>
+                    <tbody>
+                        <tr><td>Latency Avg</td><td>418.96us</td><td>159us</td></tr>
+                        <tr><td>Latency Stdev</td><td>824.32us</td><td>&mdash;</td></tr>
+                        <tr><td>Latency Max</td><td>17.51ms</td><td>&mdash;</td></tr>
+                        <tr><td>Latency p50</td><td>&mdash;</td><td>85us</td></tr>
+                        <tr><td>Latency p90</td><td>&mdash;</td><td>198us</td></tr>
+                        <tr><td>Latency p99</td><td>&mdash;</td><td>1.99ms</td></tr>
+                        <tr><td>Latency p99.9</td><td>&mdash;</td><td>4.41ms</td></tr>
+                        <tr><td>Req/Sec Avg</td><td>2.74M</td><td>3.20M</td></tr>
+                        <tr><td>Requests Total</td><td>13,955,371</td><td>15,997,491</td></tr>
+                        <tr><td>Duration</td><td>5.09s</td><td>5.00s</td></tr>
+                        <tr><td>Transfer/Bandwidth</td><td>172.59MB/s</td><td>201.18MB/s</td></tr>
+                    </tbody>
+                </table></div>
+
+                <h2>epoll read+write with IVTS reactor inline continuations</h2>
+
+                <p>Pure epoll approach with same reactor threading architecture. Inline handler continuation for both IVTS.</p>
+
+                <p><strong>Reactor count: 12</strong></p>
+
+                <h3>Sync workload</h3>
+
+                <div class="table-scroll"><table>
+                    <thead><tr><th>Metric</th><th>wrk</th><th>gcannon</th></tr></thead>
+                    <tbody>
+                        <tr><td>Latency Avg</td><td>284.42us</td><td>160us</td></tr>
+                        <tr><td>Latency Stdev</td><td>610.90us</td><td>&mdash;</td></tr>
+                        <tr><td>Latency Max</td><td>11.06ms</td><td>&mdash;</td></tr>
+                        <tr><td>Latency p50</td><td>&mdash;</td><td>86us</td></tr>
+                        <tr><td>Latency p90</td><td>&mdash;</td><td>194us</td></tr>
+                        <tr><td>Latency p99</td><td>&mdash;</td><td>2.07ms</td></tr>
+                        <tr><td>Latency p99.9</td><td>&mdash;</td><td>4.39ms</td></tr>
+                        <tr><td>Req/Sec Avg</td><td>3.36M</td><td>3.17M</td></tr>
+                        <tr><td>Requests Total</td><td>17,141,225</td><td>15,856,691</td></tr>
+                        <tr><td>Duration</td><td>5.10s</td><td>5.00s</td></tr>
+                        <tr><td>Transfer/Bandwidth</td><td>403.61MB/s</td><td>199.56MB/s</td></tr>
+                    </tbody>
+                </table></div>
+
+                <h3>Async workload</h3>
+
+                <div class="table-scroll"><table>
+                    <thead><tr><th>Metric</th><th>wrk</th><th>gcannon</th></tr></thead>
+                    <tbody>
+                        <tr><td>Latency Avg</td><td>458.63us</td><td>159us</td></tr>
+                        <tr><td>Latency Stdev</td><td>0.90ms</td><td>&mdash;</td></tr>
+                        <tr><td>Latency Max</td><td>15.96ms</td><td>&mdash;</td></tr>
+                        <tr><td>Latency p50</td><td>&mdash;</td><td>74us</td></tr>
+                        <tr><td>Latency p90</td><td>&mdash;</td><td>185us</td></tr>
+                        <tr><td>Latency p99</td><td>&mdash;</td><td>2.68ms</td></tr>
+                        <tr><td>Latency p99.9</td><td>&mdash;</td><td>5.32ms</td></tr>
+                        <tr><td>Req/Sec Avg</td><td>2.68M</td><td>3.08M</td></tr>
+                        <tr><td>Requests Total</td><td>13,670,697</td><td>15,386,279</td></tr>
+                        <tr><td>Duration</td><td>5.10s</td><td>5.00s</td></tr>
+                        <tr><td>Transfer/Bandwidth</td><td>322.12MB/s</td><td>369.72MB/s</td></tr>
+                    </tbody>
+                </table></div>
+
+                <h2>epoll read+write without IVTS reactor inline continuations</h2>
+
+                <p>Pure epoll approach with same reactor threading architecture. Threadpool handler continuation for both IVTS.</p>
+
+                <p><strong>Reactor count: 6</strong></p>
+
+                <h3>Sync workload</h3>
+
+                <div class="table-scroll"><table>
+                    <thead><tr><th>Metric</th><th>wrk</th><th>gcannon</th></tr></thead>
+                    <tbody>
+                        <tr><td>Latency Avg</td><td>391.31us</td><td>140us</td></tr>
+                        <tr><td>Latency Stdev</td><td>764.42us</td><td>&mdash;</td></tr>
+                        <tr><td>Latency Max</td><td>13.71ms</td><td>&mdash;</td></tr>
+                        <tr><td>Latency p50</td><td>&mdash;</td><td>96us</td></tr>
+                        <tr><td>Latency p90</td><td>&mdash;</td><td>150us</td></tr>
+                        <tr><td>Latency p99</td><td>&mdash;</td><td>2.06ms</td></tr>
+                        <tr><td>Latency p99.9</td><td>&mdash;</td><td>4.15ms</td></tr>
+                        <tr><td>Req/Sec Avg</td><td>2.98M</td><td>3.60M</td></tr>
+                        <tr><td>Requests Total</td><td>15,179,066</td><td>18,019,801</td></tr>
+                        <tr><td>Duration</td><td>5.10s</td><td>5.00s</td></tr>
+                        <tr><td>Transfer/Bandwidth</td><td>357.60MB/s</td><td>432.83MB/s</td></tr>
+                    </tbody>
+                </table></div>
+
+                <h3>Async workload</h3>
+
+                <div class="table-scroll"><table>
+                    <thead><tr><th>Metric</th><th>wrk</th><th>gcannon</th></tr></thead>
+                    <tbody>
+                        <tr><td>Latency Avg</td><td>464.15us</td><td>154us</td></tr>
+                        <tr><td>Latency Stdev</td><td>838.78us</td><td>&mdash;</td></tr>
+                        <tr><td>Latency Max</td><td>10.74ms</td><td>&mdash;</td></tr>
+                        <tr><td>Latency p50</td><td>&mdash;</td><td>96us</td></tr>
+                        <tr><td>Latency p90</td><td>&mdash;</td><td>154us</td></tr>
+                        <tr><td>Latency p99</td><td>&mdash;</td><td>2.22ms</td></tr>
+                        <tr><td>Latency p99.9</td><td>&mdash;</td><td>4.48ms</td></tr>
+                        <tr><td>Req/Sec Avg</td><td>2.79M</td><td>3.27M</td></tr>
+                        <tr><td>Requests Total</td><td>14,231,176</td><td>16,342,325</td></tr>
+                        <tr><td>Duration</td><td>5.10s</td><td>5.00s</td></tr>
+                        <tr><td>Transfer/Bandwidth</td><td>236.89MB/s</td><td>277.35MB/s</td></tr>
+                    </tbody>
+                </table></div>
+
+                <h2>System.Net.Socket (Kestrel stock) - epoll threadpool</h2>
+
+                <p>Kestrel's stock network I/O with some tunning</p>
+
+                <h3>Sync workload</h3>
+
+                <div class="table-scroll"><table>
+                    <thead><tr><th>Metric</th><th>wrk</th><th>gcannon</th></tr></thead>
+                    <tbody>
+                        <tr><td>Latency Avg</td><td>156.79us</td><td>141us</td></tr>
+                        <tr><td>Latency Stdev</td><td>342.31us</td><td>&mdash;</td></tr>
+                        <tr><td>Latency Max</td><td>6.98ms</td><td>&mdash;</td></tr>
+                        <tr><td>Latency p50</td><td>&mdash;</td><td>129us</td></tr>
+                        <tr><td>Latency p90</td><td>&mdash;</td><td>176us</td></tr>
+                        <tr><td>Latency p99</td><td>&mdash;</td><td>305us</td></tr>
+                        <tr><td>Latency p99.9</td><td>&mdash;</td><td>3.17ms</td></tr>
+                        <tr><td>Req/Sec Avg</td><td>3.09M</td><td>3.60M</td></tr>
+                        <tr><td>Requests Total</td><td>15,748,223</td><td>18,024,579</td></tr>
+                        <tr><td>Duration</td><td>5.10s</td><td>5.00s</td></tr>
+                        <tr><td>Transfer/Bandwidth</td><td>194.39MB/s</td><td>226.84MB/s</td></tr>
+                    </tbody>
+                </table></div>
+
+                <h3>Async workload</h3>
+
+                <div class="table-scroll"><table>
+                    <thead><tr><th>Metric</th><th>wrk</th><th>gcannon</th></tr></thead>
+                    <tbody>
+                        <tr><td>Latency Avg</td><td>255.07us</td><td>169us</td></tr>
+                        <tr><td>Latency Stdev</td><td>507.29us</td><td>&mdash;</td></tr>
+                        <tr><td>Latency Max</td><td>12.53ms</td><td>&mdash;</td></tr>
+                        <tr><td>Latency p50</td><td>&mdash;</td><td>123us</td></tr>
+                        <tr><td>Latency p90</td><td>&mdash;</td><td>237us</td></tr>
+                        <tr><td>Latency p99</td><td>&mdash;</td><td>1.25ms</td></tr>
+                        <tr><td>Latency p99.9</td><td>&mdash;</td><td>3.89ms</td></tr>
+                        <tr><td>Req/Sec Avg</td><td>2.67M</td><td>3.01M</td></tr>
+                        <tr><td>Requests Total</td><td>13,618,906</td><td>15,043,820</td></tr>
+                        <tr><td>Duration</td><td>5.10s</td><td>5.00s</td></tr>
+                        <tr><td>Transfer/Bandwidth</td><td>168.14MB/s</td><td>189.25MB/s</td></tr>
+                    </tbody>
+                </table></div>
+
+                <h2>Comparison at a glance</h2>
+
+                <p>wrk and gcannon req/s and avg latency for every model, side by side.</p>
+
+                <div class="table-scroll table-wide"><table>
+                    <thead>
+                        <tr>
+                            <th rowspan="2">Implementation</th>
+                            <th rowspan="2">Reactors</th>
+                            <th colspan="4" class="col-group">Sync</th>
+                            <th colspan="4" class="col-group">Async</th>
+                        </tr>
+                        <tr>
+                            <th>wrk req/s</th>
+                            <th>wrk avg</th>
+                            <th>gcannon req/s</th>
+                            <th class="col-group-end">gcannon avg</th>
+                            <th>wrk req/s</th>
+                            <th>wrk avg</th>
+                            <th>gcannon req/s</th>
+                            <th>gcannon avg</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>io_uring r+w, IVTS inline</td>
+                            <td>12</td>
+                            <td>3.59M</td>
+                            <td>121.45us</td>
+                            <td>3.95M</td>
+                            <td class="col-group-end">129us</td>
+                            <td>2.53M*</td>
+                            <td>435.74us*</td>
+                            <td>2.76M*</td>
+                            <td>185us*</td>
+                        </tr>
+                        <tr>
+                            <td>io_uring r+w, threadpool</td>
+                            <td>12</td>
+                            <td>1.95M</td>
+                            <td>515.72us</td>
+                            <td>2.41M</td>
+                            <td class="col-group-end">211us</td>
+                            <td>1.93M</td>
+                            <td>530.17us</td>
+                            <td>2.39M</td>
+                            <td>213us</td>
+                        </tr>
+                        <tr>
+                            <td>io_uring recv + libc send</td>
+                            <td>12</td>
+                            <td>2.82M</td>
+                            <td>410.23us</td>
+                            <td>3.31M</td>
+                            <td class="col-group-end">154us</td>
+                            <td>2.74M</td>
+                            <td>418.96us</td>
+                            <td>3.20M</td>
+                            <td>159us</td>
+                        </tr>
+                        <tr>
+                            <td>epoll r+w, IVTS inline</td>
+                            <td>12</td>
+                            <td>3.36M</td>
+                            <td>284.42us</td>
+                            <td>3.17M</td>
+                            <td class="col-group-end">160us</td>
+                            <td>2.68M</td>
+                            <td>458.63us</td>
+                            <td>3.08M</td>
+                            <td>159us</td>
+                        </tr>
+                        <tr>
+                            <td>epoll r+w, threadpool</td>
+                            <td>6</td>
+                            <td>2.98M</td>
+                            <td>391.31us</td>
+                            <td>3.60M</td>
+                            <td class="col-group-end">140us</td>
+                            <td>2.79M</td>
+                            <td>464.15us</td>
+                            <td>3.27M</td>
+                            <td>154us</td>
+                        </tr>
+                        <tr>
+                            <td>System.Net.Socket (Kestrel stock)</td>
+                            <td>&mdash;</td>
+                            <td>3.09M</td>
+                            <td>156.79us</td>
+                            <td>3.60M</td>
+                            <td class="col-group-end">141us</td>
+                            <td>2.67M</td>
+                            <td>255.07us</td>
+                            <td>3.01M</td>
+                            <td>169us</td>
+                        </tr>
+                    </tbody>
+                </table></div>
+
+                <p class="note">CPU usage: the inline-IVTS cases (io_uring r+w IVTS, epoll r+w IVTS) cap at around 1200% max, while every other model averages ~1600%.</p>
+
+                <p><small>* Async run flagged as very unstable in the original write-up.</small></p>
+
+                <h2>Conclusion</h2>
+
+                <p>The numbers are aligned with part 5's rant. On a fully synchronous benchmark, io_uring with the reactor inline continuation rides ahead, no cross thread hand offs.</p>
+
+                <p>Force the continuation on the threadpool (async workload) and that lead evaporates. The hybrid approach reclaims most of it and is a serious contender for further tests with Kestrel integration.</p>
+
+                <p>A little note on the load generators, quite interesting results, gcannon seems a lot more stable on latency values while wrk is all over the place.</p>
+
+                <p>Important to highlight that the reactor inline sync models consume in average 20% less CPU as they are bounded to 12 reactor CPU threads. On the other hand, solutions that allow threadpool continuation will use as much CPU is available. For example, epoll r+w IVTS inline can actually yield 3.9M rps if we increase the reactor count to 16, surpassing System.Net.Socket performance for same CPU usage.</p>
+
+                <p>Very surprising result on epoll r+w threadpool, was expecting the performance to be equal to System.Net.Socket, this will be quite interesting for part 7.</p>
+
+                <p>On part 7 some of these models will be integrated on Kestrel/ASP.NET for direct benchmark comparison.</p>
+            </div>
+        </article>
+    </main>
+    </div>
+
+    <footer>
+        <a href="index.html">&larr; All posts</a>
+        &nbsp;&middot;&nbsp;
+        <a href="../">ioxide docs</a>
+    </footer>
+
+    <script>hljs.highlightAll();</script>
+</body>
+</html>

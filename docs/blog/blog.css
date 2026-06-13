@@ -1,0 +1,181 @@
+/* ioxide blog - article layout layered on top of ../assets/style.css (dark theme).
+   Code highlighting comes from highlight.js + highlight-dark.min.css, exactly like the docs. */
+
+:root { --font-mono: ui-monospace, "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace; }
+
+/* active state for the Blog link in the shared top nav */
+nav.top .links a.active { color: var(--accent-soft); }
+
+/* ── centered article column ─────────────────────────── */
+.page {
+  padding: 2.2rem 0 4rem;
+  min-width: 0;
+}
+.section-label {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  color: var(--accent-soft);
+  margin-bottom: 1rem;
+}
+.page-title {
+  font-family: var(--font-mono);
+  font-size: clamp(2rem, 5vw, 3rem);
+  font-weight: 800;
+  letter-spacing: -1.5px;
+  line-height: 1.2;
+  margin-bottom: 1rem;
+}
+.page-subtitle { color: var(--text-dim); font-size: 1.1rem; margin-bottom: 3rem; }
+.back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  text-decoration: none;
+  margin-bottom: 1.5rem;
+}
+.back-link:hover { color: var(--accent-soft); text-decoration: none; }
+
+/* ── post list (blog index) ──────────────────────────── */
+.post-list { list-style: none; display: flex; flex-direction: column; gap: 1.25rem; }
+.post-card {
+  display: block;
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 1.75rem 2rem;
+  text-decoration: none;
+  color: var(--text);
+  transition: border-color 0.2s, transform 0.15s;
+}
+.post-card:hover { border-color: var(--accent); transform: translateY(-2px); text-decoration: none; }
+.post-card .post-meta {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  margin-bottom: 0.5rem;
+}
+.post-card .post-title { font-size: 1.35rem; font-weight: 700; margin-bottom: 0.5rem; color: var(--text); }
+.post-card .post-excerpt { color: var(--text-dim); font-size: 0.95rem; line-height: 1.6; }
+.post-card .post-excerpt code { color: var(--accent-soft); }
+
+/* ── article ─────────────────────────────────────────── */
+.post-hero {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin: 0 0 2.5rem;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+}
+.post-header { margin-bottom: 2.5rem; }
+.post-header h1 {
+  font-family: var(--font-mono);
+  font-size: clamp(1.75rem, 4vw, 2.5rem);
+  font-weight: 800;
+  letter-spacing: -1px;
+  line-height: 1.2;
+  margin-bottom: 0.75rem;
+}
+.post-header .post-meta {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+}
+.post-body { font-size: 1.02rem; line-height: 1.75; }
+.post-body p { margin-bottom: 1.4rem; color: var(--text); }
+.post-body h2 {
+  font-family: var(--font-mono);
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin: 2.75rem 0 1.25rem;
+  color: var(--text);
+  letter-spacing: -0.5px;
+}
+.post-body h3 {
+  font-family: var(--font-mono);
+  font-size: 1.1rem;
+  font-weight: 700;
+  margin: 2.25rem 0 1rem;
+  color: var(--accent-soft);
+}
+.post-body a { color: var(--accent-soft); text-decoration: none; border-bottom: 1px solid rgba(226, 88, 34, 0.35); }
+.post-body a:hover { border-bottom-color: var(--accent); text-decoration: none; }
+.post-body ul { margin: 1.25rem 0; padding-left: 0.5rem; list-style: none; }
+.post-body ul li { margin-bottom: 0.5rem; color: var(--text); position: relative; padding-left: 1.25rem; }
+.post-body ul li::before { content: '\2022'; position: absolute; left: 0; top: 0; color: var(--accent); font-weight: bold; }
+.post-body strong { color: var(--text); font-weight: 700; }
+.post-body .note {
+  border-left: 3px solid var(--accent);
+  background: var(--bg-card);
+  padding: 0.75rem 1rem;
+  margin: 1.25rem 0;
+  color: var(--text-dim);
+  font-style: italic;
+  border-radius: 0 6px 6px 0;
+}
+
+/* ── tables ──────────────────────────────────────────── */
+.post-body .table-scroll {
+  overflow-x: auto;
+  margin: 1.5rem 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-card);
+}
+.post-body .table-scroll table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 0.85rem; }
+.post-body table th, .post-body table td {
+  text-align: left;
+  padding: 0.6rem 0.9rem;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+.post-body table thead th { color: var(--accent-soft); font-weight: 700; background: rgba(226, 88, 34, 0.1); border-bottom: 1px solid var(--line); }
+.post-body table tbody tr:last-child td { border-bottom: none; }
+.post-body table tbody tr:hover { background: rgba(226, 88, 34, 0.06); }
+.post-body .table-scroll.table-wide table th, .post-body .table-scroll.table-wide table td { padding: 0.5rem 0.55rem; font-size: 0.8rem; }
+.post-body table th.col-group { text-align: center; border-right: 1px solid var(--line); border-left: 1px solid var(--line); }
+.post-body table th.col-group-end, .post-body table td.col-group-end { border-right: 1px solid var(--line); }
+
+/* ── parts list: rendered in the shared docs sidebar (aside.side from style.css) ── */
+aside.side .part-num {
+  display: block;
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  margin-bottom: 0.1rem;
+}
+aside.side a { line-height: 1.3; }
+aside.side a.here .part-num { color: var(--accent-soft); }
+
+/* ── glossary ────────────────────────────────────────── */
+.glossary {
+  background: var(--bg-card);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 8px 8px 0;
+  padding: 1.25rem 1.5rem;
+  margin: 0 0 2.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+}
+.glossary div { display: flex; gap: 1rem; margin-bottom: 0.35rem; }
+.glossary div:last-child { margin-bottom: 0; }
+.glossary .term { color: var(--accent-soft); font-weight: 700; flex: 0 0 auto; min-width: 4rem; }
+.glossary .def { color: var(--text-dim); }
+
+/* ── responsive ──────────────────────────────────────── */
+@media (max-width: 768px) {
+  .page { padding: 2.5rem 1.25rem 3rem; }
+  .post-card { padding: 1.25rem 1.5rem; }
+}

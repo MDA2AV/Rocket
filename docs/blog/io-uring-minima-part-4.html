@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>C# Networking Deep Dive With io_uring &mdash; Part 4 &mdash; zerg</title>
+    <link rel="stylesheet" href="../assets/style.css">
+    <link rel="stylesheet" href="../assets/highlight-dark.min.css">
+    <link rel="stylesheet" href="blog.css">
+    <script src="../assets/highlight.min.js"></script>
+</head>
+<body>
+    <nav class="top">
+  <a class="brand" href="../"><span>io</span>xide</a>
+  <div class="links">
+    <a href="../learn/overview.html">Documentation</a>
+    <a href="index.html" class="active">Blog</a>
+    <a class="gh" href="https://github.com/MDA2AV/ioxide" aria-label="GitHub"><svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
+  </div>
+</nav>
+
+    <div class="layout">
+    <aside class="side">
+    <div class="group">Blog</div>
+    <a href="index.html">All posts</a>
+    <div class="group sub">The series</div>
+    <a href="io-uring-minima-part-1.html"><span class="part-num">Part 1</span>io_uring from scratch</a>
+    <a href="io-uring-minima-part-2.html"><span class="part-num">Part 2</span>Bridge the Async Model</a>
+    <a href="io-uring-minima-part-3.html"><span class="part-num">Part 3</span>Touching the Bytes</a>
+    <a href="io-uring-minima-part-4.html" class="here"><span class="part-num">Part 4</span>Zero Copy Receive</a>
+    <a href="io-uring-minima-part-5.html"><span class="part-num">Part 5</span>io_uring and the Thread Pool</a>
+    <a href="io-uring-minima-part-6.html"><span class="part-num">Part 6</span>Numbers</a>
+    <a href="io-uring-minima-part-7.html"><span class="part-num">Part 7</span>fractal</a>
+  </aside>
+
+    <main class="page">
+        <a href="index.html" class="back-link">&larr; All posts</a>
+
+        <article>
+            <img src="images/part-4-hero.svg" alt="An arrow labelled DMA goes directly from the NIC into a registered memory box; the words 'kernel copy' below are struck through, showing zcrx skips the kernel copy." class="post-hero">
+
+            <header class="post-header">
+                <h1>C# Networking Deep Dive With io_uring &mdash; Part 4: Zero Copy Receive</h1>
+                <div class="post-meta">2026-05-18 &middot; Part 4</div>
+            </header>
+
+            <div class="glossary" aria-label="Glossary">
+                <div><span class="term">DMA</span><span class="def">Direct Memory Access</span></div>
+                <div><span class="term">NIC</span><span class="def">Network Interface Card</span></div>
+                <div><span class="term">zcrx</span><span class="def">io_uring zero copy receive</span></div>
+                <div><span class="term">CQE</span><span class="def">Completion Queue Entry</span></div>
+            </div>
+
+            <div class="post-body">
+                <p>In this part 4 we are exploring a "side quest", io_uring zero copy receive mechanism, even though I'll still add the scaffold for the code, this will be more of a theoretical part as I don't have a network card that supports this so can't test. Future parts will not use zero copy receive mechanism.</p>
+
+                <p>Feel free to skip this part as it isn't required or will impact further ones.</p>
+
+                <p>We usually see a lot of "hot path zero allocation super ultra fast socket server" here and there when people advertise their projects or frameworks. Well that's cute, pre allocate some memory and reuse it, but how about zero copy?</p>
+
+                <p>When we receive external data via network through a network interface card (NIC) typically the NIC uses DMA to write this data to kernel memory, which the kernel then copies to a memory space our apps can access. This copy is what can be avoided by having the NIC use DMA to write the data bytes directly into user space accessible memory instead of kernel memory.</p>
+
+                <h2>What is DMA?</h2>
+
+                <p>Direct Memory Access is a hardware capability that lets a device read or write to RAM "on its own" with no interaction of the CPU. Without DMA, the only way to get data from a device into memory is through the CPU reading from the device's register and copying it to RAM, the CPU is busy during the copy process, for a NIC pushing gigabits/sec this would consume the whole core.</p>
+
+                <p>For our case (NIC) the driver (CPU) pre populates a ring of Rx descriptors, each pointing at a RAM buffer. When a packet arrives off the wire, the NIC's DMA writes the packet bytes straight into the next buffer in that ring, flags the descriptor done and interrupts the CPU, which then drains the ring via NAPI. The CPU never copied thee packet, the NIC placed it in RAM itself.</p>
+
+                <p>DMAs target physical addresses, not the virtual addresses our app/program sees. This address translation/pinning is why io_uring zcrx (zero copy receive) has to register our memory with the kernel first.</p>
+
+                <p>DMA is present on every normal network receive, the NIC DMAs the packet into kernel RAM buffers. The io_uring zcrx idea is to change the descriptor's target address so that the DMA lands in our registered memory instead, avoiding the extra kernel copy. This only works for the payload, the NIC splits headers from data, the headers still DMA into kernel buffers so the stack can do TCP/IP processing and only the payload is steered into our registered area.</p>
+
+                <h2>So, what changed?</h2>
+
+                <p>In previous parts our recv path used an io_uring provided buffer ring, we allocated a big slab, sliced it into buffers and handed it to the kernel. When data arrived the kernel picked a buffer and copied the data bytes into it. We want to remove that copying having the NIC DMA the received bytes directly to our buffers.</p>
+
+                <p>To avoid making this part too extensive I'll focus on the main changes.</p>
+
+                <p>Let's do an high level comparison between Minima (parts 1-3) and MinimaZero (part 4 with zcrx).</p>
+
+                <h3>Who fills the buffer?</h3>
+
+                <p>Parts(1-3) - Kernel memcpys into our slab.<br>Part 4 - NIC DMAs into our registered area.</p>
+
+                <p>This is the pivotal difference, everything that follows exists to support it. In parts 1-3 the kernel receives the packet into its own memory and memcpys the payload to one of our pre registered slab buffers. With zero copy rx the NIC DMAs the payload straight into a memory area we register, avoiding the the kernel copy.</p>
+
+                <h3>What we register?</h3>
+
+                <p>Parts(1-3) - Provided buffer ring <code>PBUF_RING</code>.<br>Part 4 - zcrx ifq bound to NIC Rx queue (<code>ZCRX_IFQ</code>).</p>
+
+                <p>Parts 1-3 register a provided buffer ring with <code>IORING_REGISTER_PBUF_RING</code>, a pool of our own memory the kernel can copy into. In part 4 we register a zcrx interface queue with <code>IORING_REGISTER_ZCRX_IFQ</code> which binds our memory area to one specific NIC hardware receive queue, "wiring" our memory with the NIC's DMA path.</p>
+
+                <h3>Recv operation (to be multishotted)</h3>
+
+                <p>Parts(1-3) - <code>RECV</code> + <code>IOSQE_BUFFER_SELECT</code><br>Part 4 - <code>RECV_ZC</code> multishot, no buffer selection</p>
+
+                <p>Parts 1-3 use <code>IORING_OP_RECV</code> with <code>IOSQE_BUFFER_SELECT</code> flag which basically tells the kernel to pick a buffer from the provided ring only when data arrives, this makes idle connections cheap. In part 4 we use <code>IORING_OP_RECV_ZC</code> without buffer selection as the destination was set when the ifq is registered. Both work with multishot.</p>
+
+                <h3>Completion</h3>
+
+                <p>Parts(1-3) - 16-byte CQE, buffer id in flags<br>Part 4 - 32-byte CQE, <code>CQE32</code> plus trailing <code>zcrx_cqe</code></p>
+
+                <p>In part 4 the 16 bytes are not enough as the kernel needs to include information of where inside our area the NIC wrote.</p>
+
+                <h3>Locating the data</h3>
+
+                <p>Parts(1-3) - <code>slab + bid*size</code><br>Part 4 - <code>area + (off &amp; ~AREA_MASK)</code> from the token</p>
+
+                <p>Each completion points to the bytes, parts 1-3 own a fixed numbered slots so it's simple arithmetic, slab pointer plus buffer id times buffer size. In part 4 we don't own numbered slots, the NIC picks where to write in the provided area.</p>
+
+                <h3>Returning a buffer</h3>
+
+                <p>Parts(1-3) - <code>ReturnBuffer</code><br>Part 4 - refill queue entry <code>RefillRqe</code></p>
+
+                <p>Similar lifecycle for both, buffers must be "handed back" so that they can be used again. What changed is that in parts 1-3 we return the buffer id to the provided buffer ring with <code>ReturnBuffer</code>, in part 4 we post an entry to the refill ring with <code>RefillRqe</code>, this entry is basically a token pointing back at a chunk of the registered area.</p>
+
+                <h3>Concurrency</h3>
+
+                <p>Parts(1-3) - N reactors<br>Part 4 - 1 reactor, 1 ifq, one HW queue</p>
+
+                <p>Concurrency changed a lot and since I cannot test zcrx due to not having a NIC that supports it, I could not understand or optimize what is the best way to set this up.</p>
+
+                <p>In parts 1-3 we run N reactors, each has its own ring and buffer pool, using <code>SO_REUSEPORT</code> the kernel spreads incoming connetions across the reactors. zcrx breaks that, the ifq binds to one hardware receive queue on a single reactor while <code>SO_REUSEPORT</code> still spreads accepts across all reactors, so a connection accepted on another reactor has its zero copy bytes DMA'd into the ifq owning reactor's area, which breaks the multi reactor architecture where connections are owned by reactors that never thread hop. While it is still possible to have multi reactor patter with zcrx by having multiple ifq, I could not test it so won't cover it.</p>
+
+                <h3>Host setup</h3>
+
+                <p>Parts(1-3) - None<br>Part 4 - <code>ethtool</code> split + steering, NIC + kernel &gt;= 6.15</p>
+
+                <h2>Now the code</h2>
+
+                <p>I decided to not include any code for this part as I cannot test it.</p>
+
+                <p>You can find my scaffolding <a href="https://github.com/MDA2AV/zerg/tree/main/MinimaZero">here</a> It is a port to C# from an existing C implementation plus some "theoretical" changes I cannot test, might be useful in the future if I managed to get my hands on a NIC that supports this.</p>
+
+                <p><strong>Sources:</strong></p>
+
+                <ul>
+                    <li><a href="https://docs.kernel.org/networking/iou-zcrx.html">https://docs.kernel.org/networking/iou-zcrx.html</a></li>
+                    <li><a href="https://www.youtube.com/watch?v=LCuTSNDe1nQ">https://www.youtube.com/watch?v=LCuTSNDe1nQ</a></li>
+                    <li><a href="https://www.youtube.com/watch?v=WQ22zAPBSnQ">https://www.youtube.com/watch?v=WQ22zAPBSnQ</a></li>
+                    <li><a href="https://github.com/torvalds/linux/blob/master/io_uring/zcrx.c">https://github.com/torvalds/linux/blob/master/io_uring/zcrx.c</a></li>
+                </ul>
+            </div>
+        </article>
+    </main>
+    </div>
+
+    <footer>
+        <a href="index.html">&larr; All posts</a>
+        &nbsp;&middot;&nbsp;
+        <a href="../">ioxide docs</a>
+    </footer>
+
+    <script>hljs.highlightAll();</script>
+</body>
+</html>
