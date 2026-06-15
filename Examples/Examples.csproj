@@ -17,4 +17,9 @@
     <ProjectReference Include="../ioxide.tls/ioxide.tls.csproj" />
   </ItemGroup>
 
+  <!-- Static-file fixtures (the HttpArena data/static set) served by the `file` example. -->
+  <ItemGroup>
+    <Content Include="wwwroot/**/*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

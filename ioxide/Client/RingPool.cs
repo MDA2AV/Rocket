@@ -48,7 +48,7 @@ public sealed class RingPool<T> where T : class
             _waiters.Enqueue(waiter);
             return new ValueTask<T>(waiter.Task);
         }
-    }
+    }   
 
     /// <summary>Return a resource (also how fresh ones are seeded).</summary>
     public void Return(T item)

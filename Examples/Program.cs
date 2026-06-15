@@ -125,7 +125,7 @@ internal static class Program
 
     private static Example WithFiles(ServerConfig config, Func<Reactor, Connection, Task> handle)
     {
-        string dir = Environment.GetEnvironmentVariable("EXAMPLES_FILE_DIR") ?? EnsureSampleDir();
+        string dir = Environment.GetEnvironmentVariable("EXAMPLES_FILE_DIR") ?? DefaultAssetDir();
         var assets = new StaticAssets(dir);
         Console.WriteLine($"[examples] file: {assets.Count} assets under {assets.RootDir}");
 
@@ -149,6 +149,14 @@ internal static class Program
 
         var options = new TlsOptions { CertificatePath = TlsCert.CertPath, KeyPath = TlsCert.KeyPath };
         return new Example(config, handle, r => TlsService.Start(r, options));
+    }
+
+    // Prefer the bundled wwwroot (the HttpArena static set, copied next to the binary);
+    // fall back to a tiny generated sample dir so `file` mode always has something to serve.
+    private static string DefaultAssetDir()
+    {
+        string www = Path.Combine(AppContext.BaseDirectory, "wwwroot");
+        return Directory.Exists(www) ? www : EnsureSampleDir();
     }
 
     // A tiny sample asset directory so `file` mode has something to serve out of the box.
