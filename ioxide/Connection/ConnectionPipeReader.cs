@@ -221,8 +221,18 @@ public sealed unsafe class ConnectionPipeReader : PipeReader, IValueTaskSource<R
             return;
         }
 
-        long consumedBytes = _lastSequence.GetOffset(consumed);
-        long examinedBytes = _lastSequence.GetOffset(examined);
+        // GetOffset measures from the start *segment*, not the sequence's logical
+        // start. When the held sequence begins mid-segment (the head recv slice is
+        // partially consumed — e.g. a request whose header and body arrive in one
+        // recv: the body read advances after the header was already skipped),
+        // GetOffset over-counts by _headConsumed. Rebase by the sequence start so
+        // consumed/examined stay consistent with the relative _heldBytes/_examined
+        // counters below. Without this, _heldBytes underflows negative and the next
+        // ReadAsync parks forever waiting for bytes that already arrived (the hang
+        // seen on chunked request bodies, which read again for the terminating chunk).
+        long startOffset = _lastSequence.GetOffset(_lastSequence.Start);
+        long consumedBytes = _lastSequence.GetOffset(consumed) - startOffset;
+        long examinedBytes = _lastSequence.GetOffset(examined) - startOffset;
         if (examinedBytes < consumedBytes)
         {
             examinedBytes = consumedBytes;
