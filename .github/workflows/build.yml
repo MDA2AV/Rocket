@@ -23,7 +23,7 @@ jobs:
       - name: Set up .NET SDK
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '10.0'
+          dotnet-version: '11.0.100-preview.5.26302.115'
 
       - name: Restore
         run: dotnet restore ioxide.slnx
