@@ -14,6 +14,11 @@ public sealed unsafe partial class Connection : IValueTaskSource, IBufferWriter<
     internal int   WriteTail;
     internal int   WriteInFlight;
 
+    // Outstanding IORING_CQE_F_NOTIF completions for in-flight zero-copy sends. The slab can't be
+    // recycled until this hits zero (the kernel still owns the buffer until the notif). Always 0 for
+    // plain SEND; reset on Clear().
+    internal int   ZcNotifPending;
+
     private readonly UnmanagedMemoryManager _manager;
 
     private ManualResetValueTaskSourceCore<bool> _flushSignal = new()
@@ -138,6 +143,7 @@ public sealed unsafe partial class Connection : IValueTaskSource, IBufferWriter<
         WriteHead = 0;
         WriteTail = 0;
         WriteInFlight = 0;
+        ZcNotifPending = 0;
         Volatile.Write(ref _flushInProgress, 0);
         Interlocked.Exchange(ref _flushArmed, 0);
 

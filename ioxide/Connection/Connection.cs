@@ -13,11 +13,33 @@ public sealed unsafe partial class Connection
     public ushort ListenerPort { get; internal set; }
 
     /// <summary>
+    /// The reactor's injected send strategy for this connection (plain SEND or SEND_ZC), bound at
+    /// accept from <see cref="ServerConfig.ZeroCopySend"/>. kTLS forces it back to plain via the
+    /// <see cref="SendOpFlags"/> setter.
+    /// </summary>
+    internal delegate*<Reactor, int, ushort, byte*, uint, uint, void> SendFn;
+
+    private uint _sendOpFlags = 0x100;   // MSG_WAITALL
+
+    /// <summary>
     /// op_flags for sends on this connection. Defaults to MSG_WAITALL (the kernel coalesces short
     /// sends into one CQE). kTLS rejects MSG_WAITALL, so <c>ioxide.tls</c> clears this after the
-    /// handoff; the reactor's partial-send loop preserves correctness either way.
+    /// handoff; the reactor's partial-send loop preserves correctness either way. Clearing it (the
+    /// kTLS marker) also pins this connection to plain SEND - SEND_ZC through the TLS ULP gives no
+    /// benefit and may be rejected.
     /// </summary>
-    public uint SendOpFlags { get; set; } = 0x100;   // MSG_WAITALL
+    public uint SendOpFlags
+    {
+        get => _sendOpFlags;
+        set
+        {
+            _sendOpFlags = value;
+            if (value == 0)
+            {
+                SendFn = &Reactor.SubmitSendPlain;
+            }
+        }
+    }
 
     // Bumped on Clear(); the low 16 bits serve as the IVTS token so stale awaiters
     // from a previous pool life are detectable.
@@ -84,6 +106,7 @@ public sealed unsafe partial class Connection
         WriteHead = 0;
         WriteTail = 0;
         WriteInFlight = 0;
+        ZcNotifPending = 0;
 
         _readSignal.Reset();
         _flushSignal.Reset();

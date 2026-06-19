@@ -22,7 +22,7 @@ public sealed class AssetCache : IDisposable
     /// precomputed in native memory (<see cref="ResponseLength"/> bytes - send it as-is);
     /// otherwise read <see cref="Fd"/> positionally off the ring and build the response.
     /// </summary>
-    public readonly record struct Asset(int Fd, string Path, long Length, nint Response, int ResponseLength);
+    public readonly record struct Asset(int Fd, string Path, long Length, nint Response, int ResponseLength, long MtimeSec, uint MtimeNsec, ulong Ino);
 
     private readonly Dictionary<string, Asset> _assets;
     private readonly SafeFileHandle[] _handles;
@@ -78,11 +78,63 @@ public sealed class AssetCache : IDisposable
             int fd = (int)handle.DangerousGetHandle();
             string key = "/" + Path.GetRelativePath(RootDir, path).Replace('\\', '/');
 
-            _assets[key] = new Asset(fd, path, length, response, responseLength);
+            // Freshness baseline: a request later re-statx's this path and serves the baked response
+            // only while size + mtime + inode still match.
+            TryStat(path, out _, out long mtimeSec, out uint mtimeNsec, out ulong ino);
+
+            _assets[key] = new Asset(fd, path, length, response, responseLength, mtimeSec, mtimeNsec, ino);
         }
 
         _handles = handles.ToArray();
         _responses = responses.ToArray();
+    }
+
+    // --- Revalidation (statx) -------------------------------------------------------------------
+    // A baked response is served only while the file on disk still matches what was baked (size +
+    // mtime + inode), so an in-place edit or an atomic rename is picked up live instead of serving
+    // stale RAM. The baked block is never mutated here (the cache is shared across reactors) - it
+    // only re-bakes on Reload().
+
+    private const int  AT_FDCWD          = -100;
+    private const uint STATX_BASIC_STATS = 0x000007ffU;
+
+    [DllImport("libc", EntryPoint = "statx", SetLastError = true)]
+    private static extern unsafe int statx(int dirfd, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags, uint mask, byte* buf);
+
+    /// <summary>
+    /// statx a path into (size, mtime, inode). False when the file can't be stat'd (e.g. deleted).
+    /// Offsets are from <c>struct statx</c> (linux/stat.h): ino @32, size @40, mtime.sec @112,
+    /// mtime.nsec @120.
+    /// </summary>
+    internal static unsafe bool TryStat(string path, out long size, out long mtimeSec, out uint mtimeNsec, out ulong ino)
+    {
+        byte* buf = stackalloc byte[256];
+        if (statx(AT_FDCWD, path, 0, STATX_BASIC_STATS, buf) != 0)
+        {
+            size = 0; mtimeSec = 0; mtimeNsec = 0; ino = 0;
+            return false;
+        }
+
+        ino       = *(ulong*)(buf + 32);
+        size      = (long)*(ulong*)(buf + 40);
+        mtimeSec  = *(long*)(buf + 112);
+        mtimeNsec = *(uint*)(buf + 120);
+        return true;
+    }
+
+    /// <summary>
+    /// True when <paramref name="asset"/> still matches the file on disk (size + mtime + inode).
+    /// <paramref name="exists"/> is false when the file is gone; <paramref name="currentSize"/> is
+    /// the live size, used to frame the response when serving a changed file.
+    /// </summary>
+    public static bool IsFresh(in Asset asset, out bool exists, out long currentSize)
+    {
+        exists = TryStat(asset.Path, out currentSize, out long ms, out uint mn, out ulong ino);
+        return exists
+            && currentSize == asset.Length
+            && ms == asset.MtimeSec
+            && mn == asset.MtimeNsec
+            && ino == asset.Ino;
     }
 
     // Bake "HTTP/1.1 200 OK ..." + body into one contiguous native block. The body is read first

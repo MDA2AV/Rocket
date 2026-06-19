@@ -1,6 +1,7 @@
 using System.Buffers.Text;
 using System.IO.Pipelines;
 using System.Text;
+using Microsoft.Win32.SafeHandles;
 using ioxide;
 using ioxide.file;
 using ioxide.pg;
@@ -176,15 +177,29 @@ internal static class Handlers
                         conn.Write(NotFound);
                         await conn.FlushAsync();
                     }
-                    else if (asset.Response != 0)
-                    {
-                        // Hot path: the whole response (header + body) is baked into the
-                        // snapshot - no file I/O, no header formatting, no allocation.
-                        await SendChunked(conn, asset.Response, asset.ResponseLength);
-                    }
                     else
                     {
-                        await SendFromDisk(conn, readers, asset);
+                        // Revalidate against disk (size + mtime + inode). The baked response is the
+                        // hot path only while the file is unchanged; an edit or atomic rename is
+                        // served live instead, so RAM never goes stale. (Re-bakes on Reload().)
+                        bool fresh = AssetCache.IsFresh(asset, out bool exists, out long size);
+                        if (!exists)
+                        {
+                            conn.Write(NotFound);                                            // vanished
+                            await conn.FlushAsync();
+                        }
+                        else if (fresh && asset.Response != 0)
+                        {
+                            await SendChunked(conn, asset.Response, asset.ResponseLength);    // baked hot path
+                        }
+                        else if (fresh)
+                        {
+                            await SendFromDisk(conn, readers, asset, asset.Fd, asset.Length); // large, unchanged
+                        }
+                        else
+                        {
+                            await SendChangedFromDisk(conn, readers, asset, size);            // changed -> live
+                        }
                     }
                 }
 
@@ -198,14 +213,15 @@ internal static class Handlers
         }
     }
 
-    // Stream a large (non-baked) asset off the ring. Files bigger than the reader's buffer are read
-    // in successive chunks at advancing offsets, so they're served whole instead of truncated.
-    private static async Task SendFromDisk(Connection conn, RingPool<AssetReader> readers, AssetCache.Asset asset)
+    // Stream an asset off the ring from <paramref name="fd"/>, framing Content-Length from
+    // <paramref name="totalLength"/>. Files bigger than the reader's buffer are read in successive
+    // chunks at advancing offsets, so they're served whole instead of truncated.
+    private static async Task SendFromDisk(Connection conn, RingPool<AssetReader> readers, AssetCache.Asset asset, int fd, long totalLength)
     {
         AssetReader reader = await readers.RentAsync();
         try
         {
-            int first = await reader.ReadAsync(asset.Fd, offset: 0);
+            int first = await reader.ReadAsync(fd, offset: 0);
             if (first < 0)
             {
                 conn.Write(ServerError);
@@ -213,13 +229,13 @@ internal static class Handlers
                 return;
             }
 
-            WriteAssetHeader(conn, asset, (int)asset.Length);   // full length up front
+            WriteAssetHeader(conn, asset, (int)totalLength);   // full length up front
             await SendChunked(conn, reader.Buffer, first);
 
             long offset = first;
-            while (offset < asset.Length)
+            while (offset < totalLength)
             {
-                int read = await reader.ReadAsync(asset.Fd, offset);
+                int read = await reader.ReadAsync(fd, offset);
                 if (read <= 0)
                 {
                     break;   // EOF or mid-stream error; the response is already committed
@@ -231,6 +247,33 @@ internal static class Handlers
         finally
         {
             readers.Return(reader);
+        }
+    }
+
+    // Serve a file whose on-disk version no longer matches the baked snapshot: open the current path
+    // fresh (so an atomic rename resolves to the new inode, not the cached fd) and stream it live.
+    private static async Task SendChangedFromDisk(Connection conn, RingPool<AssetReader> readers, AssetCache.Asset asset, long size)
+    {
+        SafeFileHandle handle;
+        try
+        {
+            handle = System.IO.File.OpenHandle(asset.Path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        }
+        catch
+        {
+            conn.Write(NotFound);
+            await conn.FlushAsync();
+            return;
+        }
+
+        try
+        {
+            int fd = (int)handle.DangerousGetHandle();
+            await SendFromDisk(conn, readers, asset, fd, size);
+        }
+        finally
+        {
+            handle.Dispose();
         }
     }
 
