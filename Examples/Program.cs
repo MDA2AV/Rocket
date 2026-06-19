@@ -73,6 +73,11 @@ internal static class Program
         "raw-pipes"       => new Example(Configs.Shared,      Raw.PipesExample.Handle,       null),
         "raw-incremental" => new Example(Configs.Incremental, Raw.IncrementalExample.Handle, null),
 
+        // Large-body plaintext, to exercise the response send path with big payloads. raw-zc flips on
+        // IORING_OP_SEND_ZC (ServerConfig.ZeroCopySend); raw-big is the plain-SEND baseline.
+        "raw-big"         => new Example(Configs.Shared with { WriteSlabSize = 256 * 1024 },                      Raw.BigExample.Handle, null),
+        "raw-zc"          => new Example(Configs.Shared with { WriteSlabSize = 256 * 1024, ZeroCopySend = true }, Raw.BigExample.Handle, null),
+
         "pg-shared"       => WithPg(Configs.Shared,      Pg.SharedExample.Handle),
         "pg-pipes"        => WithPg(Configs.Shared,      Pg.PipesExample.Handle),
         "pg-incremental"  => WithPg(Configs.Incremental, Pg.IncrementalExample.Handle),

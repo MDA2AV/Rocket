@@ -27,6 +27,13 @@ public sealed record ServerConfig
     public int    WriteSlabSize { get; init; } = 16 * 1024;
     public int    PoolMax       { get; init; } = 1024;
 
+    // Inject IORING_OP_SEND_ZC (zero-copy send) for the response path instead of IORING_OP_SEND.
+    // Trades the in-kernel payload copy for page-pinning plus a second (F_NOTIF) completion per send,
+    // so it only pays off for large responses - leave off for small-payload workloads. The sender is
+    // chosen once per connection at accept; kTLS connections always fall back to plain SEND (the
+    // kernel re-buffers to encrypt, so zero-copy buys nothing there).
+    public bool   ZeroCopySend { get; init; } = false;
+
     // Per-connection SPSC recv queue depth (power of two); overflow closes the connection.
     public int    RecvQueueEntries { get; init; } = 64;
 

@@ -23,6 +23,10 @@ public sealed unsafe partial class Reactor
     private int[] _listenFds = [];
     private ushort[] _listenPorts = [];
     private readonly ServerConfig _config;
+
+    // The response-send strategy, chosen once from config (ZeroCopySend) and injected per-connection
+    // at accept via Connection.SendFn. Keeps the send hot path free of a per-call branch.
+    private readonly delegate*<Reactor, int, ushort, byte*, uint, uint, void> _sendFn;
     private readonly ushort _port;
     private readonly uint _ringEntries;
     private readonly bool _incremental;
@@ -99,6 +103,7 @@ public sealed unsafe partial class Reactor
         ConnBufRingEntries = config.ConnBufRingEntries;
         IncRecvBufferSize = (uint)config.IncRecvBufferSize;
         _pool = new Stack<Connection>(config.PoolMax);
+        _sendFn = config.ZeroCopySend ? &SubmitSendZc : &SubmitSendPlain;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -209,7 +214,7 @@ public sealed unsafe partial class Reactor
             Connection? conn = ConnAt(fd, (ushort)gen);
             if (conn != null)
             {
-                SubmitSend(fd, (ushort)gen, conn.WriteBuffer, (uint)conn.WriteInFlight, conn.SendOpFlags);
+                conn.SendFn(this, fd, (ushort)gen, conn.WriteBuffer, (uint)conn.WriteInFlight, conn.SendOpFlags);
             }
             return;
         }
@@ -267,7 +272,7 @@ public sealed unsafe partial class Reactor
             {
                 continue;
             }
-            SubmitSend(fd, gen, conn.WriteBuffer, (uint)conn.WriteInFlight, conn.SendOpFlags);
+            conn.SendFn(this, fd, gen, conn.WriteBuffer, (uint)conn.WriteInFlight, conn.SendOpFlags);
         }
     }
 
@@ -448,7 +453,7 @@ public sealed unsafe partial class Reactor
             }
 
             case KindSend:
-                OnSendCompletion(fd, gen, cqe.res);
+                OnSendCompletion(fd, gen, cqe.res, cqe.flags);
                 return;
 
             case KindClient:
@@ -466,6 +471,7 @@ public sealed unsafe partial class Reactor
                         : new Connection(this, clientFd, _config.WriteSlabSize, _config.RecvQueueEntries);
                     Track(clientFd, conn);
                     conn.InitRefs();
+                    conn.SendFn = _sendFn;   // config default; kTLS overrides to plain on handshake
                     conn.ListenerPort = PortOf(fd);
                     SubmitRecvMultishot(clientFd, (ushort)conn.Generation, BgId);
 
@@ -495,14 +501,27 @@ public sealed unsafe partial class Reactor
         }
     }
 
-    // Shared by both loops.
-    private void OnSendCompletion(int fd, ushort gen, int res)
+    // Shared by both loops. Handles plain SEND (one CQE) and SEND_ZC (a data CQE carrying
+    // IORING_CQE_F_MORE, then a separate IORING_CQE_F_NOTIF once the kernel releases the slab).
+    private void OnSendCompletion(int fd, ushort gen, int res, uint cqeFlags)
     {
         Connection? conn = ConnAt(fd, gen);
         if (conn == null)
         {
             return;   // stale CQE - never touch the fd's new tenant
         }
+
+        // Zero-copy buffer-release notification: the kernel is done with the slab. Recycle once the
+        // data is fully sent and no further notifs are outstanding.
+        if ((cqeFlags & IORING_CQE_F_NOTIF) != 0)
+        {
+            if (--conn.ZcNotifPending == 0 && conn.WriteHead >= conn.WriteInFlight)
+            {
+                conn.CompleteFlush();
+            }
+            return;
+        }
+
         if (res <= 0)
         {
             _connections[fd] = null;
@@ -512,13 +531,26 @@ public sealed unsafe partial class Reactor
             return;
         }
         conn.WriteHead += res;
+
+        // A zero-copy send posts its data CQE with F_MORE and a notif will follow; hold the slab until
+        // that notif arrives. Plain SEND never sets F_MORE, so this is a no-op for it.
+        if ((cqeFlags & IORING_CQE_F_MORE) != 0)
+        {
+            conn.ZcNotifPending++;
+        }
+
         if (conn.WriteHead < conn.WriteInFlight)
         {
-            // Partial send (rare with MSG_WAITALL): resubmit the remainder.
-            SubmitSend(fd, gen, conn.WriteBuffer + conn.WriteHead, (uint)(conn.WriteInFlight - conn.WriteHead), conn.SendOpFlags);
+            // Partial send (rare with MSG_WAITALL): resubmit the remainder via the injected sender.
+            conn.SendFn(this, fd, gen, conn.WriteBuffer + conn.WriteHead, (uint)(conn.WriteInFlight - conn.WriteHead), conn.SendOpFlags);
             return;
         }
-        conn.CompleteFlush();
+
+        // Data fully sent: plain SEND recycles now; a ZC send waits for its outstanding notif(s).
+        if (conn.ZcNotifPending == 0)
+        {
+            conn.CompleteFlush();
+        }
     }
 
     private void OnWakeCompletion(bool more)
@@ -627,11 +659,20 @@ public sealed unsafe partial class Reactor
         sqe->user_data = Tag(KindRecv, gen, fd);
     }
 
-    private void SubmitSend(int fd, ushort gen, byte* buf, uint len, uint opFlags)
+    // The two injectable send strategies (see _sendFn / Connection.SendFn). Static so they can be
+    // taken as function pointers; the chosen one is bound per-connection at accept.
+    internal static void SubmitSendPlain(Reactor r, int fd, ushort gen, byte* buf, uint len, uint opFlags)
+        => SubmitSendImpl(r, IORING_OP_SEND, fd, gen, buf, len, opFlags);
+
+    internal static void SubmitSendZc(Reactor r, int fd, ushort gen, byte* buf, uint len, uint opFlags)
+        => SubmitSendImpl(r, IORING_OP_SEND_ZC, fd, gen, buf, len, opFlags);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void SubmitSendImpl(Reactor r, byte opcode, int fd, ushort gen, byte* buf, uint len, uint opFlags)
     {
-        IoUringSqe* sqe = GetSqeOrFlush();
+        IoUringSqe* sqe = r.GetSqeOrFlush();
         Unsafe.InitBlockUnaligned(sqe, 0, 64);
-        sqe->opcode    = IORING_OP_SEND;
+        sqe->opcode    = opcode;
         sqe->fd        = fd;
         sqe->addr      = (ulong)buf;
         sqe->len       = len;

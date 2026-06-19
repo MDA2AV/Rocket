@@ -241,7 +241,7 @@ public sealed unsafe partial class Reactor
             }
 
             case KindSend:
-                OnSendCompletion(fd, gen, cqe.res);
+                OnSendCompletion(fd, gen, cqe.res, cqe.flags);
                 return;
 
             case KindClient:

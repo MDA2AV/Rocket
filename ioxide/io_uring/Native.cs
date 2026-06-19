@@ -21,6 +21,11 @@ public static unsafe class Native {
     public const byte IORING_OP_WRITE  = 23;
     public const byte IORING_OP_SEND   = 26;
     public const byte IORING_OP_RECV   = 27;
+
+    // Zero-copy send (kernel 6.0+): the NIC DMAs straight from the user buffer instead of the kernel
+    // copying into skbuff. Posts the usual completion (with IORING_CQE_F_MORE set) and then a second
+    // CQE (IORING_CQE_F_NOTIF) once the buffer can be reused.
+    public const byte IORING_OP_SEND_ZC = 47;
     public const uint IORING_ENTER_GETEVENTS = 1u << 0;
     public const long IORING_OFF_SQ_RING = 0;
     public const long IORING_OFF_SQES    = 0x10000000;
@@ -36,6 +41,7 @@ public static unsafe class Native {
     public const byte   IOSQE_BUFFER_SELECT     = 1 << 5;
     public const uint   IORING_CQE_F_BUFFER     = 1u << 0;
     public const uint   IORING_CQE_F_MORE       = 1u << 1;
+    public const uint   IORING_CQE_F_NOTIF      = 1u << 3;   // zero-copy send: buffer is free to reuse
     public const int    IORING_CQE_BUFFER_SHIFT = 16;
     public const uint   IORING_REGISTER_PBUF_RING   = 22;
     public const uint   IORING_UNREGISTER_PBUF_RING = 23;
