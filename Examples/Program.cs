@@ -78,6 +78,10 @@ internal static class Program
         "raw-big"         => new Example(Configs.Shared with { WriteSlabSize = 256 * 1024 },                      Raw.BigExample.Handle, null),
         "raw-zc"          => new Example(Configs.Shared with { WriteSlabSize = 256 * 1024, ZeroCopySend = true }, Raw.BigExample.Handle, null),
 
+        // Grow vs Segmented head-to-head: the 100KB BigExample body forced onto a 16KB slab so it overflows.
+        "raw-big-grow"    => new Example(Configs.Shared with { WriteSlabSize = 16 * 1024, WriteOverflow = WriteOverflowStrategy.Grow },      Raw.BigExample.Handle, null),
+        "raw-big-seg"     => new Example(Configs.Shared with { WriteSlabSize = 16 * 1024, WriteOverflow = WriteOverflowStrategy.Segmented }, Raw.BigExample.Handle, null),
+
         "pg-shared"       => WithPg(Configs.Shared,      Pg.SharedExample.Handle),
         "pg-pipes"        => WithPg(Configs.Shared,      Pg.PipesExample.Handle),
         "pg-incremental"  => WithPg(Configs.Incremental, Pg.IncrementalExample.Handle),

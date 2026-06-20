@@ -62,6 +62,10 @@ public sealed unsafe partial class Reactor
     private int _wakeFd;
     private int _reactorThreadId;
 
+    // Set cross-thread by Stop(); the loops check it at the top of each iteration and exit, after which
+    // Run() tears the ring down on this (the reactor) thread - mandatory for a single-issuer ring.
+    private volatile bool _stopRequested;
+
     // Periodic timer driving registered tickers (per-command timeout sweeps, pool replenishment).
     // Single-shot, re-armed each fire. One timer in flight per reactor.
     private __kernel_timespec* _timerTs;
@@ -79,6 +83,26 @@ public sealed unsafe partial class Reactor
     // the reserved native memory.
     private readonly int PoolMax;
     private readonly Stack<Connection> _pool;
+
+    // Per-reactor pool of base-size write slabs, rented by connections in Segmented overflow mode.
+    // Reactor-thread-only, so no locking. Capped so a burst of large responses doesn't retain memory.
+    private readonly Stack<nint> _writeSlabPool = new();
+    private const int WriteSlabPoolMax = 4096;
+
+    internal nint RentWriteSlab()
+        => _writeSlabPool.TryPop(out nint p) ? p : (nint)NativeMemory.AlignedAlloc((nuint)_config.WriteSlabSize, 64);
+
+    internal void ReturnWriteSlab(nint p)
+    {
+        if (_writeSlabPool.Count < WriteSlabPoolMax)
+        {
+            _writeSlabPool.Push(p);
+        }
+        else
+        {
+            NativeMemory.AlignedFree((void*)p);
+        }
+    }
 
     // Incremental-mode sizing (see Reactor.Incremental.cs).
     private readonly int  MaxConnections;       // one bgid per active connection
@@ -215,7 +239,7 @@ public sealed unsafe partial class Reactor
             Connection? conn = ConnAt(fd, (ushort)gen);
             if (conn != null)
             {
-                SubmitSend(conn, fd, (ushort)gen, conn.WriteBuffer, (uint)conn.WriteInFlight, conn.SendOpFlags);
+                SubmitFlush(conn, fd, (ushort)gen);
             }
             return;
         }
@@ -273,7 +297,7 @@ public sealed unsafe partial class Reactor
             {
                 continue;
             }
-            SubmitSend(conn, fd, gen, conn.WriteBuffer, (uint)conn.WriteInFlight, conn.SendOpFlags);
+            SubmitFlush(conn, fd, gen);
         }
     }
 
@@ -294,6 +318,25 @@ public sealed unsafe partial class Reactor
         sqe->op_flags  = POLLIN;                  // poll32_events
         sqe->len       = IORING_POLL_ADD_MULTI;
         sqe->user_data = Tag(KindWake, 0, _wakeFd);
+    }
+
+    /// <summary>
+    /// Requests the reactor to stop. Safe to call from any thread. The loop finishes its current
+    /// iteration and exits, then <see cref="Run"/> closes the listeners and wake fd and disposes the
+    /// io_uring ring on the reactor thread (a single-issuer / DEFER_TASKRUN ring must be torn down on the
+    /// thread that owns it). Join the reactor thread after calling this to await teardown.
+    /// </summary>
+    public void Stop()
+    {
+        _stopRequested = true;
+
+        // Wake a loop parked in io_uring_enter so it observes the flag promptly. Writing the eventfd is
+        // the only ring-adjacent action safe off the reactor thread. The guard covers Stop() racing ahead
+        // of Run() creating _wakeFd - the loop still sees the flag on its first iteration.
+        if (_wakeFd > 0)
+        {
+            WakeFdWrite();
+        }
     }
 
     public void Run()
@@ -359,6 +402,18 @@ public sealed unsafe partial class Reactor
         {
             close(listenFd);
         }
+
+        // Close any still-open accepted sockets (the connection table is indexed by fd) so they don't
+        // leak when a host is disposed and recreated many times in one process - e.g. across a test run.
+        for (int fd = 0; fd < _connections.Length; fd++)
+        {
+            if (_connections[fd] != null)
+            {
+                close(fd);
+                _connections[fd] = null;
+            }
+        }
+
         close(_wakeFd);
         if (_timerTs != null)
         {
@@ -366,11 +421,24 @@ public sealed unsafe partial class Reactor
             _timerTs = null;
         }
         Ring.Dispose();
+
+        // Shared provided-buffer ring (incremental mode allocates per connection instead). Freed after
+        // the ring fd is closed, so the kernel has dropped its references to the slab.
+        if (_bufRing != null)
+        {
+            NativeMemory.AlignedFree(_bufRing);
+            _bufRing = null;
+        }
+        if (_bufSlab != null)
+        {
+            NativeMemory.AlignedFree(_bufSlab);
+            _bufSlab = null;
+        }
     }
 
     private void LoopShared()
     {
-        while (true)
+        while (!_stopRequested)
         {
             DrainReturnQ();
             DrainFlushQ();
@@ -469,7 +537,7 @@ public sealed unsafe partial class Reactor
                     SetNoDelay(clientFd);
                     Connection conn = _pool.TryPop(out var pooled)
                         ? pooled.SetFd(clientFd)
-                        : new Connection(this, clientFd, _config.WriteSlabSize, _config.RecvQueueEntries);
+                        : new Connection(this, clientFd, _config.WriteSlabSize, _config.RecvQueueEntries, _config.WriteOverflow);
                     Track(clientFd, conn);
                     conn.InitRefs();
                     conn.UseZc = _zeroCopySend;   // config default; kTLS overrides to plain on handshake
@@ -543,7 +611,15 @@ public sealed unsafe partial class Reactor
         if (conn.WriteHead < conn.WriteInFlight)
         {
             // Partial send (rare with MSG_WAITALL): resubmit the remainder.
-            SubmitSend(conn, fd, gen, conn.WriteBuffer + conn.WriteHead, (uint)(conn.WriteInFlight - conn.WriteHead), conn.SendOpFlags);
+            if (conn.FlushVectored)
+            {
+                conn.AdvanceIov(res);   // trim the iovec past the bytes just sent
+                SubmitSendMsg(conn, fd, gen);
+            }
+            else
+            {
+                SubmitSend(conn, fd, gen, conn.WriteBuffer + conn.WriteHead, (uint)(conn.WriteInFlight - conn.WriteHead), conn.SendOpFlags);
+            }
             return;
         }
 
@@ -685,6 +761,34 @@ public sealed unsafe partial class Reactor
         sqe->addr      = (ulong)buf;
         sqe->len       = len;
         sqe->op_flags  = opFlags;   // MSG_WAITALL by default; cleared for kTLS
+        sqe->user_data = Tag(KindSend, gen, fd);
+    }
+
+    // Submits the right send for a pending flush: a vectored SENDMSG for a segmented (multi-segment)
+    // response, or the plain contiguous SEND for everything else (incl. the fast path and Grow mode).
+    private void SubmitFlush(Connection conn, int fd, ushort gen)
+    {
+        if (conn.FlushVectored)
+        {
+            SubmitSendMsg(conn, fd, gen);
+        }
+        else
+        {
+            SubmitSend(conn, fd, gen, conn.WriteBuffer, (uint)conn.WriteInFlight, conn.SendOpFlags);
+        }
+    }
+
+    // Vectored send: one SQE gathers every write segment (primary + overflow) from the iovec the
+    // connection prepared in BuildIovec. Plain SENDMSG (no zero-copy) for the segmented path.
+    private void SubmitSendMsg(Connection conn, int fd, ushort gen)
+    {
+        IoUringSqe* sqe = GetSqeOrFlush();
+        Unsafe.InitBlockUnaligned(sqe, 0, 64);
+        sqe->opcode    = IORING_OP_SENDMSG;
+        sqe->fd        = fd;
+        sqe->addr      = (ulong)conn.MsgHdr;
+        sqe->len       = 1;
+        sqe->op_flags  = conn.SendOpFlags;   // MSG_WAITALL
         sqe->user_data = Tag(KindSend, gen, fd);
     }
 
