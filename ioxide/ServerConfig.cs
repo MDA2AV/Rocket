@@ -1,5 +1,17 @@
 namespace ioxide;
 
+/// <summary>
+/// How a connection's write buffer absorbs a response larger than <see cref="ServerConfig.WriteSlabSize"/>.
+/// </summary>
+public enum WriteOverflowStrategy
+{
+    /// <summary>Grow the single contiguous slab (realloc + copy); the flush stays one SEND.</summary>
+    Grow,
+
+    /// <summary>Chain pooled slabs and flush them with one vectored SENDMSG (no realloc copies).</summary>
+    Segmented,
+}
+
 /// <summary>All server tunables; override via object initializer.</summary>
 public sealed record ServerConfig
 {
@@ -26,6 +38,10 @@ public sealed record ServerConfig
     // Per-connection write slab + connection pool cap.
     public int    WriteSlabSize { get; init; } = 16 * 1024;
     public int    PoolMax       { get; init; } = 1024;
+
+    // How a response larger than WriteSlabSize is buffered: grow the slab (default) or chain pooled
+    // slabs flushed with one vectored SENDMSG.
+    public WriteOverflowStrategy WriteOverflow { get; init; } = WriteOverflowStrategy.Grow;
 
     // Inject IORING_OP_SEND_ZC (zero-copy send) for the response path instead of IORING_OP_SEND.
     // Trades the in-kernel payload copy for page-pinning plus a second (F_NOTIF) completion per send,

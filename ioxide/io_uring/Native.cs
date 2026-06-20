@@ -13,6 +13,7 @@ public static unsafe class Native {
     private const long SYS_IO_URING_REGISTER = 427;
 
     public const byte IORING_OP_POLL_ADD = 6;
+    public const byte IORING_OP_SENDMSG  = 9;   // vectored send over an iovec; the segmented-mode write flush
     public const byte IORING_OP_TIMEOUT = 11;
     public const byte IORING_OP_ACCEPT = 13;
     public const byte IORING_OP_ASYNC_CANCEL = 14;
@@ -205,4 +206,26 @@ public static unsafe class Native {
         public in_addr sin_addr;
         public fixed byte sin_zero[8];
     }
+
+#pragma warning disable CS8981 // lower-cased names deliberately mirror the kernel struct names (uapi)
+    // struct iovec (scatter/gather entry) - one per write segment for IORING_OP_SENDMSG.
+    [StructLayout(LayoutKind.Sequential)]
+    public unsafe struct iovec {
+        public void* iov_base;
+        public nuint iov_len;
+    }
+
+    // struct msghdr (x86_64 layout). The SENDMSG SQE's addr points here; msg_iov/msg_iovlen carry the
+    // segment vector. Explicit offsets so the internal/trailing padding matches the kernel ABI exactly.
+    [StructLayout(LayoutKind.Explicit, Size = 56)]
+    public unsafe struct msghdr {
+        [FieldOffset(0)]  public void*  msg_name;
+        [FieldOffset(8)]  public uint   msg_namelen;
+        [FieldOffset(16)] public iovec* msg_iov;
+        [FieldOffset(24)] public nuint  msg_iovlen;
+        [FieldOffset(32)] public void*  msg_control;
+        [FieldOffset(40)] public nuint  msg_controllen;
+        [FieldOffset(48)] public int    msg_flags;
+    }
+#pragma warning restore CS8981
 }
