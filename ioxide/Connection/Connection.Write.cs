@@ -1,18 +1,30 @@
 using System.Buffers;
-using System.Threading.Tasks.Sources;
 using ioxide.utils;
 
 // ReSharper disable SuggestVarOrType_BuiltInTypes
 
 namespace ioxide;
 
-public sealed unsafe partial class Connection : IValueTaskSource, IBufferWriter<byte>
+/// <summary>
+/// The connection as an <see cref="IBufferWriter{T}"/>: a response is written into a per-connection
+/// slab. When it outgrows the slab the strategy is either Grow (realloc the buffer, Connection.Write.Grow.cs)
+/// or Segmented (spill into pooled segments, Connection.Write.Segmented.cs). FlushAsync
+/// (Connection.Write.Flush.cs) then hands the buffered bytes to the ring.
+/// </summary>
+public sealed unsafe partial class Connection : IBufferWriter<byte>
 {
-    private readonly int _writeSlabSize;
+    // Current capacity of the per-connection write slab. Starts at _baseSlabSize and grows on demand
+    // (GrowWriteSlab) when a response is larger than the slab; restored to _baseSlabSize on recycle.
+    private int _writeSlabSize;
+    private int _baseSlabSize;
     internal byte* WriteBuffer;
     internal int   WriteHead;
     internal int   WriteTail;
     internal int   WriteInFlight;
+
+    // Write-overflow strategy, chosen once at construction. Grow (default) reallocs the primary slab;
+    // Segmented chains pooled slabs flushed via one SENDMSG (Connection.Segmented.cs).
+    private WriteOverflowStrategy _overflow;
 
     // Outstanding IORING_CQE_F_NOTIF completions for in-flight zero-copy sends. The slab can't be
     // recycled until this hits zero (the kernel still owns the buffer until the notif). Always 0 for
@@ -20,13 +32,6 @@ public sealed unsafe partial class Connection : IValueTaskSource, IBufferWriter<
     internal int   ZcNotifPending;
 
     private readonly UnmanagedMemoryManager _manager;
-
-    private ManualResetValueTaskSourceCore<bool> _flushSignal = new()
-    {
-        RunContinuationsAsynchronously = false,
-    };
-    private int _flushArmed;
-    private int _flushInProgress;
 
 #region IBufferWriter<byte>
 
@@ -37,13 +42,22 @@ public sealed unsafe partial class Connection : IValueTaskSource, IBufferWriter<
             throw new InvalidOperationException("Cannot write while flush is in progress.");
         }
 
-        int remaining = _writeSlabSize - WriteTail;
-        if (sizeHint > remaining)
+        int need = sizeHint < 1 ? 1 : sizeHint;
+
+        // Segmented mode backs GetMemory only while the primary slab still fits; spanning overflow
+        // segments would need a per-segment MemoryManager. The consumers that actually overflow
+        // (BuffersExtensions / stream copies) go through GetSpan, so this stays on the fast path.
+        if (_overflow == WriteOverflowStrategy.Segmented && (_inOverflow || WriteTail + need > _writeSlabSize))
         {
-            throw new InvalidOperationException("Buffer too small.");
+            throw new NotSupportedException("GetMemory across segmented overflow is not supported; use GetSpan.");
         }
 
-        return _manager.Memory.Slice(WriteTail, remaining);
+        if (WriteTail + need > _writeSlabSize)
+        {
+            GrowWriteSlab(WriteTail + need);
+        }
+
+        return _manager.Memory.Slice(WriteTail, _writeSlabSize - WriteTail);
     }
 
     public Span<byte> GetSpan(int sizeHint = 0)
@@ -53,12 +67,7 @@ public sealed unsafe partial class Connection : IValueTaskSource, IBufferWriter<
             throw new InvalidOperationException("Cannot write while flush is in progress.");
         }
 
-        if (WriteTail + sizeHint > _writeSlabSize)
-        {
-            throw new InvalidOperationException("Write buffer too small.");
-        }
-
-        return new Span<byte>(WriteBuffer + WriteTail, _writeSlabSize - WriteTail);
+        return EnsureWritable(sizeHint < 1 ? 1 : sizeHint);
     }
 
     public void Advance(int count)
@@ -68,7 +77,14 @@ public sealed unsafe partial class Connection : IValueTaskSource, IBufferWriter<
             throw new InvalidOperationException("Cannot write while flush is in progress.");
         }
 
-        WriteTail += count;
+        if (_inOverflow)
+        {
+            _ov![_ovCount - 1].Used += count;
+        }
+        else
+        {
+            WriteTail += count;
+        }
     }
 
 #endregion
@@ -80,108 +96,70 @@ public sealed unsafe partial class Connection : IValueTaskSource, IBufferWriter<
             throw new InvalidOperationException("Cannot write while flush is in progress.");
         }
 
-        int len = source.Length;
-        if (WriteTail + len > _writeSlabSize)
+        // Grow mode: one contiguous copy into the (possibly grown) slab.
+        if (_overflow == WriteOverflowStrategy.Grow)
         {
-            throw new InvalidOperationException("Write buffer too small.");
-        }
+            int len = source.Length;
+            if (WriteTail + len > _writeSlabSize)
+            {
+                GrowWriteSlab(WriteTail + len);
+            }
 
-        source.CopyTo(new Span<byte>(WriteBuffer + WriteTail, len));
-        WriteTail += len;
-    }
-
-    public ValueTask FlushAsync()
-    {
-        // Connection already torn down: complete immediately so the handler unwinds
-        // to its next ReadAsync, sees IsClosed, and exits.
-        if (Volatile.Read(ref _closed) == 1)
-        {
-            return default;
-        }
-
-        if (Interlocked.Exchange(ref _flushInProgress, 1) == 1)
-        {
-            throw new InvalidOperationException("FlushAsync already in progress.");
-        }
-
-        int target = WriteTail;
-        if (target == 0)
-        {
-            Volatile.Write(ref _flushInProgress, 0);
-
-            return default;
-        }
-
-        if (Interlocked.Exchange(ref _flushArmed, 1) == 1)
-        {
-            throw new InvalidOperationException("FlushAsync already armed.");
-        }
-
-        _flushSignal.Reset();
-        WriteInFlight = target;
-
-        // The generation lets the reactor drop a flush whose connection closed (or
-        // whose fd was reused) before the queue drained.
-        int gen = Volatile.Read(ref _generation);
-
-        _reactor.EnqueueFlush(ClientFd, gen);
-
-        // Race recovery: if close raced in after the entry guard, self-complete so we
-        // don't hang on a send the reactor will never make.
-        if (Volatile.Read(ref _closed) == 1 && Interlocked.Exchange(ref _flushArmed, 0) == 1)
-        {
-            Volatile.Write(ref _flushInProgress, 0);
-            _flushSignal.SetResult(true);
-        }
-
-        return new ValueTask(this, (short)gen);
-    }
-
-    // Called by the reactor's send-completion path.
-    internal void CompleteFlush()
-    {
-        WriteHead = 0;
-        WriteTail = 0;
-        WriteInFlight = 0;
-        ZcNotifPending = 0;
-        Volatile.Write(ref _flushInProgress, 0);
-        Interlocked.Exchange(ref _flushArmed, 0);
-
-        _flushSignal.SetResult(true);
-    }
-
-#region IValueTaskSource
-
-    void IValueTaskSource.GetResult(short token)
-    {
-        if (token != (short)Volatile.Read(ref _generation))
-        {
+            source.CopyTo(new Span<byte>(WriteBuffer + WriteTail, len));
+            WriteTail += len;
             return;
         }
 
-        _flushSignal.GetResult(_flushSignal.Version);
+        // Segmented mode: spill across the primary slab and pooled overflow segments.
+        while (source.Length > 0)
+        {
+            Span<byte> dst = EnsureWritable(1);
+            int n = Math.Min(dst.Length, source.Length);
+            source.Slice(0, n).CopyTo(dst);
+            if (_inOverflow)
+            {
+                _ov![_ovCount - 1].Used += n;
+            }
+            else
+            {
+                WriteTail += n;
+            }
+            source = source.Slice(n);
+        }
     }
 
-    ValueTaskSourceStatus IValueTaskSource.GetStatus(short token)
+    // Returns a writable span at the current write position. Grow: grow the contiguous slab
+    // (Connection.Write.Grow.cs). Segmented: stay in the primary slab until it fills, then write into
+    // pooled overflow segments (Connection.Write.Segmented.cs).
+    private Span<byte> EnsureWritable(int need)
     {
-        if (token != (short)Volatile.Read(ref _generation))
+        if (_overflow == WriteOverflowStrategy.Grow)
         {
-            return ValueTaskSourceStatus.Succeeded;
+            if (WriteTail + need > _writeSlabSize)
+            {
+                GrowWriteSlab(WriteTail + need);
+            }
+            return new Span<byte>(WriteBuffer + WriteTail, _writeSlabSize - WriteTail);
         }
 
-        return _flushSignal.GetStatus(_flushSignal.Version);
-    }
-
-    void IValueTaskSource.OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags)
-    {
-        if (token != (short)Volatile.Read(ref _generation))
+        if (!_inOverflow)
         {
-            continuation(state);
-
-            return;
+            if (WriteTail + need <= _writeSlabSize)
+            {
+                return new Span<byte>(WriteBuffer + WriteTail, _writeSlabSize - WriteTail);
+            }
+            RentOverflow(need);
         }
-        _flushSignal.OnCompleted(continuation, state, _flushSignal.Version, flags);
-    }
+        else
+        {
+            ref OvSeg cur = ref _ov![_ovCount - 1];
+            if (cur.Used + need > cur.Cap)
+            {
+                RentOverflow(need);
+            }
+        }
 
-#endregion
+        ref OvSeg seg = ref _ov![_ovCount - 1];
+        return new Span<byte>((byte*)seg.Ptr + seg.Used, seg.Cap - seg.Used);
+    }
 }

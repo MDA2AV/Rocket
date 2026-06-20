@@ -50,11 +50,13 @@ public sealed unsafe partial class Connection
     // runs only at 0, so a connection is never recycled under a live handler.
     private int _refs;
 
-    public Connection(Reactor reactor, int fd, int writeSlabSize = 1024 * 16, int recvQueueEntries = 64)
+    public Connection(Reactor reactor, int fd, int writeSlabSize = 1024 * 16, int recvQueueEntries = 64, WriteOverflowStrategy overflow = WriteOverflowStrategy.Grow)
     {
         _reactor = reactor;
         ClientFd = fd;
         _writeSlabSize = writeSlabSize;
+        _baseSlabSize = writeSlabSize;
+        _overflow = overflow;
         WriteBuffer = (byte*)NativeMemory.AlignedAlloc((nuint)writeSlabSize, 64);
         _recv = new SpscRecvRing(recvQueueEntries);
 
@@ -109,6 +111,21 @@ public sealed unsafe partial class Connection
         WriteInFlight = 0;
         ZcNotifPending = 0;
 
+        // Segmented: hand any overflow slabs back to the pool (a connection recycled mid-response).
+        if (_ovCount > 0)
+        {
+            ReleaseOverflow();
+        }
+
+        // Restore an overgrown write slab to its base size so the pool doesn't retain large buffers.
+        if (_writeSlabSize != _baseSlabSize)
+        {
+            NativeMemory.AlignedFree(WriteBuffer);
+            WriteBuffer = (byte*)NativeMemory.AlignedAlloc((nuint)_baseSlabSize, 64);
+            _writeSlabSize = _baseSlabSize;
+            _manager.Reset(WriteBuffer, _baseSlabSize);
+        }
+
         _readSignal.Reset();
         _flushSignal.Reset();
 
@@ -124,6 +141,16 @@ public sealed unsafe partial class Connection
         {
             NativeMemory.AlignedFree(WriteBuffer);
             WriteBuffer = null;
+        }
+        if (_iov != null)
+        {
+            NativeMemory.AlignedFree(_iov);
+            _iov = null;
+        }
+        if (_msg != null)
+        {
+            NativeMemory.AlignedFree(_msg);
+            _msg = null;
         }
         DisposeIncremental();
     }

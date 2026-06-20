@@ -37,6 +37,14 @@ public sealed unsafe class UnmanagedMemoryManager : MemoryManager<byte>
         Gen = gen;
     }
 
+    // Re-point at a new buffer after the write slab grows; the write-side manager doesn't use
+    // BufferId/Gen, so leave them untouched.
+    internal void Reset(byte* ptr, int length)
+    {
+        _ptr = ptr;
+        _length = length;
+    }
+
     public override Span<byte> GetSpan() => new(_ptr, _length);
 
     public override MemoryHandle Pin(int elementIndex = 0) => new(_ptr + elementIndex);
