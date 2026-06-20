@@ -13,11 +13,12 @@ public sealed unsafe partial class Connection
     public ushort ListenerPort { get; internal set; }
 
     /// <summary>
-    /// The reactor's injected send strategy for this connection (plain SEND or SEND_ZC), bound at
-    /// accept from <see cref="ServerConfig.ZeroCopySend"/>. kTLS forces it back to plain via the
-    /// <see cref="SendOpFlags"/> setter.
+    /// Whether this connection sends with SEND_ZC (zero-copy). Bound at accept from
+    /// <see cref="ServerConfig.ZeroCopySend"/>; kTLS forces it back to plain via the
+    /// <see cref="SendOpFlags"/> setter. The reactor branches on this bool per send instead of
+    /// dispatching through an indirect function pointer.
     /// </summary>
-    internal delegate*<Reactor, int, ushort, byte*, uint, uint, void> SendFn;
+    internal bool UseZc;
 
     private uint _sendOpFlags = 0x100;   // MSG_WAITALL
 
@@ -36,7 +37,7 @@ public sealed unsafe partial class Connection
             _sendOpFlags = value;
             if (value == 0)
             {
-                SendFn = &Reactor.SubmitSendPlain;
+                UseZc = false;
             }
         }
     }
