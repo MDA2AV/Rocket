@@ -155,7 +155,7 @@ public sealed unsafe partial class Reactor
 
     private void LoopIncremental()
     {
-        while (true)
+        while (!_stopRequested)
         {
             DrainReturnQIncremental();
             DrainFlushQ();
