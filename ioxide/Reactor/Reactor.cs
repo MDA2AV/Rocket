@@ -62,6 +62,10 @@ public sealed unsafe partial class Reactor
     private int _wakeFd;
     private int _reactorThreadId;
 
+    // Set cross-thread by Stop(); the loops check it at the top of each iteration and exit, after which
+    // Run() tears the ring down on this (the reactor) thread - mandatory for a single-issuer ring.
+    private volatile bool _stopRequested;
+
     // Periodic timer driving registered tickers (per-command timeout sweeps, pool replenishment).
     // Single-shot, re-armed each fire. One timer in flight per reactor.
     private __kernel_timespec* _timerTs;
@@ -296,6 +300,25 @@ public sealed unsafe partial class Reactor
         sqe->user_data = Tag(KindWake, 0, _wakeFd);
     }
 
+    /// <summary>
+    /// Requests the reactor to stop. Safe to call from any thread. The loop finishes its current
+    /// iteration and exits, then <see cref="Run"/> closes the listeners and wake fd and disposes the
+    /// io_uring ring on the reactor thread (a single-issuer / DEFER_TASKRUN ring must be torn down on the
+    /// thread that owns it). Join the reactor thread after calling this to await teardown.
+    /// </summary>
+    public void Stop()
+    {
+        _stopRequested = true;
+
+        // Wake a loop parked in io_uring_enter so it observes the flag promptly. Writing the eventfd is
+        // the only ring-adjacent action safe off the reactor thread. The guard covers Stop() racing ahead
+        // of Run() creating _wakeFd - the loop still sees the flag on its first iteration.
+        if (_wakeFd > 0)
+        {
+            WakeFdWrite();
+        }
+    }
+
     public void Run()
     {
         _reactorThreadId = Environment.CurrentManagedThreadId;
@@ -359,6 +382,18 @@ public sealed unsafe partial class Reactor
         {
             close(listenFd);
         }
+
+        // Close any still-open accepted sockets (the connection table is indexed by fd) so they don't
+        // leak when a host is disposed and recreated many times in one process - e.g. across a test run.
+        for (int fd = 0; fd < _connections.Length; fd++)
+        {
+            if (_connections[fd] != null)
+            {
+                close(fd);
+                _connections[fd] = null;
+            }
+        }
+
         close(_wakeFd);
         if (_timerTs != null)
         {
@@ -366,11 +401,24 @@ public sealed unsafe partial class Reactor
             _timerTs = null;
         }
         Ring.Dispose();
+
+        // Shared provided-buffer ring (incremental mode allocates per connection instead). Freed after
+        // the ring fd is closed, so the kernel has dropped its references to the slab.
+        if (_bufRing != null)
+        {
+            NativeMemory.AlignedFree(_bufRing);
+            _bufRing = null;
+        }
+        if (_bufSlab != null)
+        {
+            NativeMemory.AlignedFree(_bufSlab);
+            _bufSlab = null;
+        }
     }
 
     private void LoopShared()
     {
-        while (true)
+        while (!_stopRequested)
         {
             DrainReturnQ();
             DrainFlushQ();
