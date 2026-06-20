@@ -24,9 +24,10 @@ public sealed unsafe partial class Reactor
     private ushort[] _listenPorts = [];
     private readonly ServerConfig _config;
 
-    // The response-send strategy, chosen once from config (ZeroCopySend) and injected per-connection
-    // at accept via Connection.SendFn. Keeps the send hot path free of a per-call branch.
-    private readonly delegate*<Reactor, int, ushort, byte*, uint, uint, void> _sendFn;
+    // The response-send strategy from config (ZeroCopySend), copied per-connection at accept into
+    // Connection.UseZc. The send hot path branches on that bool (predictable, inlinable) instead of
+    // dispatching through an indirect function pointer.
+    private readonly bool _zeroCopySend;
     private readonly ushort _port;
     private readonly uint _ringEntries;
     private readonly bool _incremental;
@@ -103,7 +104,7 @@ public sealed unsafe partial class Reactor
         ConnBufRingEntries = config.ConnBufRingEntries;
         IncRecvBufferSize = (uint)config.IncRecvBufferSize;
         _pool = new Stack<Connection>(config.PoolMax);
-        _sendFn = config.ZeroCopySend ? &SubmitSendZc : &SubmitSendPlain;
+        _zeroCopySend = config.ZeroCopySend;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -214,7 +215,7 @@ public sealed unsafe partial class Reactor
             Connection? conn = ConnAt(fd, (ushort)gen);
             if (conn != null)
             {
-                conn.SendFn(this, fd, (ushort)gen, conn.WriteBuffer, (uint)conn.WriteInFlight, conn.SendOpFlags);
+                SubmitSend(conn, fd, (ushort)gen, conn.WriteBuffer, (uint)conn.WriteInFlight, conn.SendOpFlags);
             }
             return;
         }
@@ -272,7 +273,7 @@ public sealed unsafe partial class Reactor
             {
                 continue;
             }
-            conn.SendFn(this, fd, gen, conn.WriteBuffer, (uint)conn.WriteInFlight, conn.SendOpFlags);
+            SubmitSend(conn, fd, gen, conn.WriteBuffer, (uint)conn.WriteInFlight, conn.SendOpFlags);
         }
     }
 
@@ -471,7 +472,7 @@ public sealed unsafe partial class Reactor
                         : new Connection(this, clientFd, _config.WriteSlabSize, _config.RecvQueueEntries);
                     Track(clientFd, conn);
                     conn.InitRefs();
-                    conn.SendFn = _sendFn;   // config default; kTLS overrides to plain on handshake
+                    conn.UseZc = _zeroCopySend;   // config default; kTLS overrides to plain on handshake
                     conn.ListenerPort = PortOf(fd);
                     SubmitRecvMultishot(clientFd, (ushort)conn.Generation, BgId);
 
@@ -541,8 +542,8 @@ public sealed unsafe partial class Reactor
 
         if (conn.WriteHead < conn.WriteInFlight)
         {
-            // Partial send (rare with MSG_WAITALL): resubmit the remainder via the injected sender.
-            conn.SendFn(this, fd, gen, conn.WriteBuffer + conn.WriteHead, (uint)(conn.WriteInFlight - conn.WriteHead), conn.SendOpFlags);
+            // Partial send (rare with MSG_WAITALL): resubmit the remainder.
+            SubmitSend(conn, fd, gen, conn.WriteBuffer + conn.WriteHead, (uint)(conn.WriteInFlight - conn.WriteHead), conn.SendOpFlags);
             return;
         }
 
@@ -659,13 +660,20 @@ public sealed unsafe partial class Reactor
         sqe->user_data = Tag(KindRecv, gen, fd);
     }
 
-    // The two injectable send strategies (see _sendFn / Connection.SendFn). Static so they can be
-    // taken as function pointers; the chosen one is bound per-connection at accept.
-    internal static void SubmitSendPlain(Reactor r, int fd, ushort gen, byte* buf, uint len, uint opFlags)
-        => SubmitSendImpl(r, IORING_OP_SEND, fd, gen, buf, len, opFlags);
-
-    internal static void SubmitSendZc(Reactor r, int fd, ushort gen, byte* buf, uint len, uint opFlags)
-        => SubmitSendImpl(r, IORING_OP_SEND_ZC, fd, gen, buf, len, opFlags);
+    // Dispatch a send to this connection's strategy. A predictable per-connection branch (ZeroCopySend
+    // is constant for the run; kTLS pins plain) instead of an indirect call - so SubmitSendImpl stays
+    // inlinable on the hot send path.
+    private void SubmitSend(Connection conn, int fd, ushort gen, byte* buf, uint len, uint opFlags)
+    {
+        if (conn.UseZc)
+        {
+            SubmitSendImpl(this, IORING_OP_SEND_ZC, fd, gen, buf, len, opFlags);
+        }
+        else
+        {
+            SubmitSendImpl(this, IORING_OP_SEND, fd, gen, buf, len, opFlags);
+        }
+    }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void SubmitSendImpl(Reactor r, byte opcode, int fd, ushort gen, byte* buf, uint len, uint opFlags)
