@@ -46,6 +46,9 @@ jobs:
       - name: Pack ioxide.redis
         run: dotnet pack ioxide.redis/ioxide.redis.csproj --configuration Release --no-build --output ./artifacts
 
+      - name: Pack ioxide.Kestrel
+        run: dotnet pack ioxide.Kestrel/ioxide.Kestrel.csproj --configuration Release --no-build --output ./artifacts
+
       - name: Publish to NuGet
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
