@@ -1,4 +1,5 @@
 using ioxide.Kestrel;
+using Microsoft.Extensions.Logging;
 
 // A minimal ASP.NET Core app that runs on either the ioxide io_uring transport or Kestrel's stock
 // sockets transport. Pick with the TRANSPORT environment variable (default: ioxide):
@@ -9,6 +10,8 @@ using ioxide.Kestrel;
 // Then: curl http://localhost:8080/  and  curl http://localhost:8080/plaintext
 
 var builder = WebApplication.CreateBuilder(args);
+
+builder.Logging.ClearProviders();   // turn off all logging (no per-request info: lines)
 
 var transport = (Environment.GetEnvironmentVariable("TRANSPORT") ?? "ioxide").Trim().ToLowerInvariant();
 
