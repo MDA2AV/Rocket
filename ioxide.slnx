@@ -7,5 +7,6 @@
   <Project Path="ioxide/ioxide.csproj" />
   <Project Path="Playground/Playground.csproj" />
   <Project Path="Examples/Examples.csproj" />
+  <Project Path="Examples.AspNet/Examples.AspNet.csproj" />
   <Project Path="Tests/ioxide.e2e.csproj" />
 </Solution>
