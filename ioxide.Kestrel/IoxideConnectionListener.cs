@@ -3,6 +3,7 @@ using System.Threading.Channels;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.Extensions.Logging;
 using ioxide;
+using ioxide.tls;
 
 namespace ioxide.Kestrel;
 
@@ -19,15 +20,17 @@ internal sealed class IoxideConnectionListener : IConnectionListener
     private readonly Channel<ConnectionContext> _accepted;
     private readonly Reactor[] _reactors;
     private readonly Thread[] _threads;
+    private readonly TlsOptions? _tlsOptions;
     private long _connectionCounter;
     private int _stopped;
 
     public EndPoint EndPoint { get; }
 
-    public IoxideConnectionListener(IPEndPoint endpoint, IoxideTransportOptions options, ILogger<IoxideConnectionListener> logger)
+    public IoxideConnectionListener(IPEndPoint endpoint, IoxideTransportOptions options, TlsOptions? tlsOptions, ILogger<IoxideConnectionListener> logger)
     {
         EndPoint = endpoint;
         _logger = logger;
+        _tlsOptions = tlsOptions;
 
         _accepted = Channel.CreateUnbounded<ConnectionContext>(new UnboundedChannelOptions
         {
@@ -54,6 +57,12 @@ internal sealed class IoxideConnectionListener : IConnectionListener
             {
                 Handle = HandleConnectionAsync,
             };
+            if (_tlsOptions is not null)
+            {
+                // Start the per-reactor TLS service on the reactor's own thread (OpenSSL ctx + cert load).
+                var tls = _tlsOptions;
+                reactor.OnStart = r => TlsService.Start(r, tls);
+            }
             _reactors[i] = reactor;
             _threads[i] = new Thread(reactor.Run)
             {
@@ -74,7 +83,26 @@ internal sealed class IoxideConnectionListener : IConnectionListener
     private async Task HandleConnectionAsync(Reactor reactor, Connection conn)
     {
         var id = Interlocked.Increment(ref _connectionCounter);
-        var ctx = new IoxideConnectionContext(conn, reactor, EndPoint, id);
+
+        // kTLS handshake (TLS endpoints only) runs here on the reactor thread, before Kestrel sees the
+        // connection. It awaits the ring recv/send and resumes inline. On success the kernel does TX
+        // encryption from here on; the returned session decrypts inbound records — Kestrel gets plaintext.
+        TlsSession? session = null;
+        if (_tlsOptions is not null)
+        {
+            try
+            {
+                session = await reactor.GetService<TlsService>().AcceptAsync(conn).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Handshake failed (bad client, peer closed mid-handshake): drop the connection.
+                conn.DecRef();
+                return;
+            }
+        }
+
+        var ctx = new IoxideConnectionContext(conn, reactor, EndPoint, id, session, _tlsOptions?.Alpn);
 
         if (!_accepted.Writer.TryWrite(ctx))
         {

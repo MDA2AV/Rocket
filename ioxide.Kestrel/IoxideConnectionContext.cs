@@ -1,9 +1,12 @@
 using System.IO.Pipelines;
 using System.Net;
+using System.Text;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Connections.Features;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.Server.Kestrel.Core.Features;
 using ioxide;
+using ioxide.tls;
 
 namespace ioxide.Kestrel;
 
@@ -29,9 +32,9 @@ internal sealed class IoxideConnectionContext : ConnectionContext,
 
     private int _disposed;
 
-    public IoxideConnectionContext(Connection connection, Reactor reactor, EndPoint localEndPoint, long id)
+    public IoxideConnectionContext(Connection connection, Reactor reactor, EndPoint localEndPoint, long id, TlsSession? session = null, string? alpn = null)
     {
-        _pipe = new HopDuplexPipe(connection, reactor);
+        _pipe = new HopDuplexPipe(connection, reactor, session);
 
         ConnectionId = $"ioxide-{id:x}";
         LocalEndPoint = localEndPoint;
@@ -44,6 +47,16 @@ internal sealed class IoxideConnectionContext : ConnectionContext,
         _features.Set<IConnectionItemsFeature>(this);
         _features.Set<IConnectionLifetimeFeature>(this);
         _features.Set<IConnectionEndPointFeature>(this);
+
+        if (session is not null)
+        {
+            // TLS terminated in the transport (kTLS): present the connection to Kestrel as HTTPS with the
+            // negotiated ALPN, in place of UseHttps()/SslStream.
+            var tlsFeature = new IoxideTlsFeature(Encoding.ASCII.GetBytes(alpn ?? "http/1.1"));
+            _features.Set<ITlsConnectionFeature>(tlsFeature);
+            _features.Set<ITlsHandshakeFeature>(tlsFeature);
+            _features.Set<ITlsApplicationProtocolFeature>(tlsFeature);
+        }
     }
 
     /// <summary>Resolves once Kestrel has finished with this connection; the reactor's Handle callback awaits it.</summary>
