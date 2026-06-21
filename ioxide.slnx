@@ -3,6 +3,7 @@
   <Project Path="ioxide.tls/ioxide.tls.csproj" />
   <Project Path="ioxide.redis/ioxide.redis.csproj" />
   <Project Path="ioxide.pg/ioxide.pg.csproj" />
+  <Project Path="ioxide.Kestrel/ioxide.Kestrel.csproj" />
   <Project Path="ioxide/ioxide.csproj" />
   <Project Path="Playground/Playground.csproj" />
   <Project Path="Examples/Examples.csproj" />

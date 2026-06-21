@@ -161,6 +161,7 @@ public sealed unsafe partial class Reactor
             DrainFlushQ();
             DrainRecycleQ();
             DrainRemoteOps();
+            DrainPostQ();
 
             int rc = Ring.SubmitAndWait(1);
             if (rc < 0 && rc != -EINTR && rc != -EAGAIN && rc != -EBUSY)
