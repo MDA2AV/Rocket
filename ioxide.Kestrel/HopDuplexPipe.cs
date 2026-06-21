@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.IO.Pipelines;
 using ioxide;
+using ioxide.tls;
 using ioxide.utils;
 
 namespace ioxide.Kestrel;
@@ -16,6 +17,7 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
 {
     private readonly Connection _conn;
     private readonly Reactor _reactor;
+    private readonly TlsSession? _tls;   // non-null on a kTLS-terminated connection: inbound is decrypted here
     private readonly Pipe _inbound;    // recv pump writes; Kestrel reads (Transport.Input)
     private readonly Pipe _outbound;   // Kestrel writes (Transport.Output); send pump reads
 
@@ -30,10 +32,11 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
     public PipeReader Input => _inbound.Reader;
     public PipeWriter Output => _outbound.Writer;
 
-    public HopDuplexPipe(Connection conn, Reactor reactor)
+    public HopDuplexPipe(Connection conn, Reactor reactor, TlsSession? tls = null)
     {
         _conn = conn;
         _reactor = reactor;
+        _tls = tls;
         var scheduler = new ReactorPipeScheduler(reactor);
 
         // Reader schedulers = the reactor: Kestrel's HTTP parse (inbound reader) and the send pump
@@ -64,12 +67,29 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
         _sendPump = SendPumpAsync();
     }
 
-    // Reactor → inbound pipe. Copies each recv slice into the pipe and flushes; Kestrel reads it.
+    // Reactor → inbound pipe. Copies (or, for kTLS, decrypts) each recv slice into the pipe and flushes;
+    // Kestrel reads it. kTLS has no RX offload, so inbound stays ciphertext and is decrypted here.
     private async Task RecvPumpAsync()
     {
         PipeWriter writer = _inbound.Writer;
         try
         {
+            // TLS: the client's first request can ride in bundled with its Finished flight (already
+            // decrypted during the handshake). Hand it to Kestrel before the first recv.
+            if (_tls is not null)
+            {
+                ReadOnlySpan<byte> initial = _tls.DrainPlaintext();
+                if (!initial.IsEmpty)
+                {
+                    writer.Write(initial);
+                    FlushResult ifr = await writer.FlushAsync();
+                    if (ifr.IsCompleted || ifr.IsCanceled)
+                    {
+                        return;
+                    }
+                }
+            }
+
             while (true)
             {
                 RecvSnapshot snap = await _conn.ReadAsync();
@@ -78,13 +98,21 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
                 {
                     if (item.HasBuffer && item.Len > 0)
                     {
-                        CopySlice(in item, writer);
+                        if (_tls is null)
+                        {
+                            CopySlice(in item, writer);
+                        }
+                        else
+                        {
+                            DecryptSlice(in item, writer, _tls);
+                        }
                     }
                     _conn.ReturnBuffer(in item);
                 }
                 _conn.ResetRead();
 
-                if (snap.IsClosed)
+                // Peer close: a TCP FIN, or (TLS) a clean close_notify decoded by the session.
+                if (snap.IsClosed || (_tls is not null && _tls.Closed))
                 {
                     break;
                 }
@@ -105,6 +133,16 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
         Span<byte> dst = writer.GetSpan(item.Len);
         new ReadOnlySpan<byte>(item.Ptr, item.Len).CopyTo(dst);
         writer.Advance(item.Len);
+    }
+
+    // kTLS RX stays in userspace: feed the ciphertext slice through OpenSSL and write the plaintext.
+    private static unsafe void DecryptSlice(in SpscRecvRing.Item item, PipeWriter writer, TlsSession tls)
+    {
+        ReadOnlySpan<byte> plain = tls.Decrypt(item.Ptr, item.Len);
+        if (!plain.IsEmpty)
+        {
+            writer.Write(plain);
+        }
     }
 
     // Outbound pipe → connection send. Drains Kestrel's response into the slab and submits one SEND.
@@ -150,14 +188,27 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
         _outbound.Reader.CancelPendingRead();
         try { await _sendPump.ConfigureAwait(false); } catch { }
 
-        // Half-close the write side so EOF-delimited clients (Connection: close / upgrade) see the end of
-        // the response — ioxide's refcounted teardown does not FIN a server-initiated close on its own.
-        Shutdown(_conn.ClientFd, ShutWr);
-
-        // Now wake and unwind the recv side. MarkClosed wakes a recv parked in conn.ReadAsync — schedule it
-        // on the reactor so the recv continuation (reactor-owned state) runs there, not the dispose thread.
-        _reactor.ScheduleOnReactor(static c => ((Connection)c!).MarkClosed(), _conn);
-        _inbound.Writer.CancelPendingFlush();
-        try { await _recvPump.ConfigureAwait(false); } catch { }
+        if (_tls is null)
+        {
+            // Plaintext: half-close the write side so EOF-delimited clients (Connection: close / upgrade)
+            // see the end of the response — ioxide's refcounted teardown does not FIN a server-initiated
+            // close on its own. Then wake and unwind the recv side (MarkClosed wakes a recv parked in
+            // conn.ReadAsync — schedule it on the reactor so the continuation runs there, not the dispose thread).
+            Shutdown(_conn.ClientFd, ShutWr);
+            _reactor.ScheduleOnReactor(static c => ((Connection)c!).MarkClosed(), _conn);
+            _inbound.Writer.CancelPendingFlush();
+            try { await _recvPump.ConfigureAwait(false); } catch { }
+        }
+        else
+        {
+            // TLS: unwind the recv side FIRST so the recv pump stops touching the session, then dispose it
+            // — that sends close_notify (a raw kTLS control send, which must precede the FIN while the write
+            // side is still open) and frees the SSL — then FIN.
+            _reactor.ScheduleOnReactor(static c => ((Connection)c!).MarkClosed(), _conn);
+            _inbound.Writer.CancelPendingFlush();
+            try { await _recvPump.ConfigureAwait(false); } catch { }
+            _tls.Dispose();
+            Shutdown(_conn.ClientFd, ShutWr);
+        }
     }
 }

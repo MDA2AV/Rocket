@@ -8,7 +8,7 @@
     <RootNamespace>ioxide</RootNamespace>
 
     <PackageId>ioxide</PackageId>
-    <Version>0.0.14</Version>
+    <Version>0.0.15</Version>
     <Authors>MDA2AV</Authors>
     <Description>A shared-nothing io_uring runtime for .NET: one ring per reactor thread, inline completions, zero native dependencies. The engine - reactor, connection, and the IRingHost client seam.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
