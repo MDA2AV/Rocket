@@ -20,9 +20,11 @@ internal sealed class IoxideConnectionContext : ConnectionContext,
     IConnectionTransportFeature,
     IConnectionItemsFeature,
     IConnectionLifetimeFeature,
-    IConnectionEndPointFeature
+    IConnectionEndPointFeature,
+    IReactorFeature
 {
     private readonly HopDuplexPipe _pipe;
+    private readonly Reactor _reactor;
     private readonly CancellationTokenSource _connectionClosedCts = new();
     private readonly FeatureCollection _features = new();
 
@@ -35,6 +37,7 @@ internal sealed class IoxideConnectionContext : ConnectionContext,
     public IoxideConnectionContext(Connection connection, Reactor reactor, EndPoint localEndPoint, long id, TlsSession? session = null, string? alpn = null)
     {
         _pipe = new HopDuplexPipe(connection, reactor, session);
+        _reactor = reactor;
 
         ConnectionId = $"ioxide-{id:x}";
         LocalEndPoint = localEndPoint;
@@ -47,6 +50,7 @@ internal sealed class IoxideConnectionContext : ConnectionContext,
         _features.Set<IConnectionItemsFeature>(this);
         _features.Set<IConnectionLifetimeFeature>(this);
         _features.Set<IConnectionEndPointFeature>(this);
+        _features.Set<IReactorFeature>(this);
 
         if (session is not null)
         {
@@ -64,6 +68,9 @@ internal sealed class IoxideConnectionContext : ConnectionContext,
 
     /// <summary>Launches the transport pumps. Must be called on the reactor thread (from the Handle callback).</summary>
     public void StartPumps() => _pipe.Start();
+
+    /// <summary>The reactor that owns this connection (<see cref="IReactorFeature"/>).</summary>
+    public Reactor Reactor => _reactor;
 
     public override string ConnectionId { get; set; }
     public override IFeatureCollection Features => _features;
