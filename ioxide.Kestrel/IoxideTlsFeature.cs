@@ -30,14 +30,18 @@ internal sealed class IoxideTlsFeature : ITlsConnectionFeature, ITlsHandshakeFea
     public Task<X509Certificate2?> GetClientCertificateAsync(CancellationToken cancellationToken)
         => Task.FromResult(ClientCertificate);
 
-    // ITlsHandshakeFeature — fixed by ioxide.tls's single TLS 1.3 ciphersuite.
+    // ITlsHandshakeFeature — fixed by ioxide.tls's single TLS 1.3 ciphersuite. NegotiatedCipherSuite is the
+    // modern accessor; the legacy CipherAlgorithm/HashAlgorithm/KeyExchangeAlgorithm (+ *Strength) properties
+    // are obsolete (SYSLIB0058) but still required interface members, so implement and suppress the warning.
     public SslProtocols Protocol => SslProtocols.Tls13;
     public TlsCipherSuite NegotiatedCipherSuite => TlsCipherSuite.TLS_AES_128_GCM_SHA256;
+    public string HostName => string.Empty;
+#pragma warning disable SYSLIB0058 // legacy ITlsHandshakeFeature cipher properties are obsolete but required
     public CipherAlgorithmType CipherAlgorithm => CipherAlgorithmType.Aes128;
     public int CipherStrength => 128;
     public HashAlgorithmType HashAlgorithm => HashAlgorithmType.Sha256;
     public int HashStrength => 256;
     public ExchangeAlgorithmType KeyExchangeAlgorithm => ExchangeAlgorithmType.None;
     public int KeyExchangeStrength => 0;
-    public string HostName => string.Empty;
+#pragma warning restore SYSLIB0058
 }
