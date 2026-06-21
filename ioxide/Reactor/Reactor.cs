@@ -355,7 +355,7 @@ public sealed unsafe partial class Reactor
         }
         for (int i = 0; i < _listenFds.Length; i++)
         {
-            _listenFds[i] = OpenReusePortListener(_listenPorts[i], _config.ListenBacklog);
+            _listenFds[i] = OpenReusePortListener(_listenPorts[i], _config.ListenBacklog, _config.DualStack);
         }
 
         if (_incremental)
@@ -837,9 +837,9 @@ public sealed unsafe partial class Reactor
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(int));
     }
 
-    private static int OpenReusePortListener(ushort port, int backlog)
+    private static int OpenReusePortListener(ushort port, int backlog, bool dualStack)
     {
-        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        int fd = socket(dualStack ? AF_INET6 : AF_INET, SOCK_STREAM, 0);
         if (fd < 0)
         {
             throw new InvalidOperationException($"socket failed: {fd}");
@@ -849,14 +849,34 @@ public sealed unsafe partial class Reactor
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(int));
         setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(int));
 
-        sockaddr_in addr = default;
-        addr.sin_family      = AF_INET;
-        addr.sin_port        = Htons(port);
-        addr.sin_addr.s_addr = 0; // 0.0.0.0
-
-        if (bind(fd, &addr, (uint)sizeof(sockaddr_in)) < 0)
+        if (dualStack)
         {
-            throw new InvalidOperationException("bind failed");
+            // A single AF_INET6 listener bound to :: with IPV6_V6ONLY=0 accepts both IPv6 and
+            // IPv4-mapped clients - one socket serves both families.
+            int v6only = 0;
+            setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(int));
+
+            sockaddr_in6 addr6 = default;
+            addr6.sin6_family = AF_INET6;
+            addr6.sin6_port   = Htons(port);
+            // sin6_addr left zero == in6addr_any (::)
+
+            if (bind(fd, &addr6, (uint)sizeof(sockaddr_in6)) < 0)
+            {
+                throw new InvalidOperationException("bind failed");
+            }
+        }
+        else
+        {
+            sockaddr_in addr = default;
+            addr.sin_family      = AF_INET;
+            addr.sin_port        = Htons(port);
+            addr.sin_addr.s_addr = 0; // 0.0.0.0
+
+            if (bind(fd, &addr, (uint)sizeof(sockaddr_in)) < 0)
+            {
+                throw new InvalidOperationException("bind failed");
+            }
         }
 
         if (listen(fd, backlog) < 0)

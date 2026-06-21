@@ -31,6 +31,12 @@ public sealed record ServerConfig
     /// <summary>listen() backlog per SO_REUSEPORT listener - the accept-queue depth for connection bursts.</summary>
     public int    ListenBacklog { get; init; } = 1024;
 
+    /// <summary>
+    /// Bind listeners as dual-stack IPv6 (AF_INET6 on :: with IPV6_V6ONLY=0) so one socket accepts both
+    /// IPv6 and IPv4-mapped clients. When false (default) listeners are IPv4-only (AF_INET on 0.0.0.0).
+    /// </summary>
+    public bool   DualStack { get; init; } = false;
+
     // Shared buffer ring (Incremental == false).
     public int    RecvBufferSize    { get; init; } = 32 * 1024;
     public int    BufferRingEntries { get; init; } = 4096;
