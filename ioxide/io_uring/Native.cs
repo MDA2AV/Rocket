@@ -85,6 +85,10 @@ public static unsafe class Native {
     public const int IPPROTO_TCP  = 6;
     public const int TCP_NODELAY  = 1;
 
+    public const int AF_INET6     = 10;
+    public const int IPPROTO_IPV6 = 41;
+    public const int IPV6_V6ONLY  = 26;
+
     [DllImport("libc", EntryPoint = "syscall")]
     private static extern long syscall3(long nr, uint a1, IoUringParams* a2);
 
@@ -107,7 +111,7 @@ public static unsafe class Native {
     [DllImport("libc")] public static extern int   munmap(void* addr, nuint length);
     [DllImport("libc")] public static extern int   close(int fd);
     [DllImport("libc")] public static extern int   socket(int domain, int type, int proto);
-    [DllImport("libc")] public static extern int   bind(int fd, sockaddr_in* addr, uint len);
+    [DllImport("libc")] public static extern int   bind(int fd, void* addr, uint len);
     [DllImport("libc")] public static extern int   listen(int fd, int backlog);
     [DllImport("libc")] public static extern int   setsockopt(int fd, int level, int optname, void* optval, uint optlen);
     [DllImport("libc")] public static extern int   eventfd(uint initval, int flags);
@@ -205,6 +209,15 @@ public static unsafe class Native {
         public ushort  sin_port;
         public in_addr sin_addr;
         public fixed byte sin_zero[8];
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public unsafe struct sockaddr_in6 {
+        public ushort     sin6_family;
+        public ushort     sin6_port;
+        public uint       sin6_flowinfo;
+        public fixed byte sin6_addr[16];  // in6_addr - zeroed == in6addr_any (::)
+        public uint       sin6_scope_id;
     }
 
 #pragma warning disable CS8981 // lower-cased names deliberately mirror the kernel struct names (uapi)
