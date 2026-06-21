@@ -20,6 +20,7 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
     private readonly TlsSession? _tls;   // non-null on a kTLS-terminated connection: inbound is decrypted here
     private readonly Pipe _inbound;    // recv pump writes; Kestrel reads (Transport.Input)
     private readonly Pipe _outbound;   // Kestrel writes (Transport.Output); send pump reads
+    private readonly PipeReader _input; // Kestrel's Input — pins the first read onto the reactor thread
 
     private Task _recvPump = Task.CompletedTask;
     private Task _sendPump = Task.CompletedTask;
@@ -29,7 +30,7 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
     private static extern int Shutdown(int sockfd, int how);
     private const int ShutWr = 1;   // SHUT_WR
 
-    public PipeReader Input => _inbound.Reader;
+    public PipeReader Input => _input;
     public PipeWriter Output => _outbound.Writer;
 
     public HopDuplexPipe(Connection conn, Reactor reactor, TlsSession? tls = null)
@@ -54,6 +55,8 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
             pauseWriterThreshold: 64 * 1024,
             resumeWriterThreshold: 32 * 1024,
             useSynchronizationContext: false));
+
+        _input = new ReactorPinReader(_inbound.Reader, reactor);
     }
 
     /// <summary>Launches the recv and send pumps. Must be called on the reactor thread.</summary>
