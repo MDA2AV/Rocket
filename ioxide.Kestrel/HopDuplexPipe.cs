@@ -23,6 +23,10 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
     private Task _sendPump = Task.CompletedTask;
     private int _started;
 
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "shutdown")]
+    private static extern int Shutdown(int sockfd, int how);
+    private const int ShutWr = 1;   // SHUT_WR
+
     public PipeReader Input => _inbound.Reader;
     public PipeWriter Output => _outbound.Writer;
 
@@ -139,14 +143,21 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        // Kestrel has completed its ends; wake the pumps and unwind. MarkClosed wakes a recv parked in
-        // conn.ReadAsync — schedule it ON the reactor so the recv continuation (which touches reactor-owned
-        // recv state) runs there, not on Kestrel's dispose thread. The pipe cancels resume via the pipes'
-        // reactor reader/writer schedulers, so they're reactor-safe too.
+        // Quiesce the send side BEFORE closing. Wake the send pump if it's parked on the output reader and
+        // await it, so any in-flight SEND completes normally and the full response is flushed. Draining here
+        // — rather than concurrently with MarkClosed — is what makes the response reliably reach the client
+        // and avoids completing a live flush twice (MarkClosed racing the SEND CQE's CompleteFlush).
+        _outbound.Reader.CancelPendingRead();
+        try { await _sendPump.ConfigureAwait(false); } catch { }
+
+        // Half-close the write side so EOF-delimited clients (Connection: close / upgrade) see the end of
+        // the response — ioxide's refcounted teardown does not FIN a server-initiated close on its own.
+        Shutdown(_conn.ClientFd, ShutWr);
+
+        // Now wake and unwind the recv side. MarkClosed wakes a recv parked in conn.ReadAsync — schedule it
+        // on the reactor so the recv continuation (reactor-owned state) runs there, not the dispose thread.
         _reactor.ScheduleOnReactor(static c => ((Connection)c!).MarkClosed(), _conn);
         _inbound.Writer.CancelPendingFlush();
-        _outbound.Reader.CancelPendingRead();
-        try { await _recvPump; } catch { }
-        try { await _sendPump; } catch { }
+        try { await _recvPump.ConfigureAwait(false); } catch { }
     }
 }
