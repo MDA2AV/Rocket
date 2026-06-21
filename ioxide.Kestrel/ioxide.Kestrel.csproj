@@ -5,22 +5,26 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <RootNamespace>ioxide.tls</RootNamespace>
+    <RootNamespace>ioxide.Kestrel</RootNamespace>
 
-    <PackageId>ioxide.tls</PackageId>
+    <PackageId>ioxide.Kestrel</PackageId>
     <Version>0.0.13</Version>
     <Authors>MDA2AV</Authors>
-    <Description>TLS for the ioxide io_uring runtime: OpenSSL handshake driven over the ring, then kernel TLS (kTLS) transmit offload - handlers keep writing plaintext through the same connection API. Requires Linux kTLS (tls module) and OpenSSL 3.</Description>
+    <Description>ASP.NET Core Kestrel transport backed by the ioxide io_uring runtime: one reactor (ring) per core, SO_REUSEPORT load-balanced, with Kestrel's HTTP request loop pinned to the reactor thread. Drop-in via UseIoxide().</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://mda2av.github.io/ioxide/</PackageProjectUrl>
     <RepositoryUrl>https://github.com/MDA2AV/ioxide</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <PackageTags>io_uring;tls;ktls;openssl;linux;ioxide</PackageTags>
+    <PackageTags>io_uring;kestrel;aspnetcore;transport;linux;ioxide;thread-per-core</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
   <ItemGroup>
-    <None Include="../README.md" Pack="true" PackagePath="/" />
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="/" />
     <ProjectReference Include="../ioxide/ioxide.csproj" />
   </ItemGroup>
 
