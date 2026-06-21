@@ -17,7 +17,7 @@ builder.WebHost.ConfigureKestrel(o => o.ListenAnyIP(8080));
 switch (transport)
 {
     case "ioxide":
-        builder.WebHost.UseIoxide();   // io_uring transport from the ioxide.Kestrel package
+        builder.WebHost.UseIoxide(o => o.ReactorCount = 16);   // io_uring transport, 16 reactors (one ring per thread)
         break;
 
     case "sockets":
