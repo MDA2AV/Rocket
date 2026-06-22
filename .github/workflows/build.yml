@@ -56,43 +56,11 @@ jobs:
       - name: Build
         run: dotnet build ioxide.slnx --configuration Release --no-restore
 
-      # io_uring is needed by the reactor; the tls module by the kTLS test. Best-effort — io_uring is
-      # enabled by default on the runners, and the suite skips the kTLS test if the module is absent.
-      - name: Enable io_uring + load kTLS module
+      # kTLS module for the TLS e2e test; io_uring enable in case a runner disables it (both best-effort).
+      - name: Prepare runtime (kTLS + io_uring)
         run: |
-          echo "kernel: $(uname -r)"
-          echo "io_uring_disabled (before): $(cat /proc/sys/kernel/io_uring_disabled 2>/dev/null || echo n/a)"
-          sudo sysctl -w kernel.io_uring_disabled=0 || echo "WARN: could not set kernel.io_uring_disabled"
-          echo "io_uring_disabled (after):  $(cat /proc/sys/kernel/io_uring_disabled 2>/dev/null || echo n/a)"
-          sudo modprobe tls 2>/dev/null && echo "tls module loaded" || echo "tls module unavailable (kTLS test will skip)"
-
-      # Diagnostic: io_uring_setup errno on the host, and whether a seccomp-unconfined / privileged
-      # container can bypass the block (so the e2e could run inside one instead of needing self-hosted).
-      - name: Probe io_uring (memlock accumulation at 8192 entries)
-        run: |
-          echo "memlock soft/hard: $(ulimit -Sl) / $(ulimit -Hl) KB"
-          cat > /tmp/p.c <<'PROBE'
-          #include <stdio.h>
-          #include <errno.h>
-          #include <string.h>
-          #include <stdlib.h>
-          #include <sys/syscall.h>
-          int main(int argc, char** argv){
-          unsigned flags=(1u<<12)|(1u<<13)|(1u<<16);
-          unsigned entries=argc>1?(unsigned)atoi(argv[1]):8192;
-          int n=0;
-          for(;;){
-          unsigned char p[256]={0}; *(unsigned*)(p+8)=flags;
-          long fd=syscall(425,entries,p);
-          if(fd<0){printf("entries=%u: FAILED at ring #%d errno=%d (%s)\n",entries,n,errno,strerror(errno));return 0;}
-          if(++n>=80){printf("entries=%u: created 80 rings OK\n",entries);return 0;}
-          }
-          }
-          PROBE
-          gcc -O2 -o /tmp/p /tmp/p.c
-          echo "--- accumulate 8192-entry rings @ default memlock ---"; /tmp/p 8192
-          sudo prlimit --pid $$ --memlock=-1:-1 2>/dev/null || ulimit -l unlimited 2>/dev/null || true
-          echo "--- after raising memlock to $(ulimit -Sl) ---"; /tmp/p 8192
+          sudo modprobe tls 2>/dev/null || true
+          sudo sysctl -w kernel.io_uring_disabled=0 2>/dev/null || true
 
       # E2E suite (already compiled as part of ioxide.slnx). Drives real reactors over real sockets;
       # pg/redis tests use the sidecars above. Non-zero exit fails the job before any pack/publish.
