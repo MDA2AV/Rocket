@@ -68,24 +68,34 @@ jobs:
 
       # Diagnostic: io_uring_setup errno on the host, and whether a seccomp-unconfined / privileged
       # container can bypass the block (so the e2e could run inside one instead of needing self-hosted).
-      - name: Probe io_uring (host vs container)
+      - name: Probe io_uring (flags + entries)
         run: |
+          echo "memlock (ulimit -l): $(ulimit -l) KB"
           cat > /tmp/p.c <<'PROBE'
           #include <stdio.h>
           #include <errno.h>
           #include <string.h>
+          #include <unistd.h>
           #include <sys/syscall.h>
-          int main(void){
+          static void t(const char* n, unsigned int flags, unsigned int entries){
           unsigned char p[256]={0};
-          long fd=syscall(425,8,p);
-          if(fd<0){printf("FAIL errno=%d (%s)\n",errno,strerror(errno));return 1;}
-          printf("OK fd=%ld\n",fd);return 0;}
+          *(unsigned int*)(p+8)=flags;
+          long fd=syscall(425,entries,p);
+          if(fd<0) printf("%-34s FAIL errno=%d (%s)\n",n,errno,strerror(errno));
+          else { printf("%-34s OK fd=%ld\n",n,fd); close(fd); }
+          }
+          int main(void){
+          unsigned SI=1u<<12, DTR=1u<<13, NSA=1u<<16;
+          t("flags=0 e=8",0,8);
+          t("SINGLE_ISSUER e=8",SI,8);
+          t("SI|DEFER_TASKRUN e=8",SI|DTR,8);
+          t("SI|DTR|NO_SQARRAY e=8",SI|DTR|NSA,8);
+          t("SI|DTR|NO_SQARRAY e=256",SI|DTR|NSA,256);
+          t("SI|DTR|NO_SQARRAY e=4096",SI|DTR|NSA,4096);
+          return 0;}
           PROBE
           gcc -O2 -o /tmp/p /tmp/p.c
-          echo "=== host ==="; /tmp/p || true
-          echo "=== docker default seccomp ==="; docker run --rm -v /tmp/p:/p:ro ubuntu:24.04 /p || true
-          echo "=== docker seccomp=unconfined ==="; docker run --rm --security-opt seccomp=unconfined -v /tmp/p:/p:ro ubuntu:24.04 /p || true
-          echo "=== docker privileged ==="; docker run --rm --privileged -v /tmp/p:/p:ro ubuntu:24.04 /p || true
+          /tmp/p
 
       # E2E suite (already compiled as part of ioxide.slnx). Drives real reactors over real sockets;
       # pg/redis tests use the sidecars above. Non-zero exit fails the job before any pack/publish.
