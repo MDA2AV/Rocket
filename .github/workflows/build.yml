@@ -60,18 +60,21 @@ jobs:
       # enabled by default on the runners, and the suite skips the kTLS test if the module is absent.
       - name: Enable io_uring + load kTLS module
         run: |
-          sudo sysctl -w kernel.io_uring_disabled=0 2>/dev/null || true
-          sudo modprobe tls 2>/dev/null || true
+          echo "kernel: $(uname -r)"
+          echo "io_uring_disabled (before): $(cat /proc/sys/kernel/io_uring_disabled 2>/dev/null || echo n/a)"
+          sudo sysctl -w kernel.io_uring_disabled=0 || echo "WARN: could not set kernel.io_uring_disabled"
+          echo "io_uring_disabled (after):  $(cat /proc/sys/kernel/io_uring_disabled 2>/dev/null || echo n/a)"
+          sudo modprobe tls 2>/dev/null && echo "tls module loaded" || echo "tls module unavailable (kTLS test will skip)"
 
       # E2E suite (already compiled as part of ioxide.slnx). Drives real reactors over real sockets;
       # pg/redis tests use the sidecars above. Non-zero exit fails the job before any pack/publish.
       - name: Run E2E tests
         env:
-          EXAMPLES_PG_HOST: localhost
+          EXAMPLES_PG_HOST: 127.0.0.1
           EXAMPLES_PG_PORT: 5432
           EXAMPLES_PG_USER: bench
           EXAMPLES_PG_DB: bench
-          EXAMPLES_REDIS_HOST: localhost
+          EXAMPLES_REDIS_HOST: 127.0.0.1
           EXAMPLES_REDIS_PORT: 6379
         run: dotnet run --project Tests/ioxide.e2e.csproj --configuration Release --no-build
 
