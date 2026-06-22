@@ -68,34 +68,31 @@ jobs:
 
       # Diagnostic: io_uring_setup errno on the host, and whether a seccomp-unconfined / privileged
       # container can bypass the block (so the e2e could run inside one instead of needing self-hosted).
-      - name: Probe io_uring (flags + entries)
+      - name: Probe io_uring (memlock accumulation at 8192 entries)
         run: |
-          echo "memlock (ulimit -l): $(ulimit -l) KB"
+          echo "memlock soft/hard: $(ulimit -Sl) / $(ulimit -Hl) KB"
           cat > /tmp/p.c <<'PROBE'
           #include <stdio.h>
           #include <errno.h>
           #include <string.h>
-          #include <unistd.h>
+          #include <stdlib.h>
           #include <sys/syscall.h>
-          static void t(const char* n, unsigned int flags, unsigned int entries){
-          unsigned char p[256]={0};
-          *(unsigned int*)(p+8)=flags;
+          int main(int argc, char** argv){
+          unsigned flags=(1u<<12)|(1u<<13)|(1u<<16);
+          unsigned entries=argc>1?(unsigned)atoi(argv[1]):8192;
+          int n=0;
+          for(;;){
+          unsigned char p[256]={0}; *(unsigned*)(p+8)=flags;
           long fd=syscall(425,entries,p);
-          if(fd<0) printf("%-34s FAIL errno=%d (%s)\n",n,errno,strerror(errno));
-          else { printf("%-34s OK fd=%ld\n",n,fd); close(fd); }
+          if(fd<0){printf("entries=%u: FAILED at ring #%d errno=%d (%s)\n",entries,n,errno,strerror(errno));return 0;}
+          if(++n>=80){printf("entries=%u: created 80 rings OK\n",entries);return 0;}
           }
-          int main(void){
-          unsigned SI=1u<<12, DTR=1u<<13, NSA=1u<<16;
-          t("flags=0 e=8",0,8);
-          t("SINGLE_ISSUER e=8",SI,8);
-          t("SI|DEFER_TASKRUN e=8",SI|DTR,8);
-          t("SI|DTR|NO_SQARRAY e=8",SI|DTR|NSA,8);
-          t("SI|DTR|NO_SQARRAY e=256",SI|DTR|NSA,256);
-          t("SI|DTR|NO_SQARRAY e=4096",SI|DTR|NSA,4096);
-          return 0;}
+          }
           PROBE
           gcc -O2 -o /tmp/p /tmp/p.c
-          /tmp/p
+          echo "--- accumulate 8192-entry rings @ default memlock ---"; /tmp/p 8192
+          sudo prlimit --pid $$ --memlock=-1:-1 2>/dev/null || ulimit -l unlimited 2>/dev/null || true
+          echo "--- after raising memlock to $(ulimit -Sl) ---"; /tmp/p 8192
 
       # E2E suite (already compiled as part of ioxide.slnx). Drives real reactors over real sockets;
       # pg/redis tests use the sidecars above. Non-zero exit fails the job before any pack/publish.
@@ -107,7 +104,12 @@ jobs:
           EXAMPLES_PG_DB: bench
           EXAMPLES_REDIS_HOST: 127.0.0.1
           EXAMPLES_REDIS_PORT: 6379
-        run: dotnet run --project Tests/ioxide.e2e.csproj --configuration Release --no-build
+        run: |
+          # ioxide rings (RingEntries=8192) pin memory; the e2e starts many reactors, so the
+          # default 8 MB RLIMIT_MEMLOCK is exhausted. Raise it before the run.
+          sudo prlimit --pid $$ --memlock=-1:-1 2>/dev/null || ulimit -l unlimited 2>/dev/null || true
+          echo "memlock for e2e: $(ulimit -Sl) KB"
+          dotnet run --project Tests/ioxide.e2e.csproj --configuration Release --no-build
 
       - name: Pack ioxide
         run: dotnet pack ioxide/ioxide.csproj --configuration Release --no-build --output ./artifacts
