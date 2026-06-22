@@ -66,6 +66,27 @@ jobs:
           echo "io_uring_disabled (after):  $(cat /proc/sys/kernel/io_uring_disabled 2>/dev/null || echo n/a)"
           sudo modprobe tls 2>/dev/null && echo "tls module loaded" || echo "tls module unavailable (kTLS test will skip)"
 
+      # Diagnostic: io_uring_setup errno on the host, and whether a seccomp-unconfined / privileged
+      # container can bypass the block (so the e2e could run inside one instead of needing self-hosted).
+      - name: Probe io_uring (host vs container)
+        run: |
+          cat > /tmp/p.c <<'PROBE'
+          #include <stdio.h>
+          #include <errno.h>
+          #include <string.h>
+          #include <sys/syscall.h>
+          int main(void){
+          unsigned char p[256]={0};
+          long fd=syscall(425,8,p);
+          if(fd<0){printf("FAIL errno=%d (%s)\n",errno,strerror(errno));return 1;}
+          printf("OK fd=%ld\n",fd);return 0;}
+          PROBE
+          gcc -O2 -o /tmp/p /tmp/p.c
+          echo "=== host ==="; /tmp/p || true
+          echo "=== docker default seccomp ==="; docker run --rm -v /tmp/p:/p:ro ubuntu:24.04 /p || true
+          echo "=== docker seccomp=unconfined ==="; docker run --rm --security-opt seccomp=unconfined -v /tmp/p:/p:ro ubuntu:24.04 /p || true
+          echo "=== docker privileged ==="; docker run --rm --privileged -v /tmp/p:/p:ro ubuntu:24.04 /p || true
+
       # E2E suite (already compiled as part of ioxide.slnx). Drives real reactors over real sockets;
       # pg/redis tests use the sidecars above. Non-zero exit fails the job before any pack/publish.
       - name: Run E2E tests
