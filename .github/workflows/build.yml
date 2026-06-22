@@ -16,6 +16,31 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    # pg + redis sidecars so the e2e suite's pg/redis tests run (they skip cleanly if absent).
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: bench
+          POSTGRES_DB: bench
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -30,6 +55,25 @@ jobs:
 
       - name: Build
         run: dotnet build ioxide.slnx --configuration Release --no-restore
+
+      # io_uring is needed by the reactor; the tls module by the kTLS test. Best-effort — io_uring is
+      # enabled by default on the runners, and the suite skips the kTLS test if the module is absent.
+      - name: Enable io_uring + load kTLS module
+        run: |
+          sudo sysctl -w kernel.io_uring_disabled=0 2>/dev/null || true
+          sudo modprobe tls 2>/dev/null || true
+
+      # E2E suite (already compiled as part of ioxide.slnx). Drives real reactors over real sockets;
+      # pg/redis tests use the sidecars above. Non-zero exit fails the job before any pack/publish.
+      - name: Run E2E tests
+        env:
+          EXAMPLES_PG_HOST: localhost
+          EXAMPLES_PG_PORT: 5432
+          EXAMPLES_PG_USER: bench
+          EXAMPLES_PG_DB: bench
+          EXAMPLES_REDIS_HOST: localhost
+          EXAMPLES_REDIS_PORT: 6379
+        run: dotnet run --project Tests/ioxide.e2e.csproj --configuration Release --no-build
 
       - name: Pack ioxide
         run: dotnet pack ioxide/ioxide.csproj --configuration Release --no-build --output ./artifacts
