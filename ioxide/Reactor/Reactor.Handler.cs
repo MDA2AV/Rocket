@@ -14,7 +14,7 @@ public sealed partial class Reactor
         }
         catch (Exception e)
         {
-            Console.Error.WriteLine($"[r{Id}] connection handler faulted: {e.GetBaseException().Message}");
+            Console.Error.WriteLine($"[r{_id}] connection handler faulted: {e.GetBaseException().Message}");
         }
     }
 }

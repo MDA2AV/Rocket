@@ -12,23 +12,35 @@ namespace ioxide;
 /// </summary>
 public interface IRingHost
 {
-    /// <summary>Connect <paramref name="fd"/> to the native sockaddr at <paramref name="sockaddr"/>.</summary>
+    /// <summary>
+    /// Connect <paramref name="fd"/> to the native sockaddr at <paramref name="sockaddr"/>.
+    /// </summary>
     void SubmitConnect(int fd, nint sockaddr, int sockaddrLen, IRingCompletion completion);
 
-    /// <summary>Send <paramref name="length"/> bytes from <paramref name="buffer"/> on <paramref name="fd"/>.</summary>
+    /// <summary>
+    /// Send <paramref name="length"/> bytes from <paramref name="buffer"/> on <paramref name="fd"/>.
+    /// </summary>
     void SubmitSend(int fd, nint buffer, int length, IRingCompletion completion);
 
-    /// <summary>Receive up to <paramref name="length"/> bytes into <paramref name="buffer"/> on <paramref name="fd"/>.</summary>
+    /// <summary>
+    /// Receive up to <paramref name="length"/> bytes into <paramref name="buffer"/> on <paramref name="fd"/>.
+    /// </summary>
     void SubmitRecv(int fd, nint buffer, int length, IRingCompletion completion);
 
-    /// <summary>Read up to <paramref name="length"/> bytes into <paramref name="buffer"/> from <paramref name="offset"/>.</summary>
+    /// <summary>
+    /// Read up to <paramref name="length"/> bytes into <paramref name="buffer"/> from <paramref name="offset"/>.
+    /// </summary>
     void SubmitRead(int fd, nint buffer, int length, long offset, IRingCompletion completion);
 
-    /// <summary>Write <paramref name="length"/> bytes from <paramref name="buffer"/> at <paramref name="offset"/>.</summary>
+    /// <summary>
+    /// Write <paramref name="length"/> bytes from <paramref name="buffer"/> at <paramref name="offset"/>.
+    /// </summary>
     void SubmitWrite(int fd, nint buffer, int length, long offset, IRingCompletion completion);
 }
 
-/// <summary>The reactor calls this when a submitted operation's CQE arrives.</summary>
+/// <summary>
+/// The reactor calls this when a submitted operation's CQE arrives.
+/// </summary>
 public interface IRingCompletion
 {
     /// <param name="result">Bytes transferred, or a negative errno.</param>

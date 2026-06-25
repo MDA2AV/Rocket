@@ -34,7 +34,9 @@ public sealed class RingPool<T> where T : class
         }
     }
 
-    /// <summary>Rent a resource, waiting (without blocking a thread) if none is idle.</summary>
+    /// <summary>
+    /// Rent a resource, waiting (without blocking a thread) if none is idle.
+    /// </summary>
     public ValueTask<T> RentAsync()
     {
         lock (_gate)
@@ -50,7 +52,9 @@ public sealed class RingPool<T> where T : class
         }
     }   
 
-    /// <summary>Return a resource (also how fresh ones are seeded).</summary>
+    /// <summary>
+    /// Return a resource (also how fresh ones are seeded).
+    /// </summary>
     public void Return(T item)
     {
         TaskCompletionSource<T>? waiter;

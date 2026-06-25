@@ -37,7 +37,7 @@ public sealed unsafe partial class Reactor : IRingHost
         return _services.TryGetValue(typeof(T), out object? service)
             ? (T)service
             : throw new InvalidOperationException(
-                $"No {typeof(T).Name} registered on reactor {Id}. Register it from OnStart with AddService.");
+                $"No {typeof(T).Name} registered on reactor {_id}. Register it from OnStart with AddService.");
     }
 
     /// <summary>
@@ -138,15 +138,5 @@ public sealed unsafe partial class Reactor : IRingHost
         int slot = _opFree[--_opFreeTop];
         _opTargets[slot] = completion;
         return slot;
-    }
-
-    private void CompleteClient(int slot, int result)
-    {
-        IRingCompletion? target = _opTargets[slot];
-        _opTargets[slot] = null;
-        _opFree[_opFreeTop++] = slot;
-
-        // The slot is free before Complete - the inline continuation may submit its next op.
-        target?.Complete(result);
     }
 }

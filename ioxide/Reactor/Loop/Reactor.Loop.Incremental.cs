@@ -1,9 +1,10 @@
 using System.Runtime.InteropServices;
 using ioxide.utils;
 using static ioxide.Native;
-// ReSharper disable SuggestVarOrType_BuiltInTypes
 
 namespace ioxide;
+
+// Loop - Incremental, Ring per connection
 
 /// <summary>
 /// Incremental-buffer (IOU_PBUF_RING_INC) path: each connection gets its own buffer ring, and one
@@ -18,9 +19,11 @@ public sealed unsafe partial class Reactor
     private void InitIncremental()
     {
         // GID 1 reserved; per-conn GIDs 2..MaxConnections+1.
-        _freeGids = new Stack<ushort>(MaxConnections);
-        for (int g = MaxConnections + 1; g >= 2; g--)
+        _freeGids = new Stack<ushort>(_maxConnections);
+        for (int g = _maxConnections + 1; g >= 2; g--)
+        {
             _freeGids.Push((ushort)g);
+        }
 
         _returnQInc = new Mpsc<ulong>(1 << 16);
     }
@@ -31,15 +34,19 @@ public sealed unsafe partial class Reactor
     private void SetupConnectionBufRing(Connection conn)
     {
         ushort gid = AllocGid();
-        int entries = ConnBufRingEntries;
+        int entries = _connBufRingEntries;
 
         // Allocations are reused across pool lives; only the kernel registration is per-life.
         if (conn.BufRing == null)
+        {
             conn.BufRing = (byte*)NativeMemory.AlignedAlloc((nuint)entries * 16, 4096);
+        }
         NativeMemory.Clear(conn.BufRing, (nuint)entries * 16);
 
         if (conn.BufSlab == null)
-            conn.BufSlab = (byte*)NativeMemory.AlignedAlloc((nuint)entries * (nuint)IncRecvBufferSize, 64);
+        {
+            conn.BufSlab = (byte*)NativeMemory.AlignedAlloc((nuint)entries * (nuint)_incRecvBufferSize, 64);
+        }
 
         conn.CumOffset  ??= new int[entries];
         conn.RefCount   ??= new int[entries];
@@ -55,9 +62,11 @@ public sealed unsafe partial class Reactor
             bgid         = gid,
             flags        = IOU_PBUF_RING_INC,
         };
-        int ret = io_uring_register(Ring.Fd, IORING_REGISTER_PBUF_RING, &reg, 1);
+        int ret = io_uring_register(_ring.Fd, IORING_REGISTER_PBUF_RING, &reg, 1);
         if (ret < 0)
+        {
             throw new InvalidOperationException($"register pbuf_ring (inc) failed: ret={ret} gid={gid}");
+        }
 
         conn.Bgid            = gid;
         conn.BufRingEntries  = entries;
@@ -67,8 +76,8 @@ public sealed unsafe partial class Reactor
         for (ushort bid = 0; bid < entries; bid++)
         {
             byte* slot = conn.BufRing + (uint)bid * 16;
-            *(ulong*)(slot + 0)   = (ulong)(conn.BufSlab + bid * (nuint)IncRecvBufferSize);
-            *(uint*)(slot + 8)    = IncRecvBufferSize;
+            *(ulong*)(slot + 0)   = (ulong)(conn.BufSlab + bid * (nuint)_incRecvBufferSize);
+            *(uint*)(slot + 8)    = _incRecvBufferSize;
             *(ushort*)(slot + 12) = bid;
         }
         Volatile.Write(ref *(ushort*)(conn.BufRing + 14), (ushort)entries);
@@ -81,7 +90,7 @@ public sealed unsafe partial class Reactor
             // Recycle() cancelled the multishot recv first, so the kernel won't select
             // from this group again before unregister.
             var reg = new io_uring_buf_reg { bgid = conn.Bgid };
-            io_uring_register(Ring.Fd, IORING_UNREGISTER_PBUF_RING, &reg, 1);
+            io_uring_register(_ring.Fd, IORING_UNREGISTER_PBUF_RING, &reg, 1);
             FreeGid(conn.Bgid);
         }
         // Allocations stay for pool reuse.
@@ -96,8 +105,8 @@ public sealed unsafe partial class Reactor
 
         ushort tail = Volatile.Read(ref *(ushort*)(conn.BufRing + 14));
         byte* slot  = conn.BufRing + (tail & conn.BufRingMask) * 16;
-        *(ulong*)(slot + 0)   = (ulong)(conn.BufSlab + bid * (nuint)IncRecvBufferSize);
-        *(uint*)(slot + 8)    = IncRecvBufferSize;
+        *(ulong*)(slot + 0)   = (ulong)(conn.BufSlab + bid * (nuint)_incRecvBufferSize);
+        *(uint*)(slot + 8)    = _incRecvBufferSize;
         *(ushort*)(slot + 12) = bid;
         Volatile.Write(ref *(ushort*)(conn.BufRing + 14), (ushort)(tail + 1));
     }
@@ -124,7 +133,9 @@ public sealed unsafe partial class Reactor
         ulong packed = PackReturn(fd, gen, bid);
         SpinWait sw = default;
         while (!_returnQInc!.TryEnqueue(packed))
+        {
             sw.SpinOnce();
+        }
         WakeFdWrite();
     }
 
@@ -141,7 +152,7 @@ public sealed unsafe partial class Reactor
     {
         // The gen check also rejects stale returns from a reused fd's previous life.
         Connection? conn = ConnAt(fd, gen);
-        if (conn == null || !conn.IncrementalMode)
+        if (conn is not { IncrementalMode: true })
         {
             return;
         }
@@ -163,20 +174,20 @@ public sealed unsafe partial class Reactor
             DrainRemoteOps();
             DrainPostQ();
 
-            int rc = Ring.SubmitAndWait(1);
+            int rc = _ring.SubmitAndWait(1);
             if (rc < 0 && rc != -EINTR && rc != -EAGAIN && rc != -EBUSY)
             {
-                Console.Error.WriteLine($"[r{Id}] io_uring_enter failed: {rc}");
+                Console.Error.WriteLine($"[r{_id}] io_uring_enter failed: {rc}");
 
                 break;
             }
 
-            uint ready = Ring.CqReady();
+            uint ready = _ring.CqReady();
             for (uint i = 0; i < ready; i++)
             {
-                DispatchIncremental(in Ring.CqeAt(i));
+                DispatchIncremental(in _ring.CqeAt(i));
             }
-            Ring.CqAdvance(ready);
+            _ring.CqAdvance(ready);
         }
     }
 
@@ -216,7 +227,7 @@ public sealed unsafe partial class Reactor
 
                 // Data lands at the buffer's running offset; the kernel keeps appending
                 // to this bid until the buffer is full (F_BUF_MORE clear).
-                byte* ptr = conn.BufSlab + (nuint)bid * (nuint)IncRecvBufferSize + (nuint)conn.CumOffset![bid];
+                byte* ptr = conn.BufSlab + (nuint)bid * (nuint)_incRecvBufferSize + (nuint)conn.CumOffset![bid];
                 conn.CumOffset[bid] += cqe.res;
                 conn.RefCount![bid]++;
                 if (!bufMore || !more)
@@ -246,7 +257,7 @@ public sealed unsafe partial class Reactor
                 return;
 
             case KindClient:
-                CompleteClient(fd, cqe.res);
+                OnClientCompletion(fd, cqe.res);
                 return;
 
             case KindAccept:
@@ -268,7 +279,7 @@ public sealed unsafe partial class Reactor
                 }
                 else
                 {
-                    Console.Error.WriteLine($"[r{Id}] accept error: {cqe.res}");
+                    Console.Error.WriteLine($"[r{_id}] accept error: {cqe.res}");
                 }
                 if (!more)
                 {
@@ -279,6 +290,10 @@ public sealed unsafe partial class Reactor
 
             case KindWake:
                 OnWakeCompletion(more);
+                return;
+            
+            case KindTimer:
+                OnTimerTick();
                 return;
 
             case KindCancel:
