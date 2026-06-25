@@ -7,7 +7,7 @@ namespace ioxide;
 /// </summary>
 public static class IoxideRuntime
 {
-    public const string Version = "0.0.5";
+    public const string Version = "0.0.17";
 
     // Wiring (a builder API will eventually wrap this):
     //   var reactor = new Reactor(id, config);               // implements IRingHost
