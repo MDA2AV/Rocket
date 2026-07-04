@@ -430,8 +430,10 @@ public sealed class PgConnection : IDisposable
 
         public PgResult GetResult(short token) => _core.GetResult(token);
         public ValueTaskSourceStatus GetStatus(short token) => _core.GetStatus(token);
+        // Completes on the reactor thread only - strip the context-post so resumes stay inline
+        // (see ReactorSynchronizationContext).
         public void OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags)
-            => _core.OnCompleted(continuation, state, token, flags);
+            => _core.OnCompleted(continuation, state, token, flags & ~ValueTaskSourceOnCompletedFlags.UseSchedulingContext);
     }
 
     private readonly record struct Message(byte Tag, int BodyStart, int BodyLength);

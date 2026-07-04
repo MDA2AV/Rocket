@@ -93,6 +93,10 @@ internal static class Program
                     reactor.Handle = Handlers.Hop;
                     break;
 
+                case "taskrun":
+                    reactor.Handle = Handlers.TaskRun;
+                    break;
+
                 default:
                     reactor.Handle = Handlers.Raw;
                     break;

@@ -191,6 +191,11 @@ public sealed unsafe partial class Connection : IValueTaskSource<RecvSnapshot>
             return;
         }
 
-        _readSignal.OnCompleted(continuation, state, _readSignal.Version, flags);
+        // This source only completes on the owning reactor thread, so the continuation already
+        // runs where ReactorSynchronizationContext would post it. Strip the scheduling-context
+        // flag or MRVTSC posts every resume to the mailbox instead of invoking it inline
+        // (RunContinuationsAsynchronously=false only covers the null-context case).
+        _readSignal.OnCompleted(continuation, state, _readSignal.Version,
+            flags & ~ValueTaskSourceOnCompletedFlags.UseSchedulingContext);
     }
 }

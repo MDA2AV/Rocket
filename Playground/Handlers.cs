@@ -107,6 +107,46 @@ internal static class Handlers
         }
     }
 
+    private static ReadOnlySpan<byte> JsonHeader =>
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n"u8;
+
+    private static int _offReactorSeen;
+
+    /// <summary>
+    /// taskrun - raw, but each request awaits a Task.Run JSON serialization. With the reactor
+    /// SynchronizationContext installed the continuation comes home to the reactor; without it,
+    /// it stays on the thread pool. Logs once if the post-await thread is off-reactor.
+    /// </summary>
+    public static async Task TaskRun(Reactor reactor, Connection conn)
+    {
+        try
+        {
+            while (true)
+            {
+                RecvSnapshot snapshot = await conn.ReadAsync();
+                Drain(conn, snapshot);
+
+                string json = await Task.Run(() => System.Text.Json.JsonSerializer.Serialize("hello world"));
+
+                if (!reactor.OnReactorThread && Interlocked.Exchange(ref _offReactorSeen, 1) == 0)
+                {
+                    Console.WriteLine("[taskrun] continuation resumed OFF the reactor (no sync context)");
+                }
+
+                conn.Write(JsonHeader);
+                conn.Write(Encoding.UTF8.GetBytes(json));
+                await conn.FlushAsync();
+
+                if (snapshot.IsClosed) return;
+                conn.ResetRead();
+            }
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    }
+
     /// <summary>
     /// pg - each request runs a query through the reactor's pool; a server error becomes a 500.
     /// Paths: / → SELECT 42 · /sleep → 100ms query (pool concurrency demo) · /err → server error.
