@@ -40,6 +40,15 @@ public sealed unsafe partial class Reactor
             _listenFds[i] = OpenReusePortListener(_listenPorts[i], _config.ListenBacklog, _config.DualStack);
         }
 
+        if (_config.UdpPorts.Length > 0 || _config.Quic != null)
+        {
+            OpenUdpSockets();   // binds + arms the RECVMSG slots; SQEs flush on the first enter
+        }
+        if (_config.Quic is { } quic)
+        {
+            InitQuic(quic);
+        }
+
         if (_incremental)
         {
             InitIncremental();
@@ -59,7 +68,9 @@ public sealed unsafe partial class Reactor
         // once the loop starts.
         OnStart?.Invoke(this);
 
-        Console.WriteLine($"[r{_id}] listening on 0.0.0.0:{string.Join(",", _listenPorts)} (incremental={_incremental})");
+        Console.WriteLine($"[r{_id}] listening on 0.0.0.0:{string.Join(",", _listenPorts)}" +
+                          (_udpFds.Length > 0 ? $" udp:{string.Join(",", _udpFdPorts)}" : "") +
+                          $" (incremental={_incremental})");
         foreach (int listenFd in _listenFds)
         {
             SubmitAcceptMultishot(listenFd);
@@ -84,6 +95,11 @@ public sealed unsafe partial class Reactor
         {
             close(listenFd);
         }
+        if (_quic != null)
+        {
+            TeardownQuic();
+        }
+        CloseUdpFds();
 
         // Close any still-open accepted sockets (the connection table is indexed by fd) so they don't
         // leak when a host is disposed and recreated many times in one process - e.g. across a test run.
@@ -116,7 +132,7 @@ public sealed unsafe partial class Reactor
             NativeMemory.AlignedFree(_bufSlab);
             _bufSlab = null;
         }
-        
+        FreeUdpMemory();
     }
     
     // Set cross-thread by Stop(); the loops check it at the top of each iteration and exit, after which

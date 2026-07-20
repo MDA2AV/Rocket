@@ -1,3 +1,7 @@
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using ioxide;
 using ioxide.file;
 using ioxide.pg;
 using ioxide.redis;
@@ -57,6 +61,103 @@ internal static class Program
                 (int status, _) = Client.Get(port, "/");
                 Assert.Equal(200, status);
             }
+        });
+
+        // ---- core: udp transport (recvmsg slots + sendmsg-with-address) ----
+        runner.Test("core: udp echo (3 datagrams, one socket)", () =>
+        {
+            (_, int udpPort) = TestServer.StartDatagram(
+                static (Reactor r, in UdpDatagram d) => r.UdpSendTo(d.SocketFd, d.PeerAddr, d.PeerAddrLen, d.Payload));
+
+            using var client = new UdpClient();
+            client.Client.ReceiveTimeout = 4000;
+            var server = new IPEndPoint(IPAddress.Loopback, udpPort);
+
+            for (int i = 0; i < 3; i++)
+            {
+                byte[] ping = Encoding.ASCII.GetBytes($"ping-{i}");
+                client.Send(ping, ping.Length, server);
+                IPEndPoint? from = null;
+                byte[] reply = client.Receive(ref from);
+                Assert.Equal($"ping-{i}", Encoding.ASCII.GetString(reply));
+            }
+        });
+
+        runner.Test("core: udp 8 KiB payload + two clients (per-datagram addressing)", () =>
+        {
+            (_, int udpPort) = TestServer.StartDatagram(
+                static (Reactor r, in UdpDatagram d) => r.UdpSendTo(d.SocketFd, d.PeerAddr, d.PeerAddrLen, d.Payload));
+
+            var server = new IPEndPoint(IPAddress.Loopback, udpPort);
+            using var a = new UdpClient();
+            using var b = new UdpClient();
+            a.Client.ReceiveTimeout = 4000;
+            b.Client.ReceiveTimeout = 4000;
+
+            byte[] big = new byte[8192];
+            Random.Shared.NextBytes(big);
+            byte[] small = Encoding.ASCII.GetBytes("from-b");
+
+            a.Send(big, big.Length, server);
+            b.Send(small, small.Length, server);
+
+            IPEndPoint? from = null;
+            byte[] replyA = a.Receive(ref from);
+            byte[] replyB = b.Receive(ref from);
+            Assert.True(replyA.AsSpan().SequenceEqual(big), "8 KiB echo mismatch");
+            Assert.Equal("from-b", Encoding.ASCII.GetString(replyB));
+        });
+
+        runner.Test("core: udp gso reply (UDP_SEGMENT splits one submit into wire datagrams)", () =>
+        {
+            (_, int udpPort) = TestServer.StartDatagram(
+                static (Reactor r, in UdpDatagram d) => r.UdpSendTo(d.SocketFd, d.PeerAddr, d.PeerAddrLen, d.Payload, gsoSegmentSize: 4));
+
+            using var client = new UdpClient();
+            client.Client.ReceiveTimeout = 4000;
+            var server = new IPEndPoint(IPAddress.Loopback, udpPort);
+            IPEndPoint? from = null;
+
+            byte[] batch = Encoding.ASCII.GetBytes("abcdefgh");
+            client.Send(batch, batch.Length, server);
+            Assert.Equal("abcd", Encoding.ASCII.GetString(client.Receive(ref from)));
+            Assert.Equal("efgh", Encoding.ASCII.GetString(client.Receive(ref from)));
+        });
+
+        // ---- core: quic transport scaffold (DCID demux; no engine yet) ----
+        runner.Test("core: quic dcid demux (long-header adopt, short-header route)", () =>
+        {
+            EchoQuicConnection.Created = 0;
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: static (Reactor r, in UdpDatagram d, in QuicCid dcid) =>
+                {
+                    EchoQuicConnection.Created++;
+                    var conn = new EchoQuicConnection();
+                    r.QuicRegisterCid(conn, new QuicCid("srv-cid1"u8));   // the CID "we" minted
+                    return conn;
+                });
+
+            using var client = new UdpClient();
+            client.Client.ReceiveTimeout = 4000;
+            var server = new IPEndPoint(IPAddress.Loopback, udpPort);
+            IPEndPoint? from = null;
+
+            // Long header: 0xC0 | version 1 | dcid len 8 | dcid | trailing bytes.
+            byte[] initial = [0xC0, 0, 0, 0, 1, 8, .. "cli-cid1"u8, .. "hello"u8];
+            client.Send(initial, initial.Length, server);
+            Assert.True(client.Receive(ref from).AsSpan().SequenceEqual(initial), "long-header echo mismatch");
+
+            // Same client DCID again - must route to the existing connection, not mint a second.
+            client.Send(initial, initial.Length, server);
+            client.Receive(ref from);
+
+            // Short header: 0x40 | the server-minted 8-byte CID | payload.
+            byte[] shortHdr = [0x40, .. "srv-cid1"u8, .. "ping"u8];
+            client.Send(shortHdr, shortHdr.Length, server);
+            Assert.True(client.Receive(ref from).AsSpan().SequenceEqual(shortHdr), "short-header echo mismatch");
+
+            Assert.Equal(1, EchoQuicConnection.Created);
         });
 
         // ---- pg pool fails fast on a dead backend (#1) - needs NO live pg ----
@@ -206,6 +307,17 @@ internal static class Program
 
     private static string Env(string key, string fallback) => Environment.GetEnvironmentVariable(key) ?? fallback;
     private static int EnvInt(string key, int fallback) => int.TryParse(Environment.GetEnvironmentVariable(key), out int v) ? v : fallback;
+}
+
+/// <summary>Engine-less QUIC connection for demux tests: echoes each routed datagram to the peer.</summary>
+internal sealed class EchoQuicConnection : QuicConnection
+{
+    public static int Created;
+
+    public override void OnDatagram(ReadOnlySpan<byte> payload, byte tos, int groSegmentSize) => Send(payload);
+    public override long GetNextTimeout(long nowMs) => long.MaxValue;
+    public override void OnTimer(long nowMs) { }
+    public override void OnEvicted(QuicEvictReason reason) { }
 }
 
 /// <summary>Tiny test runner: PASS / FAIL / SKIP per test, a summary line, and a non-zero exit on failure.</summary>

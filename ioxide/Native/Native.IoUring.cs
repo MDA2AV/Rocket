@@ -3,17 +3,20 @@ using System.Runtime.InteropServices;
 namespace ioxide;
 
 /// <summary>
-/// All native interop in one file: io_uring syscalls, libc socket calls,
-/// the kernel struct layouts they expect, and the constants needed to
-/// drive a minimal io_uring loop.
+/// All native interop, one partial class split by concern: io_uring (this file), the shared
+/// socket ABI (Native.Socket.cs), TCP (Native.Tcp.cs), UDP/datagram (Native.Udp.cs), and file
+/// I/O (Native.File.cs). This file owns the ring itself: syscalls, opcodes, setup/CQE flags,
+/// the kernel struct layouts, and the generic fd operations the loop machinery needs
+/// (mmap for the rings, eventfd + read/write for the cross-thread wake, close).
 /// </summary>
-public static unsafe class Native {
+public static unsafe partial class Native {
     private const long SYS_IO_URING_SETUP    = 425;
     private const long SYS_IO_URING_ENTER    = 426;
     private const long SYS_IO_URING_REGISTER = 427;
 
     public const byte IORING_OP_POLL_ADD = 6;
-    public const byte IORING_OP_SENDMSG  = 9;   // vectored send over an iovec; the segmented-mode write flush
+    public const byte IORING_OP_SENDMSG  = 9;   // vectored send over an iovec; segmented TCP flush + UDP datagram send
+    public const byte IORING_OP_RECVMSG  = 10;  // datagram recv - fills msg_name (peer addr) + control (GRO/TOS cmsgs)
     public const byte IORING_OP_TIMEOUT = 11;
     public const byte IORING_OP_ACCEPT = 13;
     public const byte IORING_OP_ASYNC_CANCEL = 14;
@@ -30,11 +33,6 @@ public static unsafe class Native {
     public const uint IORING_ENTER_GETEVENTS = 1u << 0;
     public const long IORING_OFF_SQ_RING = 0;
     public const long IORING_OFF_SQES    = 0x10000000;
-
-    // MSG_WAITALL on an OP_SEND makes the kernel retry short sends internally,
-    // so a full buffer is acked by a single CQE instead of a userspace
-    // resubmit round-trip per partial send.
-    public const uint MSG_WAITALL = 0x100;
 
     // Multishot / buffer-ring goodies.
     public const ushort IORING_ACCEPT_MULTISHOT = 1 << 0;
@@ -76,18 +74,6 @@ public static unsafe class Native {
     public const int PROT_WRITE   = 2;
     public const int MAP_SHARED   = 1;
     public const int MAP_POPULATE = 0x8000;
-    
-    public const int AF_INET      = 2;
-    public const int SOCK_STREAM  = 1;
-    public const int SOL_SOCKET   = 1;
-    public const int SO_REUSEADDR = 2;
-    public const int SO_REUSEPORT = 15;
-    public const int IPPROTO_TCP  = 6;
-    public const int TCP_NODELAY  = 1;
-
-    public const int AF_INET6     = 10;
-    public const int IPPROTO_IPV6 = 41;
-    public const int IPV6_V6ONLY  = 26;
 
     [DllImport("libc", EntryPoint = "syscall")]
     private static extern long syscall3(long nr, uint a1, IoUringParams* a2);
@@ -106,40 +92,14 @@ public static unsafe class Native {
 
     public static int io_uring_register(int fd, uint opcode, void* arg, uint nrArgs) =>
         (int)syscall4(SYS_IO_URING_REGISTER, (uint)fd, opcode, arg, nrArgs);
-    
+
     [DllImport("libc")] public static extern void* mmap(void* addr, nuint length, int prot, int flags, int fd, long offset);
     [DllImport("libc")] public static extern int   munmap(void* addr, nuint length);
     [DllImport("libc")] public static extern int   close(int fd);
-    [DllImport("libc")] public static extern int   socket(int domain, int type, int proto);
-    [DllImport("libc")] public static extern int   bind(int fd, void* addr, uint len);
-    [DllImport("libc")] public static extern int   listen(int fd, int backlog);
-    [DllImport("libc")] public static extern int   setsockopt(int fd, int level, int optname, void* optval, uint optlen);
     [DllImport("libc")] public static extern int   eventfd(uint initval, int flags);
     [DllImport("libc")] public static extern long  write(int fd, void* buf, nuint count);
     [DllImport("libc")] public static extern long  read(int fd, void* buf, nuint count);
 
-    // File open/size for ring-native file clients (the reads themselves go
-    // through the ring; these are one-time, at open).
-    public const int O_RDONLY = 0;
-    private const int SEEK_SET = 0;
-    private const int SEEK_END = 2;
-
-    [DllImport("libc", EntryPoint = "open", SetLastError = true)]
-    public static extern int open([MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags, int mode);
-
-    [DllImport("libc", SetLastError = true)]
-    public static extern long lseek(int fd, long offset, int whence);
-
-    /// <summary>File size via seek-to-end (positional ring reads never use the file position).</summary>
-    public static long FileLength(int fd)
-    {
-        long end = lseek(fd, 0, SEEK_END);
-        lseek(fd, 0, SEEK_SET);
-        return end;
-    }
-
-    public static ushort Htons(ushort x) => (ushort)((x << 8) | (x >> 8));
-    
     // Kernel struct layouts (must match include/uapi/linux/io_uring.h)
     [StructLayout(LayoutKind.Sequential)]
     public struct SqRingOffsets {
@@ -199,46 +159,4 @@ public static unsafe class Native {
     // include/uapi/linux/time_types.h - the timespec IORING_OP_TIMEOUT reads.
     [StructLayout(LayoutKind.Sequential)]
     public struct __kernel_timespec { public long tv_sec; public long tv_nsec; }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct in_addr { public uint s_addr; }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public unsafe struct sockaddr_in {
-        public ushort  sin_family;
-        public ushort  sin_port;
-        public in_addr sin_addr;
-        public fixed byte sin_zero[8];
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public unsafe struct sockaddr_in6 {
-        public ushort     sin6_family;
-        public ushort     sin6_port;
-        public uint       sin6_flowinfo;
-        public fixed byte sin6_addr[16];  // in6_addr - zeroed == in6addr_any (::)
-        public uint       sin6_scope_id;
-    }
-
-#pragma warning disable CS8981 // lower-cased names deliberately mirror the kernel struct names (uapi)
-    // struct iovec (scatter/gather entry) - one per write segment for IORING_OP_SENDMSG.
-    [StructLayout(LayoutKind.Sequential)]
-    public unsafe struct iovec {
-        public void* iov_base;
-        public nuint iov_len;
-    }
-
-    // struct msghdr (x86_64 layout). The SENDMSG SQE's addr points here; msg_iov/msg_iovlen carry the
-    // segment vector. Explicit offsets so the internal/trailing padding matches the kernel ABI exactly.
-    [StructLayout(LayoutKind.Explicit, Size = 56)]
-    public unsafe struct msghdr {
-        [FieldOffset(0)]  public void*  msg_name;
-        [FieldOffset(8)]  public uint   msg_namelen;
-        [FieldOffset(16)] public iovec* msg_iov;
-        [FieldOffset(24)] public nuint  msg_iovlen;
-        [FieldOffset(32)] public void*  msg_control;
-        [FieldOffset(40)] public nuint  msg_controllen;
-        [FieldOffset(48)] public int    msg_flags;
-    }
-#pragma warning restore CS8981
 }

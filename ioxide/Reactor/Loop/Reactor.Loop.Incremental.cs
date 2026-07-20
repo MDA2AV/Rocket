@@ -288,10 +288,18 @@ public sealed unsafe partial class Reactor
                 return;
             }
 
+            case KindUdpRecv:
+                OnUdpRecvCompletion(fd, cqe.res);   // low 32 bits = recv-slot index
+                return;
+
+            case KindUdpSend:
+                OnUdpSendCompletion(fd, cqe.res);   // low 32 bits = send-slot index
+                return;
+
             case KindWake:
                 OnWakeCompletion(more);
                 return;
-            
+
             case KindTimer:
                 OnTimerTick();
                 return;

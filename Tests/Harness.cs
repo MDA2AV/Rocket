@@ -49,6 +49,55 @@ internal static class TestServer
         return port;
     }
 
+    /// <summary>
+    /// Starts a reactor with a UDP port (plain datagram handler, or the QUIC transport when a
+    /// factory is given). The TCP listener stays up solely so WaitForListen can probe readiness -
+    /// by the time it accepts, the UDP recv slots (armed earlier in Run) are live.
+    /// </summary>
+    public static (int TcpPort, int UdpPort) StartDatagram(
+        UdpDatagramHandler? onDatagram,
+        QuicConnectionFactory? quicFactory = null,
+        int quicIdleMs = 60_000)
+    {
+        int tcpPort = Interlocked.Increment(ref _nextPort);
+        int udpPort = Interlocked.Increment(ref _nextPort);
+
+        var config = new ServerConfig
+        {
+            Port = (ushort)tcpPort,
+            ReactorCount = 1,
+            RecvBufferSize = 4096,
+            BufferRingEntries = 256,
+            WriteSlabSize = 16 * 1024,
+            PoolMax = 64,
+            RecvQueueEntries = 64,
+            UdpPorts = quicFactory == null ? [(ushort)udpPort] : [],
+            Quic = quicFactory == null ? null : new QuicOptions
+            {
+                Port = (ushort)udpPort,
+                LocalCidLength = 8,
+                ConnectionFactory = quicFactory,
+                IdleTimeoutMs = quicIdleMs,
+            },
+        };
+
+        var reactor = new Reactor(0, config)
+        {
+            Handle = static (_, _) => Task.CompletedTask,
+            OnDatagram = onDatagram,
+        };
+
+        var thread = new Thread(reactor.Run)
+        {
+            IsBackground = true,
+            Name = $"test-reactor-udp-{udpPort}",
+        };
+        thread.Start();
+
+        WaitForListen(tcpPort);
+        return (tcpPort, udpPort);
+    }
+
     private static void WaitForListen(int port)
     {
         for (int attempt = 0; attempt < 100; attempt++)
