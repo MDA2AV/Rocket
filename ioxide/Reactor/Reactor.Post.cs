@@ -10,9 +10,11 @@ public sealed unsafe partial class Reactor
 {
     private readonly struct PostItem
     {
-        public readonly Action<object?> Callback;
+        // Action<object?> or SendOrPostCallback - same signature, distinct delegate types.
+        // Held as Delegate and type-tested at invoke so neither caller pays a conversion alloc.
+        public readonly Delegate Callback;
         public readonly object? State;
-        public PostItem(Action<object?> callback, object? state)
+        public PostItem(Delegate callback, object? state)
         {
             Callback = callback;
             State = state;
@@ -30,7 +32,13 @@ public sealed unsafe partial class Reactor
     /// iteration by <see cref="DrainPostQ"/>); wakes the loop via the eventfd only when called off the
     /// reactor, coalescing concurrent producers so at most one wake is outstanding per drain.
     /// </summary>
-    public void ScheduleOnReactor(Action<object?> callback, object? state)
+    public void ScheduleOnReactor(Action<object?> callback, object? state) => EnqueuePost(callback, state);
+
+    // SendOrPostCallback variant for ReactorSynchronizationContext. Distinct name (not an
+    // overload): lambdas at existing ScheduleOnReactor call sites would otherwise be ambiguous.
+    internal void SchedulePost(SendOrPostCallback callback, object? state) => EnqueuePost(callback, state);
+
+    private void EnqueuePost(Delegate callback, object? state)
     {
         _postQ.Enqueue(new PostItem(callback, state));
 
@@ -52,7 +60,23 @@ public sealed unsafe partial class Reactor
         Volatile.Write(ref _postSignalPending, 0);
         while (_postQ.TryDequeue(out PostItem item))
         {
-            item.Callback(item.State);
+            // A faulted continuation (e.g. an async-void rethrow delivered via Post) must not
+            // unwind the loop and kill the reactor.
+            try
+            {
+                if (item.Callback is Action<object?> action)
+                {
+                    action(item.State);
+                }
+                else
+                {
+                    ((SendOrPostCallback)item.Callback)(item.State);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[r{_id}] posted continuation threw: {ex}");
+            }
         }
     }
 }

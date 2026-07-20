@@ -21,6 +21,10 @@ public sealed unsafe partial class Reactor
     {
         _reactorThreadId = Environment.CurrentManagedThreadId;
 
+        // Awaits from reactor code (timers, HttpClient, Task.Run results) resume here instead of
+        // the thread pool. Thread-lifetime; nothing to uninstall.
+        SynchronizationContext.SetSynchronizationContext(new ReactorSynchronizationContext(this));
+
         _ring = Ring.Create(_ringEntries);
 
         // One SO_REUSEPORT listener per port; accepts route by listener fd.

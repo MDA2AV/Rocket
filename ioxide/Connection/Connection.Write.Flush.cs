@@ -131,7 +131,10 @@ public sealed unsafe partial class Connection : IValueTaskSource
 
             return;
         }
-        _flushSignal.OnCompleted(continuation, state, _flushSignal.Version, flags);
+        // Completes on the reactor thread only - strip the context-post so resumes stay inline
+        // (see ReactorSynchronizationContext).
+        _flushSignal.OnCompleted(continuation, state, _flushSignal.Version,
+            flags & ~ValueTaskSourceOnCompletedFlags.UseSchedulingContext);
     }
 
 #endregion

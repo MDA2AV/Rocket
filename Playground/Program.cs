@@ -17,7 +17,7 @@ internal static class Program
         var config = new ServerConfig
         {
             Port = 8080,
-            ReactorCount = 12,
+            ReactorCount = int.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_REACTORS"), out int reactors) ? reactors : 2,
             Incremental = Environment.GetEnvironmentVariable("PLAYGROUND_INCREMENTAL") == "1"
         };
 
@@ -91,6 +91,10 @@ internal static class Program
 
                 case "hop":
                     reactor.Handle = Handlers.Hop;
+                    break;
+
+                case "taskrun":
+                    reactor.Handle = Handlers.TaskRun;
                     break;
 
                 default:

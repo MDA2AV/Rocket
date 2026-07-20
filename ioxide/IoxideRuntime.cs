@@ -15,6 +15,6 @@ public static class IoxideRuntime
     //   reactor.OnStart = r => PgPool.Start(r, pgOptions);   // clients open on the reactor thread
     //   reactor.Run();
     //
-    // Roadmap: BCL bridge (per-reactor SyncContext) · per-command timeouts · fixed files / send-zc ·
-    // builder API. (SCRAM, the extended/prepared protocol, Redis, and TLS have shipped.)
+    // Roadmap: per-command timeouts · fixed files / send-zc · builder API. (SCRAM, the
+    // extended/prepared protocol, Redis, TLS, and the BCL bridge (per-reactor SyncContext) have shipped.)
 }

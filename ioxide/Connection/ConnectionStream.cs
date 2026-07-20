@@ -220,11 +220,13 @@ public sealed class ConnectionStream : Stream, IValueTaskSource<int>, IValueTask
     // (ValueTask<int> vs ValueTask) routes each call to the right core.
     int IValueTaskSource<int>.GetResult(short token) => _readCore.GetResult(token);
     ValueTaskSourceStatus IValueTaskSource<int>.GetStatus(short token) => _readCore.GetStatus(token);
+    // Both cores complete on the reactor thread only - strip the context-post so resumes stay
+    // inline (see ReactorSynchronizationContext).
     void IValueTaskSource<int>.OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags) =>
-        _readCore.OnCompleted(continuation, state, token, flags);
+        _readCore.OnCompleted(continuation, state, token, flags & ~ValueTaskSourceOnCompletedFlags.UseSchedulingContext);
 
     void IValueTaskSource.GetResult(short token) => _writeCore.GetResult(token);
     ValueTaskSourceStatus IValueTaskSource.GetStatus(short token) => _writeCore.GetStatus(token);
     void IValueTaskSource.OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags) =>
-        _writeCore.OnCompleted(continuation, state, token, flags);
+        _writeCore.OnCompleted(continuation, state, token, flags & ~ValueTaskSourceOnCompletedFlags.UseSchedulingContext);
 }
