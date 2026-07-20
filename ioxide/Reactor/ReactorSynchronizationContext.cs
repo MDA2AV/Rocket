@@ -36,11 +36,23 @@ public sealed class ReactorSynchronizationContext : SynchronizationContext
         Exception? ex = null;
         _reactor.SchedulePost(_ =>
         {
-            try { d(state); }
-            catch (Exception e) { ex = e; }
-            finally { done.Set(); }
+            try
+            {
+                d(state);
+            }
+            catch (Exception e)
+            {
+                ex = e;
+            }
+            finally
+            {
+                done.Set(); 
+                
+            }
         }, null);
+        
         done.Wait();
+        
         if (ex is not null)
         {
             System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex).Throw();

@@ -33,7 +33,7 @@ async Task HandleAsync(Socket client)
             int read = await client.ReceiveAsync(buf.AsMemory(), SocketFlags.None);
             if (read <= 0) break;   // peer closed
             
-            _ = await Task.Run(static () => JsonSerializer.Serialize("Hello World!"));
+            //_ = await Task.Run(static () => JsonSerializer.Serialize("Hello World!"));
 
             // Same work as Minima/AspBaseline: serialize the object on the thread pool
             // (the handler already runs there) and discard. WORK_ITEMS=0 → plain "ok".

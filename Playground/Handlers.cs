@@ -126,7 +126,8 @@ internal static class Handlers
                 RecvSnapshot snapshot = await conn.ReadAsync();
                 Drain(conn, snapshot);
 
-                string json = await Task.Run(() => System.Text.Json.JsonSerializer.Serialize("hello world"));
+                string json = System.Text.Json.JsonSerializer.Serialize("hello world");
+                //string json = await Task.Run(() => System.Text.Json.JsonSerializer.Serialize("hello world"));
 
                 if (!reactor.OnReactorThread && Interlocked.Exchange(ref _offReactorSeen, 1) == 0)
                 {
