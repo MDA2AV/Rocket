@@ -1,17 +1,10 @@
-# GitHub Linguist language stats: count only the ioxide library packages
-# (ioxide, ioxide.pg, ioxide.file, ioxide.tls, ioxide.redis). Everything else -
-# the docs website, research notes, and the sample/host apps - is excluded from
-# the language bar.
+# GitHub Linguist: language stats / LOC come from the shipping code in src/ only.
+# Everything else (docs website, Research spikes, Examples, Playground, Tests,
+# scripts, CI) is vendored so it doesn't skew the repo's language breakdown.
+* linguist-vendored
+src/** -linguist-vendored
 
-docs/**          linguist-documentation
-Research/**      linguist-documentation
-Examples/**      linguist-vendored
-Playground/**    linguist-vendored
-
-# Vendored front-end assets (highlight.js and friends).
-*.min.js         linguist-vendored
-*.min.css        linguist-vendored
-
-# Markdown and CI config are not package code.
-*.md             linguist-documentation
-.github/**       linguist-vendored
+# Even inside src/: minified assets and markdown are not package code.
+*.min.js  linguist-vendored
+*.min.css linguist-vendored
+*.md      linguist-documentation

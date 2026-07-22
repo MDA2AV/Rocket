@@ -80,22 +80,22 @@ jobs:
           dotnet run --project Tests/ioxide.e2e.csproj --configuration Release --no-build
 
       - name: Pack ioxide
-        run: dotnet pack ioxide/ioxide.csproj --configuration Release --no-build --output ./artifacts
+        run: dotnet pack src/ioxide/ioxide.csproj --configuration Release --no-build --output ./artifacts
 
       - name: Pack ioxide.pg
-        run: dotnet pack ioxide.pg/ioxide.pg.csproj --configuration Release --no-build --output ./artifacts
+        run: dotnet pack src/ioxide.pg/ioxide.pg.csproj --configuration Release --no-build --output ./artifacts
 
       - name: Pack ioxide.file
-        run: dotnet pack ioxide.file/ioxide.file.csproj --configuration Release --no-build --output ./artifacts
+        run: dotnet pack src/ioxide.file/ioxide.file.csproj --configuration Release --no-build --output ./artifacts
 
       - name: Pack ioxide.tls
-        run: dotnet pack ioxide.tls/ioxide.tls.csproj --configuration Release --no-build --output ./artifacts
+        run: dotnet pack src/ioxide.tls/ioxide.tls.csproj --configuration Release --no-build --output ./artifacts
 
       - name: Pack ioxide.redis
-        run: dotnet pack ioxide.redis/ioxide.redis.csproj --configuration Release --no-build --output ./artifacts
+        run: dotnet pack src/ioxide.redis/ioxide.redis.csproj --configuration Release --no-build --output ./artifacts
 
       - name: Pack ioxide.Kestrel
-        run: dotnet pack ioxide.Kestrel/ioxide.Kestrel.csproj --configuration Release --no-build --output ./artifacts
+        run: dotnet pack src/ioxide.Kestrel/ioxide.Kestrel.csproj --configuration Release --no-build --output ./artifacts
 
       - name: Publish to NuGet
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

@@ -7,108 +7,42 @@
 
 **A shared-nothing io_uring runtime for .NET.**
 
-One ring per reactor thread - run one per core. HTTP, Postgres, and file I/O submit on that
-ring and resume inline on the same thread. No thread pool on the hot path. No native dependencies - raw syscalls, nothing else.
+One ring per reactor thread - run one per core. Each reactor owns its ring, its SO_REUSEPORT
+listener, its connections and its clients outright: nothing is shared, so nothing is locked.
+HTTP, Postgres, Redis and file I/O all submit on the owning ring and resume inline on the
+same thread. No thread pool on the hot path. No native dependencies - raw syscalls, nothing else.
 
 > Linux 6.1+ · .NET 10 · status `0.1.1` - experimental
 
 **[Documentation](https://mda2av.github.io/ioxide/)** - architecture, guides, the full picture
 
-## Quick start
+## First-class async/await
 
-```bash
-dotnet run -c Release --project Playground                     # GET / → ok
+Shared-nothing runtimes usually ask you to give up the platform's async model. ioxide keeps it:
+handlers are ordinary `async Task` code, and `await` works everywhere.
 
-PLAYGROUND_MODE=pg   dotnet run -c Release --project Playground  # SELECT 42 over the ring
-PLAYGROUND_MODE=file dotnet run -c Release --project Playground  # static files off the ring
-```
+- Ring completions resume their continuations inline on the reactor thread - an awaited recv,
+  query or file read picks up exactly where it left off, with no thread pool hop.
+- A per-reactor `SynchronizationContext` catches everything that would otherwise escape:
+  timers, `HttpClient`, `Task.Run` results - their continuations post back to the owning reactor.
+- Ring operations await through reusable, allocation-free awaitables.
 
-## How it works
+You always wake up on your reactor. That is what makes shared-nothing practical in .NET:
+connection, pool and handler state stays single-threaded without a lock in sight.
 
-```csharp
-var reactor = new Reactor(id, new ServerConfig { Port = 8080 });
+## Packages
 
-// Clients opened here ride this reactor's ring.
-reactor.OnStart = r => PgPool.Start(r, pgOptions);
+| Package | What it does |
+| --- | --- |
+| `ioxide` | The runtime: reactors, TCP/UDP transports, connections, the ring-native client seam. |
+| `ioxide.pg` | Postgres driver. A pool per reactor; connect, query and stream rows on the owning ring. |
+| `ioxide.redis` | Redis client. RESP2, pipelining, pub/sub - pooled per reactor. |
+| `ioxide.file` | Static assets. Immutable snapshots, baked responses, positional ring reads. |
+| `ioxide.tls` | TLS. OpenSSL handshake over the ring, then kTLS - handlers keep writing plaintext. |
+| `ioxide.Kestrel` | ASP.NET Core transport: `UseIoxide()` and Kestrel runs one ring per core. |
 
-reactor.Handle = async (r, conn) =>
-{
-    var pool = r.GetService<PgPool>();
+## Scope
 
-    // Carry for bytes a read leaves behind - the head of a split request.
-    var inflight = new byte[16 * 1024];
-    int inflightTail = 0;
-
-    while (true)
-    {
-        // io_uring recv - resumes inline on the reactor.
-        var snapshot = await conn.ReadAsync();
-
-        var rings = conn.GetSnapshotMemories(snapshot);
-        if (rings.Length > 0)
-        {
-            ReadOnlySequence<byte> data;
-            if (inflightTail == 0 && rings.Length == 1)
-            {
-                // Hot path: one ring, no carry - a single zero-copy segment.
-                data = new ReadOnlySequence<byte>(rings[0].Memory);
-            }
-            else if (inflightTail == 0)
-            {
-                // Several rings, no carry - chain them, still zero-copy.
-                data = rings.ToReadOnlySequence();
-            }
-            else
-            {
-                // Cold path: the carry goes first so a split request reads whole.
-                var first = new RingSegment(inflight.AsMemory(0, inflightTail), 0);
-                var last  = first;
-                for (int i = 0; i < rings.Length; i++)
-                    last = last.Append(rings[i].Memory, rings[i].BufferId);
-                data = new ReadOnlySequence<byte>(first, 0, last, last.Memory.Length);
-            }
-
-            // Walk every complete request; stop at the first partial one.
-            // TryParseRequest, Request, and SqlFor are YOUR code - ioxide
-            // hands you raw bytes and stays out of HTTP.
-            long consumed = 0;
-            bool respond  = false;
-            while (TryParseRequest(data.Slice(consumed), out Request request, out long length))
-            {
-                consumed += length;
-
-                // io_uring send + recv to Postgres, on the same ring.
-                var rows = await pool.QueryAsync(SqlFor(request.Path));
-
-                // ioxide doesn't speak HTTP for you - you write the bytes.
-                string body = $"db={rows.Value}";
-                conn.Write(Encoding.ASCII.GetBytes(
-                    $"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {body.Length}\r\n\r\n{body}"));
-                respond = true;
-            }
-
-            // Whatever wasn't consumed (a partial request, or everything when
-            // nothing completed) moves to the front of the carry - only then
-            // do the buffers go back to the ring.
-            ReadOnlySequence<byte> rest = data.Slice(consumed);
-            rest.CopyTo(inflight);
-            inflightTail = (int)rest.Length;
-
-            conn.ReturnBuffers(rings);
-
-            if (respond) await conn.FlushAsync();   // io_uring send, once per batch
-        }
-
-        if (snapshot.IsClosed)
-        {
-            conn.DecRef();
-            return;
-        }
-
-        conn.ResetRead();
-    }
-};
-
-// One reactor per core.
-new Thread(reactor.Run).Start();
-```
+ioxide hands you raw bytes and stays out of HTTP. Request parsing and response bytes are your
+code; the runtime owns the ring, the connections and the clients. When you want a framework
+on top, `ioxide.Kestrel` plugs the same engine under ASP.NET Core.

@@ -9,7 +9,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="../ioxide.Kestrel/ioxide.Kestrel.csproj" />
+    <ProjectReference Include="../src/ioxide.Kestrel/ioxide.Kestrel.csproj" />
   </ItemGroup>
 
 </Project>
