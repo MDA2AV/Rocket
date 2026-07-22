@@ -57,11 +57,11 @@ if ! dotnet build -c Release ioxide.slnx >/dev/null; then
 fi
 
 log "running e2e suite"
-./Tests/bin/Release/net10.0/ioxide.e2e
+./Tests/bin/Release/net11.0/ioxide.e2e
 e2e=$?
 
 log "load test: $LOAD_MODE, $LOAD_CONNS connections for $LOAD_DUR"
-bin=./Examples/bin/Release/net10.0/Examples
+bin=./Examples/bin/Release/net11.0/Examples
 pkill -x Examples >/dev/null 2>&1
 sleep 0.5
 EXAMPLES_MODE=$LOAD_MODE "$bin" >/tmp/ioxide-load.log 2>&1 &

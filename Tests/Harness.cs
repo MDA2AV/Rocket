@@ -9,22 +9,25 @@ using ioxide;
 namespace Ioxide.E2E;
 
 /// <summary>
-/// Starts an ioxide server on a unique loopback port and waits for it to listen. Reactors have no
-/// clean stop, so each test server runs on a background thread until the process exits - fine for a
-/// test run. Tiny buffers keep many concurrent test servers cheap.
+/// Starts an ioxide server on a unique loopback port and waits for it to listen. Most test servers
+/// run on a background thread until the process exits; teardown-focused tests use the returned
+/// reactor + thread to Stop() and join. Tiny buffers keep many concurrent test servers cheap.
 /// </summary>
 internal static class TestServer
 {
     private static int _nextPort = 18080;
+
+    /// <summary>Reserve a unique port (e.g. for ServerConfig.ExtraPorts).</summary>
+    public static int NextPort() => Interlocked.Increment(ref _nextPort);
 
     public static int Start(Func<Reactor, Connection, Task> handle, Action<Reactor>? onStart = null)
         => StartConfigured(handle, DefaultConfig(), onStart).Port;
 
     /// <summary>
     /// Start with explicit config overrides (Port and ReactorCount are stamped by the harness) and
-    /// hand back the reactor so tests can assert against it.
+    /// hand back the reactor + its thread so tests can assert against them or stop cleanly.
     /// </summary>
-    public static (int Port, Reactor Reactor) StartConfigured(
+    public static (int Port, Reactor Reactor, Thread Thread) StartConfigured(
         Func<Reactor, Connection, Task> handle, ServerConfig config, Action<Reactor>? onStart = null)
     {
         int port = Interlocked.Increment(ref _nextPort);
@@ -44,7 +47,7 @@ internal static class TestServer
         thread.Start();
 
         WaitForListen(port);
-        return (port, reactor);
+        return (port, reactor, thread);
     }
 
     private static ServerConfig DefaultConfig() => new()
@@ -181,13 +184,13 @@ internal static class Client
         return results;
     }
 
-    private static void Send(Stream stream, string path)
+    public static void Send(Stream stream, string path)
     {
         stream.Write(Encoding.ASCII.GetBytes($"GET {path} HTTP/1.1\r\nHost: test\r\n\r\n"));
     }
 
     // Read the status line and the Content-Length body in full.
-    private static (int Status, string Body) ReadResponse(Stream stream)
+    public static (int Status, string Body) ReadResponse(Stream stream)
     {
         var buffer = new byte[64 * 1024];
         int filled = 0;
