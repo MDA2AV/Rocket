@@ -17,7 +17,9 @@ public static unsafe partial class Native {
     [DllImport("libc", SetLastError = true)]
     public static extern long lseek(int fd, long offset, int whence);
 
-    /// <summary>File size via seek-to-end (positional ring reads never use the file position).</summary>
+    /// <summary>
+    /// File size via seek-to-end (positional ring reads never use the file position).
+    /// </summary>
     public static long FileLength(int fd)
     {
         long end = lseek(fd, 0, SEEK_END);
