@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using ioxide;
+using ioxide.quic;
 
 namespace Ioxide.E2E;
 
@@ -12,6 +13,13 @@ internal static class QuicTests
 {
     public static void Register(Runner runner)
     {
+        runner.Test("quic: bundled native engine loads (ngtcp2 + picotls)", () =>
+        {
+            string version = QuicEngine.NativeVersion();
+            Assert.True(version.Length > 0 && char.IsDigit(version[0]),
+                $"unexpected ngtcp2 version [{version}] - native bundle failed to load?");
+        });
+
         runner.Test("core: quic dcid demux (long-header adopt, short-header route)", () =>
         {
             EchoQuicConnection.Created = 0;

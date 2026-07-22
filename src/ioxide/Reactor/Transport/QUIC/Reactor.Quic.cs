@@ -14,7 +14,7 @@ namespace ioxide;
 /// </summary>
 public sealed unsafe partial class Reactor
 {
-    private QuicOptions? _quic;
+    private QuicOptions? _quicOptions;
     private readonly Dictionary<QuicCid, QuicConnection> _quicConns = new();
     private readonly HashSet<QuicConnection> _quicConnSet = [];
     private readonly List<QuicConnection> _quicSweepScratch = [];
@@ -26,17 +26,19 @@ public sealed unsafe partial class Reactor
         {
             return;
         }
-        _quic = options;
+        _quicOptions = options;
         AddTicker(QuicSweep);
     }
 
     private void QuicDispatch(in UdpDatagram datagram)
     {
-        if (!TryExtractDcid(datagram.Payload, _quic!.LocalCidLength, out QuicCid dcid, out bool longHeader))
+        // Reads only the cleartext prefix per RFC 8999
+        if (!TryExtractDcid(datagram.Payload, _quicOptions!.LocalCidLength, out QuicCid dcid, out bool longHeader))
         {
             return;   // not parseable as QUIC - drop
         }
 
+        // Quick connection lookup
         if (_quicConns.TryGetValue(dcid, out QuicConnection? conn))
         {
             conn.LastSeenMs = Environment.TickCount64;
@@ -49,7 +51,7 @@ public sealed unsafe partial class Reactor
             return;   // short header for an unknown CID: stale/garbage (stateless reset later)
         }
 
-        QuicConnection? fresh = _quic.ConnectionFactory?.Invoke(this, in datagram, in dcid);
+        QuicConnection? fresh = _quicOptions.ConnectionFactory?.Invoke(this, in datagram, in dcid);
         if (fresh == null)
         {
             return;
@@ -151,7 +153,7 @@ public sealed unsafe partial class Reactor
     private void QuicSweep()
     {
         long now = Environment.TickCount64;
-        int idleMs = _quic!.IdleTimeoutMs;
+        int idleMs = _quicOptions!.IdleTimeoutMs;
 
         _quicSweepScratch.Clear();
         _quicSweepScratch.AddRange(_quicConnSet);
@@ -174,7 +176,7 @@ public sealed unsafe partial class Reactor
 
     private void TeardownQuic()
     {
-        if (_quic == null)
+        if (_quicOptions == null)
         {
             return;
         }

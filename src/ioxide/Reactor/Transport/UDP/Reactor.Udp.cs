@@ -231,12 +231,14 @@ public sealed unsafe partial class Reactor
                                        new ReadOnlySpan<byte>(block + UdpRecvPayloadOff, res), gro, tos);
         try
         {
-            if (_quic != null && info.Port == _quic.Port)
+            if (_quicOptions != null && info.Port == _quicOptions.Port)
             {
+                // QUIC
                 QuicDispatch(in datagram);
             }
             else
             {
+                // Just UDP
                 OnDatagram?.Invoke(this, in datagram);
             }
         }
@@ -245,6 +247,7 @@ public sealed unsafe partial class Reactor
             Console.Error.WriteLine($"[r{_id}] datagram handler faulted: {e.GetBaseException().Message}");
         }
 
+        // TODO: Multishot?
         ArmUdpRecv(slot);
     }
 
