@@ -124,12 +124,15 @@ public sealed unsafe class Ring : IDisposable
         return &_sqes[slot];
     }
     
-    public int SubmitAndWait(uint waitFor) 
+    public int SubmitAndWait(uint waitFor)
     {
-        uint published = *_sqTail;
-        uint toSubmit  = _sqeTail - published;
-        
-        if (toSubmit > 0)
+        // liburing-style accounting: derive the submit count from the kernel-consumed head, so
+        // SQEs published by an enter that consumed nothing (-EBUSY under CQ-overflow pressure)
+        // are re-counted by the next call instead of stranding until later submits push them out.
+        uint khead    = Volatile.Read(ref *_sqHead);
+        uint toSubmit = _sqeTail - khead;
+
+        if (_sqeTail != *_sqTail)
         {
             Volatile.Write(ref *_sqTail, _sqeTail);
         }

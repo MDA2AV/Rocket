@@ -87,6 +87,15 @@ public sealed unsafe partial class Reactor
     // guard, EOF teardown, overflow teardown, re-arm - lives here and in the CloseFromRecv helpers,
     // called from both dispatch switches like the UDP/send completions.
 
+    private const int ENOBUFS = 105;
+
+    // Connections whose multishot recv died on -ENOBUFS, packed (gen << 32 | fd), both modes (#93).
+    // RearmStarvedRecvs re-arms them from the loop, gated on _buffersReturned - handler
+    // continuations run inline in CQE dispatch, so buffers can return BEFORE the batch's trailing
+    // -ENOBUFS is even seen; a per-return flag observed at the loop top misses neither ordering.
+    private readonly List<ulong> _recvStarved = [];
+    private bool _buffersReturned;
+
     // Shared mode: one reactor-wide provided-buffer ring; every CQE consumes a whole buffer, so
     // the EOF and stale paths must hand it straight back to the shared pool.
     private void OnTcpRecvCompletionShared(int fd, ushort gen, int res, uint flags)
@@ -95,6 +104,18 @@ public sealed unsafe partial class Reactor
         ushort bid    = hasBuf ? (ushort)(flags >> IORING_CQE_BUFFER_SHIFT) : (ushort)0;
 
         Connection? conn = ConnAt(fd, gen);
+
+        if (res == -ENOBUFS)
+        {
+            // Transient buffer-group exhaustion, not a peer error (#93): the multishot terminated
+            // (F_MORE clear), so park the connection; RearmStarvedRecvs resumes it when buffers
+            // return to the group.
+            if (conn != null)
+            {
+                _recvStarved.Add(((ulong)gen << 32) | (uint)fd);
+            }
+            return;
+        }
 
         if (res <= 0)
         {
@@ -145,6 +166,17 @@ public sealed unsafe partial class Reactor
 
         Connection? conn = ConnAt(fd, gen);
 
+        if (res == -ENOBUFS)
+        {
+            // Per-connection group drained - e.g. a body larger than the ring while the handler
+            // still holds buffers (#93). Park; the loop re-arms once a buffer recycles.
+            if (conn != null)
+            {
+                _recvStarved.Add(((ulong)gen << 32) | (uint)fd);
+            }
+            return;
+        }
+
         if (res <= 0)
         {
             // Peer EOF / recv error - the per-conn ring is freed in Recycle.
@@ -190,6 +222,19 @@ public sealed unsafe partial class Reactor
         if (res >= 0)
         {
             int clientFd = res;
+
+            if (_incremental && _freeGids!.Count == 0)
+            {
+                // At the gid cap (MaxConnections concurrent): shed the connection instead of
+                // letting AllocGid throw and take the whole reactor down (#92).
+                close(clientFd);
+                if (!more)
+                {
+                    SubmitAcceptMultishot(listenFd);
+                }
+                return;
+            }
+
             SetNoDelay(clientFd);
             Connection conn = _pool.TryPop(out var pooled)
                 ? pooled.SetFd(clientFd)
@@ -239,6 +284,31 @@ public sealed unsafe partial class Reactor
         SubmitCancel(Tag(KindTcpRecv, gen, fd));
         conn.MarkClosed();
         conn.DecRef();
+    }
+
+    // Re-arm every recv parked on -ENOBUFS (#93). Runs once per loop iteration, but only when a
+    // buffer actually came back since the last sweep - so a parked connection can't spin the loop
+    // (no return, no re-arm), and a connection that exhausts the group again simply parks again.
+    private void RearmStarvedRecvs()
+    {
+        if (_recvStarved.Count == 0 || !_buffersReturned)
+        {
+            return;
+        }
+        _buffersReturned = false;
+
+        for (int i = 0; i < _recvStarved.Count; i++)
+        {
+            int    fd  = (int)(uint)_recvStarved[i];
+            ushort gen = (ushort)(_recvStarved[i] >> 32);
+            Connection? conn = ConnAt(fd, gen);
+            if (conn != null)
+            {
+                SubmitRecvMultishot(fd, gen, _incremental ? conn.Bgid : BgId);
+            }
+            // stale entries (recycled connections) just drop
+        }
+        _recvStarved.Clear();
     }
 
     // Accept-time only; the listener table is tiny (Port + ExtraPorts).

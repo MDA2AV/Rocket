@@ -109,6 +109,7 @@ public sealed unsafe partial class Reactor
         *(uint*)(slot + 8)    = _incRecvBufferSize;
         *(ushort*)(slot + 12) = bid;
         Volatile.Write(ref *(ushort*)(conn.BufRing + 14), (ushort)(tail + 1));
+        _buffersReturned = true;   // lets the loop re-arm recvs parked on -ENOBUFS (#93)
     }
 
     // Return queue payload: fd in the high 32 bits, gen in the next 16, bid in the low 16.
@@ -173,6 +174,7 @@ public sealed unsafe partial class Reactor
             DrainRecycleQ();
             DrainRemoteOps();
             DrainPostQ();
+            RearmStarvedRecvs();
 
             int rc = _ring.SubmitAndWait(1);
             if (rc < 0 && rc != -EINTR && rc != -EAGAIN && rc != -EBUSY)

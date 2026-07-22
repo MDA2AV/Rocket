@@ -18,19 +18,17 @@ internal static class TestServer
     private static int _nextPort = 18080;
 
     public static int Start(Func<Reactor, Connection, Task> handle, Action<Reactor>? onStart = null)
+        => StartConfigured(handle, DefaultConfig(), onStart).Port;
+
+    /// <summary>
+    /// Start with explicit config overrides (Port and ReactorCount are stamped by the harness) and
+    /// hand back the reactor so tests can assert against it.
+    /// </summary>
+    public static (int Port, Reactor Reactor) StartConfigured(
+        Func<Reactor, Connection, Task> handle, ServerConfig config, Action<Reactor>? onStart = null)
     {
         int port = Interlocked.Increment(ref _nextPort);
-
-        var config = new ServerConfig
-        {
-            Port = (ushort)port,
-            ReactorCount = 1,
-            RecvBufferSize = 4096,
-            BufferRingEntries = 256,
-            WriteSlabSize = 16 * 1024,
-            PoolMax = 64,
-            RecvQueueEntries = 64,
-        };
+        config = config with { Port = (ushort)port, ReactorCount = 1 };
 
         var reactor = new Reactor(0, config)
         {
@@ -46,7 +44,23 @@ internal static class TestServer
         thread.Start();
 
         WaitForListen(port);
-        return port;
+        return (port, reactor);
+    }
+
+    private static ServerConfig DefaultConfig() => new()
+    {
+        RecvBufferSize = 4096,
+        BufferRingEntries = 256,
+        WriteSlabSize = 16 * 1024,
+        PoolMax = 64,
+        RecvQueueEntries = 64,
+    };
+
+    /// <summary>Incremental mode (IOU_PBUF_RING_INC) needs 6.12+; tests skip below that.</summary>
+    public static bool KernelAtLeast(int major, int minor)
+    {
+        Version v = Environment.OSVersion.Version;
+        return v.Major > major || (v.Major == major && v.Minor >= minor);
     }
 
     /// <summary>

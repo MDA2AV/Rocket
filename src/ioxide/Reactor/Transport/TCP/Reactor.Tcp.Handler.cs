@@ -8,6 +8,7 @@ public sealed partial class Reactor
     // vanish (the reactor starts it fire-and-forget from the accept path). Runs once per connection.
     private async Task RunHandlerAsync(Connection conn)
     {
+        int gen = conn.Generation;
         try
         {
             await Handle(this, conn);
@@ -15,6 +16,9 @@ public sealed partial class Reactor
         catch (Exception e)
         {
             Console.Error.WriteLine($"[r{_id}] connection handler faulted: {e.GetBaseException().Message}");
+
+            // A handler that faulted before its DecRef would otherwise leak the connection (#94).
+            conn.ReleaseHandlerRefOnFault(gen);
         }
     }
 }

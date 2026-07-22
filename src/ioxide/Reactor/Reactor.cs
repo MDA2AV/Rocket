@@ -133,6 +133,7 @@ public sealed unsafe partial class Reactor
         *(uint*)(slot + 8)   = _recvBufferSize;
         *(ushort*)(slot + 12) = bid;
         _bufRingTail++;
+        _buffersReturned = true;   // lets the loop re-arm recvs parked on -ENOBUFS (#93)
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
