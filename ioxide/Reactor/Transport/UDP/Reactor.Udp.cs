@@ -61,6 +61,11 @@ public sealed unsafe partial class Reactor
 
     private void OpenUdpSockets()
     {
+        if (_config.UdpPorts.Length == 0 && _config.Quic == null)
+        {
+            return;   // no datagram transport configured
+        }
+
         // The QUIC port is a UDP socket like any other; only completion routing differs.
         ushort[] udpPorts = _config.UdpPorts;
         if (_config.Quic is { } quic && Array.IndexOf(udpPorts, quic.Port) < 0)

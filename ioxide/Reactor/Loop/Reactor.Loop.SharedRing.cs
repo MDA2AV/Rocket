@@ -79,6 +79,11 @@ public sealed unsafe partial class Reactor
 
         switch (kind)
         {
+            // TCP
+            case KindTcpAccept:
+                OnTcpAcceptCompletion(fd, cqe.res, more);
+                return;
+            
             case KindTcpRecv:
                 OnTcpRecvCompletionShared(fd, gen, cqe.res, cqe.flags);
                 return;
@@ -87,20 +92,18 @@ public sealed unsafe partial class Reactor
                 OnSendCompletion(fd, gen, cqe.res, cqe.flags);
                 return;
 
-            case KindClient:
-                OnClientCompletion(fd, cqe.res);   // low 32 bits = op slot
-                return;
-
-            case KindTcpAccept:
-                OnTcpAcceptCompletion(fd, cqe.res, more);
-                return;
-
+            // UDP
             case KindUdpRecv:
-                OnUdpRecvCompletion(fd, cqe.res);   // low 32 bits = recv-slot index
+                OnUdpRecvCompletion(fd, cqe.res);
                 return;
 
             case KindUdpSend:
-                OnUdpSendCompletion(fd, cqe.res);   // low 32 bits = send-slot index
+                OnUdpSendCompletion(fd, cqe.res);
+                return;
+            
+            // OTHER
+            case KindClient:
+                OnClientCompletion(fd, cqe.res);
                 return;
 
             case KindWake:

@@ -19,8 +19,13 @@ public sealed unsafe partial class Reactor
     private readonly HashSet<QuicConnection> _quicConnSet = [];
     private readonly List<QuicConnection> _quicSweepScratch = [];
 
-    private void InitQuic(QuicOptions options)
+    // No-op unless ServerConfig.Quic is set (the port itself is bound by OpenUdpSockets).
+    private void InitQuic()
     {
+        if (_config.Quic is not { } options)
+        {
+            return;
+        }
         _quic = options;
         AddTicker(QuicSweep);
     }
@@ -169,6 +174,10 @@ public sealed unsafe partial class Reactor
 
     private void TeardownQuic()
     {
+        if (_quic == null)
+        {
+            return;
+        }
         _quicSweepScratch.Clear();
         _quicSweepScratch.AddRange(_quicConnSet);
         foreach (QuicConnection conn in _quicSweepScratch)

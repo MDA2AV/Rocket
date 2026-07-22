@@ -217,11 +217,11 @@ public sealed unsafe partial class Reactor
                 return;
 
             case KindUdpRecv:
-                OnUdpRecvCompletion(fd, cqe.res);   // low 32 bits = recv-slot index
+                OnUdpRecvCompletion(fd, cqe.res);
                 return;
 
             case KindUdpSend:
-                OnUdpSendCompletion(fd, cqe.res);   // low 32 bits = send-slot index
+                OnUdpSendCompletion(fd, cqe.res);
                 return;
 
             case KindWake:

@@ -1,4 +1,5 @@
 ﻿using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using static ioxide.Native;
 
 namespace ioxide;
@@ -16,6 +17,16 @@ public sealed unsafe partial class Reactor
     /// <c>OnStart</c>. Pools use it to sweep per-command timeouts and replenish connections.
     /// </summary>
     public void AddTicker(Action ticker) => _tickers.Add(ticker);
+
+    // Allocate the interval timespec and arm the first tick, before the loop starts. The timespec
+    // is freed in Teardown, after the ring fd closes.
+    private void StartTicker()
+    {
+        _timerTs = (__kernel_timespec*)NativeMemory.Alloc((nuint)sizeof(__kernel_timespec));
+        _timerTs->tv_sec  = 0;
+        _timerTs->tv_nsec = TimerIntervalNs;
+        ArmTimer();
+    }
 
     private void ArmTimer()
     {

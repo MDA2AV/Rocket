@@ -73,6 +73,14 @@ public sealed unsafe partial class Reactor
         sqe->fd        = listenFd;
         sqe->user_data = Tag(KindTcpAccept, 0, listenFd);
     }
+
+    private void ArmTcpAccepts()
+    {
+        foreach (int listenFd in _listenFds)
+        {
+            SubmitAcceptMultishot(listenFd);
+        }
+    }
     
     // Recv completions, one method per loop mode - the single operation the two modes genuinely
     // differ on (where buffers come from and who returns them). The skeleton both share - stale
@@ -251,6 +259,47 @@ public sealed unsafe partial class Reactor
     {
         int one = 1;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(int));
+    }
+
+    private int[] _listenFds = [];
+    private ushort[] _listenPorts = [];
+
+    // One SO_REUSEPORT listener per port; accepts route by listener fd.
+    private void OpenTcpListeners()
+    {
+        _listenFds = new int[1 + _config.ExtraPorts.Length];
+        _listenPorts = new ushort[_listenFds.Length];
+        _listenPorts[0] = _port;
+        for (int i = 0; i < _config.ExtraPorts.Length; i++)
+        {
+            _listenPorts[i + 1] = _config.ExtraPorts[i];
+        }
+        for (int i = 0; i < _listenFds.Length; i++)
+        {
+            _listenFds[i] = OpenReusePortListener(_listenPorts[i], _config.ListenBacklog, _config.DualStack);
+        }
+    }
+
+    private void CloseTcpListeners()
+    {
+        foreach (int listenFd in _listenFds)
+        {
+            close(listenFd);
+        }
+    }
+
+    // Close any still-open accepted sockets (the connection table is indexed by fd) so they don't
+    // leak when a host is disposed and recreated many times in one process - e.g. across a test run.
+    private void CloseAcceptedTcpSockets()
+    {
+        for (int fd = 0; fd < _connections.Length; fd++)
+        {
+            if (_connections[fd] != null)
+            {
+                close(fd);
+                _connections[fd] = null;
+            }
+        }
     }
 
     private static int OpenReusePortListener(ushort port, int backlog, bool dualStack)
