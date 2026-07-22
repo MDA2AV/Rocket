@@ -17,7 +17,7 @@ internal static class Program
         var config = new ServerConfig
         {
             Port = 8080,
-            ReactorCount = int.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_REACTORS"), out int reactors) ? reactors : 2,
+            ReactorCount = int.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_REACTORS"), out int reactors) ? reactors : 12,
             Incremental = Environment.GetEnvironmentVariable("PLAYGROUND_INCREMENTAL") == "1"
         };
 
@@ -58,7 +58,7 @@ internal static class Program
             assets.Reload();
             Console.WriteLine($"[playground] reloaded - now serving {assets.Count} files");
         });
-
+        
         Console.WriteLine($"[playground] {config.ReactorCount} reactors on :{config.Port} (mode={mode})");
 
         var threads = new Thread[config.ReactorCount];
