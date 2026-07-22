@@ -29,15 +29,15 @@ public sealed unsafe partial class Reactor
     // The generation makes straggler CQEs from a reused fd detectable as stale.
     private const int  KindShift  = 56;
     private const int  GenShift   = 32;
-    private const byte KindAccept  = 1;
-    private const byte KindRecv    = 2;
-    private const byte KindSend    = 3;
-    private const byte KindWake    = 4;
-    private const byte KindClient  = 5;   // low 32 bits = op slot (Reactor.RingHost.cs)
-    private const byte KindCancel  = 6;
-    private const byte KindTimer   = 7;
-    private const byte KindUdpRecv = 8;   // low 32 bits = recv-slot index (Reactor.Udp.cs)
-    private const byte KindUdpSend = 9;   // low 32 bits = send-slot index (Reactor.Udp.cs)
+    private const byte KindTcpAccept = 1;
+    private const byte KindTcpRecv   = 2;
+    private const byte KindTcpSend   = 3;
+    private const byte KindWake      = 4;
+    private const byte KindClient    = 5;   // low 32 bits = op slot (Reactor.RingHost.cs)
+    private const byte KindCancel    = 6;
+    private const byte KindTimer     = 7;
+    private const byte KindUdpRecv   = 8;   // low 32 bits = recv-slot index (Reactor.Udp.cs)
+    private const byte KindUdpSend   = 9;   // low 32 bits = send-slot index (Reactor.Udp.cs)
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static ulong Tag(byte kind, ushort gen, int fd)

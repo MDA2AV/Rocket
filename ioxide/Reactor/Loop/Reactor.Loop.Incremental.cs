@@ -200,59 +200,11 @@ public sealed unsafe partial class Reactor
 
         switch (kind)
         {
-            case KindRecv:
-            {
-                bool   hasBuf  = (cqe.flags & IORING_CQE_F_BUFFER)   != 0;
-                bool   bufMore = (cqe.flags & IORING_CQE_F_BUF_MORE) != 0;
-                ushort bid     = hasBuf ? (ushort)(cqe.flags >> IORING_CQE_BUFFER_SHIFT) : (ushort)0;
-
-                Connection? conn = ConnAt(fd, gen);
-
-                if (cqe.res <= 0)
-                {
-                    // Peer EOF / recv error - the per-conn ring is freed in Recycle.
-                    if (conn != null)
-                    {
-                        _connections[fd] = null;
-                        conn.MarkClosed();
-                        conn.DecRef();
-                    }
-                    return;
-                }
-
-                if (conn == null)
-                {
-                    return;   // stale CQE; its ring is already gone
-                }
-
-                // Data lands at the buffer's running offset; the kernel keeps appending
-                // to this bid until the buffer is full (F_BUF_MORE clear).
-                byte* ptr = conn.BufSlab + (nuint)bid * (nuint)_incRecvBufferSize + (nuint)conn.CumOffset![bid];
-                conn.CumOffset[bid] += cqe.res;
-                conn.RefCount![bid]++;
-                if (!bufMore || !more)
-                {
-                    conn.KernelDone![bid] = true;
-                }
-
-                if (!conn.Complete(cqe.res, bid, hasBuffer: true, ptr))
-                {
-                    // Recv queue overflow - tear down rather than zombify.
-                    _connections[fd] = null;
-                    SubmitCancel(Tag(KindRecv, gen, fd));
-                    conn.MarkClosed();
-                    conn.DecRef();
-                    return;
-                }
-
-                if (!more)
-                {
-                    SubmitRecvMultishot(fd, gen, conn.Bgid);
-                }
+            case KindTcpRecv:
+                OnTcpRecvCompletionIncremental(fd, gen, cqe.res, cqe.flags);
                 return;
-            }
 
-            case KindSend:
+            case KindTcpSend:
                 OnSendCompletion(fd, gen, cqe.res, cqe.flags);
                 return;
 
@@ -260,33 +212,9 @@ public sealed unsafe partial class Reactor
                 OnClientCompletion(fd, cqe.res);
                 return;
 
-            case KindAccept:
-            {
-                if (cqe.res >= 0)
-                {
-                    int clientFd = cqe.res;
-                    SetNoDelay(clientFd);
-                    Connection conn = _pool.TryPop(out var pooled)
-                        ? pooled.SetFd(clientFd)
-                        : new Connection(this, clientFd, _config.WriteSlabSize, _config.RecvQueueEntries);
-                    Track(clientFd, conn);
-                    conn.InitRefs();
-                    conn.ListenerPort = PortOf(fd);
-                    SetupConnectionBufRing(conn);
-                    SubmitRecvMultishot(clientFd, (ushort)conn.Generation, conn.Bgid);
-
-                    _ = Handle(this, conn);
-                }
-                else
-                {
-                    Console.Error.WriteLine($"[r{_id}] accept error: {cqe.res}");
-                }
-                if (!more)
-                {
-                    SubmitAcceptMultishot(fd);
-                }
+            case KindTcpAccept:
+                OnTcpAcceptCompletion(fd, cqe.res, more);
                 return;
-            }
 
             case KindUdpRecv:
                 OnUdpRecvCompletion(fd, cqe.res);   // low 32 bits = recv-slot index

@@ -5,7 +5,8 @@ namespace ioxide;
 
 /// <summary>
 /// TCP transport: SO_REUSEPORT listeners, multishot accept, and the stream-shaped recv/send
-/// submits that drive <see cref="Connection"/>. Peer transports: Reactor.Udp.cs / Reactor.Quic.cs.
+/// submits and completions that drive <see cref="Connection"/>. Peer transports: Reactor.Udp.cs /
+/// Reactor.Quic.cs.
 /// </summary>
 public sealed unsafe partial class Reactor
 {
@@ -18,7 +19,7 @@ public sealed unsafe partial class Reactor
         sqe->ioprio    = IORING_RECV_MULTISHOT;
         sqe->fd        = fd;
         sqe->buf_index = bgid;
-        sqe->user_data = Tag(KindRecv, gen, fd);
+        sqe->user_data = Tag(KindTcpRecv, gen, fd);
     }
 
     // Dispatch a send to this connection's strategy. A predictable per-connection branch (ZeroCopySend
@@ -46,7 +47,7 @@ public sealed unsafe partial class Reactor
         sqe->addr      = (ulong)buf;
         sqe->len       = len;
         sqe->op_flags  = opFlags;   // MSG_WAITALL by default; cleared for kTLS
-        sqe->user_data = Tag(KindSend, gen, fd);
+        sqe->user_data = Tag(KindTcpSend, gen, fd);
     }
 
     // Vectored send: one SQE gathers every write segment (primary + overflow) from the iovec the
@@ -60,7 +61,7 @@ public sealed unsafe partial class Reactor
         sqe->addr      = (ulong)conn.MsgHdr;
         sqe->len       = 1;
         sqe->op_flags  = conn.SendOpFlags;   // MSG_WAITALL
-        sqe->user_data = Tag(KindSend, gen, fd);
+        sqe->user_data = Tag(KindTcpSend, gen, fd);
     }
 
     private void SubmitAcceptMultishot(int listenFd)
@@ -70,9 +71,168 @@ public sealed unsafe partial class Reactor
         sqe->opcode    = IORING_OP_ACCEPT;
         sqe->ioprio    = IORING_ACCEPT_MULTISHOT;
         sqe->fd        = listenFd;
-        sqe->user_data = Tag(KindAccept, 0, listenFd);
+        sqe->user_data = Tag(KindTcpAccept, 0, listenFd);
     }
     
+    // Recv completions, one method per loop mode - the single operation the two modes genuinely
+    // differ on (where buffers come from and who returns them). The skeleton both share - stale
+    // guard, EOF teardown, overflow teardown, re-arm - lives here and in the CloseFromRecv helpers,
+    // called from both dispatch switches like the UDP/send completions.
+
+    // Shared mode: one reactor-wide provided-buffer ring; every CQE consumes a whole buffer, so
+    // the EOF and stale paths must hand it straight back to the shared pool.
+    private void OnTcpRecvCompletionShared(int fd, ushort gen, int res, uint flags)
+    {
+        bool   hasBuf = (flags & IORING_CQE_F_BUFFER) != 0;
+        ushort bid    = hasBuf ? (ushort)(flags >> IORING_CQE_BUFFER_SHIFT) : (ushort)0;
+
+        Connection? conn = ConnAt(fd, gen);
+
+        if (res <= 0)
+        {
+            // Peer EOF or recv error - reactor owns teardown.
+            if (hasBuf)
+            {
+                ReturnBufferDirect(bid);
+            }
+            if (conn != null)
+            {
+                CloseFromRecv(conn, fd);
+            }
+            return;
+        }
+
+        if (conn == null)
+        {
+            // Stale CQE from the fd's previous tenant.
+            if (hasBuf)
+            {
+                ReturnBufferDirect(bid);
+            }
+            return;
+        }
+
+        byte* ptr = hasBuf ? _bufSlab + (nuint)bid * (nuint)_recvBufferSize : null;
+        if (!conn.Complete(res, bid, hasBuf, ptr))
+        {
+            CloseFromRecvOverflow(conn, fd, gen);
+            return;
+        }
+
+        if ((flags & IORING_CQE_F_MORE) == 0)
+        {
+            SubmitRecvMultishot(fd, gen, BgId);
+        }
+    }
+
+    // Incremental mode: per-connection IOU_PBUF_RING_INC ring - the kernel keeps appending into
+    // one bid at a running offset, so instead of returning buffers per CQE this tracks
+    // offset/refcount/kernel-done per buffer (the ring is freed wholesale in Recycle).
+    private void OnTcpRecvCompletionIncremental(int fd, ushort gen, int res, uint flags)
+    {
+        bool   more    = (flags & IORING_CQE_F_MORE)     != 0;
+        bool   hasBuf  = (flags & IORING_CQE_F_BUFFER)   != 0;
+        bool   bufMore = (flags & IORING_CQE_F_BUF_MORE) != 0;
+        ushort bid     = hasBuf ? (ushort)(flags >> IORING_CQE_BUFFER_SHIFT) : (ushort)0;
+
+        Connection? conn = ConnAt(fd, gen);
+
+        if (res <= 0)
+        {
+            // Peer EOF / recv error - the per-conn ring is freed in Recycle.
+            if (conn != null)
+            {
+                CloseFromRecv(conn, fd);
+            }
+            return;
+        }
+
+        if (conn == null)
+        {
+            return;   // stale CQE; its ring is already gone
+        }
+
+        // Data lands at the buffer's running offset; the kernel keeps appending
+        // to this bid until the buffer is full (F_BUF_MORE clear).
+        byte* ptr = conn.BufSlab + (nuint)bid * (nuint)_incRecvBufferSize + (nuint)conn.CumOffset![bid];
+        conn.CumOffset[bid] += res;
+        conn.RefCount![bid]++;
+        if (!bufMore || !more)
+        {
+            conn.KernelDone![bid] = true;
+        }
+
+        if (!conn.Complete(res, bid, hasBuffer: true, ptr))
+        {
+            CloseFromRecvOverflow(conn, fd, gen);
+            return;
+        }
+
+        if (!more)
+        {
+            SubmitRecvMultishot(fd, gen, conn.Bgid);
+        }
+    }
+
+    // Accept, both modes: NoDelay, pooled-or-fresh connection, table registration, first recv arm,
+    // fault-observed handler launch. The mode branch picks the buffer-ring wiring; _incremental is
+    // readonly for the reactor's lifetime, so it predicts perfectly.
+    private void OnTcpAcceptCompletion(int listenFd, int res, bool more)
+    {
+        if (res >= 0)
+        {
+            int clientFd = res;
+            SetNoDelay(clientFd);
+            Connection conn = _pool.TryPop(out var pooled)
+                ? pooled.SetFd(clientFd)
+                : new Connection(this, clientFd, _config.WriteSlabSize, _config.RecvQueueEntries,
+                                 _incremental ? WriteOverflowStrategy.Grow : _config.WriteOverflow);
+            Track(clientFd, conn);
+            conn.InitRefs();
+            conn.ListenerPort = PortOf(listenFd);
+
+            if (_incremental)
+            {
+                SetupConnectionBufRing(conn);
+                SubmitRecvMultishot(clientFd, (ushort)conn.Generation, conn.Bgid);
+            }
+            else
+            {
+                conn.UseZc = _zeroCopySend;   // config default; kTLS overrides to plain on handshake
+                SubmitRecvMultishot(clientFd, (ushort)conn.Generation, BgId);
+            }
+
+            _ = RunHandlerAsync(conn);
+        }
+        else
+        {
+            Console.Error.WriteLine($"[r{_id}] accept error: {res}");
+        }
+        if (!more)
+        {
+            SubmitAcceptMultishot(listenFd);
+        }
+    }
+
+    // Recv-side teardown, shared by both modes: detach from the table, mark closed, release the
+    // recv-side ref.
+    private void CloseFromRecv(Connection conn, int fd)
+    {
+        _connections[fd] = null;
+        conn.MarkClosed();
+        conn.DecRef();
+    }
+
+    // Recv-queue overflow - tear down rather than zombify. The multishot recv is still armed
+    // (F_MORE was set), so it is also cancelled by exact user_data.
+    private void CloseFromRecvOverflow(Connection conn, int fd, ushort gen)
+    {
+        _connections[fd] = null;
+        SubmitCancel(Tag(KindTcpRecv, gen, fd));
+        conn.MarkClosed();
+        conn.DecRef();
+    }
+
     // Accept-time only; the listener table is tiny (Port + ExtraPorts).
     private ushort PortOf(int listenFd)
     {

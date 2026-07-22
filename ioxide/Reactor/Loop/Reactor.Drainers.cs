@@ -95,7 +95,7 @@ public sealed unsafe partial class Reactor
     private void Recycle(Connection conn, int fd)
     {
         conn.MarkClosed();
-        SubmitCancel(Tag(KindRecv, (ushort)conn.Generation, fd));   // before Clear() bumps the generation
+        SubmitCancel(Tag(KindTcpRecv, (ushort)conn.Generation, fd));   // before Clear() bumps the generation
 
         if (_incremental)
         {
