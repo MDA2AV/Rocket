@@ -219,7 +219,7 @@ public sealed unsafe partial class Reactor
                 return;
 
             case KindUdpRecv:
-                OnUdpRecvCompletion(fd, cqe.res);
+                OnUdpRecvCompletion(fd, cqe.res, cqe.flags);
                 return;
 
             case KindUdpSend:

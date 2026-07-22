@@ -75,6 +75,14 @@ internal static class TestServer
         UdpDatagramHandler? onDatagram,
         QuicConnectionFactory? quicFactory = null,
         int quicIdleMs = 60_000)
+        => StartDatagramConfigured(onDatagram, quicFactory, quicIdleMs, udpRecvSlots: 16);
+
+    /// <summary>StartDatagram with a tunable UDP ring depth (for the -ENOBUFS re-arm burst test).</summary>
+    public static (int TcpPort, int UdpPort) StartDatagramConfigured(
+        UdpDatagramHandler? onDatagram,
+        QuicConnectionFactory? quicFactory = null,
+        int quicIdleMs = 60_000,
+        int udpRecvSlots = 16)
     {
         int tcpPort = Interlocked.Increment(ref _nextPort);
         int udpPort = Interlocked.Increment(ref _nextPort);
@@ -88,6 +96,7 @@ internal static class TestServer
             WriteSlabSize = 16 * 1024,
             PoolMax = 64,
             RecvQueueEntries = 64,
+            UdpRecvSlots = udpRecvSlots,
             UdpPorts = quicFactory == null ? [(ushort)udpPort] : [],
             Quic = quicFactory == null ? null : new QuicOptions
             {

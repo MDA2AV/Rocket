@@ -30,6 +30,19 @@ public static unsafe partial class Native {
     public const int MSG_CTRUNC = 0x08;   // control buffer too small - cmsgs dropped
 
 #pragma warning disable CS8981 // lower-cased name deliberately mirrors the kernel struct name (uapi)
+    // struct io_uring_recvmsg_out: the 16-byte header the kernel prepends to each multishot RECVMSG
+    // buffer, followed by the reserved name region, the reserved control region, then the payload -
+    // all at offsets fixed by the reserved namelen/controllen from the arm-time msghdr template.
+    [StructLayout(LayoutKind.Sequential)]
+    public struct io_uring_recvmsg_out {
+        public uint namelen;      // actual peer-address bytes (region is reserved-namelen wide)
+        public uint controllen;   // actual cmsg bytes
+        public uint payloadlen;   // actual datagram bytes
+        public uint flags;        // MSG_TRUNC / MSG_CTRUNC
+    }
+#pragma warning restore CS8981
+
+#pragma warning disable CS8981 // lower-cased name deliberately mirrors the kernel struct name (uapi)
     // struct cmsghdr (x86_64: size_t len, then two ints; data follows the 16-byte header,
     // entries aligned to 8). Walked manually - glibc's CMSG_* are macros, not symbols.
     [StructLayout(LayoutKind.Sequential)]

@@ -88,6 +88,43 @@ internal static class UdpTests
             Assert.Equal("x", Encoding.ASCII.GetString(client.Receive(ref from)));
         });
 
+        runner.Test("core: udp burst past the ring depth (multishot -ENOBUFS re-arm)", () =>
+        {
+            // Echo server with a small recv ring; a burst larger than the ring depth forces the
+            // multishot to terminate on -ENOBUFS and re-arm. All datagrams must still round-trip.
+            (_, int udpPort) = TestServer.StartDatagramConfigured(
+                static (Reactor r, in UdpDatagram d) => r.UdpSendTo(d.SocketFd, d.PeerAddr, d.PeerAddrLen, d.Payload),
+                quicFactory: null, quicIdleMs: 60_000, udpRecvSlots: 4);
+
+            using var client = new UdpClient();
+            client.Client.ReceiveTimeout = 4000;
+            var server = new IPEndPoint(IPAddress.Loopback, udpPort);
+
+            const int count = 200;
+            for (int i = 0; i < count; i++)
+            {
+                byte[] p = Encoding.ASCII.GetBytes($"n{i}");
+                client.Send(p, p.Length, server);
+            }
+
+            // Count distinct echoes (UDP may drop under real loss, but on loopback with re-arm all
+            // should return; require a strong majority to stay robust to scheduler hiccups).
+            var seen = new HashSet<string>();
+            try
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    IPEndPoint? from = null;
+                    seen.Add(Encoding.ASCII.GetString(client.Receive(ref from)));
+                }
+            }
+            catch (SocketException)
+            {
+                // ran out before count - fall through to the assertion
+            }
+            Assert.True(seen.Count >= count - 2, $"only {seen.Count}/{count} datagrams echoed through the ring");
+        });
+
         runner.Test("core: udp with no handler drops datagrams, reactor stays up", () =>
         {
             (int tcpPort, int udpPort) = TestServer.StartDatagram(onDatagram: null);

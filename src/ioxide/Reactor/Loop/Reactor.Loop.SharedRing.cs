@@ -95,7 +95,7 @@ public sealed unsafe partial class Reactor
 
             // UDP
             case KindUdpRecv:
-                OnUdpRecvCompletion(fd, cqe.res);
+                OnUdpRecvCompletion(fd, cqe.res, cqe.flags);
                 return;
 
             case KindUdpSend:

@@ -8,11 +8,13 @@ public delegate void UdpDatagramHandler(Reactor reactor, in UdpDatagram datagram
 
 /// <summary>
 /// UDP transport: each reactor binds every <see cref="ServerConfig.UdpPorts"/> port via SO_REUSEPORT
-/// (mirroring the TCP listener sharding) and keeps a fixed pool of in-flight RECVMSG slots per
-/// socket - a slot re-arms as soon as its datagram has been handled. RECVMSG rather than plain RECV
-/// because a shared datagram socket needs the per-packet peer address (msg_name) and the GRO/TOS
-/// control messages. Sends go through pooled SENDMSG slots (copy-in), optionally GSO-segmented.
-/// QUIC rides this layer (Reactor.Quic.cs).
+/// (mirroring the TCP listener sharding) and drives recv with one multishot RECVMSG per socket over a
+/// shared provided-buffer ring - arm once, the kernel delivers a CQE per datagram and picks a buffer
+/// from the ring, and the buffer returns as soon as its datagram has been handled. RECVMSG rather than
+/// plain RECV because a shared datagram socket needs the per-packet peer address (msg_name) and the
+/// GRO/TOS control messages, which multishot packs into the chosen buffer behind an
+/// io_uring_recvmsg_out header. Sends go through pooled SENDMSG slots (copy-in), optionally
+/// GSO-segmented. QUIC rides this layer (Reactor.Quic.cs).
 /// </summary>
 public sealed unsafe partial class Reactor
 {
@@ -22,36 +24,47 @@ public sealed unsafe partial class Reactor
     /// </summary>
     public UdpDatagramHandler? OnDatagram;
 
-    // Slot native block: [msghdr 56][iovec 16][name 128][control][pad][payload 64K]; recv and send
-    // share the header/name/iov offsets and differ in control size and payload start. 64 KiB payload
-    // because that's the largest train UDP_GRO can coalesce (and the GSO batch ceiling on send);
-    // smaller would silently truncate bursts (MSG_TRUNC drops the tail, it doesn't split).
+    // ---- recv: multishot RECVMSG over a shared provided-buffer ring ----
+    // Each ring buffer holds one datagram (or GRO train) as the kernel lays it out for multishot
+    // recvmsg: [io_uring_recvmsg_out 16][name 128][control 256][payload 64K]. Name/control/payload
+    // start at offsets fixed by the reserved namelen/controllen we arm with, so the payload is always
+    // at UdpRecvPayloadOff. 64 KiB payload = the largest UDP_GRO train (truncation drops the tail).
     internal const int UdpNameCap       = 128;
     private const int UdpCtrlCap        = 256;
     private const int UdpPayloadCap     = 64 * 1024;
-    private const int UdpIovOff         = 56;
-    private const int UdpNameOff        = 72;
-    private const int UdpCtrlOff        = 200;
-    private const int UdpRecvPayloadOff = 512;
-    private const int UdpRecvBlockSize  = UdpRecvPayloadOff + UdpPayloadCap;
+    private const int UdpMsOutSize      = 16;                              // sizeof(io_uring_recvmsg_out)
+    private const int UdpRecvNameOff    = UdpMsOutSize;                    // 16
+    private const int UdpRecvCtrlOff    = UdpMsOutSize + UdpNameCap;       // 144
+    private const int UdpRecvPayloadOff = UdpMsOutSize + UdpNameCap + UdpCtrlCap;   // 400
+    private const int UdpRecvBufSize    = UdpRecvPayloadOff + UdpPayloadCap;
 
-    // Send control only needs one UDP_SEGMENT cmsg (CmsgSpace(2) = 24), so payload starts earlier.
-    private const int UdpSendPayloadOff = 320;
-    private const int UdpSendBlockSize  = UdpSendPayloadOff + UdpPayloadCap;
+    // Distinct buffer-group id: TCP shared ring is 1, incremental per-conn gids are 2..MaxConn+1,
+    // gid 1 is reserved - so 0 is always free for the UDP ring.
+    private const ushort UdpBgId = 0;
+
+    // Send block: [msghdr 56][iovec 16][name 128][control][pad][payload 64K].
+    private const int UdpSendIovOff     = 56;
+    private const int UdpSendNameOff     = 72;
+    private const int UdpSendCtrlOff     = 200;
+    private const int UdpSendPayloadOff  = 320;   // one UDP_SEGMENT cmsg (CmsgSpace(2)=24) fits before this
+    private const int UdpSendBlockSize   = UdpSendPayloadOff + UdpPayloadCap;
 
     private const int ECANCELED = 125;
+    private const int ENOBUFS_UDP = 105;
 
-    private struct UdpRecvSlot
-    {
-        public nint   Block;
-        public int    Fd;
-        public ushort Port;
-    }
+    private int[]    _udpFds     = [];
+    private ushort[] _udpFdPorts = [];
 
-    private int[]         _udpFds       = [];
-    private ushort[]      _udpFdPorts   = [];
-    private UdpRecvSlot[] _udpRecvSlots = [];
-    private int           _udpRecvSlotCount;
+    // Shared provided-buffer ring for all UDP sockets (one registration, one bgid).
+    private byte*  _udpBufRing;
+    private byte*  _udpBufSlab;
+    private ushort _udpBufRingTail;
+    private uint   _udpBufRingMask;
+    private int    _udpRingDepth;
+
+    // One persistent msghdr template, shared by every socket's multishot arm: it only conveys the
+    // reserved namelen/controllen (identical for all), the kernel writes into the ring buffer.
+    private msghdr* _udpRecvTemplate;
 
     // Send slots: free-list-pooled, grown on demand (same shape as the client-op slot registry).
     private nint[] _udpSendBlocks = [];
@@ -74,31 +87,80 @@ public sealed unsafe partial class Reactor
         }
 
         int ports = udpPorts.Length;
-        int slotsPerSocket = _config.UdpRecvSlots;
+        _udpFds     = new int[ports];
+        _udpFdPorts = new ushort[ports];
 
-        _udpFds       = new int[ports];
-        _udpFdPorts   = new ushort[ports];
-        _udpRecvSlots = new UdpRecvSlot[ports * slotsPerSocket];
+        InitUdpBufRing();
 
         for (int i = 0; i < ports; i++)
         {
             ushort port = udpPorts[i];
-            int fd = OpenUdpSocket(port, _config.DualStack, _config.UdpGro);
-            _udpFds[i]     = fd;
+            _udpFds[i]     = OpenUdpSocket(port, _config.DualStack, _config.UdpGro);
             _udpFdPorts[i] = port;
-
-            for (int s = 0; s < slotsPerSocket; s++)
-            {
-                int slot = _udpRecvSlotCount++;
-                _udpRecvSlots[slot] = new UdpRecvSlot
-                {
-                    Block = (nint)NativeMemory.AlignedAlloc(UdpRecvBlockSize, 64),
-                    Fd    = fd,
-                    Port  = port,
-                };
-                ArmUdpRecv(slot);
-            }
+            ArmUdpRecv(i);   // one multishot per socket, all sharing the ring
         }
+    }
+
+    // Provided-buffer ring (power-of-two depth) + a slab of UdpRecvBufSize buffers, plus the shared
+    // msghdr template. Mirrors the TCP shared-ring setup; buffer 0's entry overlaps the tail field at
+    // offset 14, so the fill writes only addr/len/bid and publishes the tail afterwards.
+    private void InitUdpBufRing()
+    {
+        int depth = RoundUpPow2(_config.UdpRecvSlots);
+        _udpRingDepth   = depth;
+        _udpBufRingMask = (uint)(depth - 1);
+
+        _udpBufRing = (byte*)NativeMemory.AlignedAlloc((nuint)depth * 16, 4096);
+        NativeMemory.Clear(_udpBufRing, (nuint)depth * 16);
+        _udpBufSlab = (byte*)NativeMemory.AlignedAlloc((nuint)depth * UdpRecvBufSize, 64);
+
+        for (ushort bid = 0; bid < depth; bid++)
+        {
+            byte* entry = _udpBufRing + (uint)bid * 16;
+            *(ulong*)(entry + 0)  = (ulong)(_udpBufSlab + (nuint)bid * UdpRecvBufSize);
+            *(uint*)(entry + 8)   = UdpRecvBufSize;
+            *(ushort*)(entry + 12) = bid;
+        }
+        _udpBufRingTail = (ushort)depth;
+        Volatile.Write(ref *(ushort*)(_udpBufRing + 14), _udpBufRingTail);
+
+        var reg = new io_uring_buf_reg
+        {
+            ring_addr    = (ulong)_udpBufRing,
+            ring_entries = (uint)depth,
+            bgid         = UdpBgId,
+        };
+        int ret = io_uring_register(_ring.Fd, IORING_REGISTER_PBUF_RING, &reg, 1);
+        if (ret < 0)
+        {
+            throw new InvalidOperationException($"register udp pbuf_ring failed: ret={ret}");
+        }
+
+        // Template: reserved name/control sizes only; iov unused (buffer comes from the ring).
+        _udpRecvTemplate = (msghdr*)NativeMemory.AlignedAlloc((nuint)sizeof(msghdr), 64);
+        Unsafe.InitBlockUnaligned(_udpRecvTemplate, 0, (uint)sizeof(msghdr));
+        _udpRecvTemplate->msg_namelen    = UdpNameCap;
+        _udpRecvTemplate->msg_controllen = UdpCtrlCap;
+    }
+
+    private static int RoundUpPow2(int n)
+    {
+        int p = 1;
+        while (p < n)
+        {
+            p <<= 1;
+        }
+        return p;
+    }
+
+    private void ReturnUdpBuffer(ushort bid)
+    {
+        byte* entry = _udpBufRing + (_udpBufRingTail & _udpBufRingMask) * 16;
+        *(ulong*)(entry + 0)  = (ulong)(_udpBufSlab + (nuint)bid * UdpRecvBufSize);
+        *(uint*)(entry + 8)   = UdpRecvBufSize;
+        *(ushort*)(entry + 12) = bid;
+        _udpBufRingTail++;
+        Volatile.Write(ref *(ushort*)(_udpBufRing + 14), _udpBufRingTail);
     }
 
     private static int OpenUdpSocket(ushort port, bool dualStack, bool gro)
@@ -152,94 +214,119 @@ public sealed unsafe partial class Reactor
         return fd;
     }
 
-    // (Re)build the slot's msghdr and submit its RECVMSG. The kernel clobbers msg_namelen,
-    // msg_controllen and msg_flags on every completion, so the header is reset each arm.
-    private void ArmUdpRecv(int slot)
+    // Arm (or re-arm) the multishot RECVMSG for one socket over the shared buffer ring. The kernel
+    // then delivers a CQE per datagram, each selecting a ring buffer, until the multishot terminates.
+    private void ArmUdpRecv(int socketIndex)
     {
-        byte* block = (byte*)_udpRecvSlots[slot].Block;
-
-        var iov = (iovec*)(block + UdpIovOff);
-        iov->iov_base = block + UdpRecvPayloadOff;
-        iov->iov_len  = UdpPayloadCap;
-
-        var m = (msghdr*)block;
-        m->msg_name       = block + UdpNameOff;
-        m->msg_namelen    = UdpNameCap;
-        m->msg_iov        = iov;
-        m->msg_iovlen     = 1;
-        m->msg_control    = block + UdpCtrlOff;
-        m->msg_controllen = UdpCtrlCap;
-        m->msg_flags      = 0;
-
         IoUringSqe* sqe = GetSqeOrFlush();
         Unsafe.InitBlockUnaligned(sqe, 0, 64);
         sqe->opcode    = IORING_OP_RECVMSG;
-        sqe->fd        = _udpRecvSlots[slot].Fd;
-        sqe->addr      = (ulong)m;
+        sqe->flags     = IOSQE_BUFFER_SELECT;
+        sqe->ioprio    = IORING_RECV_MULTISHOT;
+        sqe->fd        = _udpFds[socketIndex];
+        sqe->addr      = (ulong)_udpRecvTemplate;
         sqe->len       = 1;
-        sqe->user_data = Tag(KindUdpRecv, 0, slot);
+        sqe->buf_index = UdpBgId;
+        sqe->user_data = Tag(KindUdpRecv, 0, socketIndex);
     }
 
-    private void OnUdpRecvCompletion(int slot, int res)
+    private void OnUdpRecvCompletion(int socketIndex, int res, uint flags)
     {
-        if ((uint)slot >= (uint)_udpRecvSlotCount)
+        if ((uint)socketIndex >= (uint)_udpFds.Length)
         {
             return;
         }
 
+        bool more = (flags & IORING_CQE_F_MORE) != 0;
+
         if (res < 0)
         {
-            // Teardown cancels these; anything else is transient (e.g. ICMP-induced errors) - re-arm.
+            // -ENOBUFS: the ring momentarily drained (a burst outran the depth). Buffers return
+            // inline, so re-arming picks them up. -ECANCELED / stop: teardown, drop.
             if (res == -ECANCELED || _stopRequested)
             {
                 return;
             }
-            Console.Error.WriteLine($"[r{_id}] udp recv error: {res}");
-            ArmUdpRecv(slot);
+            if (res != -ENOBUFS_UDP)
+            {
+                Console.Error.WriteLine($"[r{_id}] udp recv error: {res}");
+            }
+            if (!more)
+            {
+                ArmUdpRecv(socketIndex);
+            }
             return;
         }
 
-        ref UdpRecvSlot info = ref _udpRecvSlots[slot];
-        byte* block = (byte*)info.Block;
-        var m = (msghdr*)block;
+        // Kernel-picked buffer id; without one there is nothing to parse or return.
+        if ((flags & IORING_CQE_F_BUFFER) == 0)
+        {
+            if (!more)
+            {
+                ArmUdpRecv(socketIndex);
+            }
+            return;
+        }
+
+        ushort bid = (ushort)(flags >> IORING_CQE_BUFFER_SHIFT);
+        byte*  buf = _udpBufSlab + (nuint)bid * UdpRecvBufSize;
+        var    o   = (io_uring_recvmsg_out*)buf;
+
+        // Packed layout: header, then the reserved name/control regions, then the payload at the
+        // fixed offset. res is the total written, so payload length = res - payload offset.
+        int payloadLen = res - UdpRecvPayloadOff;
+        if (payloadLen < 0)
+        {
+            ReturnUdpBuffer(bid);
+            if (!more)
+            {
+                ArmUdpRecv(socketIndex);
+            }
+            return;
+        }
 
         int  gro = 0;
         byte tos = 0;
-        for (cmsghdr* c = CmsgFirst(m); c != null; c = CmsgNext(m, c))
+        if (o->controllen >= CmsgHdrLen)
         {
-            if (c->cmsg_level == SOL_UDP && c->cmsg_type == UDP_GRO)
+            // Parse cmsgs out of the control region via a throwaway msghdr pointing at it.
+            msghdr ctrl = default;
+            ctrl.msg_control    = buf + UdpRecvCtrlOff;
+            ctrl.msg_controllen = o->controllen;
+            for (cmsghdr* c = CmsgFirst(&ctrl); c != null; c = CmsgNext(&ctrl, c))
             {
-                gro = *(int*)CmsgData(c);
-            }
-            else if (c->cmsg_level == IPPROTO_IP && c->cmsg_type == IP_TOS)
-            {
-                tos = *CmsgData(c);
-            }
-            else if (c->cmsg_level == IPPROTO_IPV6 && c->cmsg_type == IPV6_TCLASS)
-            {
-                tos = (byte)*(int*)CmsgData(c);
+                if (c->cmsg_level == SOL_UDP && c->cmsg_type == UDP_GRO)
+                {
+                    gro = *(int*)CmsgData(c);
+                }
+                else if (c->cmsg_level == IPPROTO_IP && c->cmsg_type == IP_TOS)
+                {
+                    tos = *CmsgData(c);
+                }
+                else if (c->cmsg_level == IPPROTO_IPV6 && c->cmsg_type == IPV6_TCLASS)
+                {
+                    tos = (byte)*(int*)CmsgData(c);
+                }
             }
         }
 
-        if ((m->msg_flags & MSG_TRUNC) != 0)
+        if ((o->flags & MSG_TRUNC) != 0)
         {
-            // A single datagram larger than 64 KiB is impossible; a train can't exceed it either.
-            Console.Error.WriteLine($"[r{_id}] udp datagram truncated (res={res})");
+            Console.Error.WriteLine($"[r{_id}] udp datagram truncated (payload={payloadLen})");
         }
 
-        var datagram = new UdpDatagram(info.Fd, info.Port, (nint)m->msg_name, (int)m->msg_namelen,
-                                       new ReadOnlySpan<byte>(block + UdpRecvPayloadOff, res), gro, tos);
+        var datagram = new UdpDatagram(_udpFds[socketIndex], _udpFdPorts[socketIndex],
+                                       (nint)(buf + UdpRecvNameOff), (int)o->namelen,
+                                       new ReadOnlySpan<byte>(buf + UdpRecvPayloadOff, payloadLen), gro, tos);
         try
         {
-            if (_quicOptions != null && info.Port == _quicOptions.Port)
+            if (_quicOptions != null && _udpFdPorts[socketIndex] == _quicOptions.Port)
             {
-                // QUIC
-                QuicDispatch(in datagram);
+                QuicDispatch(in datagram);   // QUIC
             }
             else
             {
-                // Just UDP
-                OnDatagram?.Invoke(this, in datagram);
+                OnDatagram?.Invoke(this, in datagram);   // plain UDP
             }
         }
         catch (Exception e)
@@ -247,8 +334,14 @@ public sealed unsafe partial class Reactor
             Console.Error.WriteLine($"[r{_id}] datagram handler faulted: {e.GetBaseException().Message}");
         }
 
-        // TODO: Multishot?
-        ArmUdpRecv(slot);
+        // Handler is done with the span; return the buffer (inline, so the ring rarely drains).
+        ReturnUdpBuffer(bid);
+
+        // Multishot terminated (buffer exhaustion or error) - re-arm to keep receiving.
+        if (!more)
+        {
+            ArmUdpRecv(socketIndex);
+        }
     }
 
     /// <summary>
@@ -275,15 +368,15 @@ public sealed unsafe partial class Reactor
         int slot = AllocUdpSendSlot();
         byte* block = (byte*)_udpSendBlocks[slot];
 
-        Buffer.MemoryCopy((void*)peerAddr, block + UdpNameOff, UdpNameCap, peerAddrLen);
+        Buffer.MemoryCopy((void*)peerAddr, block + UdpSendNameOff, UdpNameCap, peerAddrLen);
         payload.CopyTo(new Span<byte>(block + UdpSendPayloadOff, UdpPayloadCap));
 
-        var iov = (iovec*)(block + UdpIovOff);
+        var iov = (iovec*)(block + UdpSendIovOff);
         iov->iov_base = block + UdpSendPayloadOff;
         iov->iov_len  = (nuint)payload.Length;
 
         var m = (msghdr*)block;
-        m->msg_name    = block + UdpNameOff;
+        m->msg_name    = block + UdpSendNameOff;
         m->msg_namelen = (uint)peerAddrLen;
         m->msg_iov     = iov;
         m->msg_iovlen  = 1;
@@ -291,7 +384,7 @@ public sealed unsafe partial class Reactor
 
         if (gsoSegmentSize > 0)
         {
-            var c = (cmsghdr*)(block + UdpCtrlOff);
+            var c = (cmsghdr*)(block + UdpSendCtrlOff);
             c->cmsg_len   = CmsgHdrLen + sizeof(ushort);
             c->cmsg_level = SOL_UDP;
             c->cmsg_type  = UDP_SEGMENT;
@@ -360,12 +453,23 @@ public sealed unsafe partial class Reactor
 
     private void FreeUdpMemory()
     {
-        for (int i = 0; i < _udpRecvSlotCount; i++)
+        // Freed after the ring fd is closed (Teardown order), so the kernel holds no references into
+        // the buffer slab or the msghdr template - same discipline as the TCP buffer slab.
+        if (_udpBufRing != null)
         {
-            NativeMemory.AlignedFree((void*)_udpRecvSlots[i].Block);
+            NativeMemory.AlignedFree(_udpBufRing);
+            _udpBufRing = null;
         }
-        _udpRecvSlotCount = 0;
-        _udpRecvSlots = [];
+        if (_udpBufSlab != null)
+        {
+            NativeMemory.AlignedFree(_udpBufSlab);
+            _udpBufSlab = null;
+        }
+        if (_udpRecvTemplate != null)
+        {
+            NativeMemory.AlignedFree(_udpRecvTemplate);
+            _udpRecvTemplate = null;
+        }
 
         for (int i = 0; i < _udpSendCount; i++)
         {

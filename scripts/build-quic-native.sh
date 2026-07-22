@@ -45,8 +45,14 @@ cmake -S ngtcp2 -B ngtcp2/build -DCMAKE_BUILD_TYPE=Release \
     "-DPICOTLS_LIBRARIES=$WORK/picotls/build/libpicotls-openssl.a;$WORK/picotls/build/libpicotls-core.a;crypto" >/dev/null
 cmake --build ngtcp2/build -j"$(nproc)" >/dev/null
 
+echo "==> compiling the C# facade shim"
+SHIM="$OLDPWD/src/ioxide.quic/native/ioxide_quic_shim.c"
+gcc -c -O2 -fPIC -o shim.o "$SHIM" \
+    -Ingtcp2/lib/includes -Ingtcp2/build/lib/includes \
+    -Ingtcp2/crypto/includes -Ipicotls/include
+
 echo "==> linking libioxide_quic.so"
-gcc -shared -o libioxide_quic.so \
+gcc -shared -o libioxide_quic.so shim.o \
     -Wl,--whole-archive \
     ngtcp2/build/lib/libngtcp2.a \
     ngtcp2/build/crypto/picotls/libngtcp2_crypto_picotls.a \
@@ -61,6 +67,8 @@ ldd libioxide_quic.so | grep -vE 'vdso|libcrypto|libc\.|ld-linux' && {
     echo "ngtcp2 exports missing"; exit 1; }
 [ "$(nm -D --defined-only libioxide_quic.so | grep -c ' ptls_')" -gt 100 ] || {
     echo "picotls exports missing"; exit 1; }
+[ "$(nm -D --defined-only libioxide_quic.so | grep -c ' iq_')" -ge 13 ] || {
+    echo "shim exports missing"; exit 1; }
 
 cd - >/dev/null
 cp "$WORK/libioxide_quic.so" "$OUT/libioxide_quic.so"
