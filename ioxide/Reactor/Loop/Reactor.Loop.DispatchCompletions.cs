@@ -32,7 +32,7 @@ public sealed unsafe partial class Reactor
         if (res <= 0)
         {
             _connections[fd] = null;
-            SubmitCancel(Tag(KindRecv, gen, fd));   // the multishot recv is still armed
+            SubmitCancel(Tag(KindTcpRecv, gen, fd));   // the multishot recv is still armed
             conn.MarkClosed();
             conn.DecRef();
             return;

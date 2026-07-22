@@ -65,4 +65,32 @@ public sealed record ServerConfig
     public int    MaxConnections     { get; init; } = 4096;   // one bgid per active connection
     public int    ConnBufRingEntries { get; init; } = 16;
     public int    IncRecvBufferSize  { get; init; } = 4096;
+
+    /// <summary>
+    /// UDP ports to bind (every reactor binds each one via SO_REUSEPORT, like the TCP listeners).
+    /// Datagrams are delivered to <see cref="Reactor.OnDatagram"/> on the reactor thread. Empty
+    /// (default) means no UDP sockets are opened.
+    /// </summary>
+    public ushort[] UdpPorts { get; init; } = [];
+
+    /// <summary>
+    /// In-flight RECVMSG operations per UDP socket. Each slot pins ~66 KiB of native memory (a
+    /// 64 KiB payload area sized for a full GRO train, plus address/control space); a slot
+    /// resubmits as soon as its datagram has been handled.
+    /// </summary>
+    public int UdpRecvSlots { get; init; } = 8;
+
+    /// <summary>
+    /// Enable UDP_GRO on receive: the kernel coalesces a burst of equal-size datagrams from one
+    /// peer into a single completion, and <see cref="UdpDatagram.GroSegmentSize"/> carries the
+    /// segment size for the handler to split on.
+    /// </summary>
+    public bool UdpGro { get; init; } = true;
+
+    /// <summary>
+    /// Enable the QUIC transport (Reactor.Quic.cs). Its port is bound as a UDP socket
+    /// automatically (no need to repeat it in <see cref="UdpPorts"/>); datagrams on that port are
+    /// demultiplexed by connection ID instead of reaching <see cref="Reactor.OnDatagram"/>.
+    /// </summary>
+    public QuicOptions? Quic { get; init; }
 }

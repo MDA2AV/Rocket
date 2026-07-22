@@ -9,92 +9,83 @@ public sealed unsafe partial class Reactor
     // direct fast path instead (no queue, no syscall).
     private int _wakeFd;
     private int _reactorThreadId;
-    
-    private int[] _listenFds = [];
-    private ushort[] _listenPorts = [];
+
     private readonly ServerConfig _config;
-    
+
     // Loop Mode
     private readonly bool _incremental;
-    
+
+    /// <summary>
+    /// The reactor lifecycle, on the caller's (= the reactor's) thread: bind the thread, create
+    /// the ring, open transports, pick the recv-buffer mode, run the loop until <see cref="Stop"/>,
+    /// tear down.
+    /// </summary>
     public void Run()
     {
-        _reactorThreadId = Environment.CurrentManagedThreadId;
-
-        // Awaits from reactor code (timers, HttpClient, Task.Run results) resume here instead of
-        // the thread pool. Thread-lifetime; nothing to uninstall.
-        SynchronizationContext.SetSynchronizationContext(new ReactorSynchronizationContext(this));
-
+        BindReactorThread();
         _ring = Ring.Create(_ringEntries);
 
-        // One SO_REUSEPORT listener per port; accepts route by listener fd.
-        _listenFds = new int[1 + _config.ExtraPorts.Length];
-        _listenPorts = new ushort[_listenFds.Length];
-        _listenPorts[0] = _port;
-        for (int i = 0; i < _config.ExtraPorts.Length; i++)
-        {
-            _listenPorts[i + 1] = _config.ExtraPorts[i];
-        }
-        for (int i = 0; i < _listenFds.Length; i++)
-        {
-            _listenFds[i] = OpenReusePortListener(_listenPorts[i], _config.ListenBacklog, _config.DualStack);
-        }
+        // Transports: TCP always; UDP sockets + the QUIC demux only when configured (no-ops otherwise).
+        OpenTcpListeners();
+        OpenUdpSockets();
+        InitQuic();
 
-        if (_incremental)
-        {
-            InitIncremental();
-        }
-        else
-        {
-            InitSharedRingBuffer();
-        }
+        // Recv buffering: one shared provided-buffer ring, or a ring per connection.
+        if (_incremental) InitIncremental();
+        else InitSharedRingBuffer();
 
-        _wakeFd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-        if (_wakeFd < 0)
-        {
-            throw new InvalidOperationException("eventfd failed");
-        }
+        OpenWakeFd();
 
         // Ring-native clients must be opened on this thread; async opens complete
         // once the loop starts.
         OnStart?.Invoke(this);
 
-        Console.WriteLine($"[r{_id}] listening on 0.0.0.0:{string.Join(",", _listenPorts)} (incremental={_incremental})");
-        foreach (int listenFd in _listenFds)
-        {
-            SubmitAcceptMultishot(listenFd);
-        }
+        AnnounceListening();
+        ArmTcpAccepts();
         ArmWakePoll();
+        StartTicker();
 
-        _timerTs = (Native.__kernel_timespec*)NativeMemory.Alloc((nuint)sizeof(Native.__kernel_timespec));
-        _timerTs->tv_sec  = 0;
-        _timerTs->tv_nsec = TimerIntervalNs;
-        ArmTimer();
+        if (_incremental) LoopIncremental();
+        else LoopSharedRing();
+        
+        Teardown();
+    }
 
-        if (_incremental)
-        {
-            LoopIncremental();
-        }
-        else
-        {
-            LoopSharedRing();
-        }
+    // Record the owning thread (off-reactor callers detect themselves and go through the handoff
+    // queues) and route awaits from reactor code (timers, HttpClient, Task.Run results) back here
+    // instead of the thread pool. Thread-lifetime; nothing to uninstall.
+    private void BindReactorThread()
+    {
+        _reactorThreadId = Environment.CurrentManagedThreadId;
+        SynchronizationContext.SetSynchronizationContext(new ReactorSynchronizationContext(this));
+    }
 
-        foreach (int listenFd in _listenFds)
+    private void OpenWakeFd()
+    {
+        _wakeFd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+        if (_wakeFd < 0)
         {
-            close(listenFd);
+            throw new InvalidOperationException("eventfd failed");
         }
+    }
 
-        // Close any still-open accepted sockets (the connection table is indexed by fd) so they don't
-        // leak when a host is disposed and recreated many times in one process - e.g. across a test run.
-        for (int fd = 0; fd < _connections.Length; fd++)
-        {
-            if (_connections[fd] != null)
-            {
-                close(fd);
-                _connections[fd] = null;
-            }
-        }
+    private void AnnounceListening()
+    {
+        Console.WriteLine($"[r{_id}] listening on 0.0.0.0:{string.Join(",", _listenPorts)}" +
+                          (_udpFds.Length > 0 ? $" udp:{string.Join(",", _udpFdPorts)}" : "") +
+                          $" (incremental={_incremental})");
+    }
+
+    // Teardown, still on the reactor thread, in dependency order: sockets close while the ring is
+    // alive (in-flight ops surface as errors/cancels and are dropped), the ring fd goes next, and
+    // native memory the kernel could reference (buffer slabs, UDP slot blocks) is freed only after
+    // that.
+    private void Teardown()
+    {
+        CloseTcpListeners();
+        TeardownQuic();
+        CloseUdpFds();
+        CloseAcceptedTcpSockets();
 
         close(_wakeFd);
         if (_timerTs != null)
@@ -116,13 +107,13 @@ public sealed unsafe partial class Reactor
             NativeMemory.AlignedFree(_bufSlab);
             _bufSlab = null;
         }
-        
+        FreeUdpMemory();
     }
-    
+
     // Set cross-thread by Stop(); the loops check it at the top of each iteration and exit, after which
     // Run() tears the ring down on this (the reactor) thread - mandatory for a single-issuer ring.
     private volatile bool _stopRequested;
-    
+
     /// <summary>
     /// Requests the reactor to stop. Safe to call from any thread. The loop finishes its current
     /// iteration and exits, then <see cref="Run"/> closes the listeners and wake fd and disposes the
