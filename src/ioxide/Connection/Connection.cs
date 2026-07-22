@@ -95,6 +95,25 @@ public sealed unsafe partial class Connection
         }
     }
 
+    // Guards the framework's fault-path release of the handler ref; reset per pool life (#94).
+    private int _handlerRefReleased;
+
+    /// <summary>
+    /// Release the handler's ref on behalf of a handler that faulted before its own DecRef, so the
+    /// fd/slab/gid aren't leaked (#94). Generation-guarded - a fault observed after this connection
+    /// was recycled must not touch its next life - and idempotent within a life. A handler that
+    /// DecRefs and then throws is outside the refcount contract; the guards keep that from
+    /// corrupting a reused connection.
+    /// </summary>
+    internal void ReleaseHandlerRefOnFault(int generationAtStart)
+    {
+        if (Volatile.Read(ref _generation) == generationAtStart &&
+            Interlocked.Exchange(ref _handlerRefReleased, 1) == 0)
+        {
+            DecRef();
+        }
+    }
+
     internal void Clear()
     {
         // Bump generation first so stale IVTS tokens resolve to Closed()/no-op.
@@ -130,6 +149,7 @@ public sealed unsafe partial class Connection
         _flushSignal.Reset();
 
         _recv.Reset();
+        Volatile.Write(ref _handlerRefReleased, 0);
         IncrementalMode = false;
         SendOpFlags = 0x100;   // MSG_WAITALL; a kTLS connection re-sets this per handshake
         ListenerPort = 0;

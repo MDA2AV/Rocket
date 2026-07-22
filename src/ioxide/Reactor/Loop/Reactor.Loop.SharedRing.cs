@@ -53,6 +53,7 @@ public sealed unsafe partial class Reactor
             DrainRecycleQ();
             DrainRemoteOps();
             DrainPostQ();
+            RearmStarvedRecvs();
 
             int rc = _ring.SubmitAndWait(1);
             if (rc < 0 && rc != -EINTR && rc != -EAGAIN && rc != -EBUSY)
