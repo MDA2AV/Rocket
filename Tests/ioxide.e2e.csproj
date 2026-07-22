@@ -19,11 +19,11 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="../ioxide/ioxide.csproj" />
-    <ProjectReference Include="../ioxide.pg/ioxide.pg.csproj" />
-    <ProjectReference Include="../ioxide.redis/ioxide.redis.csproj" />
-    <ProjectReference Include="../ioxide.tls/ioxide.tls.csproj" />
-    <ProjectReference Include="../ioxide.file/ioxide.file.csproj" />
+    <ProjectReference Include="../src/ioxide/ioxide.csproj" />
+    <ProjectReference Include="../src/ioxide.pg/ioxide.pg.csproj" />
+    <ProjectReference Include="../src/ioxide.redis/ioxide.redis.csproj" />
+    <ProjectReference Include="../src/ioxide.tls/ioxide.tls.csproj" />
+    <ProjectReference Include="../src/ioxide.file/ioxide.file.csproj" />
   </ItemGroup>
 
 </Project>

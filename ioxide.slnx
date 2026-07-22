@@ -1,10 +1,10 @@
 <Solution>
-  <Project Path="ioxide.file/ioxide.file.csproj" />
-  <Project Path="ioxide.tls/ioxide.tls.csproj" />
-  <Project Path="ioxide.redis/ioxide.redis.csproj" />
-  <Project Path="ioxide.pg/ioxide.pg.csproj" />
-  <Project Path="ioxide.Kestrel/ioxide.Kestrel.csproj" />
-  <Project Path="ioxide/ioxide.csproj" />
+  <Project Path="src/ioxide.file/ioxide.file.csproj" />
+  <Project Path="src/ioxide.tls/ioxide.tls.csproj" />
+  <Project Path="src/ioxide.redis/ioxide.redis.csproj" />
+  <Project Path="src/ioxide.pg/ioxide.pg.csproj" />
+  <Project Path="src/ioxide.Kestrel/ioxide.Kestrel.csproj" />
+  <Project Path="src/ioxide/ioxide.csproj" />
   <Project Path="Playground/Playground.csproj" />
   <Project Path="Examples/Examples.csproj" />
   <Project Path="Examples.AspNet/Examples.AspNet.csproj" />
