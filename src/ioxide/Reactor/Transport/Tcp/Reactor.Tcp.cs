@@ -5,7 +5,7 @@ namespace ioxide;
 
 /// <summary>
 /// TCP transport: SO_REUSEPORT listeners, multishot accept, and the stream-shaped recv/send
-/// submits and completions that drive <see cref="Connection"/>. Peer transports: Reactor.Udp.cs /
+/// submits and completions that drive <see cref="TcpConnection"/>. Peer transports: Reactor.Udp.cs /
 /// Reactor.Quic.cs.
 /// </summary>
 public sealed unsafe partial class Reactor
@@ -25,7 +25,7 @@ public sealed unsafe partial class Reactor
     // Dispatch a send to this connection's strategy. A predictable per-connection branch (ZeroCopySend
     // is constant for the run; kTLS pins plain) instead of an indirect call - so SubmitSendImpl stays
     // inlinable on the hot send path.
-    private void SubmitSend(Connection conn, int fd, ushort gen, byte* buf, uint len, uint opFlags)
+    private void SubmitSend(TcpConnection conn, int fd, ushort gen, byte* buf, uint len, uint opFlags)
     {
         if (conn.UseZc)
         {
@@ -52,7 +52,7 @@ public sealed unsafe partial class Reactor
 
     // Vectored send: one SQE gathers every write segment (primary + overflow) from the iovec the
     // connection prepared in BuildIovec. Plain SENDMSG (no zero-copy) for the segmented path.
-    private void SubmitSendMsg(Connection conn, int fd, ushort gen)
+    private void SubmitSendMsg(TcpConnection conn, int fd, ushort gen)
     {
         IoUringSqe* sqe = GetSqeOrFlush();
         Unsafe.InitBlockUnaligned(sqe, 0, 64);
@@ -103,7 +103,7 @@ public sealed unsafe partial class Reactor
         bool   hasBuf = (flags & IORING_CQE_F_BUFFER) != 0;
         ushort bid    = hasBuf ? (ushort)(flags >> IORING_CQE_BUFFER_SHIFT) : (ushort)0;
 
-        Connection? conn = ConnAt(fd, gen);
+        TcpConnection? conn = ConnAt(fd, gen);
 
         if (res == -ENOBUFS)
         {
@@ -164,7 +164,7 @@ public sealed unsafe partial class Reactor
         bool   bufMore = (flags & IORING_CQE_F_BUF_MORE) != 0;
         ushort bid     = hasBuf ? (ushort)(flags >> IORING_CQE_BUFFER_SHIFT) : (ushort)0;
 
-        Connection? conn = ConnAt(fd, gen);
+        TcpConnection? conn = ConnAt(fd, gen);
 
         if (res == -ENOBUFS)
         {
@@ -236,9 +236,9 @@ public sealed unsafe partial class Reactor
             }
 
             SetNoDelay(clientFd);
-            Connection conn = _pool.TryPop(out var pooled)
+            TcpConnection conn = _pool.TryPop(out var pooled)
                 ? pooled.SetFd(clientFd)
-                : new Connection(this, clientFd, _config.WriteSlabSize, _config.RecvQueueEntries,
+                : new TcpConnection(this, clientFd, _config.WriteSlabSize, _config.RecvQueueEntries,
                                  _incremental ? WriteOverflowStrategy.Grow : _config.WriteOverflow);
             Track(clientFd, conn);
             conn.InitRefs();
@@ -269,7 +269,7 @@ public sealed unsafe partial class Reactor
 
     // Recv-side teardown, shared by both modes: detach from the table, mark closed, release the
     // recv-side ref.
-    private void CloseFromRecv(Connection conn, int fd)
+    private void CloseFromRecv(TcpConnection conn, int fd)
     {
         _connections[fd] = null;
         conn.MarkClosed();
@@ -278,7 +278,7 @@ public sealed unsafe partial class Reactor
 
     // Recv-queue overflow - tear down rather than zombify. The multishot recv is still armed
     // (F_MORE was set), so it is also cancelled by exact user_data.
-    private void CloseFromRecvOverflow(Connection conn, int fd, ushort gen)
+    private void CloseFromRecvOverflow(TcpConnection conn, int fd, ushort gen)
     {
         _connections[fd] = null;
         SubmitCancel(Tag(KindTcpRecv, gen, fd));
@@ -301,7 +301,7 @@ public sealed unsafe partial class Reactor
         {
             int    fd  = (int)(uint)_recvStarved[i];
             ushort gen = (ushort)(_recvStarved[i] >> 32);
-            Connection? conn = ConnAt(fd, gen);
+            TcpConnection? conn = ConnAt(fd, gen);
             if (conn != null)
             {
                 SubmitRecvMultishot(fd, gen, _incremental ? conn.Bgid : BgId);

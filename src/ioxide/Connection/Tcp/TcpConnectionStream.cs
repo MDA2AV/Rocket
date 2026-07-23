@@ -5,7 +5,7 @@ using ioxide.utils;
 namespace ioxide;
 
 /// <summary>
-/// Adapts a <see cref="Connection"/> to <see cref="Stream"/> so stream-based APIs - notably
+/// Adapts a <see cref="TcpConnection"/> to <see cref="Stream"/> so stream-based APIs - notably
 /// <c>SslStream</c> for portable TLS - can run over the ring. Reads copy recv slices into the
 /// caller's buffer and return each ring buffer once drained; writes stage into the connection's
 /// slab and flush. Allocation-free at steady state: read and write chain onto the connection's
@@ -13,9 +13,9 @@ namespace ioxide;
 /// the <see cref="Stream"/> contract forces is a copy into the caller's buffer (the raw API and
 /// the pipe adapter expose ring memory directly). Single reader, single writer, reactor-thread.
 /// </summary>
-public sealed class ConnectionStream : Stream, IValueTaskSource<int>, IValueTaskSource
+public sealed class TcpConnectionStream : Stream, IValueTaskSource<int>, IValueTaskSource
 {
-    private readonly Connection _conn;
+    private readonly TcpConnection _conn;
 
     // Read: lazy snapshot consumption - hold the current snapshot and the slice being copied out.
     private RecvSnapshot _snap;
@@ -35,7 +35,7 @@ public sealed class ConnectionStream : Stream, IValueTaskSource<int>, IValueTask
     private ValueTaskAwaiter _pendingFlush;
     private readonly Action _onFlushDone;
 
-    public ConnectionStream(Connection connection)
+    public TcpConnectionStream(TcpConnection connection)
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
         _onReadReady = OnReadReady;

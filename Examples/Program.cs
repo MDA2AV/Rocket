@@ -42,7 +42,7 @@ internal static class Program
         {
             var reactor = new Reactor(i, example.Config);
             reactor.OnStart = example.OnStart;
-            reactor.Handle = example.Handle;
+            reactor.TcpHandle = example.Handle;
 
             threads[i] = new Thread(reactor.Run)
             {
@@ -64,7 +64,7 @@ internal static class Program
     // service setup (OnStart) that opens its pool/cache - null when the mode needs no service.
     private readonly record struct Example(
         ServerConfig Config,
-        Func<Reactor, Connection, Task> Handle,
+        Func<Reactor, TcpConnection, Task> Handle,
         Action<Reactor>? OnStart);
 
     private static Example Resolve(string mode) => mode switch
@@ -103,7 +103,7 @@ internal static class Program
         _ => throw new ArgumentException($"unknown mode '{mode}'"),
     };
 
-    private static Example WithPg(ServerConfig config, Func<Reactor, Connection, Task> handle, int commandTimeoutMs = 30_000)
+    private static Example WithPg(ServerConfig config, Func<Reactor, TcpConnection, Task> handle, int commandTimeoutMs = 30_000)
     {
         var options = new PgOptions
         {
@@ -119,7 +119,7 @@ internal static class Program
         return new Example(config, handle, r => PgPool.Start(r, options));
     }
 
-    private static Example WithRedis(ServerConfig config, Func<Reactor, Connection, Task> handle)
+    private static Example WithRedis(ServerConfig config, Func<Reactor, TcpConnection, Task> handle)
     {
         var options = new RedisOptions
         {
@@ -132,7 +132,7 @@ internal static class Program
         return new Example(config, handle, r => RedisPool.Start(r, options));
     }
 
-    private static Example WithFiles(ServerConfig config, Func<Reactor, Connection, Task> handle)
+    private static Example WithFiles(ServerConfig config, Func<Reactor, TcpConnection, Task> handle)
     {
         string dir = Environment.GetEnvironmentVariable("EXAMPLES_FILE_DIR") ?? DefaultAssetDir();
         var assets = new StaticAssets(dir);
@@ -145,7 +145,7 @@ internal static class Program
         });
     }
 
-    private static Example WithTls(ServerConfig config, Func<Reactor, Connection, Task> handle, bool ktls)
+    private static Example WithTls(ServerConfig config, Func<Reactor, TcpConnection, Task> handle, bool ktls)
     {
         X509Certificate2 cert = TlsCert.EnsureCert();
         SslStreamExample.Init(cert);
@@ -153,7 +153,7 @@ internal static class Program
 
         if (!ktls)
         {
-            return new Example(config, handle, null);   // SslStream rides ConnectionStream - no reactor service
+            return new Example(config, handle, null);   // SslStream rides TcpConnectionStream - no reactor service
         }
 
         var options = new TlsOptions { CertificatePath = TlsCert.CertPath, KeyPath = TlsCert.KeyPath };

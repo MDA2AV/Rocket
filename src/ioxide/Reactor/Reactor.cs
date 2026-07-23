@@ -14,11 +14,11 @@ public sealed unsafe partial class Reactor
     private readonly int _id;
     private Ring _ring = null!;   // created on the reactor thread (DEFER_TASKRUN requires same-thread setup+enter)
 
-    // Connection table indexed by fd (dense small ints - array beats Dictionary per CQE).
-    private Connection?[] _connections = new Connection?[4096];
+    // TcpConnection table indexed by fd (dense small ints - array beats Dictionary per CQE).
+    private TcpConnection?[] _connections = new TcpConnection?[4096];
 
     // The response-send strategy from config (ZeroCopySend), copied per-connection at accept into
-    // Connection.UseZc. The send hot path branches on that bool (predictable, inlinable) instead of
+    // TcpConnection.UseZc. The send hot path branches on that bool (predictable, inlinable) instead of
     // dispatching through an indirect function pointer.
     private readonly bool _zeroCopySend;
     private readonly ushort _port;
@@ -51,10 +51,10 @@ public sealed unsafe partial class Reactor
     private uint   _bufRingMask;
     private ushort _bufRingTail;
 
-    // Connection pool, reactor-thread-only. PoolMax × WriteSlabSize × ReactorCount bounds
+    // TcpConnection pool, reactor-thread-only. PoolMax × WriteSlabSize × ReactorCount bounds
     // the reserved native memory.
     private readonly int _poolMax;
-    private readonly Stack<Connection> _pool;
+    private readonly Stack<TcpConnection> _pool;
 
     // Per-reactor pool of base-size write slabs, rented by connections in Segmented overflow mode.
     // Reactor-thread-only, so no locking. Capped so a burst of large responses doesn't retain memory.
@@ -99,19 +99,19 @@ public sealed unsafe partial class Reactor
         _maxConnections = config.MaxConnections;
         _connBufRingEntries = config.ConnBufRingEntries;
         _incRecvBufferSize = (uint)config.IncRecvBufferSize;
-        _pool = new Stack<Connection>(config.PoolMax);
+        _pool = new Stack<TcpConnection>(config.PoolMax);
         _zeroCopySend = config.ZeroCopySend;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private Connection? ConnAt(int fd, ushort gen)
+    private TcpConnection? ConnAt(int fd, ushort gen)
     {
-        Connection?[] conns = _connections;
-        Connection? conn = (uint)fd < (uint)conns.Length ? conns[fd] : null;
+        TcpConnection?[] conns = _connections;
+        TcpConnection? conn = (uint)fd < (uint)conns.Length ? conns[fd] : null;
         return conn != null && (ushort)conn.Generation == gen ? conn : null;
     }
 
-    private void Track(int fd, Connection conn)
+    private void Track(int fd, TcpConnection conn)
     {
         if (fd >= _connections.Length)
         {

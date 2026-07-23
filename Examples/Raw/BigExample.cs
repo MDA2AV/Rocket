@@ -33,7 +33,7 @@ public static class BigExample
         return response;
     }
 
-    public static async Task Handle(Reactor r, Connection conn)
+    public static async Task Handle(Reactor r, TcpConnection conn)
     {
         while (true)
         {

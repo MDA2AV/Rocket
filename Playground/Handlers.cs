@@ -25,7 +25,7 @@ internal static class Handlers
         "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n"u8;
 
     /// <summary>raw - a fixed plaintext response; no I/O beyond the socket.</summary>
-    public static async Task Raw(Reactor reactor, Connection conn)
+    public static async Task Raw(Reactor reactor, TcpConnection conn)
     {
         try
         {
@@ -51,10 +51,10 @@ internal static class Handlers
     /// pipe - identical workload to raw, but read and written through the PipeReader/PipeWriter
     /// adapters. Exists to benchmark the adapter overhead against the raw API.
     /// </summary>
-    public static async Task Pipe(Reactor reactor, Connection conn)
+    public static async Task Pipe(Reactor reactor, TcpConnection conn)
     {
-        var reader = new ConnectionPipeReader(conn);
-        var writer = new ConnectionPipeWriter(conn);
+        var reader = new TcpConnectionPipeReader(conn);
+        var writer = new TcpConnectionPipeWriter(conn);
 
         try
         {
@@ -83,7 +83,7 @@ internal static class Handlers
     /// hop - raw, but every request bounces through the thread pool (Task.Yield) first.
     /// Exercises the off-reactor queues and the eventfd wake.
     /// </summary>
-    public static async Task Hop(Reactor reactor, Connection conn)
+    public static async Task Hop(Reactor reactor, TcpConnection conn)
     {
         try
         {
@@ -117,7 +117,7 @@ internal static class Handlers
     /// SynchronizationContext installed the continuation comes home to the reactor; without it,
     /// it stays on the thread pool. Logs once if the post-await thread is off-reactor.
     /// </summary>
-    public static async Task TaskRun(Reactor reactor, Connection conn)
+    public static async Task TaskRun(Reactor reactor, TcpConnection conn)
     {
         try
         {
@@ -152,7 +152,7 @@ internal static class Handlers
     /// pg - each request runs a query through the reactor's pool; a server error becomes a 500.
     /// Paths: / → SELECT 42 · /sleep → 100ms query (pool concurrency demo) · /err → server error.
     /// </summary>
-    public static async Task Pg(Reactor reactor, Connection conn)
+    public static async Task Pg(Reactor reactor, TcpConnection conn)
     {
         PgPool pool = reactor.GetService<PgPool>();
 
@@ -198,7 +198,7 @@ internal static class Handlers
     /// file - static files over the shared asset cache: small assets served from the snapshot's
     /// baked response, large ones read off the ring through a rented reader; misses are 404.
     /// </summary>
-    public static async Task File(Reactor reactor, Connection conn)
+    public static async Task File(Reactor reactor, TcpConnection conn)
     {
         StaticAssets assets = reactor.GetService<StaticAssets>();
         RingPool<AssetReader> readers = reactor.GetService<RingPool<AssetReader>>();
@@ -257,7 +257,7 @@ internal static class Handlers
     // Stream an asset off the ring from <paramref name="fd"/>, framing Content-Length from
     // <paramref name="totalLength"/>. Files bigger than the reader's buffer are read in successive
     // chunks at advancing offsets, so they're served whole instead of truncated.
-    private static async Task SendFromDisk(Connection conn, RingPool<AssetReader> readers, AssetCache.Asset asset, int fd, long totalLength)
+    private static async Task SendFromDisk(TcpConnection conn, RingPool<AssetReader> readers, AssetCache.Asset asset, int fd, long totalLength)
     {
         AssetReader reader = await readers.RentAsync();
         try
@@ -293,7 +293,7 @@ internal static class Handlers
 
     // Serve a file whose on-disk version no longer matches the baked snapshot: open the current path
     // fresh (so an atomic rename resolves to the new inode, not the cached fd) and stream it live.
-    private static async Task SendChangedFromDisk(Connection conn, RingPool<AssetReader> readers, AssetCache.Asset asset, long size)
+    private static async Task SendChangedFromDisk(TcpConnection conn, RingPool<AssetReader> readers, AssetCache.Asset asset, long size)
     {
         SafeFileHandle handle;
         try
@@ -319,7 +319,7 @@ internal static class Handlers
     }
 
     // Drain the recv (the raw/pg handlers don't parse the request).
-    private static void Drain(Connection conn, RecvSnapshot snapshot)
+    private static void Drain(TcpConnection conn, RecvSnapshot snapshot)
     {
         while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
         {
@@ -331,7 +331,7 @@ internal static class Handlers
     }
 
     // Drain the recv and return the request target path (defaults to "/").
-    private static string ReadRequestPath(Connection conn, RecvSnapshot snapshot)
+    private static string ReadRequestPath(TcpConnection conn, RecvSnapshot snapshot)
     {
         string path = "/";
 
@@ -379,7 +379,7 @@ internal static class Handlers
     // Drain the recv, resolving the request target against the cache while the bytes are still
     // valid (the lookup is span-based - no string - so it must happen before the buffer goes
     // back to the ring).
-    private static bool FindAsset(Connection conn, RecvSnapshot snapshot, StaticAssets.Lease lease, out AssetCache.Asset asset)
+    private static bool FindAsset(TcpConnection conn, RecvSnapshot snapshot, StaticAssets.Lease lease, out AssetCache.Asset asset)
     {
         bool found = false;
         asset = default;
@@ -404,7 +404,7 @@ internal static class Handlers
     // payloads, a short sequence for ones bigger than the slab.
     private const int BodyChunk = 12 * 1024;
 
-    private static async Task SendChunked(Connection conn, nint data, int length)
+    private static async Task SendChunked(TcpConnection conn, nint data, int length)
     {
         int sent = 0;
         while (true)
@@ -418,18 +418,18 @@ internal static class Handlers
         }
     }
 
-    private static void WriteAssetHeader(Connection conn, AssetCache.Asset asset, int bodyLength)
+    private static void WriteAssetHeader(TcpConnection conn, AssetCache.Asset asset, int bodyLength)
     {
         Span<byte> header = stackalloc byte[256];
         conn.Write(header[..AssetCache.WriteResponseHeader(header, asset.Path, bodyLength)]);
     }
 
-    private static unsafe void WriteBodyChunk(Connection conn, nint chunk, int length)
+    private static unsafe void WriteBodyChunk(TcpConnection conn, nint chunk, int length)
     {
         conn.Write(new ReadOnlySpan<byte>((void*)chunk, length));
     }
 
-    private static void WriteDbResponse(Connection conn, string value)
+    private static void WriteDbResponse(TcpConnection conn, string value)
     {
         Span<byte> response = stackalloc byte[160];
         int position = 0;
@@ -472,5 +472,45 @@ internal static class Handlers
         }
 
         return dir;
+    }
+
+    /// <summary>
+    /// The QUIC handler: HTTP/3 via ioxide.h3 - the h3 twin of <see cref="Raw"/>. H3Connection
+    /// feeds the connection's stream items into nghttp3 (the raw ReadAsync/TryGetItem loop lives
+    /// inside it) and runs one call here per assembled request; it owns the handler ref.
+    /// </summary>
+    public static Task H3(Reactor reactor, QuicConnection conn)
+        => new ioxide.h3.H3Connection(conn).RunAsync(
+            static req => ioxide.h3.H3Response.Text($"hello {req.Path} over HTTP/3 via io_uring\n"));
+
+    /// <summary>Self-signed localhost cert for the quic mode (PLAYGROUND_QUIC_CERT/KEY override it).</summary>
+    public static (string CertPath, string KeyPath) EnsureQuicCert()
+    {
+        string? envCert = Environment.GetEnvironmentVariable("PLAYGROUND_QUIC_CERT");
+        string? envKey = Environment.GetEnvironmentVariable("PLAYGROUND_QUIC_KEY");
+        if (envCert is not null && envKey is not null)
+        {
+            return (envCert, envKey);
+        }
+
+        string dir = Path.Combine(Path.GetTempPath(), "ioxide-playground-quic");
+        Directory.CreateDirectory(dir);
+        string certPath = Path.Combine(dir, "quic.crt");
+        string keyPath = Path.Combine(dir, "quic.key");
+
+        if (!System.IO.File.Exists(certPath))
+        {
+            using var rsa = System.Security.Cryptography.RSA.Create(2048);
+            var request = new System.Security.Cryptography.X509Certificates.CertificateRequest(
+                "CN=localhost", rsa, System.Security.Cryptography.HashAlgorithmName.SHA256,
+                System.Security.Cryptography.RSASignaturePadding.Pkcs1);
+            using var cert = request.CreateSelfSigned(
+                DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
+
+            System.IO.File.WriteAllText(certPath, cert.ExportCertificatePem());
+            System.IO.File.WriteAllText(keyPath, rsa.ExportPkcs8PrivateKeyPem());
+        }
+
+        return (certPath, keyPath);
     }
 }

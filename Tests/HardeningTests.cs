@@ -148,7 +148,7 @@ internal static class HardeningTests
 
     // Reads once and holds the buffers until released, then drains until totalBytes arrived and
     // answers "done" - the starvation-then-recovery shape both #93 tests share.
-    private static Func<Reactor, Connection, Task> HoldFirstThenDrain(TaskCompletionSource release, int totalBytes)
+    private static Func<Reactor, TcpConnection, Task> HoldFirstThenDrain(TaskCompletionSource release, int totalBytes)
         => async (_, conn) =>
         {
             try

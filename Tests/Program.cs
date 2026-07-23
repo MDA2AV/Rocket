@@ -28,6 +28,8 @@ internal static class Program
         HardeningTests.Register(runner);
         UdpTests.Register(runner);
         QuicTests.Register(runner);
+        QuicEngineTests.Register(runner);
+        H3Tests.Register(runner);
         PgTests.Register(runner, pg, pgUp);
         RedisTests.Register(runner, redis, redisUp);
         FileTests.Register(runner);

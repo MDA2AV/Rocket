@@ -13,7 +13,7 @@ namespace Examples.Pg;
 /// </summary>
 public static class SharedExample
 {
-    public static async Task Handle(Reactor r, Connection conn)
+    public static async Task Handle(Reactor r, TcpConnection conn)
     {
         var pool = r.GetService<PgPool>();
 

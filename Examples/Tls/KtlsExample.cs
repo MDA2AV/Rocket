@@ -11,7 +11,7 @@ namespace Examples.Tls;
 /// </summary>
 public static class KtlsExample
 {
-    public static async Task Handle(Reactor r, Connection conn)
+    public static async Task Handle(Reactor r, TcpConnection conn)
     {
         TlsSession? tls = null;
         try

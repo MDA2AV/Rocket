@@ -3,7 +3,7 @@ using ioxide.utils;
 
 namespace ioxide;
 
-public sealed unsafe partial class Connection
+public sealed unsafe partial class TcpConnection
 {
     private readonly Reactor _reactor;
 
@@ -50,7 +50,7 @@ public sealed unsafe partial class Connection
     // runs only at 0, so a connection is never recycled under a live handler.
     private int _refs;
 
-    public Connection(Reactor reactor, int fd, int writeSlabSize = 1024 * 16, int recvQueueEntries = 64, WriteOverflowStrategy overflow = WriteOverflowStrategy.Grow)
+    public TcpConnection(Reactor reactor, int fd, int writeSlabSize = 1024 * 16, int recvQueueEntries = 64, WriteOverflowStrategy overflow = WriteOverflowStrategy.Grow)
     {
         _reactor = reactor;
         ClientFd = fd;

@@ -6,13 +6,13 @@ using System.Threading.Tasks.Sources;
 namespace ioxide;
 
 /// <summary>
-/// Adapts the <see cref="Connection"/> write API to a <see cref="PipeWriter"/>. Writes go straight
+/// Adapts the <see cref="TcpConnection"/> write API to a <see cref="PipeWriter"/>. Writes go straight
 /// into the connection's slab; a parked flush chains onto the connection's value-task source
 /// instead of an async state machine, so the adapter allocates nothing at steady state.
 /// </summary>
-public sealed class ConnectionPipeWriter : PipeWriter, IValueTaskSource<FlushResult>
+public sealed class TcpConnectionPipeWriter : PipeWriter, IValueTaskSource<FlushResult>
 {
-    private readonly Connection _conn;
+    private readonly TcpConnection _conn;
 
     private ManualResetValueTaskSourceCore<FlushResult> _core = new()
     {
@@ -25,7 +25,7 @@ public sealed class ConnectionPipeWriter : PipeWriter, IValueTaskSource<FlushRes
     private bool _cancelRequested;
     private long _unflushed;
 
-    public ConnectionPipeWriter(Connection connection)
+    public TcpConnectionPipeWriter(TcpConnection connection)
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
         _onFlushDone = OnFlushDone;

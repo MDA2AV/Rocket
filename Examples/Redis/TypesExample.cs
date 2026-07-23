@@ -10,7 +10,7 @@ namespace Examples.Redis;
 /// </summary>
 public static class TypesExample
 {
-    public static async Task Handle(Reactor r, Connection conn)
+    public static async Task Handle(Reactor r, TcpConnection conn)
     {
         RedisPool pool = r.GetService<RedisPool>();
 

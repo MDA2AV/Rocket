@@ -9,10 +9,10 @@ namespace Examples.Raw;
 /// </summary>
 public static class PipesExample
 {
-    public static async Task Handle(Reactor r, Connection conn)
+    public static async Task Handle(Reactor r, TcpConnection conn)
     {
-        var reader = new ConnectionPipeReader(conn);
-        var writer = new ConnectionPipeWriter(conn);
+        var reader = new TcpConnectionPipeReader(conn);
+        var writer = new TcpConnectionPipeWriter(conn);
 
         while (true)
         {

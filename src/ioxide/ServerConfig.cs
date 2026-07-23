@@ -19,7 +19,7 @@ public sealed record ServerConfig
 
     /// <summary>
     /// Additional listener ports (every reactor binds each one). Connections carry the port they
-    /// arrived on in <see cref="Connection.ListenerPort"/>, so one handler can serve several
+    /// arrived on in <see cref="TcpConnection.ListenerPort"/>, so one handler can serve several
     /// entry points (e.g. plaintext + TLS).
     /// </summary>
     public ushort[] ExtraPorts { get; init; } = [];
@@ -74,11 +74,12 @@ public sealed record ServerConfig
     public ushort[] UdpPorts { get; init; } = [];
 
     /// <summary>
-    /// In-flight RECVMSG operations per UDP socket. Each slot pins ~66 KiB of native memory (a
-    /// 64 KiB payload area sized for a full GRO train, plus address/control space); a slot
-    /// resubmits as soon as its datagram has been handled.
+    /// Depth of the shared UDP provided-buffer ring (rounded up to a power of two). One multishot
+    /// RECVMSG per socket draws buffers from this ring; each buffer pins ~64 KiB (a full GRO train
+    /// plus the packed address/control header) and returns as soon as its datagram is handled, so
+    /// the depth bounds how many datagrams can be in flight across all UDP sockets at once.
     /// </summary>
-    public int UdpRecvSlots { get; init; } = 8;
+    public int UdpRecvSlots { get; init; } = 16;
 
     /// <summary>
     /// Enable UDP_GRO on receive: the kernel coalesces a burst of equal-size datagrams from one

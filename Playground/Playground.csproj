@@ -13,6 +13,8 @@
     <ProjectReference Include="../src/ioxide/ioxide.csproj" />
     <ProjectReference Include="../src/ioxide.pg/ioxide.pg.csproj" />
     <ProjectReference Include="../src/ioxide.file/ioxide.file.csproj" />
+    <ProjectReference Include="../src/ioxide.quic/ioxide.quic.csproj" />
+    <ProjectReference Include="../src/ioxide.h3/ioxide.h3.csproj" />
   </ItemGroup>
 
 </Project>

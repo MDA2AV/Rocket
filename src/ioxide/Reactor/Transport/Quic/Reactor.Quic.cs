@@ -4,7 +4,7 @@ namespace ioxide;
 
 /// <summary>
 /// QUIC transport: rides the UDP layer (Reactor.Udp.cs) on one dedicated port and demultiplexes
-/// datagrams to logical connections by Destination Connection ID (RFC 8999 version-independent
+/// datagrams to logical connections by Destination TcpConnection ID (RFC 8999 version-independent
 /// parse), since one UDP socket carries every connection - the fd-keyed TCP table cannot model
 /// this. Packet protection and the handshake live in the engine subclass of
 /// <see cref="QuicConnection"/>, produced by <see cref="QuicOptions.ConnectionFactory"/>; the
@@ -14,7 +14,7 @@ namespace ioxide;
 /// </summary>
 public sealed unsafe partial class Reactor
 {
-    private QuicOptions? _quic;
+    private QuicOptions? _quicOptions;
     private readonly Dictionary<QuicCid, QuicConnection> _quicConns = new();
     private readonly HashSet<QuicConnection> _quicConnSet = [];
     private readonly List<QuicConnection> _quicSweepScratch = [];
@@ -26,21 +26,46 @@ public sealed unsafe partial class Reactor
         {
             return;
         }
-        _quic = options;
+        _quicOptions = options;
         AddTicker(QuicSweep);
     }
 
     private void QuicDispatch(in UdpDatagram datagram)
     {
-        if (!TryExtractDcid(datagram.Payload, _quic!.LocalCidLength, out QuicCid dcid, out bool longHeader))
+        // A GRO train can interleave datagrams of DIFFERENT connections - they share the client's
+        // 4-tuple, so the kernel coalesces across them. Demux per segment: routing the whole train
+        // by its first packet's DCID would feed other connections' packets to the wrong engine
+        // (which silently drops them - the peers just stall).
+        if (datagram.GroSegmentSize > 0 && datagram.GroSegmentSize < datagram.Payload.Length)
+        {
+            int stride = datagram.GroSegmentSize;
+            for (int off = 0; off < datagram.Payload.Length; off += stride)
+            {
+                int len = Math.Min(stride, datagram.Payload.Length - off);
+                QuicDispatchDatagram(new UdpDatagram(datagram.SocketFd, datagram.LocalPort,
+                    datagram.PeerAddr, datagram.PeerAddrLen,
+                    datagram.Payload.Slice(off, len), 0, datagram.Tos));
+            }
+            return;
+        }
+
+        QuicDispatchDatagram(in datagram);
+    }
+
+    private void QuicDispatchDatagram(in UdpDatagram datagram)
+    {
+        // Reads only the cleartext prefix per RFC 8999
+        if (!TryExtractDcid(datagram.Payload, _quicOptions!.LocalCidLength, out QuicCid dcid, out bool longHeader))
         {
             return;   // not parseable as QUIC - drop
         }
 
+        // Quick connection lookup
         if (_quicConns.TryGetValue(dcid, out QuicConnection? conn))
         {
             conn.LastSeenMs = Environment.TickCount64;
             conn.OnDatagram(datagram.Payload, datagram.Tos, datagram.GroSegmentSize);
+            QuicArmTimer(conn);   // reads/handler sends (inline above) moved the engine deadline
             return;
         }
 
@@ -49,7 +74,7 @@ public sealed unsafe partial class Reactor
             return;   // short header for an unknown CID: stale/garbage (stateless reset later)
         }
 
-        QuicConnection? fresh = _quic.ConnectionFactory?.Invoke(this, in datagram, in dcid);
+        QuicConnection? fresh = _quicOptions.ConnectionFactory?.Invoke(this, in datagram, in dcid);
         if (fresh == null)
         {
             return;
@@ -66,7 +91,21 @@ public sealed unsafe partial class Reactor
         _quicConns[dcid] = fresh;
         _quicConnSet.Add(fresh);
 
+        // Two owners: this transport (released in QuicRemoveConnection) and the handler. The
+        // handler launches before the first datagram is fed - if the engine delivers stream data
+        // right away, the sticky pending flag completes the handler's first ReadAsync.
+        fresh.InitRefs();
+        if (QuicHandle is not null)
+        {
+            _ = RunQuicHandlerAsync(fresh);
+        }
+        else
+        {
+            fresh.DecRef();   // no handler configured: the transport stays the only owner
+        }
+
         fresh.OnDatagram(datagram.Payload, datagram.Tos, datagram.GroSegmentSize);
+        QuicArmTimer(fresh);
     }
 
     // RFC 8999 (version-independent invariants): long header (bit 0x80) carries an explicit DCID
@@ -138,20 +177,32 @@ public sealed unsafe partial class Reactor
             _quicConns.Remove(cid);
         }
         conn.Cids.Clear();
-        _quicConnSet.Remove(conn);
 
-        if (conn.PeerAddr != 0)
+        // The set membership doubles as the "transport still owns a ref" flag, so a second call
+        // (engine close racing the idle sweep) cannot double-release.
+        if (_quicConnSet.Remove(conn))
         {
-            NativeMemory.Free((void*)conn.PeerAddr);
-            conn.PeerAddr = 0;
+            // Wake the handler with closed=1 first - it resumes inline, sees IsClosed, and releases
+            // its own ref - then invalidate any awaiter that could outlive this life.
+            conn.MarkClosed();
+            conn.BumpGeneration();
+
+            if (conn.PeerAddr != 0)
+            {
+                NativeMemory.Free((void*)conn.PeerAddr);
+                conn.PeerAddr = 0;
+            }
+
+            conn.DecRef();
         }
     }
 
-    // Ticker callback (~250 ms): fire engine deadlines, evict quiet connections.
+    // Ticker callback (~250 ms): evict quiet connections. Engine deadlines are fired by
+    // QuicFireDueTimers at loop-pass granularity; this ticker's loop wake doubles as its floor.
     private void QuicSweep()
     {
         long now = Environment.TickCount64;
-        int idleMs = _quic!.IdleTimeoutMs;
+        int idleMs = _quicOptions!.IdleTimeoutMs;
 
         _quicSweepScratch.Clear();
         _quicSweepScratch.AddRange(_quicConnSet);
@@ -162,19 +213,57 @@ public sealed unsafe partial class Reactor
             {
                 QuicRemoveConnection(conn);
                 conn.OnEvicted(QuicEvictReason.IdleTimeout);
-                continue;
             }
+        }
+    }
 
-            if (conn.GetNextTimeout(now) <= now)
+    // Earliest engine deadline across live conns; long.MaxValue = none. Checked at the top of every
+    // loop pass, so loss/PTO timers fire at completion-batch granularity (~RTT under load) instead
+    // of the 250 ms ticker - a retransmit that waits 250 ms per loss makes storms self-sustaining.
+    private long _quicNextTimeoutMs = long.MaxValue;
+
+    private void QuicFireDueTimers()
+    {
+        if (_quicConnSet.Count == 0 || Environment.TickCount64 < _quicNextTimeoutMs)
+        {
+            return;
+        }
+
+        long now = Environment.TickCount64;
+        long next = long.MaxValue;
+        _quicSweepScratch.Clear();
+        _quicSweepScratch.AddRange(_quicConnSet);
+        foreach (QuicConnection conn in _quicSweepScratch)
+        {
+            long deadline = conn.GetNextTimeout(now);
+            if (deadline <= now)
             {
                 conn.OnTimer(now);
+                deadline = conn.GetNextTimeout(now);
             }
+            if (deadline < next)
+            {
+                next = deadline;
+            }
+        }
+        _quicNextTimeoutMs = next;
+    }
+
+    // Pull the tracked minimum forward after engine activity on a conn (its expiry may now be the
+    // earliest). Deadlines that move LATER are caught by the next full scan when the stale minimum
+    // fires - one wasted scan, never a missed timer.
+    private void QuicArmTimer(QuicConnection conn)
+    {
+        long deadline = conn.GetNextTimeout(Environment.TickCount64);
+        if (deadline < _quicNextTimeoutMs)
+        {
+            _quicNextTimeoutMs = deadline;
         }
     }
 
     private void TeardownQuic()
     {
-        if (_quic == null)
+        if (_quicOptions == null)
         {
             return;
         }

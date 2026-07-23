@@ -10,9 +10,9 @@ namespace ioxide;
 /// plus a sticky _pending to close the lost-wakeup race. Pool-managed: _generation invalidates
 /// awaiters from a previous life.
 /// </summary>
-public sealed unsafe partial class Connection : IValueTaskSource<RecvSnapshot>
+public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot>
 {
-    internal Connection SetFd(int fd)
+    internal TcpConnection SetFd(int fd)
     {
         ClientFd = fd;
         return this;
@@ -70,7 +70,7 @@ public sealed unsafe partial class Connection : IValueTaskSource<RecvSnapshot>
     /// Drain the snapshot into one array of memory views - the multi-item way to reconstruct a
     /// request that arrived fragmented. Build a sequence with ToReadOnlySequence(), parse, then
     /// hand everything back with <see cref="ReturnBuffers"/>. Allocates one array per call; the
-    /// raw TryGetItem loop and ConnectionPipeReader remain the allocation-free paths.
+    /// raw TryGetItem loop and TcpConnectionPipeReader remain the allocation-free paths.
     /// </summary>
     public UnmanagedMemoryManager[] GetSnapshotMemories(in RecvSnapshot snap)
     {

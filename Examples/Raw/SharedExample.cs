@@ -8,7 +8,7 @@ namespace Examples.Raw;
 /// </summary>
 public static class SharedExample
 {
-    public static async Task Handle(Reactor r, Connection conn)
+    public static async Task Handle(Reactor r, TcpConnection conn)
     {
         while (true)
         {

@@ -328,7 +328,7 @@ internal static class CoreTests
 
     // Accumulates bytes and answers once per complete request ("\r\n\r\n"-terminated), so pipelined
     // and fragmented requests both get exactly one response each.
-    private static async Task CountingHandler(Reactor r, Connection conn)
+    private static async Task CountingHandler(Reactor r, TcpConnection conn)
     {
         var carry = new List<byte>();
         try
@@ -375,7 +375,7 @@ internal static class CoreTests
     }
 
     // Answers every request with conn.ListenerPort, for the ExtraPorts routing test.
-    private static async Task PortEchoHandler(Reactor r, Connection conn)
+    private static async Task PortEchoHandler(Reactor r, TcpConnection conn)
     {
         try
         {
@@ -399,7 +399,7 @@ internal static class CoreTests
         }
     }
 
-    private static Func<Reactor, Connection, Task> BodyHandler(string body) => async (_, conn) =>
+    private static Func<Reactor, TcpConnection, Task> BodyHandler(string body) => async (_, conn) =>
     {
         try
         {

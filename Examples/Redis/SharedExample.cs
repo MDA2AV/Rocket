@@ -16,7 +16,7 @@ public static class SharedExample
 {
     private const string BenchKey = "ioxide:bench";
 
-    public static async Task Handle(Reactor r, Connection conn)
+    public static async Task Handle(Reactor r, TcpConnection conn)
     {
         var pool = r.GetService<RedisPool>();
 

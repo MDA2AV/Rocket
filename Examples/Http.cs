@@ -71,7 +71,7 @@ public static class Http
     /// handlers answer one response per request, so they skip the zero-copy carry slab that
     /// Pg.SharedExample shows - a small GET fits in a single recv here.
     /// </summary>
-    public static string ReadPath(Connection conn, RecvSnapshot snapshot)
+    public static string ReadPath(TcpConnection conn, RecvSnapshot snapshot)
     {
         string path = "/";
 
@@ -92,7 +92,7 @@ public static class Http
     }
 
     /// <summary>Write a minimal HTTP/1.1 text response.</summary>
-    public static void WriteText(Connection conn, int status, string reason, string body)
+    public static void WriteText(TcpConnection conn, int status, string reason, string body)
     {
         byte[] response = Encoding.ASCII.GetBytes(
             $"HTTP/1.1 {status} {reason}\r\nContent-Type: text/plain\r\nContent-Length: {body.Length}\r\n\r\n{body}");

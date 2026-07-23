@@ -20,7 +20,7 @@ internal static class TestServer
     /// <summary>Reserve a unique port (e.g. for ServerConfig.ExtraPorts).</summary>
     public static int NextPort() => Interlocked.Increment(ref _nextPort);
 
-    public static int Start(Func<Reactor, Connection, Task> handle, Action<Reactor>? onStart = null)
+    public static int Start(Func<Reactor, TcpConnection, Task> handle, Action<Reactor>? onStart = null)
         => StartConfigured(handle, DefaultConfig(), onStart).Port;
 
     /// <summary>
@@ -28,7 +28,7 @@ internal static class TestServer
     /// hand back the reactor + its thread so tests can assert against them or stop cleanly.
     /// </summary>
     public static (int Port, Reactor Reactor, Thread Thread) StartConfigured(
-        Func<Reactor, Connection, Task> handle, ServerConfig config, Action<Reactor>? onStart = null)
+        Func<Reactor, TcpConnection, Task> handle, ServerConfig config, Action<Reactor>? onStart = null)
     {
         int port = Interlocked.Increment(ref _nextPort);
         config = config with { Port = (ushort)port, ReactorCount = 1 };
@@ -36,7 +36,7 @@ internal static class TestServer
         var reactor = new Reactor(0, config)
         {
             OnStart = onStart,
-            Handle = handle,
+            TcpHandle = handle,
         };
 
         var thread = new Thread(reactor.Run)
@@ -74,7 +74,17 @@ internal static class TestServer
     public static (int TcpPort, int UdpPort) StartDatagram(
         UdpDatagramHandler? onDatagram,
         QuicConnectionFactory? quicFactory = null,
-        int quicIdleMs = 60_000)
+        int quicIdleMs = 60_000,
+        Func<Reactor, QuicConnection, Task>? quicHandle = null)
+        => StartDatagramConfigured(onDatagram, quicFactory, quicIdleMs, udpRecvSlots: 16, quicHandle);
+
+    /// <summary>StartDatagram with a tunable UDP ring depth (for the -ENOBUFS re-arm burst test).</summary>
+    public static (int TcpPort, int UdpPort) StartDatagramConfigured(
+        UdpDatagramHandler? onDatagram,
+        QuicConnectionFactory? quicFactory = null,
+        int quicIdleMs = 60_000,
+        int udpRecvSlots = 16,
+        Func<Reactor, QuicConnection, Task>? quicHandle = null)
     {
         int tcpPort = Interlocked.Increment(ref _nextPort);
         int udpPort = Interlocked.Increment(ref _nextPort);
@@ -88,6 +98,7 @@ internal static class TestServer
             WriteSlabSize = 16 * 1024,
             PoolMax = 64,
             RecvQueueEntries = 64,
+            UdpRecvSlots = udpRecvSlots,
             UdpPorts = quicFactory == null ? [(ushort)udpPort] : [],
             Quic = quicFactory == null ? null : new QuicOptions
             {
@@ -100,7 +111,8 @@ internal static class TestServer
 
         var reactor = new Reactor(0, config)
         {
-            Handle = static (_, _) => Task.CompletedTask,
+            TcpHandle = static (_, _) => Task.CompletedTask,
+            QuicHandle = quicHandle,
             OnDatagram = onDatagram,
         };
 

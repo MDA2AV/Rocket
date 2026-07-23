@@ -9,7 +9,7 @@ public sealed unsafe class UnmanagedMemoryManager : MemoryManager<byte>
 
     public ushort BufferId { get; private set; }
 
-    // Connection generation at enqueue time; lets returns route safely in
+    // TcpConnection generation at enqueue time; lets returns route safely in
     // incremental mode after pool reuse.
     public ushort Gen { get; private set; }
 
@@ -27,7 +27,7 @@ public sealed unsafe class UnmanagedMemoryManager : MemoryManager<byte>
         Gen = gen;
     }
 
-    // Re-point a pooled manager at a new slice (ConnectionPipeReader reuses
+    // Re-point a pooled manager at a new slice (TcpConnectionPipeReader reuses
     // one manager per held segment instead of allocating per recv).
     internal void Reset(byte* ptr, int length, ushort bufferId, ushort gen)
     {

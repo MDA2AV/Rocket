@@ -7,7 +7,7 @@ using ioxide.utils;
 namespace ioxide.Kestrel;
 
 /// <summary>
-/// A Kestrel transport duplex over an ioxide <see cref="Connection"/>: two BCL <see cref="Pipe"/>s whose
+/// A Kestrel transport duplex over an ioxide <see cref="TcpConnection"/>: two BCL <see cref="Pipe"/>s whose
 /// reader schedulers route to the reactor thread (via <see cref="ReactorPipeScheduler"/>), plus a
 /// recv→inbound pump and an outbound→send pump that run on the reactor. This pins Kestrel's whole request
 /// loop to the reactor thread. One copy each way (recv bytes into the inbound pipe; response bytes into
@@ -15,7 +15,7 @@ namespace ioxide.Kestrel;
 /// </summary>
 internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
 {
-    private readonly Connection _conn;
+    private readonly TcpConnection _conn;
     private readonly Reactor _reactor;
     private readonly TlsSession? _tls;   // non-null on a kTLS-terminated connection: inbound is decrypted here
     private readonly Pipe _inbound;    // recv pump writes; Kestrel reads (Transport.Input)
@@ -33,7 +33,7 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
     public PipeReader Input => _input;
     public PipeWriter Output => _outbound.Writer;
 
-    public HopDuplexPipe(Connection conn, Reactor reactor, TlsSession? tls = null)
+    public HopDuplexPipe(TcpConnection conn, Reactor reactor, TlsSession? tls = null)
     {
         _conn = conn;
         _reactor = reactor;
@@ -193,12 +193,12 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
 
         if (_tls is null)
         {
-            // Plaintext: half-close the write side so EOF-delimited clients (Connection: close / upgrade)
+            // Plaintext: half-close the write side so EOF-delimited clients (TcpConnection: close / upgrade)
             // see the end of the response — ioxide's refcounted teardown does not FIN a server-initiated
             // close on its own. Then wake and unwind the recv side (MarkClosed wakes a recv parked in
             // conn.ReadAsync — schedule it on the reactor so the continuation runs there, not the dispose thread).
             Shutdown(_conn.ClientFd, ShutWr);
-            _reactor.ScheduleOnReactor(static c => ((Connection)c!).MarkClosed(), _conn);
+            _reactor.ScheduleOnReactor(static c => ((TcpConnection)c!).MarkClosed(), _conn);
             _inbound.Writer.CancelPendingFlush();
             try { await _recvPump.ConfigureAwait(false); } catch { }
         }
@@ -207,7 +207,7 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
             // TLS: unwind the recv side FIRST so the recv pump stops touching the session, then dispose it
             // — that sends close_notify (a raw kTLS control send, which must precede the FIN while the write
             // side is still open) and frees the SSL — then FIN.
-            _reactor.ScheduleOnReactor(static c => ((Connection)c!).MarkClosed(), _conn);
+            _reactor.ScheduleOnReactor(static c => ((TcpConnection)c!).MarkClosed(), _conn);
             _inbound.Writer.CancelPendingFlush();
             try { await _recvPump.ConfigureAwait(false); } catch { }
             _tls.Dispose();

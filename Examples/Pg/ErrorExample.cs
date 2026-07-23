@@ -10,7 +10,7 @@ namespace Examples.Pg;
 /// </summary>
 public static class ErrorExample
 {
-    public static async Task Handle(Reactor r, Connection conn)
+    public static async Task Handle(Reactor r, TcpConnection conn)
     {
         PgPool pool = r.GetService<PgPool>();
 

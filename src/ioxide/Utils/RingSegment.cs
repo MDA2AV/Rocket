@@ -4,7 +4,7 @@ namespace ioxide.utils;
 
 /// <summary>
 /// One segment of a multi-buffer ReadOnlySequence&lt;byte&gt; built by the
-/// ConnectionPipeReader when a single read spans more than one recv buffer.
+/// TcpConnectionPipeReader when a single read spans more than one recv buffer.
 /// BufferId is carried for debugging; buffer return is driven off the held
 /// item list, not the segments.
 /// </summary>

@@ -8,7 +8,7 @@ namespace ioxide;
 /// Incremental-mode per-connection buffer-ring state. The reactor drives setup/teardown and the
 /// refcounted recycle; allocations persist across pool reuse and are freed in Dispose().
 /// </summary>
-public sealed unsafe partial class Connection
+public sealed unsafe partial class TcpConnection
 {
     internal byte*   BufRing;          // kernel-shared ring control area
     internal byte*   BufSlab;

@@ -9,5 +9,5 @@ namespace Examples.Pg;
 /// </summary>
 public static class IncrementalExample
 {
-    public static Task Handle(Reactor r, Connection conn) => SharedExample.Handle(r, conn);
+    public static Task Handle(Reactor r, TcpConnection conn) => SharedExample.Handle(r, conn);
 }

@@ -10,9 +10,9 @@ public sealed unsafe partial class Reactor
     private readonly Mpsc<ushort> _returnQ = new(1 << 14);
     private readonly Mpsc<ulong>  _flushQ  = new(1 << 12);   // (gen << 32) | fd
     
-    // Recycle must run on the reactor (buf_ring + pool are reactor-owned). Connection is a
+    // Recycle must run on the reactor (buf_ring + pool are reactor-owned). TcpConnection is a
     // ref type, so this queue is a ConcurrentQueue rather than the unmanaged Mpsc<T>.
-    private readonly ConcurrentQueue<Connection> _recycleQ = new();
+    private readonly ConcurrentQueue<TcpConnection> _recycleQ = new();
     
 #region Wake
     
@@ -72,8 +72,8 @@ public sealed unsafe partial class Reactor
     
 #region Recycle
     
-    // Called by Connection.DecRef at refcount 0.
-    internal void EnqueueRecycle(Connection conn)
+    // Called by TcpConnection.DecRef at refcount 0.
+    internal void EnqueueRecycle(TcpConnection conn)
     {
         if (Environment.CurrentManagedThreadId == _reactorThreadId)
         {
@@ -86,13 +86,13 @@ public sealed unsafe partial class Reactor
 
     private void DrainRecycleQ()
     {
-        while (_recycleQ.TryDequeue(out Connection? conn))
+        while (_recycleQ.TryDequeue(out TcpConnection? conn))
         {
             Recycle(conn, conn.ClientFd);
         }
     }
     
-    private void Recycle(Connection conn, int fd)
+    private void Recycle(TcpConnection conn, int fd)
     {
         conn.MarkClosed();
         SubmitCancel(Tag(KindTcpRecv, (ushort)conn.Generation, fd));   // before Clear() bumps the generation
@@ -126,7 +126,7 @@ public sealed unsafe partial class Reactor
     {
         if (Environment.CurrentManagedThreadId == _reactorThreadId)
         {
-            Connection? conn = ConnAt(fd, (ushort)gen);
+            TcpConnection? conn = ConnAt(fd, (ushort)gen);
             if (conn != null)
             {
                 SubmitFlush(conn, fd, (ushort)gen);
@@ -150,7 +150,7 @@ public sealed unsafe partial class Reactor
             ushort gen = (ushort)(packed >> 32);
             // Gen check drops flushes for connections that closed (or whose fd was reused)
             // after queuing.
-            Connection? conn = ConnAt(fd, gen);
+            TcpConnection? conn = ConnAt(fd, gen);
             if (conn == null)
             {
                 continue;
@@ -161,7 +161,7 @@ public sealed unsafe partial class Reactor
     
     // Submits the right send for a pending flush: a vectored SENDMSG for a segmented (multi-segment)
     // response, or the plain contiguous SEND for everything else (incl. the fast path and Grow mode).
-    private void SubmitFlush(Connection conn, int fd, ushort gen)
+    private void SubmitFlush(TcpConnection conn, int fd, ushort gen)
     {
         if (conn.FlushVectored)
         {

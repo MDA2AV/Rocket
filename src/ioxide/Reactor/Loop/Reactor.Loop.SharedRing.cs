@@ -54,6 +54,7 @@ public sealed unsafe partial class Reactor
             DrainRemoteOps();
             DrainPostQ();
             RearmStarvedRecvs();
+            QuicFireDueTimers();
 
             int rc = _ring.SubmitAndWait(1);
             if (rc < 0 && rc != -EINTR && rc != -EAGAIN && rc != -EBUSY)
@@ -95,7 +96,7 @@ public sealed unsafe partial class Reactor
 
             // UDP
             case KindUdpRecv:
-                OnUdpRecvCompletion(fd, cqe.res);
+                OnUdpRecvCompletion(fd, cqe.res, cqe.flags);
                 return;
 
             case KindUdpSend:
