@@ -59,6 +59,16 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
     /// </summary>
     public abstract void SendStream(long streamId, ReadOnlySpan<byte> data, bool fin);
 
+    /// <summary>
+    /// Open a server-initiated unidirectional stream (H3 control / QPACK); returns its id, or a
+    /// negative value if the engine can't (peer allowance exhausted, or no engine). Reactor thread
+    /// only.
+    /// </summary>
+    public virtual long OpenUniStream() => -1;
+
+    /// <summary>The ALPN token the handshake negotiated (e.g. "h3"); null before completion.</summary>
+    public string? NegotiatedProtocol { get; protected set; }
+
     /// <summary>Send one datagram (or a GSO batch) to the connection's current peer address.</summary>
     protected void Send(ReadOnlySpan<byte> payload, int gsoSegmentSize = 0)
     {

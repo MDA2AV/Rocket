@@ -25,7 +25,12 @@ public sealed unsafe class QuicEngine : IDisposable
     /// <summary>CID length this endpoint mints; must match <see cref="QuicOptions.LocalCidLength"/>.</summary>
     public uint CidLength { get; }
 
-    public QuicEngine(string certPemPath, string keyPemPath, uint cidLength = 8)
+    /// <summary>
+    /// alpn: the protocols this server accepts, preference-ordered (e.g. ["h3"]). A client offering
+    /// none of them fails the handshake with no_application_protocol (RFC 9001 §8.1). Null/empty:
+    /// accept whichever protocol the client offers first (the pre-H3 permissive behavior).
+    /// </summary>
+    public QuicEngine(string certPemPath, string keyPemPath, uint cidLength = 8, string[]? alpn = null)
     {
         CidLength = cidLength;
 
@@ -38,12 +43,39 @@ public sealed unsafe class QuicEngine : IDisposable
             OnRetireCid          = &QuicEngineConnection.CbRetireCid,
         };
 
-        _engine = Ngtcp2.iq_engine_new(certPemPath, keyPemPath, (nuint)cidLength, cbs);
+        byte[] alpnWire = AlpnWire(alpn);
+        fixed (byte* pAlpn = alpnWire)
+        {
+            _engine = Ngtcp2.iq_engine_new(certPemPath, keyPemPath, (nuint)cidLength,
+                alpnWire.Length > 0 ? pAlpn : null, (nuint)alpnWire.Length, cbs);
+        }
         if (_engine == 0)
         {
             throw new InvalidOperationException(
                 $"ioxide.quic: engine init failed (cert '{certPemPath}', key '{keyPemPath}')");
         }
+    }
+
+    // TLS wire format: each entry length-prefixed (one byte), concatenated.
+    private static byte[] AlpnWire(string[]? alpn)
+    {
+        if (alpn is null || alpn.Length == 0)
+        {
+            return [];
+        }
+
+        var wire = new List<byte>();
+        foreach (string proto in alpn)
+        {
+            byte[] bytes = System.Text.Encoding.ASCII.GetBytes(proto);
+            if (bytes.Length is 0 or > 255)
+            {
+                throw new ArgumentException($"invalid ALPN token '{proto}'", nameof(alpn));
+            }
+            wire.Add((byte)bytes.Length);
+            wire.AddRange(bytes);
+        }
+        return wire.ToArray();
     }
 
     /// <summary>

@@ -6,16 +6,18 @@
  * C# would be fragile against upstream layout drift. The shim owns every struct layout in C
  * (compiled against the exact bundled headers) and exposes a small stable ABI:
  *
- *   engine  = iq_engine_new(cert, key, cidlen, cbs)      one per factory; owns ptls_context
+ *   engine  = iq_engine_new(cert, key, cidlen, alpn, cbs) one per factory; owns ptls_context
  *   conn    = iq_accept(engine, addrs, first_pkt, ...)   validates + creates the server conn
  *             iq_conn_read(...)                          feed one UDP datagram
  *             iq_conn_write(...)                         produce one UDP datagram (loop until 0)
+ *             iq_conn_open_uni / iq_conn_get_alpn        H3 plumbing (uni streams, negotiated proto)
  *             iq_conn_expiry / iq_conn_handle_expiry     ns-precision engine deadlines
  *             iq_conn_free / iq_engine_free
  *
  * Events flow back to C# through the iq_callbacks function pointers; every call into and out of
  * the shim happens on the owning reactor thread.
  */
+#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,6 +52,8 @@ typedef struct iq_engine {
     ptls_on_client_hello_t          on_client_hello;
     iq_callbacks                    cbs;
     size_t                          cidlen;
+    uint8_t                         alpn[256];   /* allowlist, wire format (len-prefixed entries) */
+    size_t                          alpn_len;    /* 0 = accept whatever the client offers */
 } iq_engine;
 
 typedef struct iq_conn {
@@ -79,19 +83,36 @@ static void iq_rand(uint8_t *dest, size_t destlen, const ngtcp2_rand_ctx *rand_c
     ptls_openssl_random_bytes(dest, destlen);
 }
 
-/* Accept whichever ALPN the client offered first - protocol selection is the app's concern and
- * the echo/H3 layers above decide what to do with it. */
+/* ALPN. With an engine allowlist: pick the client's first offer that we accept, else fail the
+ * handshake (RFC 9001 §8.1: no mutual protocol = no_application_protocol). Without one (empty
+ * allowlist): accept whichever the client offered first - selection is the app's concern. */
 static int iq_on_client_hello(ptls_on_client_hello_t *self, ptls_t *tls,
                               ptls_on_client_hello_parameters_t *params)
 {
-    (void)self;
+    iq_engine *e = (iq_engine *)((char *)self - offsetof(iq_engine, on_client_hello));
+
     if (params->negotiated_protocols.count == 0) {
-        return 0;
+        return e->alpn_len == 0 ? 0 : PTLS_ALERT_NO_APPLICATION_PROTOCOL;
     }
-    return ptls_set_negotiated_protocol(
-        tls,
-        (const char *)params->negotiated_protocols.list[0].base,
-        params->negotiated_protocols.list[0].len);
+
+    if (e->alpn_len == 0) {
+        return ptls_set_negotiated_protocol(
+            tls,
+            (const char *)params->negotiated_protocols.list[0].base,
+            params->negotiated_protocols.list[0].len);
+    }
+
+    for (size_t i = 0; i < params->negotiated_protocols.count; i++) {
+        ptls_iovec_t offer = params->negotiated_protocols.list[i];
+        for (size_t off = 0; off < e->alpn_len;) {
+            size_t len = e->alpn[off];
+            if (len == offer.len && memcmp(e->alpn + off + 1, offer.base, len) == 0) {
+                return ptls_set_negotiated_protocol(tls, (const char *)offer.base, offer.len);
+            }
+            off += 1 + len;
+        }
+    }
+    return PTLS_ALERT_NO_APPLICATION_PROTOCOL;
 }
 
 /* ---- ngtcp2 callbacks ------------------------------------------------------------------- */
@@ -128,11 +149,20 @@ static int iq_cb_recv_stream_data(ngtcp2_conn *conn, uint32_t flags, int64_t str
 static int iq_cb_stream_close(ngtcp2_conn *conn, uint32_t flags, int64_t stream_id,
                               uint64_t app_error_code, void *user_data, void *stream_user_data)
 {
-    (void)conn; (void)stream_user_data;
+    (void)stream_user_data;
     iq_conn *c = user_data;
     if (!(flags & NGTCP2_STREAM_CLOSE_FLAG_APP_ERROR_CODE_SET)) {
         app_error_code = 0;
     }
+
+    /* Replenish the peer's stream allowance: initial_max_streams_* is a WINDOW, not a lifetime
+     * cap - without this a connection stalls for good after its first 100 requests. */
+    if ((stream_id & 0x3) == 0x0) {
+        ngtcp2_conn_extend_max_streams_bidi(conn, 1);
+    } else if ((stream_id & 0x3) == 0x2) {
+        ngtcp2_conn_extend_max_streams_uni(conn, 1);
+    }
+
     if (c->engine) c->engine->cbs.on_stream_close(c->user, stream_id, app_error_code);
     return 0;
 }
@@ -171,7 +201,8 @@ static int iq_cb_get_new_connection_id_noreport(ngtcp2_conn *conn, ngtcp2_cid *c
 /* ---- engine ----------------------------------------------------------------------------- */
 
 iq_engine *iq_engine_new(const char *cert_pem_path, const char *key_pem_path,
-                         size_t cidlen, iq_callbacks cbs)
+                         size_t cidlen, const uint8_t *alpn, size_t alpn_len,
+                         iq_callbacks cbs)
 {
     iq_engine *e = calloc(1, sizeof(*e));
     if (e == NULL) {
@@ -179,6 +210,15 @@ iq_engine *iq_engine_new(const char *cert_pem_path, const char *key_pem_path,
     }
     e->cbs    = cbs;
     e->cidlen = cidlen;
+
+    if (alpn != NULL && alpn_len > 0) {
+        if (alpn_len > sizeof(e->alpn)) {
+            free(e);
+            return NULL;
+        }
+        memcpy(e->alpn, alpn, alpn_len);
+        e->alpn_len = alpn_len;
+    }
 
     e->ptls_ctx.random_bytes = ptls_openssl_random_bytes;
     e->ptls_ctx.get_time     = &ptls_get_time;
@@ -298,7 +338,7 @@ iq_conn *iq_accept(iq_engine *e,
     params.initial_max_stream_data_bidi_remote = 256 * 1024;
     params.initial_max_stream_data_uni         = 256 * 1024;
     params.initial_max_data                    = 1024 * 1024;
-    params.initial_max_streams_bidi            = 100;
+    params.initial_max_streams_bidi            = 1024;
     params.initial_max_streams_uni             = 100;
     params.original_dcid                       = hd.dcid;
     params.original_dcid_present               = 1;
@@ -417,6 +457,33 @@ int iq_conn_in_draining(iq_conn *c)
     return ngtcp2_conn_in_draining_period(c->conn);
 }
 
+/* Open a server-initiated unidirectional stream (H3 control / QPACK). Returns the stream id, or
+ * a negative ngtcp2 error (e.g. STREAM_ID_BLOCKED when the peer's uni allowance is exhausted). */
+int64_t iq_conn_open_uni(iq_conn *c)
+{
+    int64_t sid;
+    int rv = ngtcp2_conn_open_uni_stream(c->conn, &sid, NULL);
+    return rv != 0 ? (int64_t)rv : sid;
+}
+
+/* Negotiated ALPN token into buf; returns its length, 0 if none (or buf too small). */
+size_t iq_conn_get_alpn(iq_conn *c, uint8_t *buf, size_t buflen)
+{
+    if (c->cptls.ptls == NULL) {
+        return 0;
+    }
+    const char *proto = ptls_get_negotiated_protocol(c->cptls.ptls);
+    if (proto == NULL) {
+        return 0;
+    }
+    size_t len = strlen(proto);
+    if (len == 0 || len > buflen) {
+        return 0;
+    }
+    memcpy(buf, proto, len);
+    return len;
+}
+
 const char *iq_strerror(int liberr)
 {
     return ngtcp2_strerror(liberr);
@@ -505,7 +572,7 @@ iq_conn *iq_client_connect(iq_client_engine *e,
     params.initial_max_stream_data_bidi_remote = 256 * 1024;
     params.initial_max_stream_data_uni         = 256 * 1024;
     params.initial_max_data                    = 1024 * 1024;
-    params.initial_max_streams_bidi            = 100;
+    params.initial_max_streams_bidi            = 1024;
     params.initial_max_streams_uni             = 100;
 
     ngtcp2_cid dcid, scid;

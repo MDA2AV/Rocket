@@ -32,6 +32,28 @@ public sealed unsafe partial class Reactor
 
     private void QuicDispatch(in UdpDatagram datagram)
     {
+        // A GRO train can interleave datagrams of DIFFERENT connections - they share the client's
+        // 4-tuple, so the kernel coalesces across them. Demux per segment: routing the whole train
+        // by its first packet's DCID would feed other connections' packets to the wrong engine
+        // (which silently drops them - the peers just stall).
+        if (datagram.GroSegmentSize > 0 && datagram.GroSegmentSize < datagram.Payload.Length)
+        {
+            int stride = datagram.GroSegmentSize;
+            for (int off = 0; off < datagram.Payload.Length; off += stride)
+            {
+                int len = Math.Min(stride, datagram.Payload.Length - off);
+                QuicDispatchDatagram(new UdpDatagram(datagram.SocketFd, datagram.LocalPort,
+                    datagram.PeerAddr, datagram.PeerAddrLen,
+                    datagram.Payload.Slice(off, len), 0, datagram.Tos));
+            }
+            return;
+        }
+
+        QuicDispatchDatagram(in datagram);
+    }
+
+    private void QuicDispatchDatagram(in UdpDatagram datagram)
+    {
         // Reads only the cleartext prefix per RFC 8999
         if (!TryExtractDcid(datagram.Payload, _quicOptions!.LocalCidLength, out QuicCid dcid, out bool longHeader))
         {

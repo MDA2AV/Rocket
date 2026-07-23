@@ -29,7 +29,7 @@ internal static unsafe class Ngtcp2
     [DllImport(Lib)] internal static extern nint iq_engine_new(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string certPemPath,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string keyPemPath,
-        nuint cidLen, Callbacks cbs);
+        nuint cidLen, byte* alpn, nuint alpnLen, Callbacks cbs);
 
     [DllImport(Lib)] internal static extern void iq_engine_free(nint engine);
 
@@ -58,6 +58,8 @@ internal static unsafe class Ngtcp2
     [DllImport(Lib)] internal static extern int   iq_conn_handle_expiry(nint conn, ulong ts);
     [DllImport(Lib)] internal static extern int   iq_conn_is_established(nint conn);
     [DllImport(Lib)] internal static extern int   iq_conn_in_draining(nint conn);
+    [DllImport(Lib)] internal static extern long  iq_conn_open_uni(nint conn);
+    [DllImport(Lib)] internal static extern nuint iq_conn_get_alpn(nint conn, byte* buf, nuint bufLen);
 
     [DllImport(Lib)] internal static extern nint iq_version();
     [DllImport(Lib)] internal static extern nint iq_strerror(int liberr);

@@ -17,14 +17,15 @@ internal static class Program
     {
         string mode = Environment.GetEnvironmentVariable("PLAYGROUND_MODE") ?? "raw";
 
-        // quic mode: an ngtcp2+picotls echo next to the TCP listener. One engine for the whole
-        // server; every reactor binds the UDP port via SO_REUSEPORT and demuxes its own flows.
+        // quic/h3 modes (aliases): ngtcp2+picotls next to the TCP listener, the nghttp3 layer
+        // answering real HTTP/3 requests, ALPN pinned. One engine for the whole server; every
+        // reactor binds the UDP port via SO_REUSEPORT and demuxes its own flows.
         QuicEngine? quicEngine = null;
         QuicOptions? quicOptions = null;
-        if (mode == "quic")
+        if (mode is "quic" or "h3")
         {
             (string certPath, string keyPath) = Handlers.EnsureQuicCert();
-            quicEngine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            quicEngine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
             ushort quicPort = ushort.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_QUIC_PORT"), out ushort qp) ? qp : (ushort)8443;
             quicOptions = new QuicOptions
             {
@@ -32,7 +33,7 @@ internal static class Program
                 LocalCidLength = 8,
                 ConnectionFactory = quicEngine.CreateFactory(),
             };
-            Console.WriteLine($"[playground] quic echo on udp :{quicPort} (ngtcp2 {QuicEngine.NativeVersion()})");
+            Console.WriteLine($"[playground] {mode} on udp :{quicPort} (ngtcp2 {QuicEngine.NativeVersion()})");
         }
 
         var config = new ServerConfig
@@ -40,6 +41,7 @@ internal static class Program
             Port = 8080,
             ReactorCount = int.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_REACTORS"), out int reactors) ? reactors : 12,
             Incremental = Environment.GetEnvironmentVariable("PLAYGROUND_INCREMENTAL") == "1",
+            UdpRecvSlots = int.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_UDP_SLOTS"), out int udpSlots) ? udpSlots : 16,
             Quic = quicOptions,
         };
         string assetDir = Environment.GetEnvironmentVariable("PLAYGROUND_DIR") ?? "/tmp/ioxide-assets";
@@ -118,8 +120,9 @@ internal static class Program
                     break;
 
                 case "quic":
+                case "h3":
                     reactor.TcpHandle = Handlers.Raw;   // :8080 still listens (until a TCP opt-out exists)
-                    reactor.QuicHandle = Handlers.QuicEcho;
+                    reactor.QuicHandle = Handlers.H3;
                     break;
 
                 default:

@@ -475,36 +475,13 @@ internal static class Handlers
     }
 
     /// <summary>
-    /// QUIC echo over the delegate model: one handler per connection, streams demuxed by the item's
-    /// StreamId - the QUIC twin of <see cref="Raw"/>. Bytes arrive decrypted off the ngtcp2 engine;
-    /// replies re-enter it via SendStream (no flush to await - the engine owns pacing).
+    /// The QUIC handler: HTTP/3 via ioxide.h3 - the h3 twin of <see cref="Raw"/>. H3Connection
+    /// feeds the connection's stream items into nghttp3 (the raw ReadAsync/TryGetItem loop lives
+    /// inside it) and runs one call here per assembled request; it owns the handler ref.
     /// </summary>
-    public static async Task QuicEcho(Reactor reactor, QuicConnection conn)
-    {
-        try
-        {
-            while (true)
-            {
-                QuicRecvSnapshot snap = await conn.ReadAsync();
-
-                while (conn.TryGetItem(in snap, out QuicRecvRing.Item item))
-                {
-                    conn.SendStream(item.StreamId, item.AsSpan(), item.Fin);
-                    conn.ReturnItem(in item);
-                }
-
-                if (snap.IsClosed)
-                {
-                    break;
-                }
-                conn.ResetRead();
-            }
-        }
-        finally
-        {
-            conn.DecRef();
-        }
-    }
+    public static Task H3(Reactor reactor, QuicConnection conn)
+        => new ioxide.h3.H3Connection(conn).RunAsync(
+            static req => ioxide.h3.H3Response.Text($"hello {req.Path} over HTTP/3 via io_uring\n"));
 
     /// <summary>Self-signed localhost cert for the quic mode (PLAYGROUND_QUIC_CERT/KEY override it).</summary>
     public static (string CertPath, string KeyPath) EnsureQuicCert()

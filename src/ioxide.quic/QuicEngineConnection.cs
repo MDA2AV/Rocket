@@ -122,7 +122,6 @@ public unsafe class QuicEngineConnection : QuicConnection
         {
             return;
         }
-
         // A GRO train is several datagrams of groSegmentSize bytes (last may be shorter); feed each.
         int stride = groSegmentSize > 0 ? groSegmentSize : payload.Length;
         for (int off = 0; off < payload.Length; off += stride)
@@ -152,12 +151,30 @@ public unsafe class QuicEngineConnection : QuicConnection
 
         if (!_handshakeDone && Ngtcp2.iq_conn_is_established(_conn) != 0)
         {
-            _handshakeDone = true;
-            OnHandshakeCompleted();
+            HandshakeCompletedOnce();
         }
 
         FlushEgress();
         FireRecv();
+    }
+
+    // Single handshake-done funnel (the engine callback and the OnDatagram poll can both detect
+    // it): record the negotiated ALPN, then fire the hook.
+    private void HandshakeCompletedOnce()
+    {
+        _handshakeDone = true;
+
+        Span<byte> alpn = stackalloc byte[64];
+        fixed (byte* p = alpn)
+        {
+            nuint len = Ngtcp2.iq_conn_get_alpn(_conn, p, (nuint)alpn.Length);
+            if (len > 0)
+            {
+                NegotiatedProtocol = System.Text.Encoding.ASCII.GetString(alpn[..(int)len]);
+            }
+        }
+
+        OnHandshakeCompleted();
     }
 
     // The once-per-read wake: the engine is idle again, so the handler resuming inline (and
@@ -182,9 +199,18 @@ public unsafe class QuicEngineConnection : QuicConnection
         {
             return long.MaxValue;
         }
+
+        // Already due (it expired between ticker sweeps): fire on this sweep. The subtraction below
+        // would otherwise underflow the ulong and push the deadline ~584 years out, permanently
+        // killing this connection's loss recovery.
+        ulong now = NowNs();
+        if (expiryNs <= now)
+        {
+            return nowMs;
+        }
+
         // The sweep works in TickCount64 ms; convert the ns deadline to that clock's frame.
-        long deltaMs = (long)((expiryNs - NowNs()) / 1_000_000);
-        return nowMs + Math.Max(0, deltaMs);
+        return nowMs + (long)((expiryNs - now) / 1_000_000);
     }
 
     public override void OnTimer(long nowMs)
@@ -210,50 +236,120 @@ public unsafe class QuicEngineConnection : QuicConnection
 
     // --- application-facing send --------------------------------------------------------------
 
+    // Application egress the engine couldn't take yet (cwnd/pacing/flow control full), replayed
+    // from FlushEgress once ACKs or timers free the window. Order-preserving; bytes are NEVER
+    // dropped - a response the engine defers would otherwise vanish for good, since the layer
+    // above (nghttp3) has already accounted it as written and will not re-emit it.
+    private readonly Queue<(long Sid, byte[] Data, bool Fin)> _pendingSend = new();
+    private long   _pendingSid;
+    private byte[]? _pendingData;   // partially-written head; null = take the next queue entry
+    private int    _pendingOff;
+    private bool   _pendingFin;
+    private int    _pendingBytes;
+
+    // A peer that stops draining gets closed rather than buffered without bound.
+    private const int PendingSendCap = 1 << 20;
+
     /// <summary>Queue bytes on a stream and flush. streamId must come from a delivered item or
-    /// <see cref="OpenUniStream"/>. fin closes the send side.</summary>
+    /// <see cref="OpenUniStream"/>. fin closes the send side. Never discards: what the engine
+    /// can't take now is buffered and replayed as the window opens.</summary>
     public override void SendStream(long streamId, ReadOnlySpan<byte> data, bool fin)
     {
         if (_closed)
         {
             return;
         }
-        Pump(streamId, data, fin);
+
+        if (_pendingData is null && _pendingSend.Count == 0)
+        {
+            int consumed = WriteStream(streamId, data, fin, out bool complete);
+            if (_closed)
+            {
+                return;
+            }
+            FlushConnection();
+            if (complete)
+            {
+                return;
+            }
+            data = data[consumed..];
+        }
+
+        // Preserve order behind whatever is already queued.
+        _pendingBytes += data.Length;
+        if (_pendingBytes > PendingSendCap)
+        {
+            Console.Error.WriteLine("[ioxide.quic] send backlog cap exceeded; closing connection.");
+            _closed = true;
+            _reactor.QuicRemoveConnection(this);
+            Destroy();
+            return;
+        }
+        _pendingSend.Enqueue((streamId, data.ToArray(), fin));
     }
 
-    /// <summary>Open a server-initiated unidirectional stream; returns its id, or -1 on failure.</summary>
-    protected long OpenUniStream()
+    /// <summary>Open a server-initiated unidirectional stream (H3 control / QPACK); id, or negative.</summary>
+    public override long OpenUniStream()
     {
-        // Reserved for the H3 control/QPACK streams; wired with ngtcp2_conn_open_uni_stream when
-        // the H3 layer lands. Not needed for the bidi echo milestone.
-        return -1;
+        if (_closed)
+        {
+            return -1;
+        }
+        return Ngtcp2.iq_conn_open_uni(_conn);
     }
 
     // --- engine egress pump -------------------------------------------------------------------
 
-    // Drain ngtcp2's non-stream output (ACKs, handshake, CRYPTO) until it has nothing more.
-    private void FlushEgress() => Pump(-1, default, false);
-
-    // Write one stream's data, then keep pumping the engine's remaining datagrams. streamId == -1
-    // means "no stream data, just flush". Handles ngtcp2's writev_stream loop: advance by the
-    // consumed count, and once the stream can take no more (all sent / FIN'd / blocked) fall back
-    // to stream -1 so coalesced ACKs and the FIN's own packets still go out.
-    private void Pump(long streamId, ReadOnlySpan<byte> data, bool fin)
+    // Replay deferred stream bytes now that the window may have opened, then drain the engine's
+    // own frames. Runs after every inbound datagram (ACKs open the window) and every timer.
+    private void FlushEgress()
     {
-        if (_closed)
+        ReplayPending();
+        FlushConnection();
+    }
+
+    private void ReplayPending()
+    {
+        while (!_closed)
         {
-            return;
+            if (_pendingData is null)
+            {
+                if (!_pendingSend.TryDequeue(out (long Sid, byte[] Data, bool Fin) next))
+                {
+                    return;
+                }
+                (_pendingSid, _pendingData, _pendingFin) = next;
+                _pendingOff = 0;
+            }
+
+            int consumed = WriteStream(_pendingSid, _pendingData.AsSpan(_pendingOff), _pendingFin, out bool complete);
+            _pendingOff   += consumed;
+            _pendingBytes -= consumed;
+            if (!complete)
+            {
+                return;   // engine still full - the next ACK/timer flush retries
+            }
+            _pendingBytes -= _pendingData.Length - _pendingOff;   // discarded tail of a reset stream
+            _pendingData = null;
         }
+    }
+
+    // Write one stream's bytes into the engine, sending each produced datagram. Returns the bytes
+    // accepted; complete = every byte and the fin were taken (or the stream is gone and the rest
+    // has nowhere to go). Never discards silently - the caller keeps the remainder.
+    private int WriteStream(long streamId, ReadOnlySpan<byte> data, bool fin, out bool complete)
+    {
+        complete = data.Length == 0 && !fin;
         int off = 0;
-        while (true)
+        while (!_closed && !complete)
         {
             long consumed;
             nint n;
             fixed (byte* dest = _sendBuf)
             fixed (byte* src = data)
             {
-                byte* dataPtr = streamId >= 0 ? src + off : null;
-                nuint dataLen = streamId >= 0 ? (nuint)(data.Length - off) : 0;
+                byte* dataPtr = off < data.Length ? src + off : null;
+                nuint dataLen = (nuint)(data.Length - off);
                 n = Ngtcp2.iq_conn_write(_conn, dest, (nuint)_sendBuf.Length,
                     streamId, dataPtr, dataLen, fin ? 1 : 0, &consumed, NowNs());
             }
@@ -261,17 +357,22 @@ public unsafe class QuicEngineConnection : QuicConnection
             int code = (int)n;
             if (code < 0)
             {
-                // Stream can't accept more right now - stop feeding it, but keep flushing the
-                // connection's own packets (ACKs, the FIN we already handed over) via stream -1.
-                if (code is Ngtcp2.NGTCP2_ERR_STREAM_DATA_BLOCKED
-                         or Ngtcp2.NGTCP2_ERR_STREAM_SHUT_WR
-                         or Ngtcp2.NGTCP2_ERR_STREAM_NOT_FOUND)
+                if (code == Ngtcp2.NGTCP2_ERR_STREAM_SHUT_WR)
                 {
-                    streamId = -1;
-                    continue;
+                    complete = true;   // the fin is already registered - nothing more can be written
+                    return off;
+                }
+                if (code == Ngtcp2.NGTCP2_ERR_STREAM_NOT_FOUND)
+                {
+                    complete = true;   // peer reset/closed the stream - the remainder has nowhere to go
+                    return off;
+                }
+                if (code == Ngtcp2.NGTCP2_ERR_STREAM_DATA_BLOCKED)
+                {
+                    return off;        // stream-level flow control - retry on a later flush
                 }
                 CloseFromEngine(code);
-                return;
+                return off;
             }
 
             if (consumed > 0)
@@ -283,17 +384,40 @@ public unsafe class QuicEngineConnection : QuicConnection
                 Send(_sendBuf.AsSpan(0, (int)n));
             }
 
-            if (n == 0)
+            if (off == data.Length && (data.Length > 0 || n > 0))
             {
-                // Nothing more to write on this stream. If stream data remains unsent, drop to the
-                // generic flush; otherwise we are done.
-                if (streamId >= 0 && off < data.Length)
-                {
-                    streamId = -1;
-                    continue;
-                }
+                complete = true;   // all bytes accepted; the fin (if any) rode the final ones
+                return off;
+            }
+            if (n == 0 && consumed <= 0)
+            {
+                return off;        // engine can't take more now (cwnd/pacing/amplification)
+            }
+        }
+        return off;
+    }
+
+    // Drain ngtcp2's own frames (ACKs, handshake, CRYPTO, MAX_STREAMS) until it has nothing more.
+    private void FlushConnection()
+    {
+        while (!_closed)
+        {
+            long consumed;
+            nint n;
+            fixed (byte* dest = _sendBuf)
+            {
+                n = Ngtcp2.iq_conn_write(_conn, dest, (nuint)_sendBuf.Length, -1, null, 0, 0, &consumed, NowNs());
+            }
+            if ((int)n < 0)
+            {
+                CloseFromEngine((int)n);
                 return;
             }
+            if (n == 0)
+            {
+                return;
+            }
+            Send(_sendBuf.AsSpan(0, (int)n));
         }
     }
 
@@ -348,8 +472,7 @@ public unsafe class QuicEngineConnection : QuicConnection
         QuicEngineConnection c = From(user);
         if (!c._handshakeDone)
         {
-            c._handshakeDone = true;
-            c.OnHandshakeCompleted();
+            c.HandshakeCompletedOnce();
         }
     }
 

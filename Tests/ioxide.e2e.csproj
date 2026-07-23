@@ -21,6 +21,7 @@
   <ItemGroup>
     <ProjectReference Include="../src/ioxide/ioxide.csproj" />
     <ProjectReference Include="../src/ioxide.quic/ioxide.quic.csproj" />
+    <ProjectReference Include="../src/ioxide.h3/ioxide.h3.csproj" />
     <ProjectReference Include="../src/ioxide.pg/ioxide.pg.csproj" />
     <ProjectReference Include="../src/ioxide.redis/ioxide.redis.csproj" />
     <ProjectReference Include="../src/ioxide.tls/ioxide.tls.csproj" />

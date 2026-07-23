@@ -1,0 +1,401 @@
+/*
+ * ioxide.h3 native shim: a thin, C#-friendly facade over nghttp3 (sans-I/O HTTP/3 + QPACK).
+ *
+ * Why it exists: nghttp3's conn API takes a ~15-entry callback table, rcbuf-typed header values
+ * and vectored reads - marshaling those from C# would be fragile against upstream layout drift.
+ * The shim owns every struct layout in C (compiled against the exact bundled headers) and exposes
+ * a small stable ABI. It does no I/O and holds no transport state: bytes in via ih3_read_stream
+ * (from any QuicConnection's recv queue), bytes out via ih3_writev (into SendStream).
+ *
+ *   conn = ih3_server_new(cbs, user)              one per QUIC connection
+ *          ih3_bind_streams(ctrl, qenc, qdec)     the server-opened uni streams (SETTINGS ride out
+ *                                                 on the next ih3_writev drain)
+ *          ih3_read_stream(sid, data, len, fin)   feed one recv item; request events fire back
+ *          ih3_submit_response(sid, hdrs, body)   headers packed [u16 nlen][name][u16 vlen][value]*
+ *          ih3_writev(&sid, &fin, buf, len)       drain one egress chunk per call until 0
+ *          ih3_close_stream(sid, app_error)       QUIC reported the stream closed
+ *          ih3_free
+ *
+ * Every call happens on the owning reactor thread. Response bodies are copied in and freed on
+ * stream close, so the C# side keeps nothing alive.
+ */
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+#include <sys/types.h>
+
+#include <nghttp3/nghttp3.h>
+
+/* ---- callback table into C# ------------------------------------------------------------- */
+
+typedef struct ih3_callbacks {
+    void (*on_begin_headers)(void *user, int64_t stream_id);
+    void (*on_header)(void *user, int64_t stream_id,
+                      const uint8_t *name, size_t namelen,
+                      const uint8_t *value, size_t valuelen);
+    void (*on_end_headers)(void *user, int64_t stream_id, int fin);
+    void (*on_data)(void *user, int64_t stream_id, const uint8_t *data, size_t datalen);
+    void (*on_end_stream)(void *user, int64_t stream_id);
+} ih3_callbacks;
+
+/* ---- objects ---------------------------------------------------------------------------- */
+
+/* Per-request-stream send state: the response body, copied at submit, freed at close. */
+typedef struct ih3_stream {
+    int64_t             id;
+    uint8_t            *body;
+    size_t              body_len;
+    struct ih3_stream  *next;
+} ih3_stream;
+
+typedef struct ih3_conn {
+    nghttp3_conn   *conn;
+    ih3_callbacks   cbs;
+    void           *user;
+    ih3_stream     *streams;
+} ih3_conn;
+
+static ih3_stream *ih3_stream_find(ih3_conn *c, int64_t id)
+{
+    for (ih3_stream *s = c->streams; s != NULL; s = s->next) {
+        if (s->id == id) {
+            return s;
+        }
+    }
+    return NULL;
+}
+
+static void ih3_stream_drop(ih3_conn *c, int64_t id)
+{
+    ih3_stream **p = &c->streams;
+    while (*p != NULL) {
+        if ((*p)->id == id) {
+            ih3_stream *dead = *p;
+            *p = dead->next;
+            free(dead->body);
+            free(dead);
+            return;
+        }
+        p = &(*p)->next;
+    }
+}
+
+/* ---- nghttp3 callbacks ------------------------------------------------------------------ */
+
+static int ih3_cb_begin_headers(nghttp3_conn *conn, int64_t stream_id, void *conn_user_data,
+                                void *stream_user_data)
+{
+    (void)conn; (void)stream_user_data;
+    ih3_conn *c = conn_user_data;
+    c->cbs.on_begin_headers(c->user, stream_id);
+    return 0;
+}
+
+static int ih3_cb_recv_header(nghttp3_conn *conn, int64_t stream_id, int32_t token,
+                              nghttp3_rcbuf *name, nghttp3_rcbuf *value, uint8_t flags,
+                              void *conn_user_data, void *stream_user_data)
+{
+    (void)conn; (void)token; (void)flags; (void)stream_user_data;
+    ih3_conn *c = conn_user_data;
+    nghttp3_vec n = nghttp3_rcbuf_get_buf(name);
+    nghttp3_vec v = nghttp3_rcbuf_get_buf(value);
+    c->cbs.on_header(c->user, stream_id, n.base, n.len, v.base, v.len);
+    return 0;
+}
+
+static int ih3_cb_end_headers(nghttp3_conn *conn, int64_t stream_id, int fin,
+                              void *conn_user_data, void *stream_user_data)
+{
+    (void)conn; (void)stream_user_data;
+    ih3_conn *c = conn_user_data;
+    c->cbs.on_end_headers(c->user, stream_id, fin);
+    return 0;
+}
+
+static int ih3_cb_recv_data(nghttp3_conn *conn, int64_t stream_id, const uint8_t *data,
+                            size_t datalen, void *conn_user_data, void *stream_user_data)
+{
+    (void)conn; (void)stream_user_data;
+    ih3_conn *c = conn_user_data;
+    c->cbs.on_data(c->user, stream_id, data, datalen);
+    return 0;
+}
+
+static int ih3_cb_end_stream(nghttp3_conn *conn, int64_t stream_id, void *conn_user_data,
+                             void *stream_user_data)
+{
+    (void)conn; (void)stream_user_data;
+    ih3_conn *c = conn_user_data;
+    c->cbs.on_end_stream(c->user, stream_id);
+    return 0;
+}
+
+static int ih3_cb_stream_close(nghttp3_conn *conn, int64_t stream_id, uint64_t app_error_code,
+                               void *conn_user_data, void *stream_user_data)
+{
+    (void)conn; (void)app_error_code; (void)stream_user_data;
+    ih3_conn *c = conn_user_data;
+    ih3_stream_drop(c, stream_id);
+    return 0;
+}
+
+/* The transport (iq shim) extends QUIC flow-control credit for every byte at delivery, before
+ * nghttp3 ever sees it - so deferred consumption needs no follow-up here. */
+static int ih3_cb_deferred_consume(nghttp3_conn *conn, int64_t stream_id, size_t nconsumed,
+                                   void *conn_user_data, void *stream_user_data)
+{
+    (void)conn; (void)stream_id; (void)nconsumed; (void)conn_user_data; (void)stream_user_data;
+    return 0;
+}
+
+static int ih3_cb_acked_stream_data(nghttp3_conn *conn, int64_t stream_id, uint64_t datalen,
+                                    void *conn_user_data, void *stream_user_data)
+{
+    (void)conn; (void)stream_id; (void)datalen; (void)conn_user_data; (void)stream_user_data;
+    return 0;
+}
+
+/* ---- body provider ---------------------------------------------------------------------- */
+
+/* Hand nghttp3 the whole remaining body in one vec with EOF; it slices as the window allows.
+ * The buffer stays valid until stream close (ih3_stream_drop), so no ack tracking is needed. */
+static nghttp3_ssize ih3_read_body(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec,
+                                   size_t veccnt, uint32_t *pflags, void *conn_user_data,
+                                   void *stream_user_data)
+{
+    (void)conn; (void)veccnt; (void)stream_user_data;
+    ih3_conn *c = conn_user_data;
+    ih3_stream *s = ih3_stream_find(c, stream_id);
+
+    *pflags |= NGHTTP3_DATA_FLAG_EOF;
+    if (s == NULL || s->body_len == 0) {
+        return 0;
+    }
+    vec[0].base = s->body;
+    vec[0].len  = s->body_len;
+    return 1;
+}
+
+/* ---- API -------------------------------------------------------------------------------- */
+
+static ih3_conn *ih3_new(ih3_callbacks cbs, void *user, int server)
+{
+    ih3_conn *c = calloc(1, sizeof(*c));
+    if (c == NULL) {
+        return NULL;
+    }
+    c->cbs  = cbs;
+    c->user = user;
+
+    nghttp3_callbacks callbacks = {0};
+    callbacks.begin_headers     = ih3_cb_begin_headers;
+    callbacks.recv_header       = ih3_cb_recv_header;
+    callbacks.end_headers       = ih3_cb_end_headers;
+    callbacks.recv_data         = ih3_cb_recv_data;
+    callbacks.end_stream        = ih3_cb_end_stream;
+    callbacks.stream_close      = ih3_cb_stream_close;
+    callbacks.deferred_consume  = ih3_cb_deferred_consume;
+    callbacks.acked_stream_data = ih3_cb_acked_stream_data;
+
+    nghttp3_settings settings;
+    nghttp3_settings_default(&settings);
+
+    int rv = server
+        ? nghttp3_conn_server_new(&c->conn, &callbacks, &settings, nghttp3_mem_default(), c)
+        : nghttp3_conn_client_new(&c->conn, &callbacks, &settings, nghttp3_mem_default(), c);
+    if (rv != 0) {
+        free(c);
+        return NULL;
+    }
+    return c;
+}
+
+ih3_conn *ih3_server_new(ih3_callbacks cbs, void *user)
+{
+    return ih3_new(cbs, user, 1);
+}
+
+/* Client conn (test drivers): same event surface, requests out instead of responses. */
+ih3_conn *ih3_client_new(ih3_callbacks cbs, void *user)
+{
+    return ih3_new(cbs, user, 0);
+}
+
+void ih3_free(ih3_conn *c)
+{
+    if (c == NULL) {
+        return;
+    }
+    while (c->streams != NULL) {
+        ih3_stream_drop(c, c->streams->id);
+    }
+    nghttp3_conn_del(c->conn);
+    free(c);
+}
+
+/* Register the server-opened uni streams. nghttp3 queues its SETTINGS/QPACK prefaces; the next
+ * ih3_writev drain carries them out. */
+int ih3_bind_streams(ih3_conn *c, int64_t ctrl, int64_t qenc, int64_t qdec)
+{
+    int rv = nghttp3_conn_bind_control_stream(c->conn, ctrl);
+    if (rv != 0) {
+        return rv;
+    }
+    return nghttp3_conn_bind_qpack_streams(c->conn, qenc, qdec);
+}
+
+/* Feed one recv item (any stream - nghttp3 demuxes uni stream types itself). Negative = fatal. */
+int64_t ih3_read_stream(ih3_conn *c, int64_t stream_id, const uint8_t *data, size_t datalen, int fin)
+{
+    nghttp3_ssize rv = nghttp3_conn_read_stream(c->conn, stream_id, data, datalen, fin);
+    return (int64_t)rv;
+}
+
+#define IH3_MAX_NV 64
+
+/* headers: [u16 namelen][name][u16 valuelen][value] repeated, little-endian u16 (written and read
+ * on the same host). Returns the entry count, or -1 on a malformed buffer. */
+static int ih3_unpack_headers(const uint8_t *headers, size_t headers_len, nghttp3_nv *nva)
+{
+    size_t nvlen = 0;
+    for (size_t off = 0; off + 2 <= headers_len && nvlen < IH3_MAX_NV; nvlen++) {
+        uint16_t namelen;
+        memcpy(&namelen, headers + off, 2);
+        off += 2;
+        const uint8_t *name = headers + off;
+        off += namelen;
+
+        if (off + 2 > headers_len) {
+            return -1;
+        }
+        uint16_t valuelen;
+        memcpy(&valuelen, headers + off, 2);
+        off += 2;
+        const uint8_t *value = headers + off;
+        off += valuelen;
+
+        if (off > headers_len) {
+            return -1;
+        }
+
+        nva[nvlen].name     = (uint8_t *)name;
+        nva[nvlen].namelen  = namelen;
+        nva[nvlen].value    = (uint8_t *)value;
+        nva[nvlen].valuelen = valuelen;
+        nva[nvlen].flags    = NGHTTP3_NV_FLAG_NONE;
+
+        if (off == headers_len) {
+            return (int)(nvlen + 1);
+        }
+    }
+    return (int)nvlen;
+}
+
+/* body copied; freed at stream close. */
+int ih3_submit_response(ih3_conn *c, int64_t stream_id,
+                        const uint8_t *headers, size_t headers_len,
+                        const uint8_t *body, size_t body_len)
+{
+    nghttp3_nv nva[IH3_MAX_NV];
+    int nvlen = ih3_unpack_headers(headers, headers_len, nva);
+    if (nvlen < 0) {
+        return NGHTTP3_ERR_INVALID_ARGUMENT;
+    }
+
+    ih3_stream *s = NULL;
+    if (body_len > 0) {
+        s = calloc(1, sizeof(*s));
+        if (s == NULL) {
+            return NGHTTP3_ERR_NOMEM;
+        }
+        s->body = malloc(body_len);
+        if (s->body == NULL) {
+            free(s);
+            return NGHTTP3_ERR_NOMEM;
+        }
+        memcpy(s->body, body, body_len);
+        s->body_len = body_len;
+        s->id       = stream_id;
+        s->next     = c->streams;
+        c->streams  = s;
+    }
+
+    nghttp3_data_reader dr = { .read_data = ih3_read_body };
+    int rv = nghttp3_conn_submit_response(c->conn, stream_id, nva, (size_t)nvlen,
+                                          body_len > 0 ? &dr : NULL);
+    if (rv != 0 && s != NULL) {
+        ih3_stream_drop(c, stream_id);
+    }
+    return rv;
+}
+
+/* Client conn only: a bodyless request (fin after headers). Test drivers. */
+int ih3_submit_request(ih3_conn *c, int64_t stream_id,
+                       const uint8_t *headers, size_t headers_len)
+{
+    nghttp3_nv nva[IH3_MAX_NV];
+    int nvlen = ih3_unpack_headers(headers, headers_len, nva);
+    if (nvlen < 0) {
+        return NGHTTP3_ERR_INVALID_ARGUMENT;
+    }
+    return nghttp3_conn_submit_request(c->conn, stream_id, nva, (size_t)nvlen, NULL, NULL);
+}
+
+/* Drain one egress chunk: fills buf, returns byte count (0 = drained), sets *stream_id and *fin.
+ * fin only survives when the chunk fit whole - a truncated chunk clears it and the next call
+ * carries the rest. */
+int64_t ih3_writev(ih3_conn *c, int64_t *stream_id, int *fin, uint8_t *buf, size_t buflen)
+{
+    enum { MAX_VEC = 16 };
+    nghttp3_vec vec[MAX_VEC];
+
+    int lfin = 0;
+    nghttp3_ssize cnt = nghttp3_conn_writev_stream(c->conn, stream_id, &lfin, vec, MAX_VEC);
+    if (cnt < 0) {
+        return (int64_t)cnt;
+    }
+    if (cnt == 0 && *stream_id == -1) {
+        return 0;
+    }
+
+    size_t total = 0;
+    int truncated = 0;
+    for (nghttp3_ssize i = 0; i < cnt; i++) {
+        size_t take = vec[i].len;
+        if (total + take > buflen) {
+            take = buflen - total;
+            truncated = 1;
+        }
+        memcpy(buf + total, vec[i].base, take);
+        total += take;
+        if (truncated) {
+            break;
+        }
+    }
+
+    nghttp3_conn_add_write_offset(c->conn, *stream_id, total);
+    *fin = (lfin && !truncated) ? 1 : 0;
+    return (int64_t)total;
+}
+
+int ih3_close_stream(ih3_conn *c, int64_t stream_id, uint64_t app_error)
+{
+    int rv = nghttp3_conn_close_stream(c->conn, stream_id, app_error);
+    if (rv == NGHTTP3_ERR_STREAM_NOT_FOUND) {
+        return 0;   /* uni streams and already-closed streams are not an error */
+    }
+    return rv;
+}
+
+const char *ih3_strerror(int liberr)
+{
+    return nghttp3_strerror(liberr);
+}
+
+const char *ih3_version(void)
+{
+    const nghttp3_info *info = nghttp3_version(0);
+    return info != NULL ? info->version_str : "unknown";
+}
