@@ -7,9 +7,9 @@ namespace ioxide;
 /// <summary>
 /// The connection's flush lifecycle: hand the buffered response to the reactor for sending and park the
 /// caller on an <see cref="IValueTaskSource"/> until that send completes. The reactor chooses a plain
-/// SEND for a contiguous response or a vectored SENDMSG for a segmented one (Connection.Write.Segmented.cs).
+/// SEND for a contiguous response or a vectored SENDMSG for a segmented one (TcpConnection.Write.Segmented.cs).
 /// </summary>
-public sealed unsafe partial class Connection : IValueTaskSource
+public sealed unsafe partial class TcpConnection : IValueTaskSource
 {
     private ManualResetValueTaskSourceCore<bool> _flushSignal = new()
     {
@@ -20,7 +20,7 @@ public sealed unsafe partial class Connection : IValueTaskSource
 
     public ValueTask FlushAsync()
     {
-        // Connection already torn down: complete immediately so the handler unwinds
+        // TcpConnection already torn down: complete immediately so the handler unwinds
         // to its next ReadAsync, sees IsClosed, and exits.
         if (Volatile.Read(ref _closed) == 1)
         {
@@ -91,7 +91,7 @@ public sealed unsafe partial class Connection : IValueTaskSource
         Volatile.Write(ref _flushInProgress, 0);
 
         // Guard against a double completion. During teardown MarkClosed() may have already disarmed and
-        // completed this flush (e.g. a Connection: close response whose SEND CQE lands after the close),
+        // completed this flush (e.g. a TcpConnection: close response whose SEND CQE lands after the close),
         // which Resets/invalidates the value-task source. Only the call that actually disarms the flush
         // signals — mirroring MarkClosed and the recv path's _armed check. Without this, the late CQE's
         // SetResult throws InvalidOperationException on the reactor thread and crashes the process.

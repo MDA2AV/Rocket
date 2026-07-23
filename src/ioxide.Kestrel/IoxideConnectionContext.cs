@@ -11,7 +11,7 @@ using ioxide.tls;
 namespace ioxide.Kestrel;
 
 /// <summary>
-/// Adapts a single ioxide <see cref="Connection"/> to Kestrel's <see cref="ConnectionContext"/>. The
+/// Adapts a single ioxide <see cref="TcpConnection"/> to Kestrel's <see cref="ConnectionContext"/>. The
 /// transport is a <see cref="HopDuplexPipe"/> (BCL pipes whose reader schedulers route to the reactor),
 /// so Kestrel's read → parse → handle → send loop runs pinned to the reactor thread.
 /// </summary>
@@ -34,7 +34,7 @@ internal sealed class IoxideConnectionContext : ConnectionContext,
 
     private int _disposed;
 
-    public IoxideConnectionContext(Connection connection, Reactor reactor, EndPoint localEndPoint, long id, TlsSession? session = null, string? alpn = null)
+    public IoxideConnectionContext(TcpConnection connection, Reactor reactor, EndPoint localEndPoint, long id, TlsSession? session = null, string? alpn = null)
     {
         _pipe = new HopDuplexPipe(connection, reactor, session);
         _reactor = reactor;

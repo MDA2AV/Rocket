@@ -16,7 +16,7 @@ public static class SslStreamExample
 
     public static void Init(X509Certificate2 cert) => _cert = cert;
 
-    public static async Task Handle(Reactor r, Connection conn)
+    public static async Task Handle(Reactor r, TcpConnection conn)
     {
         SslStream? ssl = null;
         try

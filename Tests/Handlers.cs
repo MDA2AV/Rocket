@@ -11,7 +11,7 @@ namespace Ioxide.E2E;
 /// <summary>Server-side HTTP helpers for the test handlers (local copy so the suite depends only on the modules).</summary>
 internal static class Wire
 {
-    public static string ReadPath(Connection conn, RecvSnapshot snapshot)
+    public static string ReadPath(TcpConnection conn, RecvSnapshot snapshot)
     {
         string path = "/";
 
@@ -31,7 +31,7 @@ internal static class Wire
         return path;
     }
 
-    public static void Write(Connection conn, int status, string body)
+    public static void Write(TcpConnection conn, int status, string body)
     {
         conn.Write(Encoding.ASCII.GetBytes(
             $"HTTP/1.1 {status} X\r\nContent-Type: text/plain\r\nContent-Length: {body.Length}\r\n\r\n{body}"));
@@ -56,7 +56,7 @@ internal static class Wire
 internal static class Handlers
 {
     // core: echo "ok" - exercises accept, the buffer-ring recv, send, and the keep-alive read loop.
-    public static async Task Raw(Reactor r, Connection conn)
+    public static async Task Raw(Reactor r, TcpConnection conn)
     {
         try
         {
@@ -82,7 +82,7 @@ internal static class Handlers
     }
 
     // pg: /add/N (int param), /rows (streaming), /bad (server error, caught), else SELECT 42.
-    public static async Task Pg(Reactor r, Connection conn)
+    public static async Task Pg(Reactor r, TcpConnection conn)
     {
         PgPool pool = r.GetService<PgPool>();
 
@@ -138,7 +138,7 @@ internal static class Handlers
     }
 
     // pg with a query longer than the (short) command timeout - for the timeout test.
-    public static async Task PgSlow(Reactor r, Connection conn)
+    public static async Task PgSlow(Reactor r, TcpConnection conn)
     {
         PgPool pool = r.GetService<PgPool>();
 
@@ -176,7 +176,7 @@ internal static class Handlers
     }
 
     // redis: /incr (RESP integer), /pipe (SET+INCR+GET in one round trip), else SET then GET.
-    public static async Task Redis(Reactor r, Connection conn)
+    public static async Task Redis(Reactor r, TcpConnection conn)
     {
         RedisPool pool = r.GetService<RedisPool>();
 
@@ -224,7 +224,7 @@ internal static class Handlers
     }
 
     // file: serve a baked asset by path; 404 on miss.
-    public static async Task Files(Reactor r, Connection conn)
+    public static async Task Files(Reactor r, TcpConnection conn)
     {
         StaticAssets assets = r.GetService<StaticAssets>();
 
@@ -264,7 +264,7 @@ internal static class Handlers
     }
 
     // tls: kTLS handshake, then a fixed plaintext response the kernel encrypts on send.
-    public static async Task Tls(Reactor r, Connection conn)
+    public static async Task Tls(Reactor r, TcpConnection conn)
     {
         TlsSession? tls = null;
 
@@ -317,7 +317,7 @@ internal static class Handlers
     }
 
     // The asset cache hands back one native response block; copy it through the write slab.
-    private static unsafe void WriteNative(Connection conn, nint data, int length)
+    private static unsafe void WriteNative(TcpConnection conn, nint data, int length)
     {
         conn.Write(new ReadOnlySpan<byte>((void*)data, length));
     }

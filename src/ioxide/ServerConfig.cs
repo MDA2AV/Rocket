@@ -19,7 +19,7 @@ public sealed record ServerConfig
 
     /// <summary>
     /// Additional listener ports (every reactor binds each one). Connections carry the port they
-    /// arrived on in <see cref="Connection.ListenerPort"/>, so one handler can serve several
+    /// arrived on in <see cref="TcpConnection.ListenerPort"/>, so one handler can serve several
     /// entry points (e.g. plaintext + TLS).
     /// </summary>
     public ushort[] ExtraPorts { get; init; } = [];

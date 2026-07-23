@@ -31,7 +31,7 @@ public sealed unsafe partial class Reactor
     private ushort AllocGid() => _freeGids!.Pop();
     private void   FreeGid(ushort gid) => _freeGids!.Push(gid);
 
-    private void SetupConnectionBufRing(Connection conn)
+    private void SetupConnectionBufRing(TcpConnection conn)
     {
         ushort gid = AllocGid();
         int entries = _connBufRingEntries;
@@ -83,7 +83,7 @@ public sealed unsafe partial class Reactor
         Volatile.Write(ref *(ushort*)(conn.BufRing + 14), (ushort)entries);
     }
 
-    private void TeardownConnectionBufRing(Connection conn)
+    private void TeardownConnectionBufRing(TcpConnection conn)
     {
         if (conn.IncrementalMode)
         {
@@ -97,7 +97,7 @@ public sealed unsafe partial class Reactor
     }
 
     // Re-add a fully-consumed buffer to its connection's ring. Reactor-thread-only.
-    private void ReturnConnectionBuffer(Connection conn, ushort bid)
+    private void ReturnConnectionBuffer(TcpConnection conn, ushort bid)
     {
         conn.CumOffset![bid]  = 0;
         conn.RefCount![bid]   = 0;
@@ -152,7 +152,7 @@ public sealed unsafe partial class Reactor
     private void ApplyReturnIncremental(int fd, ushort gen, ushort bid)
     {
         // The gen check also rejects stale returns from a reused fd's previous life.
-        Connection? conn = ConnAt(fd, gen);
+        TcpConnection? conn = ConnAt(fd, gen);
         if (conn is not { IncrementalMode: true })
         {
             return;

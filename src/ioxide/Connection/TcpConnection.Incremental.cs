@@ -8,7 +8,7 @@ namespace ioxide;
 /// Incremental-mode per-connection buffer-ring state. The reactor drives setup/teardown and the
 /// refcounted recycle; allocations persist across pool reuse and are freed in Dispose().
 /// </summary>
-public sealed unsafe partial class Connection
+public sealed unsafe partial class TcpConnection
 {
     internal byte*   BufRing;          // kernel-shared ring control area
     internal byte*   BufSlab;
@@ -20,8 +20,6 @@ public sealed unsafe partial class Connection
     internal int[]?  CumOffset;        // per-bid: offset where the next slice begins
     internal int[]?  RefCount;         // per-bid: outstanding handler refs
     internal bool[]? KernelDone;       // per-bid: kernel finished appending
-
-    internal int Generation => Volatile.Read(ref _generation);
 
     /// <summary>Hand a consumed recv buffer back, routed by mode.</summary>
     public void ReturnBuffer(in SpscRecvRing.Item item)

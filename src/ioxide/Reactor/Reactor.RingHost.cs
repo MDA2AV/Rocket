@@ -48,7 +48,7 @@ public sealed unsafe partial class Reactor : IRingHost
     /// <summary>
     /// The per-connection request handler, invoked once per accepted connection.
     /// </summary>
-    public Func<Reactor, Connection, Task> Handle = null!;
+    public Func<Reactor, TcpConnection, Task> Handle = null!;
 
     public void SubmitConnect(int fd, nint sockaddr, int sockaddrLen, IRingCompletion completion)
     {

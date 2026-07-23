@@ -17,7 +17,7 @@ public static class StaticExample
 {
     private const int Chunk = 12 * 1024;
 
-    public static async Task Handle(Reactor r, Connection conn)
+    public static async Task Handle(Reactor r, TcpConnection conn)
     {
         StaticAssets assets = r.GetService<StaticAssets>();
         RingPool<AssetReader> readers = r.GetService<RingPool<AssetReader>>();
@@ -74,7 +74,7 @@ public static class StaticExample
         }
     }
 
-    private static async Task NotFound(Connection conn, string path)
+    private static async Task NotFound(TcpConnection conn, string path)
     {
         Http.WriteText(conn, 404, "Not Found", $"no asset {path}");
         await conn.FlushAsync();
@@ -83,7 +83,7 @@ public static class StaticExample
     // Stream an asset off the ring from <paramref name="fd"/>, framing Content-Length from
     // <paramref name="totalLength"/>. Files bigger than the reader's buffer are read in successive
     // chunks at advancing offsets, so they're served whole instead of truncated.
-    private static async Task SendFromDisk(Connection conn, RingPool<AssetReader> readers, AssetCache.Asset asset, int fd, long totalLength)
+    private static async Task SendFromDisk(TcpConnection conn, RingPool<AssetReader> readers, AssetCache.Asset asset, int fd, long totalLength)
     {
         AssetReader reader = await readers.RentAsync();
 
@@ -121,7 +121,7 @@ public static class StaticExample
 
     // Serve a file whose on-disk version no longer matches the baked snapshot: open the current path
     // fresh (so an atomic rename resolves to the new inode, not the cached fd) and stream it live.
-    private static async Task SendChangedFromDisk(Connection conn, RingPool<AssetReader> readers, AssetCache.Asset asset, long size)
+    private static async Task SendChangedFromDisk(TcpConnection conn, RingPool<AssetReader> readers, AssetCache.Asset asset, long size)
     {
         SafeFileHandle handle;
         try
@@ -146,14 +146,14 @@ public static class StaticExample
     }
 
     // Format the 200 header into a stack buffer (kept in a sync method - a Span can't cross an await).
-    private static void WriteHeader(Connection conn, AssetCache.Asset asset, long bodyLength)
+    private static void WriteHeader(TcpConnection conn, AssetCache.Asset asset, long bodyLength)
     {
         Span<byte> header = stackalloc byte[256];
         conn.Write(header[..AssetCache.WriteResponseHeader(header, asset.Path, (int)bodyLength)]);
     }
 
     // Copy native memory through the write slab in slab-sized chunks and flush each.
-    private static async Task SendNative(Connection conn, nint data, int length)
+    private static async Task SendNative(TcpConnection conn, nint data, int length)
     {
         int sent = 0;
 
@@ -166,7 +166,7 @@ public static class StaticExample
         }
     }
 
-    private static unsafe void WriteChunk(Connection conn, nint chunk, int length)
+    private static unsafe void WriteChunk(TcpConnection conn, nint chunk, int length)
     {
         conn.Write(new ReadOnlySpan<byte>((void*)chunk, length));
     }

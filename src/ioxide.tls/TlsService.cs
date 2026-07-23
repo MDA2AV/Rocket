@@ -82,7 +82,7 @@ public sealed class TlsService
     /// data that arrived alongside the final handshake flight is already in
     /// <see cref="TlsSession.DrainPlaintext"/>.
     /// </summary>
-    public async ValueTask<TlsSession> AcceptAsync(Connection conn)
+    public async ValueTask<TlsSession> AcceptAsync(TcpConnection conn)
     {
         nint ssl = OpenSsl.SSL_new(_ctx);
         if (ssl == 0)
@@ -155,7 +155,7 @@ public sealed class TlsService
         }
     }
 
-    private static async ValueTask FlushOutbound(Connection conn, nint wbio)
+    private static async ValueTask FlushOutbound(TcpConnection conn, nint wbio)
     {
         int pending = (int)OpenSsl.BIO_ctrl_pending(wbio);
         while (pending > 0)
@@ -170,7 +170,7 @@ public sealed class TlsService
         }
     }
 
-    private static unsafe int StageOutbound(Connection conn, nint wbio, int chunk)
+    private static unsafe int StageOutbound(TcpConnection conn, nint wbio, int chunk)
     {
         Span<byte> dst = conn.GetSpan(chunk);
         int n;
@@ -185,7 +185,7 @@ public sealed class TlsService
         return n;
     }
 
-    private static unsafe bool FeedInbound(Connection conn, nint rbio, in RecvSnapshot snapshot)
+    private static unsafe bool FeedInbound(TcpConnection conn, nint rbio, in RecvSnapshot snapshot)
     {
         bool any = false;
         while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))

@@ -20,7 +20,7 @@ internal static class TestServer
     /// <summary>Reserve a unique port (e.g. for ServerConfig.ExtraPorts).</summary>
     public static int NextPort() => Interlocked.Increment(ref _nextPort);
 
-    public static int Start(Func<Reactor, Connection, Task> handle, Action<Reactor>? onStart = null)
+    public static int Start(Func<Reactor, TcpConnection, Task> handle, Action<Reactor>? onStart = null)
         => StartConfigured(handle, DefaultConfig(), onStart).Port;
 
     /// <summary>
@@ -28,7 +28,7 @@ internal static class TestServer
     /// hand back the reactor + its thread so tests can assert against them or stop cleanly.
     /// </summary>
     public static (int Port, Reactor Reactor, Thread Thread) StartConfigured(
-        Func<Reactor, Connection, Task> handle, ServerConfig config, Action<Reactor>? onStart = null)
+        Func<Reactor, TcpConnection, Task> handle, ServerConfig config, Action<Reactor>? onStart = null)
     {
         int port = Interlocked.Increment(ref _nextPort);
         config = config with { Port = (ushort)port, ReactorCount = 1 };

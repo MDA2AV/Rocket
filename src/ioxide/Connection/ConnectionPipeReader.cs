@@ -7,7 +7,7 @@ using ioxide.utils;
 namespace ioxide;
 
 /// <summary>
-/// Adapts the raw <see cref="Connection"/> read API to a <see cref="PipeReader"/>, allocation-free
+/// Adapts the raw <see cref="TcpConnection"/> read API to a <see cref="PipeReader"/>, allocation-free
 /// at steady state: a parked read chains onto the connection's value-task source (no async state
 /// machine), recv slices live in pooled segments on a persistent chain, and consumption trims the
 /// chain's front. Honors <c>examined</c>: when everything held has been examined, ReadAsync waits
@@ -41,7 +41,7 @@ public sealed unsafe class ConnectionPipeReader : PipeReader, IValueTaskSource<R
         }
     }
 
-    private readonly Connection _conn;
+    private readonly TcpConnection _conn;
 
     // Held slices, oldest first. _headConsumed is the consumed prefix of the
     // head slice; consumption never mutates segments, it moves the sequence start.
@@ -66,7 +66,7 @@ public sealed unsafe class ConnectionPipeReader : PipeReader, IValueTaskSource<R
     private bool _cancelRequested;
     private bool _connectionClosed;
 
-    public ConnectionPipeReader(Connection connection)
+    public ConnectionPipeReader(TcpConnection connection)
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
         _onRecvReady = OnRecvReady;

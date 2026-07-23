@@ -6,10 +6,10 @@ namespace ioxide;
 
 /// <summary>
 /// Grow write overflow (<see cref="WriteOverflowStrategy.Grow"/>): when a response outgrows the primary
-/// write slab (see Connection.Write.cs), reallocate it larger and copy the bytes written so far, so the
+/// write slab (see TcpConnection.Write.cs), reallocate it larger and copy the bytes written so far, so the
 /// whole response stays in one contiguous buffer flushed with a single SEND.
 /// </summary>
-public sealed unsafe partial class Connection
+public sealed unsafe partial class TcpConnection
 {
     // Grows the per-connection write slab so a response larger than the current capacity can be
     // buffered before the single contiguous flush. Doubles until it fits, copies the bytes written so

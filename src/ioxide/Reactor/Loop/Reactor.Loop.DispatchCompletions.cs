@@ -12,7 +12,7 @@ public sealed unsafe partial class Reactor
     // IORING_CQE_F_MORE, then a separate IORING_CQE_F_NOTIF once the kernel releases the slab).
     private void OnSendCompletion(int fd, ushort gen, int res, uint cqeFlags)
     {
-        Connection? conn = ConnAt(fd, gen);
+        TcpConnection? conn = ConnAt(fd, gen);
         if (conn == null)
         {
             return;   // stale CQE - never touch the fd's new tenant

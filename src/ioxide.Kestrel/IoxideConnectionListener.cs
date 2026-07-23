@@ -88,7 +88,7 @@ internal sealed class IoxideConnectionListener : IConnectionListener
     }
 
     // Runs on the reactor thread, fire-and-forget, once per accepted connection.
-    private async Task HandleConnectionAsync(Reactor reactor, Connection conn)
+    private async Task HandleConnectionAsync(Reactor reactor, TcpConnection conn)
     {
         var id = Interlocked.Increment(ref _connectionCounter);
 

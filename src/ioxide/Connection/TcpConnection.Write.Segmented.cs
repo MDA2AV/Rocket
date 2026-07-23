@@ -7,10 +7,10 @@ namespace ioxide;
 
 /// <summary>
 /// Segmented write overflow (<see cref="WriteOverflowStrategy.Segmented"/>). When a response outgrows
-/// the primary write slab (see Connection.Write.cs) the extra bytes spill into pooled fixed-size slabs
+/// the primary write slab (see TcpConnection.Write.cs) the extra bytes spill into pooled fixed-size slabs
 /// chained here, then flushed with a single vectored SENDMSG instead of growing one contiguous buffer.
 /// </summary>
-public sealed unsafe partial class Connection
+public sealed unsafe partial class TcpConnection
 {
     // Once the primary slab (WriteBuffer/WriteTail) fills, further bytes spill into slabs rented from
     // the reactor pool (base size) or a one-off oversized alloc. All empty on the fast path / in Grow mode.

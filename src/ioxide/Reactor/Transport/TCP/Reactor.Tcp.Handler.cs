@@ -6,7 +6,7 @@ public sealed partial class Reactor
 {
     // Invoke the per-connection handler, observing faults so a thrown handler doesn't silently
     // vanish (the reactor starts it fire-and-forget from the accept path). Runs once per connection.
-    private async Task RunHandlerAsync(Connection conn)
+    private async Task RunHandlerAsync(TcpConnection conn)
     {
         int gen = conn.Generation;
         try
