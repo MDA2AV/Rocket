@@ -21,6 +21,8 @@ public sealed unsafe partial class TcpConnection
     internal int[]?  RefCount;         // per-bid: outstanding handler refs
     internal bool[]? KernelDone;       // per-bid: kernel finished appending
 
+    internal int Generation => Volatile.Read(ref _generation);
+
     /// <summary>Hand a consumed recv buffer back, routed by mode.</summary>
     public void ReturnBuffer(in SpscRecvRing.Item item)
     {

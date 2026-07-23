@@ -153,7 +153,7 @@ internal static class Program
 
         if (!ktls)
         {
-            return new Example(config, handle, null);   // SslStream rides ConnectionStream - no reactor service
+            return new Example(config, handle, null);   // SslStream rides TcpConnectionStream - no reactor service
         }
 
         var options = new TlsOptions { CertificatePath = TlsCert.CertPath, KeyPath = TlsCert.KeyPath };

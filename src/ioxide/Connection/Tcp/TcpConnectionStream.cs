@@ -13,7 +13,7 @@ namespace ioxide;
 /// the <see cref="Stream"/> contract forces is a copy into the caller's buffer (the raw API and
 /// the pipe adapter expose ring memory directly). Single reader, single writer, reactor-thread.
 /// </summary>
-public sealed class ConnectionStream : Stream, IValueTaskSource<int>, IValueTaskSource
+public sealed class TcpConnectionStream : Stream, IValueTaskSource<int>, IValueTaskSource
 {
     private readonly TcpConnection _conn;
 
@@ -35,7 +35,7 @@ public sealed class ConnectionStream : Stream, IValueTaskSource<int>, IValueTask
     private ValueTaskAwaiter _pendingFlush;
     private readonly Action _onFlushDone;
 
-    public ConnectionStream(TcpConnection connection)
+    public TcpConnectionStream(TcpConnection connection)
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
         _onReadReady = OnReadReady;

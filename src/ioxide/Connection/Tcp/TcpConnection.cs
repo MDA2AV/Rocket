@@ -3,8 +3,10 @@ using ioxide.utils;
 
 namespace ioxide;
 
-public sealed unsafe partial class TcpConnection : Connection
+public sealed unsafe partial class TcpConnection
 {
+    private readonly Reactor _reactor;
+
     public int ClientFd { get; private set; }
 
     /// <summary>The listener port this connection was accepted on; set per accept.</summary>
@@ -40,24 +42,41 @@ public sealed unsafe partial class TcpConnection : Connection
         }
     }
 
+    // Bumped on Clear(); the low 16 bits serve as the IVTS token so stale awaiters
+    // from a previous pool life are detectable.
+    private int _generation;
+
+    // Two owners: the reactor (recv side) and the handler. Init 2 on accept; teardown
+    // runs only at 0, so a connection is never recycled under a live handler.
+    private int _refs;
+
     public TcpConnection(Reactor reactor, int fd, int writeSlabSize = 1024 * 16, int recvQueueEntries = 64, WriteOverflowStrategy overflow = WriteOverflowStrategy.Grow)
-        : base(reactor, recvQueueEntries)
     {
+        _reactor = reactor;
         ClientFd = fd;
         _writeSlabSize = writeSlabSize;
         _baseSlabSize = writeSlabSize;
         _overflow = overflow;
         WriteBuffer = (byte*)NativeMemory.AlignedAlloc((nuint)writeSlabSize, 64);
+        _recv = new SpscRecvRing(recvQueueEntries);
 
         _manager = new UnmanagedMemoryManager(WriteBuffer, writeSlabSize);
     }
 
-    // Refcount zero: the reactor owns the buffer-ring return, close(fd) and pool return (Recycle).
-    protected override void EnqueueForRecycle() => _reactor.EnqueueRecycle(this);
-
-    // Close-time: also disarm and complete a pending flush so a parked FlushAsync unwinds.
-    protected override void OnMarkClosed()
+    // Wake awaiters with closed=1. Reactor-thread or teardown paths only.
+    public void MarkClosed()
     {
+        Volatile.Write(ref _closed, 1);
+
+        if (Interlocked.Exchange(ref _armed, 0) == 1)
+        {
+            _readSignal.SetResult(new RecvSnapshot(_recv.SnapshotTail(), isClosed: true));
+        }
+        else
+        {
+            Volatile.Write(ref _pending, 1);
+        }
+
         if (Interlocked.Exchange(ref _flushArmed, 0) == 1)
         {
             Volatile.Write(ref _flushInProgress, 0);
@@ -65,10 +84,44 @@ public sealed unsafe partial class TcpConnection : Connection
         }
     }
 
-    // Pool reuse: reset the write slab, overflow segments and flush signal (the base already reset
-    // the read side and bumped the generation).
-    protected override void OnClear()
+    internal void InitRefs() => Volatile.Write(ref _refs, 2);
+
+    /// <summary>Release one owner's ref; whoever hits 0 hands the connection to the reactor for recycle.</summary>
+    public void DecRef()
     {
+        if (Interlocked.Decrement(ref _refs) == 0)
+        {
+            _reactor.EnqueueRecycle(this);
+        }
+    }
+
+    // Guards the framework's fault-path release of the handler ref; reset per pool life (#94).
+    private int _handlerRefReleased;
+
+    /// <summary>
+    /// Release the handler's ref on behalf of a handler that faulted before its own DecRef, so the
+    /// fd/slab/gid aren't leaked (#94). Generation-guarded - a fault observed after this connection
+    /// was recycled must not touch its next life - and idempotent within a life. A handler that
+    /// DecRefs and then throws is outside the refcount contract; the guards keep that from
+    /// corrupting a reused connection.
+    /// </summary>
+    internal void ReleaseHandlerRefOnFault(int generationAtStart)
+    {
+        if (Volatile.Read(ref _generation) == generationAtStart &&
+            Interlocked.Exchange(ref _handlerRefReleased, 1) == 0)
+        {
+            DecRef();
+        }
+    }
+
+    internal void Clear()
+    {
+        // Bump generation first so stale IVTS tokens resolve to Closed()/no-op.
+        Interlocked.Increment(ref _generation);
+
+        Volatile.Write(ref _armed, 0);
+        Volatile.Write(ref _pending, 0);
+        Volatile.Write(ref _closed, 0);
         Volatile.Write(ref _flushArmed, 0);
         Volatile.Write(ref _flushInProgress, 0);
 
@@ -92,8 +145,11 @@ public sealed unsafe partial class TcpConnection : Connection
             _manager.Reset(WriteBuffer, _baseSlabSize);
         }
 
+        _readSignal.Reset();
         _flushSignal.Reset();
 
+        _recv.Reset();
+        Volatile.Write(ref _handlerRefReleased, 0);
         IncrementalMode = false;
         SendOpFlags = 0x100;   // MSG_WAITALL; a kTLS connection re-sets this per handshake
         ListenerPort = 0;

@@ -53,8 +53,8 @@ internal static class Handlers
     /// </summary>
     public static async Task Pipe(Reactor reactor, TcpConnection conn)
     {
-        var reader = new ConnectionPipeReader(conn);
-        var writer = new ConnectionPipeWriter(conn);
+        var reader = new TcpConnectionPipeReader(conn);
+        var writer = new TcpConnectionPipeWriter(conn);
 
         try
         {

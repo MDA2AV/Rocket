@@ -13,7 +13,7 @@ namespace ioxide;
 /// chain's front. Honors <c>examined</c>: when everything held has been examined, ReadAsync waits
 /// for new bytes instead of returning the same data again.
 /// </summary>
-public sealed unsafe class ConnectionPipeReader : PipeReader, IValueTaskSource<ReadResult>
+public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSource<ReadResult>
 {
     // One pooled object per held recv slice: sequence segment + reusable memory
     // manager + the original ring item (needed to return the buffer).
@@ -66,7 +66,7 @@ public sealed unsafe class ConnectionPipeReader : PipeReader, IValueTaskSource<R
     private bool _cancelRequested;
     private bool _connectionClosed;
 
-    public ConnectionPipeReader(TcpConnection connection)
+    public TcpConnectionPipeReader(TcpConnection connection)
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
         _onRecvReady = OnRecvReady;

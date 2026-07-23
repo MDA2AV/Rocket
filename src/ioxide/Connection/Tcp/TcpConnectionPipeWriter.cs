@@ -10,7 +10,7 @@ namespace ioxide;
 /// into the connection's slab; a parked flush chains onto the connection's value-task source
 /// instead of an async state machine, so the adapter allocates nothing at steady state.
 /// </summary>
-public sealed class ConnectionPipeWriter : PipeWriter, IValueTaskSource<FlushResult>
+public sealed class TcpConnectionPipeWriter : PipeWriter, IValueTaskSource<FlushResult>
 {
     private readonly TcpConnection _conn;
 
@@ -25,7 +25,7 @@ public sealed class ConnectionPipeWriter : PipeWriter, IValueTaskSource<FlushRes
     private bool _cancelRequested;
     private long _unflushed;
 
-    public ConnectionPipeWriter(TcpConnection connection)
+    public TcpConnectionPipeWriter(TcpConnection connection)
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
         _onFlushDone = OnFlushDone;

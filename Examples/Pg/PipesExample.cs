@@ -6,8 +6,8 @@ using ioxide.pg;
 namespace Examples.Pg;
 
 /// <summary>
-/// The landing page's "pipes" tab, runnable: ConnectionPipeReader owns the carry (partial
-/// requests wait inside it, zero-copy), ConnectionPipeWriter stages into the write slab,
+/// The landing page's "pipes" tab, runnable: TcpConnectionPipeReader owns the carry (partial
+/// requests wait inside it, zero-copy), TcpConnectionPipeWriter stages into the write slab,
 /// and every request runs a query through the per-reactor PgPool.
 /// </summary>
 public static class PipesExample
@@ -16,8 +16,8 @@ public static class PipesExample
     {
         var pool = r.GetService<PgPool>();
 
-        var reader = new ConnectionPipeReader(conn);
-        var writer = new ConnectionPipeWriter(conn);
+        var reader = new TcpConnectionPipeReader(conn);
+        var writer = new TcpConnectionPipeWriter(conn);
 
         while (true)
         {
