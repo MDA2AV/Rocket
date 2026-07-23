@@ -261,6 +261,9 @@ internal sealed unsafe class QuicTestClient : IDisposable
         public delegate* unmanaged<void*, void>                         OnHandshakeCompleted;
         public delegate* unmanaged<void*, byte*, nuint, void>           OnNewCid;
         public delegate* unmanaged<void*, byte*, nuint, void>           OnRetireCid;
+        public delegate* unmanaged<void*, long, ulong, void>            OnStreamReset;
+        public delegate* unmanaged<void*, long, ulong, void>            OnStreamStopSending;
+        public delegate* unmanaged<void*, long, ulong, ulong, void>     OnAckedStreamData;
     }
 
     private const string Lib = "ioxide_quic";

@@ -65,6 +65,30 @@ public unsafe class QuicEngineConnection : QuicConnection
     /// <summary>A stream ended (peer FIN/reset or local close).</summary>
     protected virtual void OnStreamClosed(long streamId, ulong appErrorCode) { }
 
+    // Stream lifecycle -> the shared recv queue, ordered with the data that preceded it. All three
+    // fire inside iq_conn_read/handle_expiry, so the once-per-read wake covers them.
+    private void EnqueueLifecycle(long streamId, QuicStreamEvent kind, ulong appError)
+    {
+        if (EnqueueStreamEvent(streamId, kind, appError))
+        {
+            _recvEnqueued = true;
+        }
+        else
+        {
+            _recvOverflow = true;
+        }
+    }
+
+    // The peer refuses our response (STOP_SENDING): stop feeding the stream. Retained chunks are
+    // NOT freed here - ngtcp2 may still hold references until the stream closes.
+    private void MarkOutStreamDead(long streamId)
+    {
+        if (_outStreams.TryGetValue(streamId, out OutStream? os))
+        {
+            os.Dead = true;
+        }
+    }
+
     // Monotonic nanosecond clock ngtcp2 wants; Stopwatch is monotonic, unlike wall time.
     private static ulong NowNs() => (ulong)(Stopwatch.GetTimestamp() * (1_000_000_000.0 / Stopwatch.Frequency));
 
@@ -259,23 +283,35 @@ public unsafe class QuicEngineConnection : QuicConnection
 
     // --- application-facing send --------------------------------------------------------------
 
-    // Application egress the engine couldn't take yet (cwnd/pacing/flow control full), replayed
-    // from FlushEgress once ACKs or timers free the window. Order-preserving; bytes are NEVER
-    // dropped - a response the engine defers would otherwise vanish for good, since the layer
-    // above (nghttp3) has already accounted it as written and will not re-emit it.
-    private readonly Queue<(long Sid, byte[] Data, bool Fin)> _pendingSend = new();
-    private long   _pendingSid;
-    private byte[]? _pendingData;   // partially-written head; null = take the next queue entry
-    private int    _pendingOff;
-    private bool   _pendingFin;
-    private int    _pendingBytes;
+    // Outgoing stream bytes, copied into native chunks that stay alive until ngtcp2 ACKNOWLEDGES
+    // them. iq_conn_write does not copy: ngtcp2 retains pointers into the caller's buffers for
+    // retransmission until acked_stream_data_offset - handing it spans of reused managed buffers
+    // is a use-after-free the first time a loss forces a retransmit. The chunk chain doubles as
+    // the never-drop backlog: unsent tail bytes are replayed from FlushEgress as the window opens.
+    private sealed class OutStream
+    {
+        public readonly Queue<(nint Ptr, int Len)> Chunks = new();
+        public long Base;      // freed (acked) up to this stream offset - first retained byte
+        public long Sent;      // handed to the engine up to this offset
+        public long End;       // queued up to this offset
+        public bool Fin;       // fin follows the last queued byte
+        public bool FinSent;
+        public bool Dead;      // reset/refused: stop feeding; chunks freed at stream close
+        public bool Pending;   // in the replay list
+    }
 
-    // A peer that stops draining gets closed rather than buffered without bound.
-    private const int PendingSendCap = 1 << 20;
+    private readonly Dictionary<long, OutStream> _outStreams = new();
+    private readonly List<long> _outPending = [];
+    private long _outRetained;
+
+    // A peer that stops ACKing gets closed rather than buffered without bound (retained =
+    // sent-but-unacked + unsent, across all streams).
+    private const long OutRetainedCap = 4 << 20;
 
     /// <summary>Queue bytes on a stream and flush. streamId must come from a delivered item or
-    /// <see cref="OpenUniStream"/>. fin closes the send side. Never discards: what the engine
-    /// can't take now is buffered and replayed as the window opens.</summary>
+    /// <see cref="OpenUniStream"/>. fin closes the send side. Never discards: bytes are retained
+    /// until the peer acknowledges them (retransmission reads from this copy) and what the engine
+    /// can't take now is replayed as the window opens.</summary>
     public override void SendStream(long streamId, ReadOnlySpan<byte> data, bool fin)
     {
         if (_closed)
@@ -283,32 +319,46 @@ public unsafe class QuicEngineConnection : QuicConnection
             return;
         }
 
-        if (_pendingData is null && _pendingSend.Count == 0)
+        if (!_outStreams.TryGetValue(streamId, out OutStream? os))
         {
-            int consumed = WriteStream(streamId, data, fin, out bool complete);
-            if (_closed)
-            {
-                return;
-            }
-            FlushConnection();
-            if (complete)
-            {
-                return;
-            }
-            data = data[consumed..];
+            os = new OutStream();
+            _outStreams[streamId] = os;
+        }
+        if (os.Dead || (os.Fin && !fin && data.Length > 0))
+        {
+            return;   // refused or already finished - nowhere for more bytes to go
         }
 
-        // Preserve order behind whatever is already queued.
-        _pendingBytes += data.Length;
-        if (_pendingBytes > PendingSendCap)
+        if (data.Length > 0)
         {
-            Console.Error.WriteLine("[ioxide.quic] send backlog cap exceeded; closing connection.");
+            void* chunk = NativeMemory.Alloc((nuint)data.Length);
+            data.CopyTo(new Span<byte>(chunk, data.Length));
+            os.Chunks.Enqueue(((nint)chunk, data.Length));
+            os.End += data.Length;
+            _outRetained += data.Length;
+        }
+        os.Fin |= fin;
+
+        if (_outRetained > OutRetainedCap)
+        {
+            Console.Error.WriteLine("[ioxide.quic] send retention cap exceeded; closing connection.");
             _closed = true;
             _reactor.QuicRemoveConnection(this);
             Destroy();
             return;
         }
-        _pendingSend.Enqueue((streamId, data.ToArray(), fin));
+
+        PumpOut(streamId, os);
+        if (_closed)
+        {
+            return;
+        }
+        FlushConnection();
+        if (!OutDone(os) && !os.Pending)
+        {
+            os.Pending = true;
+            _outPending.Add(streamId);
+        }
     }
 
     /// <summary>Open a server-initiated unidirectional stream (H3 control / QPACK); id, or negative.</summary>
@@ -376,97 +426,148 @@ public unsafe class QuicEngineConnection : QuicConnection
     // own frames. Runs after every inbound datagram (ACKs open the window) and every timer.
     private void FlushEgress()
     {
-        ReplayPending();
+        ReplayOut();
         FlushConnection();
     }
 
-    private void ReplayPending()
-    {
-        while (!_closed)
-        {
-            if (_pendingData is null)
-            {
-                if (!_pendingSend.TryDequeue(out (long Sid, byte[] Data, bool Fin) next))
-                {
-                    return;
-                }
-                (_pendingSid, _pendingData, _pendingFin) = next;
-                _pendingOff = 0;
-            }
+    private static bool OutDone(OutStream os)
+        => os.Dead || (os.Sent == os.End && (!os.Fin || os.FinSent));
 
-            int consumed = WriteStream(_pendingSid, _pendingData.AsSpan(_pendingOff), _pendingFin, out bool complete);
-            _pendingOff   += consumed;
-            _pendingBytes -= consumed;
-            if (!complete)
-            {
-                return;   // engine still full - the next ACK/timer flush retries
-            }
-            _pendingBytes -= _pendingData.Length - _pendingOff;   // discarded tail of a reset stream
-            _pendingData = null;
+    private void ReplayOut()
+    {
+        if (_outPending.Count == 0)
+        {
+            return;
         }
+        int keep = 0;
+        for (int i = 0; i < _outPending.Count; i++)
+        {
+            long sid = _outPending[i];
+            if (_closed || !_outStreams.TryGetValue(sid, out OutStream? os))
+            {
+                continue;   // conn or stream torn down meanwhile
+            }
+            PumpOut(sid, os);
+            if (!_closed && !OutDone(os))
+            {
+                _outPending[keep++] = sid;
+            }
+            else
+            {
+                os.Pending = false;
+            }
+        }
+        _outPending.RemoveRange(keep, _outPending.Count - keep);
     }
 
-    // Write one stream's bytes into the engine, sending each produced datagram. Returns the bytes
-    // accepted; complete = every byte and the fin were taken (or the stream is gone and the rest
-    // has nowhere to go). Never discards silently - the caller keeps the remainder.
-    private int WriteStream(long streamId, ReadOnlySpan<byte> data, bool fin, out bool complete)
+    // Feed one stream's unsent bytes (pointers into the retained chunks - stable until acked) into
+    // the engine, sending each produced datagram, until done or the engine can't take more.
+    private void PumpOut(long sid, OutStream os)
     {
-        complete = data.Length == 0 && !fin;
-        int off = 0;
-        while (!_closed && !complete)
+        while (!_closed && !OutDone(os))
         {
+            // Locate the first unsent byte inside the chunk chain.
+            byte* ptr = null;
+            int len = 0;
+            if (os.Sent < os.End)
+            {
+                long skip = os.Sent - os.Base;
+                foreach ((nint p, int l) in os.Chunks)
+                {
+                    if (skip < l)
+                    {
+                        ptr = (byte*)p + skip;
+                        len = (int)(l - skip);
+                        break;
+                    }
+                    skip -= l;
+                }
+            }
+            bool fin = os.Fin && os.Sent + len == os.End;
+
             long consumed;
             nint n;
             fixed (byte* dest = _sendBuf)
-            fixed (byte* src = data)
             {
-                byte* dataPtr = off < data.Length ? src + off : null;
-                nuint dataLen = (nuint)(data.Length - off);
                 n = Ngtcp2.iq_conn_write(_conn, dest, (nuint)_sendBuf.Length,
-                    streamId, dataPtr, dataLen, fin ? 1 : 0, &consumed, NowNs());
+                    sid, ptr, (nuint)len, fin ? 1 : 0, &consumed, NowNs());
             }
 
             int code = (int)n;
             if (code < 0)
             {
-                if (code == Ngtcp2.NGTCP2_ERR_STREAM_SHUT_WR)
+                if (code is Ngtcp2.NGTCP2_ERR_STREAM_SHUT_WR or Ngtcp2.NGTCP2_ERR_STREAM_NOT_FOUND)
                 {
-                    complete = true;   // the fin is already registered - nothing more can be written
-                    return off;
-                }
-                if (code == Ngtcp2.NGTCP2_ERR_STREAM_NOT_FOUND)
-                {
-                    complete = true;   // peer reset/closed the stream - the remainder has nowhere to go
-                    return off;
+                    os.Dead = true;   // finished or reset - chunks are freed at stream close
+                    return;
                 }
                 if (code == Ngtcp2.NGTCP2_ERR_STREAM_DATA_BLOCKED)
                 {
-                    return off;        // stream-level flow control - retry on a later flush
+                    return;           // stream-level flow control - retry on a later flush
                 }
                 CloseFromEngine(code);
-                return off;
+                return;
             }
 
             if (consumed > 0)
             {
-                off += (int)consumed;
+                os.Sent += consumed;
+                if (fin && os.Sent == os.End)
+                {
+                    os.FinSent = true;
+                }
+            }
+            else if (fin && len == 0 && n > 0)
+            {
+                os.FinSent = true;   // bare-fin frame went out
             }
             if (n > 0)
             {
                 QueueSend(_sendBuf.AsSpan(0, (int)n));
             }
-
-            if (off == data.Length && (data.Length > 0 || n > 0))
-            {
-                complete = true;   // all bytes accepted; the fin (if any) rode the final ones
-                return off;
-            }
             if (n == 0 && consumed <= 0)
             {
-                return off;        // engine can't take more now (cwnd/pacing/amplification)
+                return;   // engine can't take more now (cwnd/pacing/amplification)
             }
         }
-        return off;
+    }
+
+    // The peer acknowledged [offset, offset+datalen): retained chunks below the new watermark can
+    // never be retransmitted again and are freed.
+    private void OnAckedStreamData(long sid, ulong offset, ulong datalen)
+    {
+        if (!_outStreams.TryGetValue(sid, out OutStream? os))
+        {
+            return;
+        }
+        long ackedTo = (long)(offset + datalen);
+        while (os.Chunks.Count > 0)
+        {
+            (nint p, int l) = os.Chunks.Peek();
+            if (os.Base + l > ackedTo)
+            {
+                break;
+            }
+            os.Chunks.Dequeue();
+            NativeMemory.Free((void*)p);
+            os.Base += l;
+            _outRetained -= l;
+        }
+    }
+
+    // Stream fully closed (or the connection is going down): nothing can be retransmitted anymore.
+    private void PurgeOutStream(long sid)
+    {
+        if (!_outStreams.Remove(sid, out OutStream? os))
+        {
+            return;
+        }
+        while (os.Chunks.Count > 0)
+        {
+            (nint p, int l) = os.Chunks.Dequeue();
+            NativeMemory.Free((void*)p);
+            _outRetained -= l;
+        }
     }
 
     // Drain ngtcp2's own frames (ACKs, handshake, CRYPTO, MAX_STREAMS) until it has nothing more.
@@ -517,6 +618,17 @@ public unsafe class QuicEngineConnection : QuicConnection
     private void Destroy()
     {
         _closed = true;
+        foreach (OutStream os in _outStreams.Values)
+        {
+            while (os.Chunks.Count > 0)
+            {
+                (nint ptr, int len) = os.Chunks.Dequeue();
+                NativeMemory.Free((void*)ptr);
+                _outRetained -= len;
+            }
+        }
+        _outStreams.Clear();
+        _outPending.Clear();
         if (_conn != 0)
         {
             Ngtcp2.iq_conn_free(_conn);
@@ -539,7 +651,28 @@ public unsafe class QuicEngineConnection : QuicConnection
 
     [UnmanagedCallersOnly]
     internal static void CbStreamClose(void* user, long streamId, ulong appError)
-        => From(user).OnStreamClosed(streamId, appError);
+    {
+        QuicEngineConnection c = From(user);
+        c.PurgeOutStream(streamId);
+        c.EnqueueLifecycle(streamId, QuicStreamEvent.Closed, appError);
+        c.OnStreamClosed(streamId, appError);
+    }
+
+    [UnmanagedCallersOnly]
+    internal static void CbAckedStreamData(void* user, long streamId, ulong offset, ulong datalen)
+        => From(user).OnAckedStreamData(streamId, offset, datalen);
+
+    [UnmanagedCallersOnly]
+    internal static void CbStreamReset(void* user, long streamId, ulong appError)
+        => From(user).EnqueueLifecycle(streamId, QuicStreamEvent.Reset, appError);
+
+    [UnmanagedCallersOnly]
+    internal static void CbStreamStopSending(void* user, long streamId, ulong appError)
+    {
+        QuicEngineConnection c = From(user);
+        c.MarkOutStreamDead(streamId);
+        c.EnqueueLifecycle(streamId, QuicStreamEvent.StopSending, appError);
+    }
 
     [UnmanagedCallersOnly]
     internal static void CbHandshakeCompleted(void* user)

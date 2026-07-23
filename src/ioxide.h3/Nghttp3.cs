@@ -32,6 +32,8 @@ internal static unsafe class Nghttp3
     [DllImport(Lib)] internal static extern long ih3_read_stream(nint conn, long streamId, byte* data, nuint dataLen, int fin);
     [DllImport(Lib)] internal static extern int  ih3_submit_response(nint conn, long streamId, byte* headers, nuint headersLen, byte* body, nuint bodyLen);
     [DllImport(Lib)] internal static extern long ih3_writev(nint conn, long* streamId, int* fin, byte* buf, nuint bufLen);
+    [DllImport(Lib)] internal static extern int  ih3_shutdown_stream_read(nint conn, long streamId);
+    [DllImport(Lib)] internal static extern int  ih3_shutdown_stream_write(nint conn, long streamId);
     [DllImport(Lib)] internal static extern int  ih3_close_stream(nint conn, long streamId, ulong appError);
     [DllImport(Lib)] internal static extern nint ih3_strerror(int liberr);
     [DllImport(Lib)] internal static extern nint ih3_version();

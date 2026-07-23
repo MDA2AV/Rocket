@@ -380,6 +380,21 @@ int64_t ih3_writev(ih3_conn *c, int64_t *stream_id, int *fin, uint8_t *buf, size
     return (int64_t)total;
 }
 
+/* Peer aborted its sending side (RESET_STREAM): stop expecting request bytes, release QPACK state. */
+int ih3_shutdown_stream_read(ih3_conn *c, int64_t stream_id)
+{
+    return nghttp3_conn_shutdown_stream_read(c->conn, stream_id);
+}
+
+/* Peer refused our response (STOP_SENDING): stop generating output for the stream. The body
+ * buffer is NOT dropped here - nghttp3 may still hold references into it for output it already
+ * accepted; stream_close (which always follows) is the single free point. */
+int ih3_shutdown_stream_write(ih3_conn *c, int64_t stream_id)
+{
+    nghttp3_conn_shutdown_stream_write(c->conn, stream_id);
+    return 0;
+}
+
 int ih3_close_stream(ih3_conn *c, int64_t stream_id, uint64_t app_error)
 {
     int rv = nghttp3_conn_close_stream(c->conn, stream_id, app_error);

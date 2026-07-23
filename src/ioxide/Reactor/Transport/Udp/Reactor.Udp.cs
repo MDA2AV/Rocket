@@ -179,6 +179,13 @@ public sealed unsafe partial class Reactor
             setsockopt(fd, SOL_UDP, UDP_GRO, &one, sizeof(int));
         }
 
+        // QUIC bursts (many conns per peer socket, GSO trains) overflow the ~212KB default while
+        // the reactor drains a batch; ask for more - the kernel clamps to net.core.rmem_max, so
+        // this is best-effort headroom, not a requirement.
+        int buf = 8 * 1024 * 1024;
+        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buf, sizeof(int));
+        setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buf, sizeof(int));
+
         if (dualStack)
         {
             int v6only = 0;

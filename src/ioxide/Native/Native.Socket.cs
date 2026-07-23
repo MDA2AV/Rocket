@@ -12,6 +12,8 @@ public static unsafe partial class Native {
     public const int AF_INET      = 2;
     public const int SOL_SOCKET   = 1;
     public const int SO_REUSEADDR = 2;
+    public const int SO_SNDBUF    = 7;
+    public const int SO_RCVBUF    = 8;
     public const int SO_REUSEPORT = 15;
 
     public const int AF_INET6     = 10;

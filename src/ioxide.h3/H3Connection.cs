@@ -123,6 +123,26 @@ public sealed class H3Connection : IDisposable
 
     private unsafe void Feed(in QuicRecvRing.Item item)
     {
+        // Lifecycle items: mirror the QUIC stream state into nghttp3 so a cancelled request is
+        // torn down on both sides instead of half-ignored (a dangling stream keeps per-stream
+        // state alive and can feed the peer a confusing half-open response).
+        if (item.Kind != QuicStreamEvent.Data)
+        {
+            _requests.Remove(item.StreamId);
+            int erv = item.Kind switch
+            {
+                QuicStreamEvent.Reset       => Nghttp3.ih3_shutdown_stream_read(_h3, item.StreamId),
+                QuicStreamEvent.StopSending => Nghttp3.ih3_shutdown_stream_write(_h3, item.StreamId),
+                _                           => Nghttp3.ih3_close_stream(_h3, item.StreamId, item.AppError),
+            };
+            if (erv < 0)
+            {
+                Console.Error.WriteLine($"[ioxide.h3] stream {item.Kind} handling failed: {Nghttp3.StrError(erv)}");
+                _fatal = true;
+            }
+            return;
+        }
+
         long rv;
         if (item.Buf is not null)
         {

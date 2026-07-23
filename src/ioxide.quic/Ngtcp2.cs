@@ -24,6 +24,9 @@ internal static unsafe class Ngtcp2
         public delegate* unmanaged<void*, void>                         OnHandshakeCompleted;
         public delegate* unmanaged<void*, byte*, nuint, void>           OnNewCid;
         public delegate* unmanaged<void*, byte*, nuint, void>           OnRetireCid;
+        public delegate* unmanaged<void*, long, ulong, void>            OnStreamReset;
+        public delegate* unmanaged<void*, long, ulong, void>            OnStreamStopSending;
+        public delegate* unmanaged<void*, long, ulong, ulong, void>     OnAckedStreamData;
     }
 
     [DllImport(Lib)] internal static extern nint iq_engine_new(

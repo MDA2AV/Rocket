@@ -196,6 +196,19 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
     }
 
     /// <summary>
+    /// Queue one stream lifecycle event (engine-facing, reactor thread): closed / reset /
+    /// stop-sending, ordered with the data that preceded it. Same overflow contract as
+    /// <see cref="EnqueueStreamData"/>.
+    /// </summary>
+    public bool EnqueueStreamEvent(long streamId, QuicStreamEvent kind, ulong appError)
+        => _recv.TryEnqueue(new QuicRecvRing.Item
+           {
+               StreamId = streamId,
+               Kind = kind,
+               AppError = appError,
+           });
+
+    /// <summary>
     /// Wake the armed reader inline, or leave a sticky _pending for the next ReadAsync
     /// (engine-facing, reactor thread, once per iq_conn_read that enqueued anything).
     /// </summary>

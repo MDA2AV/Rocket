@@ -4,6 +4,17 @@ using System.Runtime.CompilerServices;
 
 namespace ioxide;
 
+/// <summary>What a recv item describes: stream bytes, or a stream lifecycle event (the peer closed,
+/// reset, or refused the stream). Events ride the same queue so the handler sees them in order
+/// with the data.</summary>
+public enum QuicStreamEvent : byte
+{
+    Data        = 0,
+    Closed      = 1,   // stream fully closed (normal end or after abort)
+    Reset       = 2,   // peer aborted its sending side (RESET_STREAM)
+    StopSending = 3,   // peer asked us to stop sending (STOP_SENDING)
+}
+
 /// <summary>
 /// SPSC queue of decrypted QUIC stream events: producer is the engine on the reactor thread
 /// (inside iq_conn_read), consumer is the connection handler. QUIC's mirror of the TCP recv ring -
@@ -16,8 +27,10 @@ public sealed class QuicRecvRing
     {
         public long StreamId;
         public bool Fin;
-        public byte[]? Buf;   // pooled copy (ArrayPool); null on a fin-only event
+        public byte[]? Buf;   // pooled copy (ArrayPool); null on fin-only and lifecycle items
         public int Len;
+        public QuicStreamEvent Kind;
+        public ulong AppError;   // lifecycle items: the peer's application error code
 
         public ReadOnlySpan<byte> AsSpan() => Buf is null ? default : Buf.AsSpan(0, Len);
     }

@@ -41,6 +41,9 @@ public sealed unsafe class QuicEngine : IDisposable
             OnHandshakeCompleted = &QuicEngineConnection.CbHandshakeCompleted,
             OnNewCid             = &QuicEngineConnection.CbNewCid,
             OnRetireCid          = &QuicEngineConnection.CbRetireCid,
+            OnStreamReset        = &QuicEngineConnection.CbStreamReset,
+            OnStreamStopSending  = &QuicEngineConnection.CbStreamStopSending,
+            OnAckedStreamData    = &QuicEngineConnection.CbAckedStreamData,
         };
 
         byte[] alpnWire = AlpnWire(alpn);

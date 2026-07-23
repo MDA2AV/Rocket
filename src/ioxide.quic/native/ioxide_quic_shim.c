@@ -42,6 +42,14 @@ typedef struct iq_callbacks {
     void (*on_handshake_completed)(void *user);
     void (*on_new_cid)(void *user, const uint8_t *cid, size_t cidlen);
     void (*on_retire_cid)(void *user, const uint8_t *cid, size_t cidlen);
+    /* Peer aborted its sending side (RESET_STREAM) / asked us to stop ours (STOP_SENDING).
+     * Either may be NULL (the test client ignores them). */
+    void (*on_stream_reset)(void *user, int64_t stream_id, uint64_t app_error_code);
+    void (*on_stream_stop_sending)(void *user, int64_t stream_id, uint64_t app_error_code);
+    /* Bytes [offset, offset+datalen) of the stream are acknowledged: the app may free them.
+     * ngtcp2 retains POINTERS into the app's buffers for retransmission until this fires - the
+     * caller of iq_conn_write must keep stream bytes alive until then. May be NULL. */
+    void (*on_acked_stream_data)(void *user, int64_t stream_id, uint64_t offset, uint64_t datalen);
 } iq_callbacks;
 
 /* ---- objects ---------------------------------------------------------------------------- */
@@ -164,6 +172,39 @@ static int iq_cb_stream_close(ngtcp2_conn *conn, uint32_t flags, int64_t stream_
     }
 
     if (c->engine) c->engine->cbs.on_stream_close(c->user, stream_id, app_error_code);
+    return 0;
+}
+
+static int iq_cb_stream_reset(ngtcp2_conn *conn, int64_t stream_id, uint64_t final_size,
+                              uint64_t app_error_code, void *user_data, void *stream_user_data)
+{
+    (void)conn; (void)final_size; (void)stream_user_data;
+    iq_conn *c = user_data;
+    if (c->engine && c->engine->cbs.on_stream_reset) {
+        c->engine->cbs.on_stream_reset(c->user, stream_id, app_error_code);
+    }
+    return 0;
+}
+
+static int iq_cb_stream_stop_sending(ngtcp2_conn *conn, int64_t stream_id, uint64_t app_error_code,
+                                     void *user_data, void *stream_user_data)
+{
+    (void)conn; (void)stream_user_data;
+    iq_conn *c = user_data;
+    if (c->engine && c->engine->cbs.on_stream_stop_sending) {
+        c->engine->cbs.on_stream_stop_sending(c->user, stream_id, app_error_code);
+    }
+    return 0;
+}
+
+static int iq_cb_acked_stream_data_offset(ngtcp2_conn *conn, int64_t stream_id, uint64_t offset,
+                                          uint64_t datalen, void *user_data, void *stream_user_data)
+{
+    (void)conn; (void)stream_user_data;
+    iq_conn *c = user_data;
+    if (c->engine && c->engine->cbs.on_acked_stream_data) {
+        c->engine->cbs.on_acked_stream_data(c->user, stream_id, offset, datalen);
+    }
     return 0;
 }
 
@@ -327,6 +368,9 @@ iq_conn *iq_accept(iq_engine *e,
     callbacks.handshake_completed       = iq_cb_handshake_completed;
     callbacks.recv_stream_data          = iq_cb_recv_stream_data;
     callbacks.stream_close              = iq_cb_stream_close;
+    callbacks.stream_reset              = iq_cb_stream_reset;
+    callbacks.stream_stop_sending       = iq_cb_stream_stop_sending;
+    callbacks.acked_stream_data_offset  = iq_cb_acked_stream_data_offset;
 
     ngtcp2_settings settings;
     ngtcp2_settings_default(&settings);
@@ -561,6 +605,9 @@ iq_conn *iq_client_connect(iq_client_engine *e,
     callbacks.handshake_completed       = iq_cb_handshake_completed;
     callbacks.recv_stream_data          = iq_cb_recv_stream_data;
     callbacks.stream_close              = iq_cb_stream_close;
+    callbacks.stream_reset              = iq_cb_stream_reset;
+    callbacks.stream_stop_sending       = iq_cb_stream_stop_sending;
+    callbacks.acked_stream_data_offset  = iq_cb_acked_stream_data_offset;
 
     ngtcp2_settings settings;
     ngtcp2_settings_default(&settings);
