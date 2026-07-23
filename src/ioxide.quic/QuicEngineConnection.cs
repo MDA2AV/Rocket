@@ -497,7 +497,11 @@ public unsafe class QuicEngineConnection : QuicConnection
 
     private void CloseFromEngine(int liberr)
     {
-        if (liberr != -Ngtcp2.NGTCP2_ERR_DRAINING && liberr != Ngtcp2.NGTCP2_ERR_DRAINING)
+        // Draining and idle-close are normal lifecycle (the peer finished, or vanished and the
+        // idle timer reaped the connection - every abandoned benchmark client ends this way);
+        // only genuine protocol/engine errors are worth a log line.
+        if (liberr != -Ngtcp2.NGTCP2_ERR_DRAINING && liberr != Ngtcp2.NGTCP2_ERR_DRAINING &&
+            liberr != Ngtcp2.NGTCP2_ERR_IDLE_CLOSE)
         {
             Console.Error.WriteLine($"[ioxide.quic] connection closed: {Ngtcp2.StrError(liberr)}");
         }

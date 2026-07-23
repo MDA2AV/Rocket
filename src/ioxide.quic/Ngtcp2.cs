@@ -69,6 +69,7 @@ internal static unsafe class Ngtcp2
     internal const int NGTCP2_ERR_STREAM_SHUT_WR        = -219;
     internal const int NGTCP2_ERR_STREAM_NOT_FOUND      = -220;
     internal const int NGTCP2_ERR_DRAINING              = -224;
+    internal const int NGTCP2_ERR_IDLE_CLOSE            = -238;
 
     internal static string StrError(int liberr) => Marshal.PtrToStringUTF8(iq_strerror(liberr)) ?? liberr.ToString();
 }
