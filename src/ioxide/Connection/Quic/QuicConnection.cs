@@ -1,0 +1,294 @@
+using System.Buffers;
+using System.Threading.Tasks.Sources;
+
+// ReSharper disable SuggestVarOrType_BuiltInTypes
+
+namespace ioxide;
+
+/// <summary>
+/// A logical QUIC connection tracked by the transport's CID demux. The QUIC engine binding
+/// (ngtcp2/quicly - the sans-I/O protocol state machine) subclasses this: datagrams routed by
+/// DCID arrive via <see cref="OnDatagram"/>, replies leave via <see cref="Send"/>, and the timer
+/// sweep drives loss/handshake deadlines. All members run on the owning reactor thread unless
+/// noted - the read surface below is the exception, built for a handler on any thread.
+///
+/// The read surface mirrors TcpConnection's (arm flag + sticky _pending + IVTS, two-owner
+/// refcount) but shares no code with it - the transports are deliberately independent. The engine
+/// enqueues decrypted stream events with <see cref="EnqueueStreamData"/> (a pooled copy, since
+/// ngtcp2's spans die when iq_conn_read returns) and fires <see cref="SignalDataArrived"/> ONCE
+/// after iq_conn_read returns, so a resumed handler can never re-enter the engine mid-read.
+/// </summary>
+public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
+{
+    public Reactor Reactor { get; internal set; } = null!;
+    public int SocketFd { get; internal set; }
+
+    // Peer sockaddr snapshot, transport-owned native memory (freed on eviction). Updated only via
+    // UpdatePeerAddress - the engine decides when a migration is validated, not the transport.
+    internal nint PeerAddr;
+    internal int  PeerAddrLen;
+
+    internal readonly List<QuicCid> Cids = [];
+    internal long LastSeenMs;
+
+    protected QuicConnection(int recvQueueEntries = 256)
+    {
+        _recv = new QuicRecvRing(recvQueueEntries);
+    }
+
+    /// <summary>
+    /// One UDP payload for this connection (with GRO, a train of <paramref name="groSegmentSize"/>-
+    /// sized datagrams to split before feeding the engine). Spans are valid only during the call.
+    /// </summary>
+    public abstract void OnDatagram(ReadOnlySpan<byte> payload, byte tos, int groSegmentSize);
+
+    /// <summary>Next engine deadline in <see cref="Environment.TickCount64"/> ms; long.MaxValue = none.</summary>
+    public abstract long GetNextTimeout(long nowMs);
+
+    /// <summary>Deadline passed - run loss/handshake/idle processing and flush whatever it produced.</summary>
+    public abstract void OnTimer(long nowMs);
+
+    /// <summary>The transport dropped this connection (it is already unregistered when this runs).</summary>
+    public abstract void OnEvicted(QuicEvictReason reason);
+
+    /// <summary>
+    /// Queue application bytes on a stream and pump the engine (framing, encryption and pacing are
+    /// its job - there is no flush to await, unlike TCP). streamId comes from a delivered item or a
+    /// server-opened stream; fin closes the send side. Reactor thread only - the inline-resume
+    /// handler already runs there.
+    /// </summary>
+    public abstract void SendStream(long streamId, ReadOnlySpan<byte> data, bool fin);
+
+    /// <summary>Send one datagram (or a GSO batch) to the connection's current peer address.</summary>
+    protected void Send(ReadOnlySpan<byte> payload, int gsoSegmentSize = 0)
+    {
+        if (PeerAddr == 0)
+        {
+            return;   // torn down - a late handler resume must not send through freed memory
+        }
+        Reactor.UdpSendTo(SocketFd, PeerAddr, PeerAddrLen, payload, gsoSegmentSize);
+    }
+
+    /// <summary>Adopt a validated peer migration (copies the sockaddr out of the datagram).</summary>
+    public unsafe void UpdatePeerAddress(nint addr, int addrLen)
+    {
+        Buffer.MemoryCopy((void*)addr, (void*)PeerAddr, Reactor.UdpNameCap, addrLen);
+        PeerAddrLen = addrLen;
+    }
+
+    // --- read surface: engine enqueues on the reactor thread, the handler awaits from anywhere.
+    //     Coordination is the arm flag + sticky _pending; QUIC connections are not pooled, so
+    //     _generation only guards awaiters that outlive a teardown. ---
+
+    private readonly QuicRecvRing _recv;
+
+    private ManualResetValueTaskSourceCore<QuicRecvSnapshot> _readSignal = new()
+    {
+        RunContinuationsAsynchronously = false,
+    };
+    private int _armed;
+    private int _pending;
+    private int _closed;
+    private int _generation;
+
+    // Two owners: the reactor (engine side) and the handler. Init 2 on adopt; teardown runs only
+    // at 0, so a connection is never freed under a live handler.
+    private int _refs;
+
+    // Guards the framework's fault-path release of the handler ref (mirror of TCP's #94 guard).
+    private int _handlerRefReleased;
+
+    internal int Generation => Volatile.Read(ref _generation);
+
+    /// <summary>Invalidate awaiter tokens from a finished life; the eviction path runs this at teardown.</summary>
+    internal void BumpGeneration() => Interlocked.Increment(ref _generation);
+
+    public ValueTask<QuicRecvSnapshot> ReadAsync()
+    {
+        if (!_recv.IsEmpty() || Volatile.Read(ref _pending) == 1)
+        {
+            Volatile.Write(ref _pending, 0);
+            return new ValueTask<QuicRecvSnapshot>(
+                new QuicRecvSnapshot(_recv.SnapshotTail(), Volatile.Read(ref _closed) != 0));
+        }
+
+        if (Volatile.Read(ref _closed) != 0)
+        {
+            return new ValueTask<QuicRecvSnapshot>(QuicRecvSnapshot.Closed());
+        }
+
+        if (Interlocked.Exchange(ref _armed, 1) == 1)
+        {
+            throw new InvalidOperationException("ReadAsync already armed.");
+        }
+
+        int gen = Volatile.Read(ref _generation);
+
+        // Race recovery: re-check between arming and returning the task.
+        if (!_recv.IsEmpty() || Volatile.Read(ref _pending) == 1 || Volatile.Read(ref _closed) != 0)
+        {
+            Volatile.Write(ref _pending, 0);
+            Interlocked.Exchange(ref _armed, 0);
+
+            return new ValueTask<QuicRecvSnapshot>(
+                new QuicRecvSnapshot(_recv.SnapshotTail(), Volatile.Read(ref _closed) != 0));
+        }
+
+        return new ValueTask<QuicRecvSnapshot>(this, (short)gen);
+    }
+
+    /// <summary>Drain the snapshot one event at a time; hand each buffer back with <see cref="ReturnItem"/>.</summary>
+    public bool TryGetItem(in QuicRecvSnapshot snap, out QuicRecvRing.Item item)
+        => _recv.TryDequeueUntil(snap.Tail, out item);
+
+    /// <summary>Return a consumed item's pooled buffer.</summary>
+    public void ReturnItem(in QuicRecvRing.Item item)
+    {
+        if (item.Buf is not null)
+        {
+            ArrayPool<byte>.Shared.Return(item.Buf);
+        }
+    }
+
+    public void ResetRead() => _readSignal.Reset();
+
+    /// <summary>
+    /// Copy one decrypted stream event into the queue (engine-facing, reactor thread, called per
+    /// OnStreamData inside iq_conn_read). Does NOT wake the handler - the engine fires
+    /// <see cref="SignalDataArrived"/> once after iq_conn_read returns. Returns false on queue
+    /// overflow; the engine then closes the connection.
+    /// </summary>
+    public bool EnqueueStreamData(long streamId, ReadOnlySpan<byte> data, bool fin)
+    {
+        byte[]? buf = null;
+        if (data.Length > 0)
+        {
+            buf = ArrayPool<byte>.Shared.Rent(data.Length);
+            data.CopyTo(buf);
+        }
+
+        if (!_recv.TryEnqueue(new QuicRecvRing.Item
+                 {
+                     StreamId = streamId,
+                     Fin = fin,
+                     Buf = buf,
+                     Len = data.Length,
+                 }))
+        {
+            if (buf is not null)
+            {
+                ArrayPool<byte>.Shared.Return(buf);
+            }
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Wake the armed reader inline, or leave a sticky _pending for the next ReadAsync
+    /// (engine-facing, reactor thread, once per iq_conn_read that enqueued anything).
+    /// </summary>
+    public void SignalDataArrived()
+    {
+        if (Interlocked.Exchange(ref _armed, 0) == 1)
+        {
+            _readSignal.SetResult(new QuicRecvSnapshot(_recv.SnapshotTail(), Volatile.Read(ref _closed) != 0));
+        }
+        else
+        {
+            Volatile.Write(ref _pending, 1);
+        }
+    }
+
+    /// <summary>Wake awaiters with closed=1. Engine close/drain or transport eviction paths only.</summary>
+    public void MarkClosed()
+    {
+        Volatile.Write(ref _closed, 1);
+
+        if (Interlocked.Exchange(ref _armed, 0) == 1)
+        {
+            _readSignal.SetResult(new QuicRecvSnapshot(_recv.SnapshotTail(), isClosed: true));
+        }
+        else
+        {
+            Volatile.Write(ref _pending, 1);
+        }
+    }
+
+    internal void InitRefs() => Volatile.Write(ref _refs, 2);
+
+    /// <summary>
+    /// Release one owner's ref. Whoever hits 0 returns the leftover pooled buffers; the transport
+    /// teardown off refcount zero is wired together with the handler launch.
+    /// </summary>
+    public void DecRef()
+    {
+        if (Interlocked.Decrement(ref _refs) == 0)
+        {
+            DrainRecv();
+        }
+    }
+
+    /// <summary>
+    /// Release the handler's ref on behalf of a handler that faulted before its own DecRef.
+    /// Generation-guarded and idempotent, mirroring the TCP fault guard.
+    /// </summary>
+    internal void ReleaseHandlerRefOnFault(int generationAtStart)
+    {
+        if (Volatile.Read(ref _generation) == generationAtStart &&
+            Interlocked.Exchange(ref _handlerRefReleased, 1) == 0)
+        {
+            DecRef();
+        }
+    }
+
+    private void DrainRecv()
+    {
+        while (_recv.TryDequeue(out QuicRecvRing.Item item))
+        {
+            ReturnItem(in item);
+        }
+    }
+
+    // --- IValueTaskSource<QuicRecvSnapshot>: token = generation snapshot; the core's own Version
+    //     is passed through for the dispatch. Same shape as the TCP source, shared with nothing. ---
+
+    QuicRecvSnapshot IValueTaskSource<QuicRecvSnapshot>.GetResult(short token)
+    {
+        if (token != (short)Volatile.Read(ref _generation))
+        {
+            return QuicRecvSnapshot.Closed();
+        }
+
+        return _readSignal.GetResult(_readSignal.Version);
+    }
+
+    ValueTaskSourceStatus IValueTaskSource<QuicRecvSnapshot>.GetStatus(short token)
+    {
+        if (token != (short)Volatile.Read(ref _generation))
+        {
+            return ValueTaskSourceStatus.Succeeded;
+        }
+
+        return _readSignal.GetStatus(_readSignal.Version);
+    }
+
+    void IValueTaskSource<QuicRecvSnapshot>.OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags)
+    {
+        if (token != (short)Volatile.Read(ref _generation))
+        {
+            // Stale - unblock now; GetResult returns Closed().
+            continuation(state);
+
+            return;
+        }
+
+        // This source only completes on the owning reactor thread, so the continuation already runs
+        // where ReactorSynchronizationContext would post it. Strip the scheduling-context flag or
+        // MRVTSC posts every resume to the mailbox instead of invoking it inline
+        // (RunContinuationsAsynchronously=false only covers the null-context case).
+        _readSignal.OnCompleted(continuation, state, _readSignal.Version,
+            flags & ~ValueTaskSourceOnCompletedFlags.UseSchedulingContext);
+    }
+}

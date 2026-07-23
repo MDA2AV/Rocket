@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using ioxide;
 using ioxide.file;
 using ioxide.pg;
+using ioxide.quic;
 
 namespace Playground;
 
@@ -14,14 +15,33 @@ internal static class Program
 {
     private static int Main()
     {
+        string mode = Environment.GetEnvironmentVariable("PLAYGROUND_MODE") ?? "raw";
+
+        // quic mode: an ngtcp2+picotls echo next to the TCP listener. One engine for the whole
+        // server; every reactor binds the UDP port via SO_REUSEPORT and demuxes its own flows.
+        QuicEngine? quicEngine = null;
+        QuicOptions? quicOptions = null;
+        if (mode == "quic")
+        {
+            (string certPath, string keyPath) = Handlers.EnsureQuicCert();
+            quicEngine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            ushort quicPort = ushort.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_QUIC_PORT"), out ushort qp) ? qp : (ushort)8443;
+            quicOptions = new QuicOptions
+            {
+                Port = quicPort,
+                LocalCidLength = 8,
+                ConnectionFactory = quicEngine.CreateFactory(),
+            };
+            Console.WriteLine($"[playground] quic echo on udp :{quicPort} (ngtcp2 {QuicEngine.NativeVersion()})");
+        }
+
         var config = new ServerConfig
         {
             Port = 8080,
             ReactorCount = int.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_REACTORS"), out int reactors) ? reactors : 12,
-            Incremental = Environment.GetEnvironmentVariable("PLAYGROUND_INCREMENTAL") == "1"
+            Incremental = Environment.GetEnvironmentVariable("PLAYGROUND_INCREMENTAL") == "1",
+            Quic = quicOptions,
         };
-
-        string mode = Environment.GetEnvironmentVariable("PLAYGROUND_MODE") ?? "raw";
         string assetDir = Environment.GetEnvironmentVariable("PLAYGROUND_DIR") ?? "/tmp/ioxide-assets";
 
         var pgOptions = new PgOptions
@@ -72,12 +92,12 @@ internal static class Program
             switch (mode)
             {
                 case "pg":
-                    reactor.Handle = Handlers.Pg;
+                    reactor.TcpHandle = Handlers.Pg;
                     reactor.OnStart = r => PgPool.Start(r, pgOptions);
                     break;
 
                 case "file":
-                    reactor.Handle = Handlers.File;
+                    reactor.TcpHandle = Handlers.File;
                     reactor.OnStart = r =>
                     {
                         r.AddService(assets!);
@@ -86,19 +106,24 @@ internal static class Program
                     break;
 
                 case "pipe":
-                    reactor.Handle = Handlers.Pipe;
+                    reactor.TcpHandle = Handlers.Pipe;
                     break;
 
                 case "hop":
-                    reactor.Handle = Handlers.Hop;
+                    reactor.TcpHandle = Handlers.Hop;
                     break;
 
                 case "taskrun":
-                    reactor.Handle = Handlers.TaskRun;
+                    reactor.TcpHandle = Handlers.TaskRun;
+                    break;
+
+                case "quic":
+                    reactor.TcpHandle = Handlers.Raw;   // :8080 still listens (until a TCP opt-out exists)
+                    reactor.QuicHandle = Handlers.QuicEcho;
                     break;
 
                 default:
-                    reactor.Handle = Handlers.Raw;
+                    reactor.TcpHandle = Handlers.Raw;
                     break;
             }
 
@@ -116,6 +141,7 @@ internal static class Program
             thread.Join();
         }
 
+        quicEngine?.Dispose();
         return 0;
     }
 }

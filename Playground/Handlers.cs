@@ -473,4 +473,67 @@ internal static class Handlers
 
         return dir;
     }
+
+    /// <summary>
+    /// QUIC echo over the delegate model: one handler per connection, streams demuxed by the item's
+    /// StreamId - the QUIC twin of <see cref="Raw"/>. Bytes arrive decrypted off the ngtcp2 engine;
+    /// replies re-enter it via SendStream (no flush to await - the engine owns pacing).
+    /// </summary>
+    public static async Task QuicEcho(Reactor reactor, QuicConnection conn)
+    {
+        try
+        {
+            while (true)
+            {
+                QuicRecvSnapshot snap = await conn.ReadAsync();
+
+                while (conn.TryGetItem(in snap, out QuicRecvRing.Item item))
+                {
+                    conn.SendStream(item.StreamId, item.AsSpan(), item.Fin);
+                    conn.ReturnItem(in item);
+                }
+
+                if (snap.IsClosed)
+                {
+                    break;
+                }
+                conn.ResetRead();
+            }
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    }
+
+    /// <summary>Self-signed localhost cert for the quic mode (PLAYGROUND_QUIC_CERT/KEY override it).</summary>
+    public static (string CertPath, string KeyPath) EnsureQuicCert()
+    {
+        string? envCert = Environment.GetEnvironmentVariable("PLAYGROUND_QUIC_CERT");
+        string? envKey = Environment.GetEnvironmentVariable("PLAYGROUND_QUIC_KEY");
+        if (envCert is not null && envKey is not null)
+        {
+            return (envCert, envKey);
+        }
+
+        string dir = Path.Combine(Path.GetTempPath(), "ioxide-playground-quic");
+        Directory.CreateDirectory(dir);
+        string certPath = Path.Combine(dir, "quic.crt");
+        string keyPath = Path.Combine(dir, "quic.key");
+
+        if (!System.IO.File.Exists(certPath))
+        {
+            using var rsa = System.Security.Cryptography.RSA.Create(2048);
+            var request = new System.Security.Cryptography.X509Certificates.CertificateRequest(
+                "CN=localhost", rsa, System.Security.Cryptography.HashAlgorithmName.SHA256,
+                System.Security.Cryptography.RSASignaturePadding.Pkcs1);
+            using var cert = request.CreateSelfSigned(
+                DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
+
+            System.IO.File.WriteAllText(certPath, cert.ExportCertificatePem());
+            System.IO.File.WriteAllText(keyPath, rsa.ExportPkcs8PrivateKeyPem());
+        }
+
+        return (certPath, keyPath);
+    }
 }

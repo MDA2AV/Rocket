@@ -55,7 +55,7 @@ internal sealed class IoxideConnectionListener : IConnectionListener
         {
             var reactor = new Reactor(i, cfg)
             {
-                Handle = HandleConnectionAsync,
+                TcpHandle = HandleConnectionAsync,
             };
             // Per-reactor startup, on the reactor's own thread: bind the current-reactor seam (so Kestrel
             // endpoints can resolve ring-native services), start the TLS service if configured, then run

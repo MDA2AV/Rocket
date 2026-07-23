@@ -68,6 +68,19 @@ public sealed unsafe partial class Reactor
         _quicConns[dcid] = fresh;
         _quicConnSet.Add(fresh);
 
+        // Two owners: this transport (released in QuicRemoveConnection) and the handler. The
+        // handler launches before the first datagram is fed - if the engine delivers stream data
+        // right away, the sticky pending flag completes the handler's first ReadAsync.
+        fresh.InitRefs();
+        if (QuicHandle is not null)
+        {
+            _ = RunQuicHandlerAsync(fresh);
+        }
+        else
+        {
+            fresh.DecRef();   // no handler configured: the transport stays the only owner
+        }
+
         fresh.OnDatagram(datagram.Payload, datagram.Tos, datagram.GroSegmentSize);
     }
 
@@ -140,12 +153,23 @@ public sealed unsafe partial class Reactor
             _quicConns.Remove(cid);
         }
         conn.Cids.Clear();
-        _quicConnSet.Remove(conn);
 
-        if (conn.PeerAddr != 0)
+        // The set membership doubles as the "transport still owns a ref" flag, so a second call
+        // (engine close racing the idle sweep) cannot double-release.
+        if (_quicConnSet.Remove(conn))
         {
-            NativeMemory.Free((void*)conn.PeerAddr);
-            conn.PeerAddr = 0;
+            // Wake the handler with closed=1 first - it resumes inline, sees IsClosed, and releases
+            // its own ref - then invalidate any awaiter that could outlive this life.
+            conn.MarkClosed();
+            conn.BumpGeneration();
+
+            if (conn.PeerAddr != 0)
+            {
+                NativeMemory.Free((void*)conn.PeerAddr);
+                conn.PeerAddr = 0;
+            }
+
+            conn.DecRef();
         }
     }
 

@@ -11,7 +11,7 @@ public static class IoxideRuntime
 
     // Wiring (a builder API will eventually wrap this):
     //   var reactor = new Reactor(id, config);               // implements IRingHost
-    //   reactor.Handle  = HandleConnection;
+    //   reactor.TcpHandle  = HandleConnection;
     //   reactor.OnStart = r => PgPool.Start(r, pgOptions);   // clients open on the reactor thread
     //   reactor.Run();
     //

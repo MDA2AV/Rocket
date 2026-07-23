@@ -11,10 +11,12 @@ namespace ioxide.quic;
 /// ticker via <see cref="GetNextTimeout"/> / <see cref="OnTimer"/>. Everything runs on the owning
 /// reactor thread, so the whole connection - transport half and engine half - is single-threaded.
 ///
-/// Subclass and override <see cref="OnStreamData"/> to consume application bytes; call
-/// <see cref="OpenUniStream"/> / <see cref="SendStream"/> to produce them. The base echoes nothing.
+/// Application bytes flow through the read surface on <see cref="QuicConnection"/>: each decrypted
+/// stream event is copied into the recv queue during iq_conn_read, and the IVTS fires ONCE after
+/// the read returns, so the resumed handler (see <see cref="QuicOptions.Handle"/>) can never
+/// re-enter the engine mid-read. Replies go out via <see cref="SendStream"/>.
 /// </summary>
-public abstract unsafe class QuicEngineConnection : QuicConnection
+public unsafe class QuicEngineConnection : QuicConnection
 {
     // sockaddr cap the transport uses for its peer-address blocks; large enough for sockaddr_in6.
     private const int PeerAddrCap = 128;
@@ -33,7 +35,12 @@ public abstract unsafe class QuicEngineConnection : QuicConnection
     // One reusable send scratch datagram (max QUIC payload); the engine writes at most one per call.
     private readonly byte[] _sendBuf = new byte[1452];
 
-    protected QuicEngineConnection(QuicEngine engine)
+    // Set inside iq_conn_read: _recvEnqueued arms the once-per-read IVTS fire, _recvOverflow defers
+    // the teardown until the engine call unwinds (freeing the conn inside its own callback is UB).
+    private bool _recvEnqueued;
+    private bool _recvOverflow;
+
+    public QuicEngineConnection(QuicEngine engine)
     {
         _engine = engine;
     }
@@ -41,8 +48,19 @@ public abstract unsafe class QuicEngineConnection : QuicConnection
     /// <summary>Handshake finished; safe to open server-initiated streams and send.</summary>
     protected virtual void OnHandshakeCompleted() { }
 
-    /// <summary>Application bytes arrived on a stream (spans valid only for the call).</summary>
-    protected abstract void OnStreamData(long streamId, ReadOnlySpan<byte> data, bool fin);
+    // ngtcp2 delivered decrypted stream bytes (mid-iq_conn_read; the span dies when it returns).
+    // Copy-and-enqueue only - the wake happens once, after the read unwinds.
+    private void OnStreamData(long streamId, ReadOnlySpan<byte> data, bool fin)
+    {
+        if (EnqueueStreamData(streamId, data, fin))
+        {
+            _recvEnqueued = true;
+        }
+        else
+        {
+            _recvOverflow = true;
+        }
+    }
 
     /// <summary>A stream ended (peer FIN/reset or local close).</summary>
     protected virtual void OnStreamClosed(long streamId, ulong appErrorCode) { }
@@ -121,6 +139,15 @@ public abstract unsafe class QuicEngineConnection : QuicConnection
                 CloseFromEngine(rv);
                 return;
             }
+            if (_recvOverflow)
+            {
+                // Deferred from OnStreamData: tear down now that the engine call has unwound.
+                Console.Error.WriteLine("[ioxide.quic] recv queue overflow; closing connection.");
+                _closed = true;
+                _reactor.QuicRemoveConnection(this);
+                Destroy();
+                return;
+            }
         }
 
         if (!_handshakeDone && Ngtcp2.iq_conn_is_established(_conn) != 0)
@@ -130,6 +157,18 @@ public abstract unsafe class QuicEngineConnection : QuicConnection
         }
 
         FlushEgress();
+        FireRecv();
+    }
+
+    // The once-per-read wake: the engine is idle again, so the handler resuming inline (and
+    // immediately calling SendStream) is safe.
+    private void FireRecv()
+    {
+        if (_recvEnqueued)
+        {
+            _recvEnqueued = false;
+            SignalDataArrived();
+        }
     }
 
     public override long GetNextTimeout(long nowMs)
@@ -161,6 +200,7 @@ public abstract unsafe class QuicEngineConnection : QuicConnection
             return;
         }
         FlushEgress();
+        FireRecv();
     }
 
     public override void OnEvicted(QuicEvictReason reason)
@@ -170,9 +210,9 @@ public abstract unsafe class QuicEngineConnection : QuicConnection
 
     // --- application-facing send --------------------------------------------------------------
 
-    /// <summary>Queue bytes on a stream and flush. streamId must come from a delivered stream or
+    /// <summary>Queue bytes on a stream and flush. streamId must come from a delivered item or
     /// <see cref="OpenUniStream"/>. fin closes the send side.</summary>
-    protected void SendStream(long streamId, ReadOnlySpan<byte> data, bool fin)
+    public override void SendStream(long streamId, ReadOnlySpan<byte> data, bool fin)
     {
         if (_closed)
         {
@@ -265,16 +305,17 @@ public abstract unsafe class QuicEngineConnection : QuicConnection
         {
             Console.Error.WriteLine($"[ioxide.quic] connection closed: {Ngtcp2.StrError(liberr)}");
         }
+
+        // Close the send gate before the transport wakes the handler (QuicRemoveConnection ->
+        // MarkClosed resumes it inline): a farewell SendStream must not pump an errored conn.
+        _closed = true;
         _reactor.QuicRemoveConnection(this);   // stop routing every CID to us
         Destroy();
     }
 
+    // Idempotent per resource: callers may gate the send path (_closed) before getting here.
     private void Destroy()
     {
-        if (_closed)
-        {
-            return;
-        }
         _closed = true;
         if (_conn != 0)
         {

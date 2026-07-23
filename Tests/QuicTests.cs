@@ -250,6 +250,7 @@ internal sealed class EchoQuicConnection : QuicConnection
     public override long GetNextTimeout(long nowMs) => long.MaxValue;
     public override void OnTimer(long nowMs) { }
     public override void OnEvicted(QuicEvictReason reason) { }
+    public override void SendStream(long streamId, ReadOnlySpan<byte> data, bool fin) { }   // engine-less: no streams
 }
 
 /// <summary>
@@ -301,4 +302,5 @@ internal sealed class TestQuicConnection : QuicConnection
     }
 
     public override void OnEvicted(QuicEvictReason reason) => Evicted = reason;
+    public override void SendStream(long streamId, ReadOnlySpan<byte> data, bool fin) { }   // engine-less: no streams
 }

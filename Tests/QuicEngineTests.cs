@@ -23,7 +23,8 @@ internal static class QuicEngineTests
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
-                quicFactory: engine.CreateFactory(r => new EchoEngineConnection(engine)));
+                quicFactory: engine.CreateFactory(),
+                quicHandle: EchoHandler);
 
             using var client = new QuicTestClient("127.0.0.1", udpPort);
             client.Connect();
@@ -36,15 +37,34 @@ internal static class QuicEngineTests
             Assert.Equal("hello-quic-echo", echoed);
         });
     }
-}
 
-/// <summary>Server side: echoes each stream's bytes back on the same stream.</summary>
-internal sealed class EchoEngineConnection : QuicEngineConnection
-{
-    public EchoEngineConnection(QuicEngine engine) : base(engine) { }
+    // Server side, the delegate model: await stream events, echo each back on its own stream.
+    private static async Task EchoHandler(Reactor reactor, QuicConnection conn)
+    {
+        try
+        {
+            while (true)
+            {
+                QuicRecvSnapshot snap = await conn.ReadAsync();
 
-    protected override void OnStreamData(long streamId, ReadOnlySpan<byte> data, bool fin)
-        => SendStream(streamId, data.ToArray(), fin);
+                while (conn.TryGetItem(in snap, out QuicRecvRing.Item item))
+                {
+                    conn.SendStream(item.StreamId, item.AsSpan(), item.Fin);
+                    conn.ReturnItem(in item);
+                }
+
+                if (snap.IsClosed)
+                {
+                    break;
+                }
+                conn.ResetRead();
+            }
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    }
 }
 
 /// <summary>

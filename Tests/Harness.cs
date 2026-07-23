@@ -36,7 +36,7 @@ internal static class TestServer
         var reactor = new Reactor(0, config)
         {
             OnStart = onStart,
-            Handle = handle,
+            TcpHandle = handle,
         };
 
         var thread = new Thread(reactor.Run)
@@ -74,15 +74,17 @@ internal static class TestServer
     public static (int TcpPort, int UdpPort) StartDatagram(
         UdpDatagramHandler? onDatagram,
         QuicConnectionFactory? quicFactory = null,
-        int quicIdleMs = 60_000)
-        => StartDatagramConfigured(onDatagram, quicFactory, quicIdleMs, udpRecvSlots: 16);
+        int quicIdleMs = 60_000,
+        Func<Reactor, QuicConnection, Task>? quicHandle = null)
+        => StartDatagramConfigured(onDatagram, quicFactory, quicIdleMs, udpRecvSlots: 16, quicHandle);
 
     /// <summary>StartDatagram with a tunable UDP ring depth (for the -ENOBUFS re-arm burst test).</summary>
     public static (int TcpPort, int UdpPort) StartDatagramConfigured(
         UdpDatagramHandler? onDatagram,
         QuicConnectionFactory? quicFactory = null,
         int quicIdleMs = 60_000,
-        int udpRecvSlots = 16)
+        int udpRecvSlots = 16,
+        Func<Reactor, QuicConnection, Task>? quicHandle = null)
     {
         int tcpPort = Interlocked.Increment(ref _nextPort);
         int udpPort = Interlocked.Increment(ref _nextPort);
@@ -109,7 +111,8 @@ internal static class TestServer
 
         var reactor = new Reactor(0, config)
         {
-            Handle = static (_, _) => Task.CompletedTask,
+            TcpHandle = static (_, _) => Task.CompletedTask,
+            QuicHandle = quicHandle,
             OnDatagram = onDatagram,
         };
 

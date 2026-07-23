@@ -46,9 +46,16 @@ public sealed unsafe partial class Reactor : IRingHost
     public Action<Reactor>? OnStart;
 
     /// <summary>
-    /// The per-connection request handler, invoked once per accepted connection.
+    /// The per-connection TCP handler, invoked once per accepted connection (CQE accept path).
     /// </summary>
-    public Func<Reactor, TcpConnection, Task> Handle = null!;
+    public Func<Reactor, TcpConnection, Task> TcpHandle = null!;
+
+    /// <summary>
+    /// The per-connection QUIC handler, invoked once per adopted connection (CID demux path).
+    /// Null: no handler is launched (raw engine mode, e.g. a custom <see cref="QuicConnection"/>
+    /// subclass consuming its own events).
+    /// </summary>
+    public Func<Reactor, QuicConnection, Task>? QuicHandle;
 
     public void SubmitConnect(int fd, nint sockaddr, int sockaddrLen, IRingCompletion completion)
     {

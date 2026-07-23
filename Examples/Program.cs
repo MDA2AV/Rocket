@@ -42,7 +42,7 @@ internal static class Program
         {
             var reactor = new Reactor(i, example.Config);
             reactor.OnStart = example.OnStart;
-            reactor.Handle = example.Handle;
+            reactor.TcpHandle = example.Handle;
 
             threads[i] = new Thread(reactor.Run)
             {

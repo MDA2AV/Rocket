@@ -51,6 +51,9 @@ public sealed unsafe class QuicEngine : IDisposable
     /// construct the connection, run the ngtcp2 accept + validation, and either adopt it (registering
     /// the server-minted CID) or drop the packet.
     /// </summary>
+    /// <summary>Factory for the plain engine connection - the delegate-handler model needs no subclass.</summary>
+    public QuicConnectionFactory CreateFactory() => CreateFactory(_ => new QuicEngineConnection(this));
+
     public QuicConnectionFactory CreateFactory(Func<Reactor, QuicEngineConnection> create)
     {
         return (Reactor reactor, in UdpDatagram datagram, in QuicCid dcid) =>
