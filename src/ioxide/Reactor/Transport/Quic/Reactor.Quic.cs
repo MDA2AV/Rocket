@@ -65,6 +65,7 @@ public sealed unsafe partial class Reactor
         {
             conn.LastSeenMs = Environment.TickCount64;
             conn.OnDatagram(datagram.Payload, datagram.Tos, datagram.GroSegmentSize);
+            QuicArmTimer(conn);   // reads/handler sends (inline above) moved the engine deadline
             return;
         }
 
@@ -104,6 +105,7 @@ public sealed unsafe partial class Reactor
         }
 
         fresh.OnDatagram(datagram.Payload, datagram.Tos, datagram.GroSegmentSize);
+        QuicArmTimer(fresh);
     }
 
     // RFC 8999 (version-independent invariants): long header (bit 0x80) carries an explicit DCID
@@ -195,7 +197,8 @@ public sealed unsafe partial class Reactor
         }
     }
 
-    // Ticker callback (~250 ms): fire engine deadlines, evict quiet connections.
+    // Ticker callback (~250 ms): evict quiet connections. Engine deadlines are fired by
+    // QuicFireDueTimers at loop-pass granularity; this ticker's loop wake doubles as its floor.
     private void QuicSweep()
     {
         long now = Environment.TickCount64;
@@ -210,13 +213,51 @@ public sealed unsafe partial class Reactor
             {
                 QuicRemoveConnection(conn);
                 conn.OnEvicted(QuicEvictReason.IdleTimeout);
-                continue;
             }
+        }
+    }
 
-            if (conn.GetNextTimeout(now) <= now)
+    // Earliest engine deadline across live conns; long.MaxValue = none. Checked at the top of every
+    // loop pass, so loss/PTO timers fire at completion-batch granularity (~RTT under load) instead
+    // of the 250 ms ticker - a retransmit that waits 250 ms per loss makes storms self-sustaining.
+    private long _quicNextTimeoutMs = long.MaxValue;
+
+    private void QuicFireDueTimers()
+    {
+        if (_quicConnSet.Count == 0 || Environment.TickCount64 < _quicNextTimeoutMs)
+        {
+            return;
+        }
+
+        long now = Environment.TickCount64;
+        long next = long.MaxValue;
+        _quicSweepScratch.Clear();
+        _quicSweepScratch.AddRange(_quicConnSet);
+        foreach (QuicConnection conn in _quicSweepScratch)
+        {
+            long deadline = conn.GetNextTimeout(now);
+            if (deadline <= now)
             {
                 conn.OnTimer(now);
+                deadline = conn.GetNextTimeout(now);
             }
+            if (deadline < next)
+            {
+                next = deadline;
+            }
+        }
+        _quicNextTimeoutMs = next;
+    }
+
+    // Pull the tracked minimum forward after engine activity on a conn (its expiry may now be the
+    // earliest). Deadlines that move LATER are caught by the next full scan when the stale minimum
+    // fires - one wasted scan, never a missed timer.
+    private void QuicArmTimer(QuicConnection conn)
+    {
+        long deadline = conn.GetNextTimeout(Environment.TickCount64);
+        if (deadline < _quicNextTimeoutMs)
+        {
+            _quicNextTimeoutMs = deadline;
         }
     }
 

@@ -122,6 +122,20 @@ public unsafe class QuicEngineConnection : QuicConnection
         {
             return;
         }
+        _inEngineCycle = true;
+        try
+        {
+            OnDatagramCore(payload, tos, groSegmentSize);
+        }
+        finally
+        {
+            _inEngineCycle = false;
+            FlushGso();
+        }
+    }
+
+    private void OnDatagramCore(ReadOnlySpan<byte> payload, byte tos, int groSegmentSize)
+    {
         // A GRO train is several datagrams of groSegmentSize bytes (last may be shorter); feed each.
         int stride = groSegmentSize > 0 ? groSegmentSize : payload.Length;
         for (int off = 0; off < payload.Length; off += stride)
@@ -219,14 +233,23 @@ public unsafe class QuicEngineConnection : QuicConnection
         {
             return;
         }
-        int rv = Ngtcp2.iq_conn_handle_expiry(_conn, NowNs());
-        if (rv != 0)
+        _inEngineCycle = true;
+        try
         {
-            CloseFromEngine(rv);
-            return;
+            int rv = Ngtcp2.iq_conn_handle_expiry(_conn, NowNs());
+            if (rv != 0)
+            {
+                CloseFromEngine(rv);
+                return;
+            }
+            FlushEgress();
+            FireRecv();
         }
-        FlushEgress();
-        FireRecv();
+        finally
+        {
+            _inEngineCycle = false;
+            FlushGso();
+        }
     }
 
     public override void OnEvicted(QuicEvictReason reason)
@@ -296,6 +319,55 @@ public unsafe class QuicEngineConnection : QuicConnection
             return -1;
         }
         return Ngtcp2.iq_conn_open_uni(_conn);
+    }
+
+    // --- GSO send batching ----------------------------------------------------------------------
+    // One sendmsg per engine cycle instead of one per datagram: ngtcp2 emits runs of equal-size
+    // (MTU-full) datagrams under load, which is exactly the UDP_SEGMENT shape. A shorter datagram
+    // may only END a batch (GSO semantics: equal segments, the last may be short). All datagrams
+    // in a batch are this connection's, so the destination is single by construction.
+
+    private readonly byte[] _gsoBuf = new byte[63 * 1024];   // < 65507, the UDP payload ceiling
+    private int  _gsoLen;
+    private int  _gsoSeg;      // segment size = first datagram's length; 0 = batch empty
+    private bool _gsoClosed;   // a short (final) segment landed - flush before accepting more
+    private bool _inEngineCycle;
+
+    private void QueueSend(ReadOnlySpan<byte> datagram)
+    {
+        if (!_inEngineCycle)
+        {
+            Send(datagram);   // outside a cycle (mailbox-resumed handler): direct, unbatched
+            return;
+        }
+
+        int len = datagram.Length;
+        if (_gsoSeg != 0 && (len > _gsoSeg || _gsoClosed || _gsoLen + len > _gsoBuf.Length))
+        {
+            FlushGso();
+        }
+        if (_gsoSeg == 0)
+        {
+            _gsoSeg = len;
+        }
+        datagram.CopyTo(_gsoBuf.AsSpan(_gsoLen));
+        _gsoLen += len;
+        if (len < _gsoSeg)
+        {
+            _gsoClosed = true;
+        }
+    }
+
+    private void FlushGso()
+    {
+        if (_gsoLen == 0)
+        {
+            return;
+        }
+        Send(_gsoBuf.AsSpan(0, _gsoLen), _gsoLen > _gsoSeg ? _gsoSeg : 0);
+        _gsoLen = 0;
+        _gsoSeg = 0;
+        _gsoClosed = false;
     }
 
     // --- engine egress pump -------------------------------------------------------------------
@@ -381,7 +453,7 @@ public unsafe class QuicEngineConnection : QuicConnection
             }
             if (n > 0)
             {
-                Send(_sendBuf.AsSpan(0, (int)n));
+                QueueSend(_sendBuf.AsSpan(0, (int)n));
             }
 
             if (off == data.Length && (data.Length > 0 || n > 0))
@@ -417,7 +489,7 @@ public unsafe class QuicEngineConnection : QuicConnection
             {
                 return;
             }
-            Send(_sendBuf.AsSpan(0, (int)n));
+            QueueSend(_sendBuf.AsSpan(0, (int)n));
         }
     }
 

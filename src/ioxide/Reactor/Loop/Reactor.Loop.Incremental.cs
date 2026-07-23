@@ -175,6 +175,7 @@ public sealed unsafe partial class Reactor
             DrainRemoteOps();
             DrainPostQ();
             RearmStarvedRecvs();
+            QuicFireDueTimers();
 
             int rc = _ring.SubmitAndWait(1);
             if (rc < 0 && rc != -EINTR && rc != -EAGAIN && rc != -EBUSY)
