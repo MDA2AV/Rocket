@@ -14,7 +14,6 @@
 <nav class="top">
   <a class="brand" href="./"><span>io</span>xide</a>
   <div class="links">
-    <a href="learn/overview.html">Documentation</a>
     <a href="blog/index.html">Blog</a>
     <a class="gh" href="https://github.com/MDA2AV/ioxide" aria-label="GitHub"><svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
   </div>
@@ -32,22 +31,41 @@
 <section class="block">
   <h2>A normal async handler. An abnormal runtime under it.</h2>
   <p class="lead">You write ordinary C#. Underneath, every await is a request placed on this
-  core's queue, and your code resumes right where it left off when the kernel answers.</p>
+  core's queue, and your code resumes right where it left off when the kernel answers. The same
+  model rides TCP and QUIC (ngtcp2 + picotls bundled in the package, TLS 1.3 inside the
+  transport) - pick a transport and a surface, pipes first. HTTP/3 ships as a layer over the
+  QUIC surface.</p>
 <div class="tabs">
   <input type="radio" name="mode-tabs" id="tab-pipe" checked>
   <input type="radio" name="mode-tabs" id="tab-shared">
   <input type="radio" name="mode-tabs" id="tab-inc">
   <input type="radio" name="mode-tabs" id="tab-vs">
+  <input type="radio" name="mode-tabs" id="tab-qpipe">
+  <input type="radio" name="mode-tabs" id="tab-qraw">
+  <input type="radio" name="mode-tabs" id="tab-h3">
   <div class="tab-bar">
-    <label for="tab-pipe">pipes</label>
     <div class="tab-rawgroup">
-      <span class="tab-group">raw &middot; highest performance</span>
+      <span class="tab-group">tcp</span>
       <div class="tab-rawtabs">
-        <label for="tab-shared">shared buffer ring</label>
-        <label for="tab-inc">incremental &middot; kernel 6.12+</label>
+        <label for="tab-pipe">pipes</label>
+        <label for="tab-shared">raw &middot; shared ring</label>
+        <label for="tab-inc">raw &middot; incremental</label>
+        <label for="tab-vs">shared vs incremental</label>
       </div>
     </div>
-    <label for="tab-vs">shared vs incremental</label>
+    <div class="tab-rawgroup">
+      <span class="tab-group">quic</span>
+      <div class="tab-rawtabs">
+        <label for="tab-qpipe">pipes</label>
+        <label for="tab-qraw">raw</label>
+      </div>
+    </div>
+    <div class="tab-rawgroup">
+      <span class="tab-group">http/3</span>
+      <div class="tab-rawtabs">
+        <label for="tab-h3">H3Connection</label>
+      </div>
+    </div>
   </div>
   <div class="pane pane-pipe">
 <pre><code class="language-csharp">var config = new ServerConfig
@@ -73,7 +91,7 @@ var reactor = new Reactor(id, config);
 // Clients opened here ride this reactor's ring.
 reactor.OnStart = r =&gt; PgPool.Start(r, pgOptions);
 
-reactor.Handle = async (r, conn) =&gt;
+reactor.TcpHandle = async (r, conn) =&gt;
 {
     var pool = r.GetService&lt;PgPool&gt;();
 
@@ -81,8 +99,8 @@ reactor.Handle = async (r, conn) =&gt;
     // bytes are held across reads (no copy, no slab) and buffers return to
     // the ring automatically once fully consumed. The writer stages into the
     // connection's write slab.
-    var reader = new ConnectionPipeReader(conn);
-    var writer = new ConnectionPipeWriter(conn);
+    var reader = new TcpConnectionPipeReader(conn);
+    var writer = new TcpConnectionPipeWriter(conn);
 
     while (true)
     {
@@ -148,7 +166,7 @@ var reactor = new Reactor(id, config);
 // Clients opened here ride this reactor's ring.
 reactor.OnStart = r =&gt; PgPool.Start(r, pgOptions);
 
-reactor.Handle = async (r, conn) =&gt;
+reactor.TcpHandle = async (r, conn) =&gt;
 {
     var pool = r.GetService&lt;PgPool&gt;();
 
@@ -252,7 +270,7 @@ var reactor = new Reactor(id, config);
 // Clients opened here ride this reactor's ring.
 reactor.OnStart = r =&gt; PgPool.Start(r, pgOptions);
 
-reactor.Handle = async (r, conn) =&gt;
+reactor.TcpHandle = async (r, conn) =&gt;
 {
     var pool = r.GetService&lt;PgPool&gt;();
 
@@ -362,6 +380,153 @@ new Thread(reactor.Run).Start();</code></pre>
       The pipes tab is API sugar over either mode: the reader owns the carry for you.</p>
     </div>
   </div>
+  <div class="pane pane-qpipe">
+<pre><code class="language-csharp">// One engine for the whole server: ngtcp2 + picotls, compiled into the package.
+var engine = new QuicEngine("cert.pem", "key.pem", cidLength: 8,
+                            alpn: ["echo"]);   // TLS ALPN allowlist - ["h3"] when serving HTTP/3
+
+var config = new ServerConfig
+{
+    Port         = 8080,
+    ReactorCount = Environment.ProcessorCount,
+    UdpRecvSlots = 16,                      // multishot UDP recv slots per reactor
+    Quic = new QuicOptions
+    {
+        Port              = 8443,           // every reactor binds it via SO_REUSEPORT
+        LocalCidLength    = 8,
+        ConnectionFactory = engine.CreateFactory(),
+    },
+};
+
+var reactor = new Reactor(id, config);
+
+reactor.QuicHandle = async (r, conn) =&gt;
+{
+    // One QUIC stream as a duplex pipe. QUIC multiplexes streams and a
+    // PipeReader is one byte stream, so the pipe binds to a single stream:
+    // the first one the peer opens (auto-bind), or an explicit id.
+    // Multi-stream protocols use the raw surface - that's what ioxide.h3 does.
+    var pipe = new QuicConnectionDualPipe(conn);
+
+    while (true)
+    {
+        // Decrypted stream bytes - resumed inline on the reactor.
+        var result = await pipe.Input.ReadAsync();
+        var buffer = result.Buffer;
+
+        // Same shape as TCP: walk every complete request, keep the partial
+        // tail buffered. TryParseRequest and Respond are YOUR code - ioxide
+        // hands you the stream's bytes and stays out of your protocol.
+        while (TryParseRequest(ref buffer, out Request request))
+            pipe.Output.Write(Respond(request));
+
+        // No parked flush: framing, encryption, pacing and retransmission
+        // are the engine's job - FlushAsync hands the bytes over and returns.
+        await pipe.Output.FlushAsync();
+
+        pipe.Input.AdvanceTo(buffer.Start, buffer.End);
+
+        if (result.IsCompleted)   // peer's fin, stream reset, or connection close
+            break;
+    }
+
+    pipe.Output.Complete();   // half-close: our fin rides out
+    pipe.Input.Complete();
+    conn.DecRef();
+};
+
+// One reactor per core.
+new Thread(reactor.Run).Start();</code></pre>
+  </div>
+  <div class="pane pane-qraw">
+<pre><code class="language-csharp">// One engine for the whole server: ngtcp2 + picotls, compiled into the package.
+var engine = new QuicEngine("cert.pem", "key.pem", cidLength: 8,
+                            alpn: ["echo"]);   // TLS ALPN allowlist - ["h3"] when serving HTTP/3
+
+var config = new ServerConfig
+{
+    Port         = 8080,
+    ReactorCount = Environment.ProcessorCount,
+    UdpRecvSlots = 16,                      // multishot UDP recv slots per reactor
+    Quic = new QuicOptions
+    {
+        Port              = 8443,           // every reactor binds it via SO_REUSEPORT
+        LocalCidLength    = 8,
+        ConnectionFactory = engine.CreateFactory(),
+    },
+};
+
+var reactor = new Reactor(id, config);
+
+reactor.QuicHandle = async (r, conn) =&gt;
+{
+    try
+    {
+        while (true)
+        {
+            // Decrypted stream events - resumed inline on the reactor.
+            QuicRecvSnapshot snap = await conn.ReadAsync();
+
+            // Drain the queue: each item carries stream id + fin, so this one
+            // loop serves every stream the peer multiplexes - here, an echo.
+            // Replies queue on the engine; framing, encryption, pacing and
+            // retransmission are its job (no flush to await).
+            while (conn.TryGetItem(in snap, out QuicRecvRing.Item item))
+            {
+                conn.SendStream(item.StreamId, item.AsSpan(), item.Fin);
+                conn.ReturnItem(in item);
+            }
+
+            if (snap.IsClosed)
+                break;
+            conn.ResetRead();
+        }
+    }
+    finally
+    {
+        conn.DecRef();
+    }
+};
+
+// One reactor per core.
+new Thread(reactor.Run).Start();</code></pre>
+  </div>
+  <div class="pane pane-h3">
+<pre><code class="language-csharp">// ioxide.h3: nghttp3 over the QUIC surface - real HTTP/3, ALPN-pinned.
+var engine = new QuicEngine("cert.pem", "key.pem", cidLength: 8, alpn: ["h3"]);
+
+var config = new ServerConfig
+{
+    Port         = 8080,
+    ReactorCount = Environment.ProcessorCount,
+    UdpRecvSlots = 16,                      // multishot UDP recv slots per reactor
+    Quic = new QuicOptions
+    {
+        Port              = 8443,           // every reactor binds it via SO_REUSEPORT
+        LocalCidLength    = 8,
+        ConnectionFactory = engine.CreateFactory(),
+    },
+};
+
+var reactor = new Reactor(id, config);
+
+// H3Connection owns the connection's read loop: it feeds stream items into
+// nghttp3, assembles each request - headers, body and all - and calls your
+// function once per request. QPACK, control streams, fin and stream teardown
+// are its problem, not yours.
+reactor.QuicHandle = (r, conn) =&gt;
+    new H3Connection(conn).RunAsync(req =&gt; req.Path switch
+    {
+        "/"          =&gt; H3Response.Text("hello from HTTP/3 over io_uring\n"),
+        "/plaintext" =&gt; H3Response.Text("Hello, World!"),
+        _            =&gt; H3Response.Text("not found\n", status: 404),
+    });
+
+// One reactor per core.
+new Thread(reactor.Run).Start();
+
+// curl --http3-only -k https://localhost:8443/</code></pre>
+  </div>
 </div>
   <p>Each of those awaits is backed by a reusable <code>IValueTaskSource</code>: submitting the
   op parks your continuation, and the moment its completion arrives the reactor calls
@@ -370,13 +535,14 @@ new Thread(reactor.Run).Start();</code></pre>
 
   <p>Every tab is runnable code: the
   <a href="https://github.com/MDA2AV/ioxide/tree/main/Examples">Examples project</a> in the repo
-  builds each one - pg and raw variants, 12 reactors - with
+  builds each one - pg and raw variants plus a <code>quic-h3</code> mode that serves HTTP/3 and a
+  pipe echo off one listener - with
   <a href="https://github.com/MDA2AV/ioxide/blob/main/Examples/RESULTS.md">benchmark results</a>.</p>
 
 </section>
 
 <footer>
-  MIT · Linux 6.1+ · .NET 10 · <a href="https://github.com/MDA2AV/ioxide">github.com/MDA2AV/ioxide</a>
+  MIT · Linux 6.1+ · .NET 10 · <a href="https://github.com/MDA2AV/ioxide">github.com/MDA2AV/ioxide</a> · <a href="learn/overview.html">docs</a>
 </footer>
 
 <script>hljs.highlightAll();</script>
