@@ -12,7 +12,8 @@ public enum WriteOverflowStrategy
     Segmented,
 }
 
-/// <summary>The TCP side of <see cref="ServerConfig"/>: listeners, buffer rings, and the write path.</summary>
+/// <summary>The TCP side of <see cref="ServerConfig"/>: listeners, connection pool, and the write path
+/// (recv buffering is reactor machinery - see the buffer-ring knobs on <see cref="ServerConfig"/>).</summary>
 public sealed record TcpOptions
 {
     public ushort Port { get; init; } = 8080;
@@ -26,10 +27,6 @@ public sealed record TcpOptions
 
     /// <summary>listen() backlog per SO_REUSEPORT listener - the accept-queue depth for connection bursts.</summary>
     public int ListenBacklog { get; init; } = 1024;
-
-    // Shared buffer ring (Incremental == false).
-    public int RecvBufferSize    { get; init; } = 32 * 1024;
-    public int BufferRingEntries { get; init; } = 4096;
 
     // Per-connection write slab + connection pool cap.
     public int WriteSlabSize { get; init; } = 16 * 1024;
@@ -48,11 +45,4 @@ public sealed record TcpOptions
 
     // Per-connection SPSC recv queue depth (power of two); overflow closes the connection.
     public int RecvQueueEntries { get; init; } = 64;
-
-    // Incremental mode (IOU_PBUF_RING_INC, kernel 6.12+) - per-connection rings.
-    // Reserved native memory ≈ PoolMax × ConnBufRingEntries × IncRecvBufferSize × ReactorCount.
-    public bool Incremental        { get; init; } = false;
-    public int  MaxConnections     { get; init; } = 4096;   // one bgid per active connection
-    public int  ConnBufRingEntries { get; init; } = 16;
-    public int  IncRecvBufferSize  { get; init; } = 4096;
 }

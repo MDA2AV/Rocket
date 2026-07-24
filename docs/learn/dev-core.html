@@ -443,16 +443,18 @@ contract forces is a copy into the caller's buffer - the raw read API and the pi
 memory directly; <code>Stream</code> cannot.</p>
 
     <h2>Configuration &middot; <span class="dim">ServerConfig.cs, IoxideRuntime.cs</span></h2>
-    <p><code>ServerConfig</code> is the record of tunables, grouped by transport. At the root:
-    <code>ReactorCount</code>, <code>RingEntries</code> (SQ/CQ depth), <code>DualStack</code>.
-    Under <code>Tcp</code> (a <code>TcpOptions</code>): <code>Port</code> + <code>ExtraPorts</code>,
-    <code>ListenBacklog</code>, the shared-ring knobs (<code>RecvBufferSize</code>,
-    <code>BufferRingEntries</code>), <code>WriteSlabSize</code>, <code>PoolMax</code>,
-    <code>RecvQueueEntries</code>, <code>WriteOverflow</code>, <code>ZeroCopySend</code>, and the
-    incremental-mode knobs (<code>Incremental</code>, <code>MaxConnections</code>,
-    <code>ConnBufRingEntries</code>, <code>IncRecvBufferSize</code>). Under <code>Udp</code> (a
-    <code>UdpOptions</code>): <code>Ports</code>, <code>RecvSlots</code>, <code>Gro</code>. And
-    <code>Quic</code> holds the optional <code>QuicOptions</code>. <code>RecvSnapshot</code> is the
+    <p><code>ServerConfig</code> is the record of tunables. At the root, the engine and its recv
+    machinery: <code>ReactorCount</code>, <code>RingEntries</code> (SQ/CQ depth),
+    <code>DualStack</code>, the shared-ring knobs (<code>RecvBufferSize</code>,
+    <code>BufferRingEntries</code>) and the incremental-mode knobs (<code>Incremental</code> -
+    which also selects the reactor loop variant - <code>MaxConnections</code>,
+    <code>ConnBufRingEntries</code>, <code>IncRecvBufferSize</code>): io_uring provided-buffer
+    rings are per-reactor machinery, not socket config. Under <code>Tcp</code> (a
+    <code>TcpOptions</code>): <code>Port</code> + <code>ExtraPorts</code>,
+    <code>ListenBacklog</code>, <code>WriteSlabSize</code>, <code>PoolMax</code>,
+    <code>RecvQueueEntries</code>, <code>WriteOverflow</code>, <code>ZeroCopySend</code>. Under
+    <code>Udp</code> (a <code>UdpOptions</code>): <code>Ports</code>, <code>RecvSlots</code>,
+    <code>Gro</code>. And <code>Quic</code> holds the optional <code>QuicOptions</code>. <code>RecvSnapshot</code> is the
     readonly struct a read returns (tail + closed flag). <code>IoxideRuntime</code> is the version /
     wiring doc surface.</p>
 

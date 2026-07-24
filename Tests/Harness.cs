@@ -52,10 +52,10 @@ internal static class TestServer
 
     private static ServerConfig DefaultConfig() => new()
     {
+        RecvBufferSize = 4096,
+        BufferRingEntries = 256,
         Tcp = new TcpOptions
         {
-            RecvBufferSize = 4096,
-            BufferRingEntries = 256,
             WriteSlabSize = 16 * 1024,
             PoolMax = 64,
             RecvQueueEntries = 64,
@@ -95,11 +95,11 @@ internal static class TestServer
         var config = new ServerConfig
         {
             ReactorCount = 1,
+            RecvBufferSize = 4096,
+            BufferRingEntries = 256,
             Tcp = new TcpOptions
             {
                 Port = (ushort)tcpPort,
-                RecvBufferSize = 4096,
-                BufferRingEntries = 256,
                 WriteSlabSize = 16 * 1024,
                 PoolMax = 64,
                 RecvQueueEntries = 64,

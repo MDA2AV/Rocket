@@ -166,18 +166,18 @@
       <tr><td><code>ReactorCount</code></td><td>12</td><td>reactors = threads; run one per core</td></tr>
       <tr><td><code>RingEntries</code></td><td>8192</td><td>io_uring SQ/CQ depth</td></tr>
       <tr><td><code>DualStack</code></td><td>false</td><td>bind listeners (TCP and UDP) as dual-stack IPv6</td></tr>
+      <tr><td><code>RecvBufferSize</code></td><td>32 KB</td><td>shared mode: bytes per recv buffer</td></tr>
+      <tr><td><code>BufferRingEntries</code></td><td>4096</td><td>shared mode: buffers per reactor (power of two)</td></tr>
+      <tr><td><code>Incremental</code></td><td>false</td><td>per-connection buffer rings (kernel 6.12+)</td></tr>
+      <tr><td><code>MaxConnections</code></td><td>4096</td><td>incremental: one buffer-group id per live connection</td></tr>
+      <tr><td><code>ConnBufRingEntries</code></td><td>16</td><td>incremental: buffers per connection ring</td></tr>
+      <tr><td><code>IncRecvBufferSize</code></td><td>4 KB</td><td>incremental: bytes per buffer (kernel appends into it)</td></tr>
       <tr><td><code>Tcp.Port</code></td><td>8080</td><td>SO_REUSEPORT listener port (every reactor binds it)</td></tr>
       <tr><td><code>Tcp.ExtraPorts</code></td><td>[]</td><td>additional listener ports; <code>conn.ListenerPort</code> says which one a connection used</td></tr>
       <tr><td><code>Tcp.ListenBacklog</code></td><td>1024</td><td>accept-queue depth per listener</td></tr>
-      <tr><td><code>Tcp.RecvBufferSize</code></td><td>32 KB</td><td>shared mode: bytes per recv buffer</td></tr>
-      <tr><td><code>Tcp.BufferRingEntries</code></td><td>4096</td><td>shared mode: buffers per reactor (power of two)</td></tr>
       <tr><td><code>Tcp.WriteSlabSize</code></td><td>16 KB</td><td>per-connection write buffer</td></tr>
       <tr><td><code>Tcp.PoolMax</code></td><td>1024</td><td>pooled connection objects per reactor (bounds native memory)</td></tr>
       <tr><td><code>Tcp.RecvQueueEntries</code></td><td>64</td><td>per-connection slice queue depth; overflow closes the connection</td></tr>
-      <tr><td><code>Tcp.Incremental</code></td><td>false</td><td>per-connection buffer rings (kernel 6.12+)</td></tr>
-      <tr><td><code>Tcp.MaxConnections</code></td><td>4096</td><td>incremental: one buffer-group id per live connection</td></tr>
-      <tr><td><code>Tcp.ConnBufRingEntries</code></td><td>16</td><td>incremental: buffers per connection ring</td></tr>
-      <tr><td><code>Tcp.IncRecvBufferSize</code></td><td>4 KB</td><td>incremental: bytes per buffer (kernel appends into it)</td></tr>
       <tr><td><code>Udp.Ports</code></td><td>[]</td><td>raw UDP sockets; datagrams reach <code>Reactor.OnDatagram</code></td></tr>
       <tr><td><code>Udp.RecvSlots</code></td><td>16</td><td>shared UDP provided-buffer ring depth (in-flight datagrams)</td></tr>
       <tr><td><code>Udp.Gro</code></td><td>true</td><td>UDP_GRO: coalesce equal-size datagram bursts into one completion</td></tr>

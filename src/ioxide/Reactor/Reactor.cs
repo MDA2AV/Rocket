@@ -92,13 +92,13 @@ public sealed unsafe partial class Reactor
         _config = config;
         _port = config.Tcp.Port;
         _ringEntries = config.RingEntries;
-        _incremental = config.Tcp.Incremental;
-        _recvBufferSize = (uint)config.Tcp.RecvBufferSize;
-        _bufferRingEntries = (uint)config.Tcp.BufferRingEntries;
+        _incremental = config.Incremental;
+        _recvBufferSize = (uint)config.RecvBufferSize;
+        _bufferRingEntries = (uint)config.BufferRingEntries;
         _poolMax = config.Tcp.PoolMax;
-        _maxConnections = config.Tcp.MaxConnections;
-        _connBufRingEntries = config.Tcp.ConnBufRingEntries;
-        _incRecvBufferSize = (uint)config.Tcp.IncRecvBufferSize;
+        _maxConnections = config.MaxConnections;
+        _connBufRingEntries = config.ConnBufRingEntries;
+        _incRecvBufferSize = (uint)config.IncRecvBufferSize;
         _pool = new Stack<TcpConnection>(config.Tcp.PoolMax);
         _zeroCopySend = config.Tcp.ZeroCopySend;
     }

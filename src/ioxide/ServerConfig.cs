@@ -20,7 +20,22 @@ public sealed record ServerConfig
     /// </summary>
     public bool DualStack { get; init; } = false;
 
-    /// <summary>The TCP transport: listeners, recv buffer rings, and the write path.</summary>
+    // --- reactor recv machinery: io_uring provided-buffer rings, registered per reactor at
+    //     startup (TCP recv draws on them; UDP has its own ring, sized by UdpOptions.RecvSlots). ---
+
+    // Shared buffer ring (Incremental == false).
+    public int RecvBufferSize    { get; init; } = 32 * 1024;
+    public int BufferRingEntries { get; init; } = 4096;
+
+    // Incremental mode (IOU_PBUF_RING_INC, kernel 6.12+): per-connection buffer rings, and the
+    // reactor runs its incremental loop variant. Reserved native memory ≈
+    // MaxConnections × ConnBufRingEntries × IncRecvBufferSize × ReactorCount.
+    public bool Incremental        { get; init; } = false;
+    public int  MaxConnections     { get; init; } = 4096;   // one bgid per active connection
+    public int  ConnBufRingEntries { get; init; } = 16;
+    public int  IncRecvBufferSize  { get; init; } = 4096;
+
+    /// <summary>The TCP transport: listeners, connection pool, and the write path.</summary>
     public TcpOptions Tcp { get; init; } = new();
 
     /// <summary>Raw UDP sockets (datagrams reach <see cref="Reactor.OnDatagram"/>).</summary>
