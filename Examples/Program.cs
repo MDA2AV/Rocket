@@ -2,8 +2,10 @@ using System.Security.Cryptography.X509Certificates;
 using ioxide;
 using ioxide.file;
 using ioxide.pg;
+using ioxide.quic;
 using ioxide.redis;
 using ioxide.tls;
+using Examples.Quic;
 using Examples.Tls;
 using FileExample = Examples.Files.StaticExample;
 
@@ -21,9 +23,13 @@ namespace Examples;
 ///   redis-shared | redis-cache | redis-types | redis-pipeline - GET, cache-aside, RESP types, pipelining
 ///   file                                                      - static files off the asset cache
 ///   tls-ktls | tls-sslstream                                  - TLS: kernel offload vs managed SslStream
+///   quic-h3                                                   - QUIC on UDP :8443, demuxed by ALPN:
+///                                                               HTTP/3 (ioxide.h3) for "h3", dual-pipe
+///                                                               stream echo for anything else
 ///
 /// Backends via env: EXAMPLES_PG_* (host/port/user/db/password/pool), EXAMPLES_REDIS_*,
-/// EXAMPLES_FILE_DIR, EXAMPLES_TLS_BODY/CERT/KEY. Benchmark numbers live in Examples/RESULTS.md.
+/// EXAMPLES_FILE_DIR, EXAMPLES_TLS_BODY/CERT/KEY, EXAMPLES_QUIC_PORT/CERT/KEY.
+/// Benchmark numbers live in Examples/RESULTS.md.
 /// </summary>
 internal static class Program
 {
@@ -43,6 +49,7 @@ internal static class Program
             var reactor = new Reactor(i, example.Config);
             reactor.OnStart = example.OnStart;
             reactor.TcpHandle = example.Handle;
+            reactor.QuicHandle = example.QuicHandle;
 
             threads[i] = new Thread(reactor.Run)
             {
@@ -62,10 +69,12 @@ internal static class Program
 
     // One runnable example: the server config, the per-connection handler, and the per-reactor
     // service setup (OnStart) that opens its pool/cache - null when the mode needs no service.
+    // QuicHandle is set only by the quic-h3 mode (the config then carries the UDP listener).
     private readonly record struct Example(
         ServerConfig Config,
         Func<Reactor, TcpConnection, Task> Handle,
-        Action<Reactor>? OnStart);
+        Action<Reactor>? OnStart,
+        Func<Reactor, QuicConnection, Task>? QuicHandle = null);
 
     private static Example Resolve(string mode) => mode switch
     {
@@ -99,6 +108,8 @@ internal static class Program
 
         "tls-ktls"        => WithTls(Configs.Shared, KtlsExample.Handle,      ktls: true),
         "tls-sslstream"   => WithTls(Configs.Shared, SslStreamExample.Handle, ktls: false),
+
+        "quic-h3"         => WithQuicH3(Configs.Shared),
 
         _ => throw new ArgumentException($"unknown mode '{mode}'"),
     };
@@ -143,6 +154,36 @@ internal static class Program
             r.AddService(assets);
             AssetReader.CreatePool(r, readers: 4, bufferBytes: 1 << 20);
         });
+    }
+
+    // Rooted for the process lifetime - the engine backs every reactor's QUIC connections.
+    private static QuicEngine? _quicEngine;
+
+    private static Example WithQuicH3(ServerConfig config)
+    {
+        (string certPath, string keyPath) = QuicH3Example.EnsureQuicCert();
+
+        // Permissive ALPN (no allowlist): h3 clients negotiate "h3" and get HTTP/3; anything
+        // else - including clients that offer no ALPN at all - falls through to the pipe echo.
+        _quicEngine = new QuicEngine(certPath, keyPath, cidLength: 8);
+
+        ushort quicPort = ushort.TryParse(Environment.GetEnvironmentVariable("EXAMPLES_QUIC_PORT"), out ushort qp) ? qp : (ushort)8443;
+        var quicOptions = new QuicOptions
+        {
+            Port = quicPort,
+            LocalCidLength = 8,
+            ConnectionFactory = _quicEngine.CreateFactory(),
+        };
+
+        Console.WriteLine($"[examples] quic-h3 on udp :{quicPort} (ngtcp2 {QuicEngine.NativeVersion()}) - " +
+                          $"try: curl --http3-only -k https://127.0.0.1:{quicPort}/hello");
+
+        // :8080 still serves plaintext TCP (no TCP opt-out yet); the QUIC listener rides alongside.
+        return new Example(
+            config with { Quic = quicOptions, UdpRecvSlots = 16 },
+            Raw.SharedExample.Handle,
+            null,
+            QuicH3Example.Handle);
     }
 
     private static Example WithTls(ServerConfig config, Func<Reactor, TcpConnection, Task> handle, bool ktls)
