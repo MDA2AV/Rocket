@@ -41,7 +41,7 @@ internal static class Program
 
         Example example = Resolve(mode);
 
-        Console.WriteLine($"[examples] {mode}: {example.Config.ReactorCount} reactors on :{example.Config.Port}");
+        Console.WriteLine($"[examples] {mode}: {example.Config.ReactorCount} reactors on :{example.Config.Tcp.Port}");
 
         var threads = new Thread[example.Config.ReactorCount];
         for (int i = 0; i < threads.Length; i++)
@@ -83,13 +83,13 @@ internal static class Program
         "raw-incremental" => new Example(Configs.Incremental, Raw.IncrementalExample.Handle, null),
 
         // Large-body plaintext, to exercise the response send path with big payloads. raw-zc flips on
-        // IORING_OP_SEND_ZC (ServerConfig.ZeroCopySend); raw-big is the plain-SEND baseline.
-        "raw-big"         => new Example(Configs.Shared with { WriteSlabSize = 256 * 1024 },                      Raw.BigExample.Handle, null),
-        "raw-zc"          => new Example(Configs.Shared with { WriteSlabSize = 256 * 1024, ZeroCopySend = true }, Raw.BigExample.Handle, null),
+        // IORING_OP_SEND_ZC (TcpOptions.ZeroCopySend); raw-big is the plain-SEND baseline.
+        "raw-big"         => new Example(Configs.Shared with { Tcp = Configs.Shared.Tcp with { WriteSlabSize = 256 * 1024 } },                      Raw.BigExample.Handle, null),
+        "raw-zc"          => new Example(Configs.Shared with { Tcp = Configs.Shared.Tcp with { WriteSlabSize = 256 * 1024, ZeroCopySend = true } }, Raw.BigExample.Handle, null),
 
         // Grow vs Segmented head-to-head: the 100KB BigExample body forced onto a 16KB slab so it overflows.
-        "raw-big-grow"    => new Example(Configs.Shared with { WriteSlabSize = 16 * 1024, WriteOverflow = WriteOverflowStrategy.Grow },      Raw.BigExample.Handle, null),
-        "raw-big-seg"     => new Example(Configs.Shared with { WriteSlabSize = 16 * 1024, WriteOverflow = WriteOverflowStrategy.Segmented }, Raw.BigExample.Handle, null),
+        "raw-big-grow"    => new Example(Configs.Shared with { Tcp = Configs.Shared.Tcp with { WriteSlabSize = 16 * 1024, WriteOverflow = WriteOverflowStrategy.Grow } },      Raw.BigExample.Handle, null),
+        "raw-big-seg"     => new Example(Configs.Shared with { Tcp = Configs.Shared.Tcp with { WriteSlabSize = 16 * 1024, WriteOverflow = WriteOverflowStrategy.Segmented } }, Raw.BigExample.Handle, null),
 
         "pg-shared"       => WithPg(Configs.Shared,      Pg.SharedExample.Handle),
         "pg-pipes"        => WithPg(Configs.Shared,      Pg.PipesExample.Handle),
@@ -180,7 +180,7 @@ internal static class Program
 
         // :8080 still serves plaintext TCP (no TCP opt-out yet); the QUIC listener rides alongside.
         return new Example(
-            config with { Quic = quicOptions, UdpRecvSlots = 16 },
+            config with { Quic = quicOptions },
             Raw.SharedExample.Handle,
             null,
             QuicH3Example.Handle);

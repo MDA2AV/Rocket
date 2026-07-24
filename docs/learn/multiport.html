@@ -47,13 +47,16 @@
     fleet of threads.</p>
 
     <h2>Configuration</h2>
-    <p><code>ServerConfig.Port</code> is the primary listener; <code>ExtraPorts</code> adds more.
+    <p><code>ServerConfig.Tcp.Port</code> is the primary listener; <code>Tcp.ExtraPorts</code> adds more.
     Every reactor binds each one with SO_REUSEPORT and arms a multishot accept on it.</p>
 <pre><code class="language-csharp">var config = new ServerConfig
 {
-    Port       = 8080,        // plaintext
-    ExtraPorts = [8443],      // TLS, same reactors
     ReactorCount = Environment.ProcessorCount,
+    Tcp = new TcpOptions
+    {
+        Port       = 8080,        // plaintext
+        ExtraPorts = [8443],      // TLS, same reactors
+    },
 };</code></pre>
     <p>With no <code>ExtraPorts</code>, behaviour is exactly as before - one listener, one accept.
     Adding ports costs nothing on the recv/send hot path; the only extra work happens at accept
@@ -63,7 +66,7 @@
     <p>Each accept completion carries the listener's fd in its <code>user_data</code>. The reactor
     looks the port up (a tiny table - <code>Port</code> plus <code>ExtraPorts</code>) and stamps it
     on the connection before your handler runs:</p>
-<pre><code class="language-csharp">reactor.Handle = async (r, conn) =&gt;
+<pre><code class="language-csharp">reactor.TcpHandle = async (r, conn) =&gt;
 {
     if (conn.ListenerPort == 8443)
         await r.GetService&lt;TlsService&gt;().AcceptAsync(conn);   // terminate TLS on this door

@@ -138,7 +138,7 @@ int    fd   = (int)(uint)cqe.user_data;</code></pre>
     <p>Runs on the reactor's own thread, in order: record the managed thread id (every fast-path
     "am I on the reactor?" check compares against it); create the <code>Ring</code>
     (<code>DEFER_TASKRUN</code> requires setup and enter on the same thread); open one
-    SO_REUSEPORT listener per port (<code>Port</code> + <code>ExtraPorts</code>); register the shared
+    SO_REUSEPORT listener per port (<code>Tcp.Port</code> + <code>Tcp.ExtraPorts</code>); register the shared
     buffer ring (or the incremental machinery); create the wake eventfd; run <code>OnStart</code> so
     the app opens its ring-native clients <em>here</em> (they ride this reactor's ring); arm the
     multishot accept, the wake poll, and the periodic timer; then fall into the loop.</p>
@@ -400,14 +400,14 @@ internal void Clear()
 
     <h2>BCL bridges</h2>
     <ul>
-      <li><b>ConnectionPipeReader</b> (<code>Connection/ConnectionPipeReader.cs</code>) - adapts the
+      <li><b>TcpConnectionPipeReader</b> (<code>Connection/Tcp/TcpConnectionPipeReader.cs</code>) - adapts the
       raw read API to <code>System.IO.Pipelines.PipeReader</code>, allocation-free at steady state: a
       parked read chains onto the connection's value-task source (no async state machine), recv slices
       live in pooled segments on a persistent chain, and <code>AdvanceTo</code> trims the consumed
       front and returns those buffers. It honors <code>examined</code> - when everything held has been
       examined, it waits for new bytes instead of returning the same data.</li>
-      <li><b>ConnectionPipeWriter</b> / <b>ConnectionStream</b> / <b>ConnectionDualPipe</b>
-      (<code>Connection/</code>) - a <code>PipeWriter</code> over the write slab, a
+      <li><b>TcpConnectionPipeWriter</b> / <b>TcpConnectionStream</b> / <b>TcpConnectionDualPipe</b>
+      (<code>Connection/Tcp/</code>) - a <code>PipeWriter</code> over the write slab, a
       <code>Stream</code> (so <code>SslStream</code> and other BCL code can ride a connection - see
       <a href="dev-tls.html">TLS internals</a>), and a duplex pipe pairing.</li>
     </ul>
@@ -443,12 +443,16 @@ contract forces is a copy into the caller's buffer - the raw read API and the pi
 memory directly; <code>Stream</code> cannot.</p>
 
     <h2>Configuration &middot; <span class="dim">ServerConfig.cs, IoxideRuntime.cs</span></h2>
-    <p><code>ServerConfig</code> is the record of tunables: <code>Port</code> + <code>ExtraPorts</code>,
-    <code>ReactorCount</code>, <code>RingEntries</code> (SQ/CQ depth), the shared-ring knobs
-    (<code>RecvBufferSize</code>, <code>BufferRingEntries</code>), <code>WriteSlabSize</code>,
-    <code>PoolMax</code>, <code>RecvQueueEntries</code>, <code>ListenBacklog</code>, and the
+    <p><code>ServerConfig</code> is the record of tunables, grouped by transport. At the root:
+    <code>ReactorCount</code>, <code>RingEntries</code> (SQ/CQ depth), <code>DualStack</code>.
+    Under <code>Tcp</code> (a <code>TcpOptions</code>): <code>Port</code> + <code>ExtraPorts</code>,
+    <code>ListenBacklog</code>, the shared-ring knobs (<code>RecvBufferSize</code>,
+    <code>BufferRingEntries</code>), <code>WriteSlabSize</code>, <code>PoolMax</code>,
+    <code>RecvQueueEntries</code>, <code>WriteOverflow</code>, <code>ZeroCopySend</code>, and the
     incremental-mode knobs (<code>Incremental</code>, <code>MaxConnections</code>,
-    <code>ConnBufRingEntries</code>, <code>IncRecvBufferSize</code>). <code>RecvSnapshot</code> is the
+    <code>ConnBufRingEntries</code>, <code>IncRecvBufferSize</code>). Under <code>Udp</code> (a
+    <code>UdpOptions</code>): <code>Ports</code>, <code>RecvSlots</code>, <code>Gro</code>. And
+    <code>Quic</code> holds the optional <code>QuicOptions</code>. <code>RecvSnapshot</code> is the
     readonly struct a read returns (tail + closed flag). <code>IoxideRuntime</code> is the version /
     wiring doc surface.</p>
 

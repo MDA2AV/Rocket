@@ -5,7 +5,7 @@ namespace Examples.Raw;
 
 /// <summary>
 /// Large fixed plaintext body, to exercise the response send path with big payloads - in particular
-/// the zero-copy send strategy (ServerConfig.ZeroCopySend). The body is a deterministic byte pattern
+/// the zero-copy send strategy (TcpOptions.ZeroCopySend). The body is a deterministic byte pattern
 /// so a client can checksum it and compare plain SEND vs SEND_ZC output byte-for-byte. Under
 /// keep-alive this also exercises slab reuse: the handler only writes the next response after
 /// FlushAsync completes, which for a ZC send is the F_NOTIF (buffer-release) - so a correct

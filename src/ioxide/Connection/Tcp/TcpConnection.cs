@@ -14,7 +14,7 @@ public sealed unsafe partial class TcpConnection
 
     /// <summary>
     /// Whether this connection sends with SEND_ZC (zero-copy). Bound at accept from
-    /// <see cref="ServerConfig.ZeroCopySend"/>; kTLS forces it back to plain via the
+    /// <see cref="TcpOptions.ZeroCopySend"/>; kTLS forces it back to plain via the
     /// <see cref="SendOpFlags"/> setter. The reactor branches on this bool per send instead of
     /// dispatching through an indirect function pointer.
     /// </summary>

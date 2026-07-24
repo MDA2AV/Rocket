@@ -38,10 +38,16 @@ internal static class Program
 
         var config = new ServerConfig
         {
-            Port = 8080,
             ReactorCount = int.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_REACTORS"), out int reactors) ? reactors : 12,
-            Incremental = Environment.GetEnvironmentVariable("PLAYGROUND_INCREMENTAL") == "1",
-            UdpRecvSlots = int.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_UDP_SLOTS"), out int udpSlots) ? udpSlots : 16,
+            Tcp = new TcpOptions
+            {
+                Port = 8080,
+                Incremental = Environment.GetEnvironmentVariable("PLAYGROUND_INCREMENTAL") == "1",
+            },
+            Udp = new UdpOptions
+            {
+                RecvSlots = int.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_UDP_SLOTS"), out int udpSlots) ? udpSlots : 16,
+            },
             Quic = quicOptions,
         };
         string assetDir = Environment.GetEnvironmentVariable("PLAYGROUND_DIR") ?? "/tmp/ioxide-assets";
@@ -81,7 +87,7 @@ internal static class Program
             Console.WriteLine($"[playground] reloaded - now serving {assets.Count} files");
         });
         
-        Console.WriteLine($"[playground] {config.ReactorCount} reactors on :{config.Port} (mode={mode})");
+        Console.WriteLine($"[playground] {config.ReactorCount} reactors on :{config.Tcp.Port} (mode={mode})");
 
         var threads = new Thread[config.ReactorCount];
 
