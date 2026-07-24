@@ -162,7 +162,10 @@ nav.top .links a.gh svg { display: block; }
 #tab-shared:checked ~ .tab-bar label[for="tab-shared"],
 #tab-inc:checked    ~ .tab-bar label[for="tab-inc"],
 #tab-pipe:checked   ~ .tab-bar label[for="tab-pipe"],
-#tab-vs:checked     ~ .tab-bar label[for="tab-vs"] {
+#tab-vs:checked     ~ .tab-bar label[for="tab-vs"],
+#tab-qpipe:checked  ~ .tab-bar label[for="tab-qpipe"],
+#tab-qraw:checked   ~ .tab-bar label[for="tab-qraw"],
+#tab-h3:checked     ~ .tab-bar label[for="tab-h3"] {
   color: var(--accent-soft);
   background: var(--code-bg);
 }
@@ -172,6 +175,9 @@ nav.top .links a.gh svg { display: block; }
 #tab-inc:checked    ~ .pane-inc    { display: block; }
 #tab-pipe:checked   ~ .pane-pipe   { display: block; }
 #tab-vs:checked     ~ .pane-vs     { display: block; }
+#tab-qpipe:checked  ~ .pane-qpipe  { display: block; }
+#tab-qraw:checked   ~ .pane-qraw   { display: block; }
+#tab-h3:checked     ~ .pane-h3     { display: block; }
 .pane pre { margin: 0; }
 
 /* the explainer pane: same panel chrome as the code blocks */

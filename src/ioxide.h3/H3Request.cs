@@ -24,8 +24,14 @@ public sealed class H3Response
 
     public static H3Response Text(string body, int status = 200)
     {
-        var r = new H3Response { Status = status, Body = System.Text.Encoding.UTF8.GetBytes(body) };
-        r.Headers.Add(("content-type", "text/plain; charset=utf-8"));
-        return r;
+        var h3Response = new H3Response
+        {
+            Status = status, 
+            Body = System.Text.Encoding.UTF8.GetBytes(body) 
+        };
+        
+        h3Response.Headers.Add(("content-type", "text/plain; charset=utf-8"));
+        
+        return h3Response;
     }
 }
