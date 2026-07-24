@@ -41,12 +41,12 @@ internal sealed class IoxideConnectionListener : IConnectionListener
 
         var reactorCount = Math.Max(1, options.ReactorCount);
 
-        var cfg = new ServerConfig { ReactorCount = reactorCount, Port = (ushort)endpoint.Port };
+        var cfg = new ServerConfig { ReactorCount = reactorCount, Tcp = new TcpOptions { Port = (ushort)endpoint.Port } };
         if (options.ConfigureServer is not null)
         {
             cfg = options.ConfigureServer(cfg);
         }
-        cfg = cfg with { Port = (ushort)endpoint.Port, ReactorCount = reactorCount };
+        cfg = cfg with { Tcp = cfg.Tcp with { Port = (ushort)endpoint.Port }, ReactorCount = reactorCount };
 
         _reactors = new Reactor[reactorCount];
         _threads = new Thread[reactorCount];

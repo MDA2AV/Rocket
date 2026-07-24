@@ -17,7 +17,7 @@ internal static class TestServer
 {
     private static int _nextPort = 18080;
 
-    /// <summary>Reserve a unique port (e.g. for ServerConfig.ExtraPorts).</summary>
+    /// <summary>Reserve a unique port (e.g. for TcpOptions.ExtraPorts).</summary>
     public static int NextPort() => Interlocked.Increment(ref _nextPort);
 
     public static int Start(Func<Reactor, TcpConnection, Task> handle, Action<Reactor>? onStart = null)
@@ -31,7 +31,7 @@ internal static class TestServer
         Func<Reactor, TcpConnection, Task> handle, ServerConfig config, Action<Reactor>? onStart = null)
     {
         int port = Interlocked.Increment(ref _nextPort);
-        config = config with { Port = (ushort)port, ReactorCount = 1 };
+        config = config with { Tcp = config.Tcp with { Port = (ushort)port }, ReactorCount = 1 };
 
         var reactor = new Reactor(0, config)
         {
@@ -52,11 +52,14 @@ internal static class TestServer
 
     private static ServerConfig DefaultConfig() => new()
     {
-        RecvBufferSize = 4096,
-        BufferRingEntries = 256,
-        WriteSlabSize = 16 * 1024,
-        PoolMax = 64,
-        RecvQueueEntries = 64,
+        Tcp = new TcpOptions
+        {
+            RecvBufferSize = 4096,
+            BufferRingEntries = 256,
+            WriteSlabSize = 16 * 1024,
+            PoolMax = 64,
+            RecvQueueEntries = 64,
+        },
     };
 
     /// <summary>Incremental mode (IOU_PBUF_RING_INC) needs 6.12+; tests skip below that.</summary>
@@ -91,15 +94,21 @@ internal static class TestServer
 
         var config = new ServerConfig
         {
-            Port = (ushort)tcpPort,
             ReactorCount = 1,
-            RecvBufferSize = 4096,
-            BufferRingEntries = 256,
-            WriteSlabSize = 16 * 1024,
-            PoolMax = 64,
-            RecvQueueEntries = 64,
-            UdpRecvSlots = udpRecvSlots,
-            UdpPorts = quicFactory == null ? [(ushort)udpPort] : [],
+            Tcp = new TcpOptions
+            {
+                Port = (ushort)tcpPort,
+                RecvBufferSize = 4096,
+                BufferRingEntries = 256,
+                WriteSlabSize = 16 * 1024,
+                PoolMax = 64,
+                RecvQueueEntries = 64,
+            },
+            Udp = new UdpOptions
+            {
+                RecvSlots = udpRecvSlots,
+                Ports = quicFactory == null ? [(ushort)udpPort] : [],
+            },
             Quic = quicFactory == null ? null : new QuicOptions
             {
                 Port = (ushort)udpPort,

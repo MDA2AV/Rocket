@@ -1,97 +1,35 @@
 namespace ioxide;
 
 /// <summary>
-/// How a connection's write buffer absorbs a response larger than <see cref="ServerConfig.WriteSlabSize"/>.
+/// All server tunables; override via object initializer. Engine-wide knobs live here; everything
+/// transport-specific is grouped: <see cref="Tcp"/> (listeners, buffer rings, write path),
+/// <see cref="Udp"/> (raw datagram sockets), <see cref="Quic"/> (the QUIC transport, which binds
+/// its own UDP port).
 /// </summary>
-public enum WriteOverflowStrategy
-{
-    /// <summary>Grow the single contiguous slab (realloc + copy); the flush stays one SEND.</summary>
-    Grow,
-
-    /// <summary>Chain pooled slabs and flush them with one vectored SENDMSG (no realloc copies).</summary>
-    Segmented,
-}
-
-/// <summary>All server tunables; override via object initializer.</summary>
 public sealed record ServerConfig
 {
-    public ushort Port         { get; init; } = 8080;
-
-    /// <summary>
-    /// Additional listener ports (every reactor binds each one). Connections carry the port they
-    /// arrived on in <see cref="TcpConnection.ListenerPort"/>, so one handler can serve several
-    /// entry points (e.g. plaintext + TLS).
-    /// </summary>
-    public ushort[] ExtraPorts { get; init; } = [];
-    public int    ReactorCount { get; init; } = 12;
+    public int ReactorCount { get; init; } = 12;
 
     // io_uring SQ/CQ depth.
-    public uint   RingEntries  { get; init; } = 8192;
-
-    /// <summary>listen() backlog per SO_REUSEPORT listener - the accept-queue depth for connection bursts.</summary>
-    public int    ListenBacklog { get; init; } = 1024;
+    public uint RingEntries { get; init; } = 8192;
 
     /// <summary>
     /// Bind listeners as dual-stack IPv6 (AF_INET6 on :: with IPV6_V6ONLY=0) so one socket accepts both
     /// IPv6 and IPv4-mapped clients. When false (default) listeners are IPv4-only (AF_INET on 0.0.0.0).
+    /// Applies to TCP listeners and UDP sockets alike.
     /// </summary>
-    public bool   DualStack { get; init; } = false;
+    public bool DualStack { get; init; } = false;
 
-    // Shared buffer ring (Incremental == false).
-    public int    RecvBufferSize    { get; init; } = 32 * 1024;
-    public int    BufferRingEntries { get; init; } = 4096;
+    /// <summary>The TCP transport: listeners, recv buffer rings, and the write path.</summary>
+    public TcpOptions Tcp { get; init; } = new();
 
-    // Per-connection write slab + connection pool cap.
-    public int    WriteSlabSize { get; init; } = 16 * 1024;
-    public int    PoolMax       { get; init; } = 1024;
-
-    // How a response larger than WriteSlabSize is buffered: grow the slab (default) or chain pooled
-    // slabs flushed with one vectored SENDMSG.
-    public WriteOverflowStrategy WriteOverflow { get; init; } = WriteOverflowStrategy.Grow;
-
-    // Inject IORING_OP_SEND_ZC (zero-copy send) for the response path instead of IORING_OP_SEND.
-    // Trades the in-kernel payload copy for page-pinning plus a second (F_NOTIF) completion per send,
-    // so it only pays off for large responses - leave off for small-payload workloads. The sender is
-    // chosen once per connection at accept; kTLS connections always fall back to plain SEND (the
-    // kernel re-buffers to encrypt, so zero-copy buys nothing there).
-    public bool   ZeroCopySend { get; init; } = false;
-
-    // Per-connection SPSC recv queue depth (power of two); overflow closes the connection.
-    public int    RecvQueueEntries { get; init; } = 64;
-
-    // Incremental mode (IOU_PBUF_RING_INC, kernel 6.12+) - per-connection rings.
-    // Reserved native memory ≈ PoolMax × ConnBufRingEntries × IncRecvBufferSize × ReactorCount.
-    public bool   Incremental        { get; init; } = false;
-    public int    MaxConnections     { get; init; } = 4096;   // one bgid per active connection
-    public int    ConnBufRingEntries { get; init; } = 16;
-    public int    IncRecvBufferSize  { get; init; } = 4096;
-
-    /// <summary>
-    /// UDP ports to bind (every reactor binds each one via SO_REUSEPORT, like the TCP listeners).
-    /// Datagrams are delivered to <see cref="Reactor.OnDatagram"/> on the reactor thread. Empty
-    /// (default) means no UDP sockets are opened.
-    /// </summary>
-    public ushort[] UdpPorts { get; init; } = [];
-
-    /// <summary>
-    /// Depth of the shared UDP provided-buffer ring (rounded up to a power of two). One multishot
-    /// RECVMSG per socket draws buffers from this ring; each buffer pins ~64 KiB (a full GRO train
-    /// plus the packed address/control header) and returns as soon as its datagram is handled, so
-    /// the depth bounds how many datagrams can be in flight across all UDP sockets at once.
-    /// </summary>
-    public int UdpRecvSlots { get; init; } = 16;
-
-    /// <summary>
-    /// Enable UDP_GRO on receive: the kernel coalesces a burst of equal-size datagrams from one
-    /// peer into a single completion, and <see cref="UdpDatagram.GroSegmentSize"/> carries the
-    /// segment size for the handler to split on.
-    /// </summary>
-    public bool UdpGro { get; init; } = true;
+    /// <summary>Raw UDP sockets (datagrams reach <see cref="Reactor.OnDatagram"/>).</summary>
+    public UdpOptions Udp { get; init; } = new();
 
     /// <summary>
     /// Enable the QUIC transport (Reactor.Quic.cs). Its port is bound as a UDP socket
-    /// automatically (no need to repeat it in <see cref="UdpPorts"/>); datagrams on that port are
-    /// demultiplexed by connection ID instead of reaching <see cref="Reactor.OnDatagram"/>.
+    /// automatically (no need to repeat it in <see cref="UdpOptions.Ports"/>); datagrams on that
+    /// port are demultiplexed by connection ID instead of reaching <see cref="Reactor.OnDatagram"/>.
     /// </summary>
     public QuicOptions? Quic { get; init; }
 }

@@ -113,9 +113,12 @@ internal static class CoreTests
             (int port, _, _) = TestServer.StartConfigured(BodyHandler(body),
                 new ServerConfig
                 {
-                    RecvBufferSize = 4096, BufferRingEntries = 64,
-                    WriteSlabSize = 16 * 1024, PoolMax = 8, RecvQueueEntries = 64,
-                    ZeroCopySend = true,
+                    Tcp = new TcpOptions
+                    {
+                        RecvBufferSize = 4096, BufferRingEntries = 64,
+                        WriteSlabSize = 16 * 1024, PoolMax = 8, RecvQueueEntries = 64,
+                        ZeroCopySend = true,
+                    },
                 });
 
             var replies = Client.GetKeepAlive(port, "/", 3);
@@ -132,8 +135,11 @@ internal static class CoreTests
             (int port, _, _) = TestServer.StartConfigured(Handlers.Raw,
                 new ServerConfig
                 {
-                    Incremental = true, MaxConnections = 16, ConnBufRingEntries = 16, IncRecvBufferSize = 4096,
-                    WriteSlabSize = 16 * 1024, PoolMax = 8, RecvQueueEntries = 64,
+                    Tcp = new TcpOptions
+                    {
+                        Incremental = true, MaxConnections = 16, ConnBufRingEntries = 16, IncRecvBufferSize = 4096,
+                        WriteSlabSize = 16 * 1024, PoolMax = 8, RecvQueueEntries = 64,
+                    },
                 });
 
             var replies = Client.GetKeepAlive(port, "/", 5);
@@ -151,9 +157,12 @@ internal static class CoreTests
             (int port, _, _) = TestServer.StartConfigured(PortEchoHandler,
                 new ServerConfig
                 {
-                    RecvBufferSize = 4096, BufferRingEntries = 64,
-                    WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 64,
-                    ExtraPorts = [(ushort)extra],
+                    Tcp = new TcpOptions
+                    {
+                        RecvBufferSize = 4096, BufferRingEntries = 64,
+                        WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 64,
+                        ExtraPorts = [(ushort)extra],
+                    },
                 });
 
             (_, string mainBody) = Client.Get(port, "/");
@@ -212,8 +221,11 @@ internal static class CoreTests
                 },
                 new ServerConfig
                 {
-                    RecvBufferSize = 64, BufferRingEntries = 256,
-                    WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 8,
+                    Tcp = new TcpOptions
+                    {
+                        RecvBufferSize = 64, BufferRingEntries = 256,
+                        WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 8,
+                    },
                 });
 
             using var flood = new TcpClient();
@@ -253,8 +265,11 @@ internal static class CoreTests
                 },
                 new ServerConfig
                 {
-                    RecvBufferSize = 1024, BufferRingEntries = 64,
-                    WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 64,
+                    Tcp = new TcpOptions
+                    {
+                        RecvBufferSize = 1024, BufferRingEntries = 64,
+                        WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 64,
+                    },
                 });
 
             Thread.Sleep(200);
@@ -290,8 +305,11 @@ internal static class CoreTests
             (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(Handlers.Raw,
                 new ServerConfig
                 {
-                    RecvBufferSize = 4096, BufferRingEntries = 64,
-                    WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 64,
+                    Tcp = new TcpOptions
+                    {
+                        RecvBufferSize = 4096, BufferRingEntries = 64,
+                        WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 64,
+                    },
                 });
 
             (int status, _) = Client.Get(port, "/");
@@ -431,9 +449,12 @@ internal static class CoreTests
         (int port, _, _) = TestServer.StartConfigured(BodyHandler(body),
             new ServerConfig
             {
-                RecvBufferSize = 4096, BufferRingEntries = 64,
-                WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 64,
-                WriteOverflow = strategy,
+                Tcp = new TcpOptions
+                {
+                    RecvBufferSize = 4096, BufferRingEntries = 64,
+                    WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 64,
+                    WriteOverflow = strategy,
+                },
             });
 
         (int status, string got) = Client.Get(port, "/", timeoutMs: 8000);

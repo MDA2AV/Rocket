@@ -62,7 +62,7 @@ public sealed unsafe partial class Reactor
     private const int WriteSlabPoolMax = 4096;
 
     internal nint RentWriteSlab()
-        => _writeSlabPool.TryPop(out nint p) ? p : (nint)NativeMemory.AlignedAlloc((nuint)_config.WriteSlabSize, 64);
+        => _writeSlabPool.TryPop(out nint p) ? p : (nint)NativeMemory.AlignedAlloc((nuint)_config.Tcp.WriteSlabSize, 64);
 
     internal void ReturnWriteSlab(nint p)
     {
@@ -90,17 +90,17 @@ public sealed unsafe partial class Reactor
     {
         _id = id;
         _config = config;
-        _port = config.Port;
+        _port = config.Tcp.Port;
         _ringEntries = config.RingEntries;
-        _incremental = config.Incremental;
-        _recvBufferSize = (uint)config.RecvBufferSize;
-        _bufferRingEntries = (uint)config.BufferRingEntries;
-        _poolMax = config.PoolMax;
-        _maxConnections = config.MaxConnections;
-        _connBufRingEntries = config.ConnBufRingEntries;
-        _incRecvBufferSize = (uint)config.IncRecvBufferSize;
-        _pool = new Stack<TcpConnection>(config.PoolMax);
-        _zeroCopySend = config.ZeroCopySend;
+        _incremental = config.Tcp.Incremental;
+        _recvBufferSize = (uint)config.Tcp.RecvBufferSize;
+        _bufferRingEntries = (uint)config.Tcp.BufferRingEntries;
+        _poolMax = config.Tcp.PoolMax;
+        _maxConnections = config.Tcp.MaxConnections;
+        _connBufRingEntries = config.Tcp.ConnBufRingEntries;
+        _incRecvBufferSize = (uint)config.Tcp.IncRecvBufferSize;
+        _pool = new Stack<TcpConnection>(config.Tcp.PoolMax);
+        _zeroCopySend = config.Tcp.ZeroCopySend;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

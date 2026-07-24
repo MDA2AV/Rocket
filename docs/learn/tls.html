@@ -81,7 +81,11 @@
     <h2>kTLS: setup</h2>
     <p>Open a TLS listener with <a href="multiport.html"><code>ExtraPorts</code></a> and start a
     <code>TlsService</code> per reactor from <code>OnStart</code> (same pattern as any client):</p>
-<pre><code class="language-csharp">var config = new ServerConfig { Port = 8080, ExtraPorts = [8443], ReactorCount = Environment.ProcessorCount };
+<pre><code class="language-csharp">var config = new ServerConfig
+{
+    ReactorCount = Environment.ProcessorCount,
+    Tcp = new TcpOptions { Port = 8080, ExtraPorts = [8443] },
+};
 
 var options = new TlsOptions
 {
@@ -96,7 +100,7 @@ reactor.OnStart = r =&gt; TlsService.Start(r, options);</code></pre>
     <p>Branch on the listener port. <code>AcceptAsync</code> runs the handshake and the kTLS
     hand-off, returning a <code>TlsSession</code> for the receive side. After that, writes are
     plaintext (the kernel encrypts) and each inbound slice is decrypted through the session.</p>
-<pre><code class="language-csharp">reactor.Handle = async (r, conn) =&gt;
+<pre><code class="language-csharp">reactor.TcpHandle = async (r, conn) =&gt;
 {
     TlsSession? tls = null;
     try
@@ -194,7 +198,7 @@ reactor.OnStart = r =&gt; TlsService.Start(r, options);</code></pre>
     <code>ConnectionStream</code>. <code>ConnectionStream</code> is a general-purpose
     <code>Stream</code> over a connection (in the core engine), so this path needs nothing from
     <code>ioxide.tls</code> at all:</p>
-<pre><code class="language-csharp">reactor.Handle = async (r, conn) =&gt;
+<pre><code class="language-csharp">reactor.TcpHandle = async (r, conn) =&gt;
 {
     var ssl = new SslStream(new ConnectionStream(conn), leaveInnerStreamOpen: false);
     await ssl.AuthenticateAsServerAsync(new SslServerAuthenticationOptions

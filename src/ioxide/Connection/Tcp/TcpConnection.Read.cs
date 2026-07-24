@@ -26,7 +26,7 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
     private int _pending;
     private int _closed;
 
-    private readonly SpscRecvRing _recv;   // sized by ServerConfig.RecvQueueEntries
+    private readonly SpscRecvRing _recv;   // sized by TcpOptions.RecvQueueEntries
 
     public ValueTask<RecvSnapshot> ReadAsync()
     {

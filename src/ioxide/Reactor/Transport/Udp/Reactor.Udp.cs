@@ -7,7 +7,7 @@ namespace ioxide;
 public delegate void UdpDatagramHandler(Reactor reactor, in UdpDatagram datagram);
 
 /// <summary>
-/// UDP transport: each reactor binds every <see cref="ServerConfig.UdpPorts"/> port via SO_REUSEPORT
+/// UDP transport: each reactor binds every <see cref="UdpOptions.Ports"/> port via SO_REUSEPORT
 /// (mirroring the TCP listener sharding) and drives recv with one multishot RECVMSG per socket over a
 /// shared provided-buffer ring - arm once, the kernel delivers a CQE per datagram and picks a buffer
 /// from the ring, and the buffer returns as soon as its datagram has been handled. RECVMSG rather than
@@ -74,13 +74,13 @@ public sealed unsafe partial class Reactor
 
     private void OpenUdpSockets()
     {
-        if (_config.UdpPorts.Length == 0 && _config.Quic == null)
+        if (_config.Udp.Ports.Length == 0 && _config.Quic == null)
         {
             return;   // no datagram transport configured
         }
 
         // The QUIC port is a UDP socket like any other; only completion routing differs.
-        ushort[] udpPorts = _config.UdpPorts;
+        ushort[] udpPorts = _config.Udp.Ports;
         if (_config.Quic is { } quic && Array.IndexOf(udpPorts, quic.Port) < 0)
         {
             udpPorts = [.. udpPorts, quic.Port];
@@ -95,7 +95,7 @@ public sealed unsafe partial class Reactor
         for (int i = 0; i < ports; i++)
         {
             ushort port = udpPorts[i];
-            _udpFds[i]     = OpenUdpSocket(port, _config.DualStack, _config.UdpGro);
+            _udpFds[i]     = OpenUdpSocket(port, _config.DualStack, _config.Udp.Gro);
             _udpFdPorts[i] = port;
             ArmUdpRecv(i);   // one multishot per socket, all sharing the ring
         }
@@ -106,7 +106,7 @@ public sealed unsafe partial class Reactor
     // offset 14, so the fill writes only addr/len/bid and publishes the tail afterwards.
     private void InitUdpBufRing()
     {
-        int depth = RoundUpPow2(_config.UdpRecvSlots);
+        int depth = RoundUpPow2(_config.Udp.RecvSlots);
         _udpRingDepth   = depth;
         _udpBufRingMask = (uint)(depth - 1);
 

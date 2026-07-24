@@ -70,20 +70,23 @@
   <div class="pane pane-pipe">
 <pre><code class="language-csharp">var config = new ServerConfig
 {
-    Port               = 8080,
-    ReactorCount       = Environment.ProcessorCount,
+    ReactorCount = Environment.ProcessorCount,
+    RingEntries  = 8192,                   // io_uring submission/completion queue depth
 
-    RingEntries        = 8192,         // io_uring submission/completion queue depth
-    RecvBufferSize     = 32 * 1024,    // size of each receive buffer
-    BufferRingEntries  = 4096,         // receive buffers shared by a reactor's connections
-    WriteSlabSize      = 16 * 1024,    // per-connection write buffer
-    PoolMax            = 1024,         // connection objects recycled per reactor
-    RecvQueueEntries   = 64,           // per-connection queue of received slices
+    Tcp = new TcpOptions
+    {
+        Port               = 8080,
+        RecvBufferSize     = 32 * 1024,    // size of each receive buffer
+        BufferRingEntries  = 4096,         // receive buffers shared by a reactor's connections
+        WriteSlabSize      = 16 * 1024,    // per-connection write buffer
+        PoolMax            = 1024,         // connection objects recycled per reactor
+        RecvQueueEntries   = 64,           // per-connection queue of received slices
 
-    Incremental        = false,        // kernel 6.12+: per-connection buffer rings
-    MaxConnections     = 4096,         //   one buffer group per live connection
-    ConnBufRingEntries = 16,           //   buffers per connection ring
-    IncRecvBufferSize  = 4096,         //   bytes per incremental buffer
+        Incremental        = false,        // kernel 6.12+: per-connection buffer rings
+        MaxConnections     = 4096,         //   one buffer group per live connection
+        ConnBufRingEntries = 16,           //   buffers per connection ring
+        IncRecvBufferSize  = 4096,         //   bytes per incremental buffer
+    },
 };
 
 var reactor = new Reactor(id, config);
@@ -145,20 +148,23 @@ new Thread(reactor.Run).Start();</code></pre>
   <div class="pane pane-shared">
 <pre><code class="language-csharp">var config = new ServerConfig
 {
-    Port               = 8080,
-    ReactorCount       = Environment.ProcessorCount,
+    ReactorCount = Environment.ProcessorCount,
+    RingEntries  = 8192,                   // io_uring submission/completion queue depth
 
-    RingEntries        = 8192,         // io_uring submission/completion queue depth
-    RecvBufferSize     = 32 * 1024,    // size of each receive buffer
-    BufferRingEntries  = 4096,         // receive buffers shared by a reactor's connections
-    WriteSlabSize      = 16 * 1024,    // per-connection write buffer
-    PoolMax            = 1024,         // connection objects recycled per reactor
-    RecvQueueEntries   = 64,           // per-connection queue of received slices
+    Tcp = new TcpOptions
+    {
+        Port               = 8080,
+        RecvBufferSize     = 32 * 1024,    // size of each receive buffer
+        BufferRingEntries  = 4096,         // receive buffers shared by a reactor's connections
+        WriteSlabSize      = 16 * 1024,    // per-connection write buffer
+        PoolMax            = 1024,         // connection objects recycled per reactor
+        RecvQueueEntries   = 64,           // per-connection queue of received slices
 
-    Incremental        = false,        // kernel 6.12+: per-connection buffer rings
-    MaxConnections     = 4096,         //   one buffer group per live connection
-    ConnBufRingEntries = 16,           //   buffers per connection ring
-    IncRecvBufferSize  = 4096,         //   bytes per incremental buffer
+        Incremental        = false,        // kernel 6.12+: per-connection buffer rings
+        MaxConnections     = 4096,         //   one buffer group per live connection
+        ConnBufRingEntries = 16,           //   buffers per connection ring
+        IncRecvBufferSize  = 4096,         //   bytes per incremental buffer
+    },
 };
 
 var reactor = new Reactor(id, config);
@@ -250,19 +256,22 @@ new Thread(reactor.Run).Start();</code></pre>
   <div class="pane pane-inc">
 <pre><code class="language-csharp">var config = new ServerConfig
 {
-    Port               = 8080,
-    ReactorCount       = Environment.ProcessorCount,
+    ReactorCount = Environment.ProcessorCount,
+    RingEntries  = 8192,                   // io_uring submission/completion queue depth
 
-    RingEntries        = 8192,         // io_uring submission/completion queue depth
-    WriteSlabSize      = 16 * 1024,    // per-connection write buffer
-    PoolMax            = 1024,         // connection objects recycled per reactor
-    RecvQueueEntries   = 64,           // per-connection queue of received slices
+    Tcp = new TcpOptions
+    {
+        Port               = 8080,
+        WriteSlabSize      = 16 * 1024,    // per-connection write buffer
+        PoolMax            = 1024,         // connection objects recycled per reactor
+        RecvQueueEntries   = 64,           // per-connection queue of received slices
 
-    // RecvBufferSize / BufferRingEntries are shared-ring knobs - unused here.
-    Incremental        = true,         // per-connection buffer rings (kernel 6.12+)
-    MaxConnections     = 4096,         // one buffer group per live connection
-    ConnBufRingEntries = 16,           // buffers per connection ring
-    IncRecvBufferSize  = 4096,         // bytes per buffer - the kernel appends into it
+        // RecvBufferSize / BufferRingEntries are shared-ring knobs - unused here.
+        Incremental        = true,         // per-connection buffer rings (kernel 6.12+)
+        MaxConnections     = 4096,         // one buffer group per live connection
+        ConnBufRingEntries = 16,           // buffers per connection ring
+        IncRecvBufferSize  = 4096,         // bytes per buffer - the kernel appends into it
+    },
 };
 
 var reactor = new Reactor(id, config);
@@ -387,12 +396,11 @@ var engine = new QuicEngine("cert.pem", "key.pem", cidLength: 8,
 
 var config = new ServerConfig
 {
-    Port         = 8080,
     ReactorCount = Environment.ProcessorCount,
-    UdpRecvSlots = 16,                      // multishot UDP recv slots per reactor
+    Udp = new UdpOptions { RecvSlots = 16 },   // multishot UDP recv slots per reactor
     Quic = new QuicOptions
     {
-        Port              = 8443,           // every reactor binds it via SO_REUSEPORT
+        Port              = 8443,              // every reactor binds it via SO_REUSEPORT
         LocalCidLength    = 8,
         ConnectionFactory = engine.CreateFactory(),
     },
@@ -445,12 +453,11 @@ var engine = new QuicEngine("cert.pem", "key.pem", cidLength: 8,
 
 var config = new ServerConfig
 {
-    Port         = 8080,
     ReactorCount = Environment.ProcessorCount,
-    UdpRecvSlots = 16,                      // multishot UDP recv slots per reactor
+    Udp = new UdpOptions { RecvSlots = 16 },   // multishot UDP recv slots per reactor
     Quic = new QuicOptions
     {
-        Port              = 8443,           // every reactor binds it via SO_REUSEPORT
+        Port              = 8443,              // every reactor binds it via SO_REUSEPORT
         LocalCidLength    = 8,
         ConnectionFactory = engine.CreateFactory(),
     },
@@ -497,12 +504,11 @@ var engine = new QuicEngine("cert.pem", "key.pem", cidLength: 8, alpn: ["h3"]);
 
 var config = new ServerConfig
 {
-    Port         = 8080,
     ReactorCount = Environment.ProcessorCount,
-    UdpRecvSlots = 16,                      // multishot UDP recv slots per reactor
+    Udp = new UdpOptions { RecvSlots = 16 },   // multishot UDP recv slots per reactor
     Quic = new QuicOptions
     {
-        Port              = 8443,           // every reactor binds it via SO_REUSEPORT
+        Port              = 8443,              // every reactor binds it via SO_REUSEPORT
         LocalCidLength    = 8,
         ConnectionFactory = engine.CreateFactory(),
     },

@@ -129,7 +129,7 @@
 
 var config = new ServerConfig
 {
-    Port = 8080,                       // TCP listener (still required today)
+    // Tcp defaults still bind :8080 - there is no TCP opt-out yet.
     Quic = new QuicOptions
     {
         Port = 8443,                   // UDP port, bound automatically on every reactor

@@ -238,8 +238,8 @@ public sealed unsafe partial class Reactor
             SetNoDelay(clientFd);
             TcpConnection conn = _pool.TryPop(out var pooled)
                 ? pooled.SetFd(clientFd)
-                : new TcpConnection(this, clientFd, _config.WriteSlabSize, _config.RecvQueueEntries,
-                                 _incremental ? WriteOverflowStrategy.Grow : _config.WriteOverflow);
+                : new TcpConnection(this, clientFd, _config.Tcp.WriteSlabSize, _config.Tcp.RecvQueueEntries,
+                                 _incremental ? WriteOverflowStrategy.Grow : _config.Tcp.WriteOverflow);
             Track(clientFd, conn);
             conn.InitRefs();
             conn.ListenerPort = PortOf(listenFd);
@@ -337,16 +337,16 @@ public sealed unsafe partial class Reactor
     // One SO_REUSEPORT listener per port; accepts route by listener fd.
     private void OpenTcpListeners()
     {
-        _listenFds = new int[1 + _config.ExtraPorts.Length];
+        _listenFds = new int[1 + _config.Tcp.ExtraPorts.Length];
         _listenPorts = new ushort[_listenFds.Length];
         _listenPorts[0] = _port;
-        for (int i = 0; i < _config.ExtraPorts.Length; i++)
+        for (int i = 0; i < _config.Tcp.ExtraPorts.Length; i++)
         {
-            _listenPorts[i + 1] = _config.ExtraPorts[i];
+            _listenPorts[i + 1] = _config.Tcp.ExtraPorts[i];
         }
         for (int i = 0; i < _listenFds.Length; i++)
         {
-            _listenFds[i] = OpenReusePortListener(_listenPorts[i], _config.ListenBacklog, _config.DualStack);
+            _listenFds[i] = OpenReusePortListener(_listenPorts[i], _config.Tcp.ListenBacklog, _config.DualStack);
         }
     }
 
