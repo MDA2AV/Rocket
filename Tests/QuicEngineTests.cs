@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
@@ -36,6 +37,60 @@ internal static class QuicEngineTests
             string echoed = client.RequestEcho(sent, timeoutMs: 5000);
             Assert.Equal("hello-quic-echo", echoed);
         });
+
+        runner.Test("quic: dual-pipe (PipeReader/PipeWriter) stream echo (loopback)", () =>
+        {
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: PipeEchoHandler);
+
+            using var client = new QuicTestClient("127.0.0.1", udpPort);
+            client.Connect();
+            Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");
+
+            byte[] sent = Encoding.ASCII.GetBytes("hello-quic-pipe-echo");
+            string echoed = client.RequestEcho(sent, timeoutMs: 5000);
+            Assert.Equal("hello-quic-pipe-echo", echoed);
+        });
+    }
+
+    // Server side, the dual-pipe model: auto-bind to the client's stream, echo until fin, then
+    // Complete() half-closes with the server's own fin (which RequestEcho waits for).
+    private static async Task PipeEchoHandler(Reactor reactor, QuicConnection conn)
+    {
+        try
+        {
+            var pipe = new QuicConnectionDualPipe(conn);
+
+            while (true)
+            {
+                System.IO.Pipelines.ReadResult result = await pipe.Input.ReadAsync();
+
+                foreach (ReadOnlyMemory<byte> segment in result.Buffer)
+                {
+                    pipe.Output.Write(segment.Span);
+                }
+                await pipe.Output.FlushAsync();
+
+                pipe.Input.AdvanceTo(result.Buffer.End);
+
+                if (result.IsCompleted)
+                {
+                    break;
+                }
+            }
+
+            pipe.Output.Complete();
+            pipe.Input.Complete();
+        }
+        finally
+        {
+            conn.DecRef();
+        }
     }
 
     // Server side, the delegate model: await stream events, echo each back on its own stream.

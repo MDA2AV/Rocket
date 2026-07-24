@@ -15,6 +15,8 @@
     <ProjectReference Include="../src/ioxide.redis/ioxide.redis.csproj" />
     <ProjectReference Include="../src/ioxide.file/ioxide.file.csproj" />
     <ProjectReference Include="../src/ioxide.tls/ioxide.tls.csproj" />
+    <ProjectReference Include="../src/ioxide.quic/ioxide.quic.csproj" />
+    <ProjectReference Include="../src/ioxide.h3/ioxide.h3.csproj" />
   </ItemGroup>
 
   <!-- Static-file fixtures (the HttpArena data/static set) served by the `file` example. -->
