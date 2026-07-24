@@ -73,19 +73,20 @@
     ReactorCount = Environment.ProcessorCount,
     RingEntries  = 8192,                   // io_uring submission/completion queue depth
 
+    // reactor recv machinery: io_uring provided-buffer rings
+    RecvBufferSize     = 32 * 1024,        // size of each receive buffer
+    BufferRingEntries  = 4096,             // receive buffers shared by a reactor's connections
+    Incremental        = false,            // kernel 6.12+: per-connection buffer rings
+    MaxConnections     = 4096,             //   one buffer group per live connection
+    ConnBufRingEntries = 16,               //   buffers per connection ring
+    IncRecvBufferSize  = 4096,             //   bytes per incremental buffer
+
     Tcp = new TcpOptions
     {
-        Port               = 8080,
-        RecvBufferSize     = 32 * 1024,    // size of each receive buffer
-        BufferRingEntries  = 4096,         // receive buffers shared by a reactor's connections
-        WriteSlabSize      = 16 * 1024,    // per-connection write buffer
-        PoolMax            = 1024,         // connection objects recycled per reactor
-        RecvQueueEntries   = 64,           // per-connection queue of received slices
-
-        Incremental        = false,        // kernel 6.12+: per-connection buffer rings
-        MaxConnections     = 4096,         //   one buffer group per live connection
-        ConnBufRingEntries = 16,           //   buffers per connection ring
-        IncRecvBufferSize  = 4096,         //   bytes per incremental buffer
+        Port             = 8080,
+        WriteSlabSize    = 16 * 1024,      // per-connection write buffer
+        PoolMax          = 1024,           // connection objects recycled per reactor
+        RecvQueueEntries = 64,             // per-connection queue of received slices
     },
 };
 
@@ -151,19 +152,20 @@ new Thread(reactor.Run).Start();</code></pre>
     ReactorCount = Environment.ProcessorCount,
     RingEntries  = 8192,                   // io_uring submission/completion queue depth
 
+    // reactor recv machinery: io_uring provided-buffer rings
+    RecvBufferSize     = 32 * 1024,        // size of each receive buffer
+    BufferRingEntries  = 4096,             // receive buffers shared by a reactor's connections
+    Incremental        = false,            // kernel 6.12+: per-connection buffer rings
+    MaxConnections     = 4096,             //   one buffer group per live connection
+    ConnBufRingEntries = 16,               //   buffers per connection ring
+    IncRecvBufferSize  = 4096,             //   bytes per incremental buffer
+
     Tcp = new TcpOptions
     {
-        Port               = 8080,
-        RecvBufferSize     = 32 * 1024,    // size of each receive buffer
-        BufferRingEntries  = 4096,         // receive buffers shared by a reactor's connections
-        WriteSlabSize      = 16 * 1024,    // per-connection write buffer
-        PoolMax            = 1024,         // connection objects recycled per reactor
-        RecvQueueEntries   = 64,           // per-connection queue of received slices
-
-        Incremental        = false,        // kernel 6.12+: per-connection buffer rings
-        MaxConnections     = 4096,         //   one buffer group per live connection
-        ConnBufRingEntries = 16,           //   buffers per connection ring
-        IncRecvBufferSize  = 4096,         //   bytes per incremental buffer
+        Port             = 8080,
+        WriteSlabSize    = 16 * 1024,      // per-connection write buffer
+        PoolMax          = 1024,           // connection objects recycled per reactor
+        RecvQueueEntries = 64,             // per-connection queue of received slices
     },
 };
 
@@ -259,18 +261,19 @@ new Thread(reactor.Run).Start();</code></pre>
     ReactorCount = Environment.ProcessorCount,
     RingEntries  = 8192,                   // io_uring submission/completion queue depth
 
+    // reactor recv machinery: per-connection buffer rings, incremental loop variant
+    // (RecvBufferSize / BufferRingEntries are shared-ring knobs - unused here)
+    Incremental        = true,             // per-connection buffer rings (kernel 6.12+)
+    MaxConnections     = 4096,             // one buffer group per live connection
+    ConnBufRingEntries = 16,               // buffers per connection ring
+    IncRecvBufferSize  = 4096,             // bytes per buffer - the kernel appends into it
+
     Tcp = new TcpOptions
     {
-        Port               = 8080,
-        WriteSlabSize      = 16 * 1024,    // per-connection write buffer
-        PoolMax            = 1024,         // connection objects recycled per reactor
-        RecvQueueEntries   = 64,           // per-connection queue of received slices
-
-        // RecvBufferSize / BufferRingEntries are shared-ring knobs - unused here.
-        Incremental        = true,         // per-connection buffer rings (kernel 6.12+)
-        MaxConnections     = 4096,         // one buffer group per live connection
-        ConnBufRingEntries = 16,           // buffers per connection ring
-        IncRecvBufferSize  = 4096,         // bytes per buffer - the kernel appends into it
+        Port             = 8080,
+        WriteSlabSize    = 16 * 1024,      // per-connection write buffer
+        PoolMax          = 1024,           // connection objects recycled per reactor
+        RecvQueueEntries = 64,             // per-connection queue of received slices
     },
 };
 

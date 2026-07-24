@@ -23,9 +23,9 @@ internal static class HardeningTests
                 HoldFirstThenDrain(release, totalBytes),
                 new ServerConfig
                 {
+                    RecvBufferSize = 1024, BufferRingEntries = 8,
                     Tcp = new TcpOptions
                     {
-                        RecvBufferSize = 1024, BufferRingEntries = 8,
                         WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 64,
                     },
                 });
@@ -42,9 +42,9 @@ internal static class HardeningTests
                 HoldFirstThenDrain(release, totalBytes),
                 new ServerConfig
                 {
+                    Incremental = true, MaxConnections = 8, ConnBufRingEntries = 4, IncRecvBufferSize = 1024,
                     Tcp = new TcpOptions
                     {
-                        Incremental = true, MaxConnections = 8, ConnBufRingEntries = 4, IncRecvBufferSize = 1024,
                         WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 64,
                     },
                 });
@@ -62,9 +62,9 @@ internal static class HardeningTests
                 },
                 new ServerConfig
                 {
+                    RecvBufferSize = 1024, BufferRingEntries = 64,
                     Tcp = new TcpOptions
                     {
-                        RecvBufferSize = 1024, BufferRingEntries = 64,
                         WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 64,
                     },
                 });
@@ -90,9 +90,9 @@ internal static class HardeningTests
             (int port, _, _) = TestServer.StartConfigured(Handlers.Raw,
                 new ServerConfig
                 {
+                    Incremental = true, MaxConnections = 4, ConnBufRingEntries = 4, IncRecvBufferSize = 1024,
                     Tcp = new TcpOptions
                     {
-                        Incremental = true, MaxConnections = 4, ConnBufRingEntries = 4, IncRecvBufferSize = 1024,
                         WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 64,
                     },
                 });

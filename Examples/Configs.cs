@@ -10,11 +10,11 @@ public static class Configs
         ReactorCount = 12,
         RingEntries  = 8192,
 
+        RecvBufferSize    = 32 * 1024,
+        BufferRingEntries = 4096,
         Tcp = new TcpOptions
         {
             Port              = 8080,
-            RecvBufferSize    = 32 * 1024,
-            BufferRingEntries = 4096,
             WriteSlabSize     = 16 * 1024,
             PoolMax           = 1024,
             RecvQueueEntries  = 64,
@@ -26,6 +26,10 @@ public static class Configs
         ReactorCount = 12,
         RingEntries  = 8192,
 
+        Incremental        = true,
+        MaxConnections     = 4096,
+        ConnBufRingEntries = 16,
+        IncRecvBufferSize  = 4096,
         Tcp = new TcpOptions
         {
             Port             = 8080,
@@ -34,10 +38,6 @@ public static class Configs
             RecvQueueEntries = 64,
 
             // RecvBufferSize / BufferRingEntries are shared-ring knobs - unused here.
-            Incremental        = true,
-            MaxConnections     = 4096,
-            ConnBufRingEntries = 16,
-            IncRecvBufferSize  = 4096,
         },
     };
 }

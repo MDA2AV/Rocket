@@ -9,7 +9,7 @@ namespace ioxide;
 /// <summary>
 /// Incremental-buffer (IOU_PBUF_RING_INC) path: each connection gets its own buffer ring, and one
 /// buffer accumulates its byte stream across many recvs. A buffer recycles only when the kernel is
-/// done appending AND the handler returned every slice. Selected by TcpOptions.Incremental.
+/// done appending AND the handler returned every slice. Selected by ServerConfig.Incremental.
 /// </summary>
 public sealed unsafe partial class Reactor
 {
