@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Text;
 using ioxide;
 using ioxide.h3;
 
@@ -24,9 +25,12 @@ public static class QuicH3Example
 
         if (conn.NegotiatedProtocol == "h3")
         {
-            // Owns the handler ref (DecRef on exit).
+            // Owns the handler ref (DecRef on exit). H3Request is bytes throughout - route
+            // by byte compare (no per-request strings), decode only what goes into the text.
             await new H3Connection(conn).RunAsync(
-                static req => H3Response.Text($"hello {req.Path} over HTTP/3 via io_uring\n"));
+                static req => req.Path.Span.SequenceEqual("/plaintext"u8)
+                    ? H3Response.Text("Hello, World!")
+                    : H3Response.Text($"hello {Encoding.ASCII.GetString(req.Path.Span)} over HTTP/3 via io_uring\n"));
             return;
         }
 

@@ -140,7 +140,7 @@ var config = new ServerConfig
 
 reactor.TcpHandle  = Handlers.Raw;
 reactor.QuicHandle = (r, conn) => new H3Connection(conn).RunAsync(
-    static req => H3Response.Text($"hello {req.Path}"));</code></pre>
+    static req => H3Response.Text($"hello {Encoding.ASCII.GetString(req.Path.Span)}"));</code></pre>
 
     <h2>Ingress: the life of a datagram</h2>
     <p>A client datagram lands as a multishot <code>recvmsg</code> completion on the reactor
@@ -280,7 +280,7 @@ reactor.QuicHandle = async (r, conn) =>
     nothing but the abstract read/write surface, so it would ride any future engine (quicly, etc.)
     unchanged. One <code>H3Connection</code> wraps one <code>QuicConnection</code>:</p>
 <pre><code class="language-csharp">reactor.QuicHandle = (r, conn) => new H3Connection(conn).RunAsync(
-    static req => H3Response.Text($"hello {req.Path} via {req.Method}"));</code></pre>
+    static req => H3Response.Text($"hello {Encoding.ASCII.GetString(req.Path.Span)} via {Encoding.ASCII.GetString(req.Method.Span)}"));</code></pre>
     <p>Inside <code>RunAsync</code>:</p>
     <ol>
       <li><b>Lazy setup.</b> On the first wake (which is by definition post-handshake), it opens
@@ -288,7 +288,9 @@ reactor.QuicHandle = async (r, conn) =>
       binds them into nghttp3, and the SETTINGS preface rides out on that same drain.</li>
       <li><b>Assembly.</b> Every recv item is fed to <code>nghttp3_conn_read_stream</code>;
       nghttp3 demuxes uni-stream types itself and fires header/data/end callbacks, which
-      accumulate into an <code>H3Request</code> (method, path, headers, body).</li>
+      accumulate into an <code>H3Request</code> (method, path, headers, body - all post-QPACK
+      bytes as <code>ReadOnlyMemory&lt;byte&gt;</code>; the library never decodes to strings, and the
+      memories are valid until the handler returns).</li>
       <li><b>Dispatch.</b> Completed requests run your callback on the reactor thread; the
       <code>H3Response</code> (status, headers, body) is submitted back to nghttp3, whose output
       frames are drained through <code>SendStream</code> - response bodies are copied into shim

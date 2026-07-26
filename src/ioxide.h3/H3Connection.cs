@@ -1,5 +1,6 @@
+using System.Buffers;
+using System.Buffers.Text;
 using System.Runtime.InteropServices;
-using System.Text;
 using ioxide;
 
 // ReSharper disable SuggestVarOrType_BuiltInTypes
@@ -22,7 +23,7 @@ namespace ioxide.h3;
 /// </summary>
 public sealed class H3Connection : IDisposable
 {
-    private readonly QuicConnection _conn;
+    private readonly QuicConnection _quicConnection;
     private nint _h3;
     private GCHandle _self;
     private bool _fatal;
@@ -31,9 +32,9 @@ public sealed class H3Connection : IDisposable
     private readonly List<long> _ready = [];
     private readonly byte[] _egress = new byte[16 * 1024];
 
-    public H3Connection(QuicConnection conn)
+    public H3Connection(QuicConnection quicConnection)
     {
-        _conn = conn;
+        _quicConnection = quicConnection;
     }
 
     /// <summary>
@@ -46,20 +47,20 @@ public sealed class H3Connection : IDisposable
         {
             while (true)
             {
-                QuicRecvSnapshot snap = await _conn.ReadAsync();
+                QuicRecvSnapshot snap = await _quicConnection.ReadAsync();
 
                 if (_h3 == 0 && !_fatal && !TrySetup())
                 {
                     _fatal = true;
                 }
 
-                while (_conn.TryGetItem(in snap, out QuicRecvRing.Item item))
+                while (_quicConnection.TryGetItem(in snap, out QuicRecvRing.Item item))
                 {
                     if (!_fatal)
                     {
                         Feed(in item);
                     }
-                    _conn.ReturnItem(in item);
+                    _quicConnection.ReturnItem(in item);
                 }
 
                 if (!_fatal)
@@ -72,12 +73,12 @@ public sealed class H3Connection : IDisposable
                 {
                     break;
                 }
-                _conn.ResetRead();
+                _quicConnection.ResetRead();
             }
         }
         finally
         {
-            _conn.DecRef();
+            _quicConnection.DecRef();
             Dispose();
         }
     }
@@ -86,9 +87,9 @@ public sealed class H3Connection : IDisposable
     // first post-handshake wake; the SETTINGS preface rides out on this wake's Drain.
     private unsafe bool TrySetup()
     {
-        long ctrl = _conn.OpenUniStream();
-        long qenc = _conn.OpenUniStream();
-        long qdec = _conn.OpenUniStream();
+        long ctrl = _quicConnection.OpenUniStream();
+        long qenc = _quicConnection.OpenUniStream();
+        long qdec = _quicConnection.OpenUniStream();
         if (ctrl < 0 || qenc < 0 || qdec < 0)
         {
             Console.Error.WriteLine("[ioxide.h3] failed to open control/QPACK uni streams");
@@ -96,7 +97,7 @@ public sealed class H3Connection : IDisposable
         }
 
         _self = GCHandle.Alloc(this);
-        var cbs = new Nghttp3.Callbacks
+        var callbacks = new Nghttp3.Callbacks
         {
             OnBeginHeaders = &CbBeginHeaders,
             OnHeader       = &CbHeader,
@@ -105,7 +106,7 @@ public sealed class H3Connection : IDisposable
             OnEndStream    = &CbEndStream,
         };
 
-        _h3 = Nghttp3.ih3_server_new(cbs, (void*)GCHandle.ToIntPtr(_self));
+        _h3 = Nghttp3.ih3_server_new(callbacks, (void*)GCHandle.ToIntPtr(_self));
         if (_h3 == 0)
         {
             Console.Error.WriteLine("[ioxide.h3] engine init failed");
@@ -172,8 +173,7 @@ public sealed class H3Connection : IDisposable
             {
                 continue;
             }
-            req.Body = req.BodyBuffer?.ToArray() ?? [];
-            req.BodyBuffer = null;
+            req.Freeze();   // arena is final - materialize the public memories
 
             H3Response resp;
             try
@@ -193,14 +193,15 @@ public sealed class H3Connection : IDisposable
 
     private unsafe void Submit(long streamId, H3Response resp)
     {
-        byte[] headers = PackHeaders(resp);
+        byte[] headers = PackHeaders(resp, out int headersLen);
         int rv;
         fixed (byte* ph = headers)
-        fixed (byte* pb = resp.Body)
+        fixed (byte* pb = resp.Body.Span)
         {
-            rv = Nghttp3.ih3_submit_response(_h3, streamId, ph, (nuint)headers.Length,
+            rv = Nghttp3.ih3_submit_response(_h3, streamId, ph, (nuint)headersLen,
                 pb, (nuint)resp.Body.Length);
         }
+        ArrayPool<byte>.Shared.Return(headers);
         if (rv != 0)
         {
             Console.Error.WriteLine($"[ioxide.h3] submit_response failed: {Nghttp3.StrError(rv)}");
@@ -228,44 +229,72 @@ public sealed class H3Connection : IDisposable
                 {
                     return;
                 }
-                _conn.SendStream(sid, _egress.AsSpan(0, (int)n), fin != 0);
+                _quicConnection.SendStream(sid, _egress.AsSpan(0, (int)n), fin != 0);
             }
         }
     }
 
-    // [u16 namelen][name][u16 valuelen][value]... - ":status" first, content-length appended when
-    // a body is present and the handler didn't set one.
-    private static byte[] PackHeaders(H3Response resp)
+    // [u16 namelen][name][u16 valuelen][value]... (little-endian u16, written and read on the
+    // same host) - ":status" first, content-length appended when a body is present and the
+    // handler didn't set one. Names are lowercased as they're copied (h3 wire requirement);
+    // numbers go through Utf8Formatter - no strings anywhere. The buffer is pooled: nghttp3
+    // copies the entries during submit (NGHTTP3_NV_FLAG_NONE), so it's returned right after.
+    private static byte[] PackHeaders(H3Response resp, out int written)
     {
-        var buf = new MemoryStream(256);
-
-        void Add(string name, string value)
+        int cap = (4 + 7 + 3) + (4 + 14 + 20);   // :status + a worst-case content-length
+        foreach ((ReadOnlyMemory<byte> name, ReadOnlyMemory<byte> value) in resp.Headers)
         {
-            byte[] n = Encoding.ASCII.GetBytes(name);
-            byte[] v = Encoding.ASCII.GetBytes(value);
-            Span<byte> len = stackalloc byte[2];
-            BitConverter.TryWriteBytes(len, (ushort)n.Length);
-            buf.Write(len);
-            buf.Write(n);
-            BitConverter.TryWriteBytes(len, (ushort)v.Length);
-            buf.Write(len);
-            buf.Write(v);
+            cap += 4 + name.Length + value.Length;
         }
 
-        Add(":status", resp.Status.ToString());
+        byte[] buf = ArrayPool<byte>.Shared.Rent(cap);
+        int w = 0;
+        Span<byte> num = stackalloc byte[20];
+
+        static void U16(byte[] b, ref int w, int x)
+        {
+            b[w++] = (byte)x;
+            b[w++] = (byte)(x >> 8);
+        }
+
+        U16(buf, ref w, 7);
+        ":status"u8.CopyTo(buf.AsSpan(w));
+        w += 7;
+        Utf8Formatter.TryFormat(resp.Status, num, out int numLen);
+        U16(buf, ref w, numLen);
+        num[..numLen].CopyTo(buf.AsSpan(w));
+        w += numLen;
 
         bool hasContentLength = false;
-        foreach ((string name, string value) in resp.Headers)
+        foreach ((ReadOnlyMemory<byte> nameM, ReadOnlyMemory<byte> valueM) in resp.Headers)
         {
-            Add(name.ToLowerInvariant(), value);
-            hasContentLength |= name.Equals("content-length", StringComparison.OrdinalIgnoreCase);
-        }
-        if (!hasContentLength && resp.Body.Length > 0)
-        {
-            Add("content-length", resp.Body.Length.ToString());
+            ReadOnlySpan<byte> name = nameM.Span;
+            U16(buf, ref w, name.Length);
+            int nameStart = w;
+            foreach (byte b in name)
+            {
+                buf[w++] = b is >= (byte)'A' and <= (byte)'Z' ? (byte)(b | 0x20) : b;
+            }
+            hasContentLength |= buf.AsSpan(nameStart, name.Length).SequenceEqual("content-length"u8);
+
+            U16(buf, ref w, valueM.Length);
+            valueM.Span.CopyTo(buf.AsSpan(w));
+            w += valueM.Length;
         }
 
-        return buf.ToArray();
+        if (!hasContentLength && resp.Body.Length > 0)
+        {
+            U16(buf, ref w, 14);
+            "content-length"u8.CopyTo(buf.AsSpan(w));
+            w += 14;
+            Utf8Formatter.TryFormat(resp.Body.Length, num, out numLen);
+            U16(buf, ref w, numLen);
+            num[..numLen].CopyTo(buf.AsSpan(w));
+            w += numLen;
+        }
+
+        written = w;
+        return buf;
     }
 
     public void Dispose()
@@ -289,8 +318,8 @@ public sealed class H3Connection : IDisposable
     [UnmanagedCallersOnly]
     private static unsafe void CbBeginHeaders(void* user, long streamId)
     {
-        H3Connection c = From(user);
-        c._requests[streamId] = new H3Request { StreamId = streamId };
+        H3Connection h3Connection = From(user);
+        h3Connection._requests[streamId] = new H3Request { StreamId = streamId };
     }
 
     [UnmanagedCallersOnly]
@@ -302,16 +331,22 @@ public sealed class H3Connection : IDisposable
             return;
         }
 
-        string n = Encoding.ASCII.GetString(name, (int)nameLen);
-        string v = Encoding.UTF8.GetString(value, (int)valueLen);
-        switch (n)
+        // Copy now - nghttp3 reclaims both buffers when this callback returns. Pseudo-headers
+        // route by byte compare; nothing is decoded to text anywhere in the library.
+        var n = new ReadOnlySpan<byte>(name, (int)nameLen);
+        if (n.Length > 0 && n[0] == (byte)':')
         {
-            case ":method":    req.Method = v; break;
-            case ":path":      req.Path = v; break;
-            case ":scheme":    req.Scheme = v; break;
-            case ":authority": req.Authority = v; break;
-            default:           req.Headers.Add((n, v)); break;
+            (int Off, int Len) r = req.Append(value, (int)valueLen);
+            if      (n.SequenceEqual(":method"u8))    req.MethodR = r;
+            else if (n.SequenceEqual(":path"u8))      req.PathR = r;
+            else if (n.SequenceEqual(":scheme"u8))    req.SchemeR = r;
+            else if (n.SequenceEqual(":authority"u8)) req.AuthorityR = r;
+            return;
         }
+
+        (int Off, int Len) nr = req.Append(name, (int)nameLen);
+        (int Off, int Len) vr = req.Append(value, (int)valueLen);
+        req.HeaderRanges.Add((nr.Off, nr.Len, vr.Off, vr.Len));
     }
 
     [UnmanagedCallersOnly]

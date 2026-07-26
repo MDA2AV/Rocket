@@ -53,7 +53,7 @@ internal static class TestServer
     private static ServerConfig DefaultConfig() => new()
     {
         RecvBufferSize = 4096,
-        BufferRingEntries = 256,
+        RecvSlots = 256,
         Tcp = new TcpOptions
         {
             WriteSlabSize = 16 * 1024,
@@ -96,7 +96,7 @@ internal static class TestServer
         {
             ReactorCount = 1,
             RecvBufferSize = 4096,
-            BufferRingEntries = 256,
+            RecvSlots = 256,
             Tcp = new TcpOptions
             {
                 Port = (ushort)tcpPort,

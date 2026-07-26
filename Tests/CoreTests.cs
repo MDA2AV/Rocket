@@ -113,7 +113,7 @@ internal static class CoreTests
             (int port, _, _) = TestServer.StartConfigured(BodyHandler(body),
                 new ServerConfig
                 {
-                    RecvBufferSize = 4096, BufferRingEntries = 64,
+                    RecvBufferSize = 4096, RecvSlots = 64,
                     Tcp = new TcpOptions
                     {
                         WriteSlabSize = 16 * 1024, PoolMax = 8, RecvQueueEntries = 64,
@@ -135,7 +135,7 @@ internal static class CoreTests
             (int port, _, _) = TestServer.StartConfigured(Handlers.Raw,
                 new ServerConfig
                 {
-                    Incremental = true, MaxConnections = 16, ConnBufRingEntries = 16, IncRecvBufferSize = 4096,
+                    Incremental = new IncrementalOptions { MaxConnections = 16, RecvSlots = 16, RecvBufferSize = 4096 },
                     Tcp = new TcpOptions
                     {
                         WriteSlabSize = 16 * 1024, PoolMax = 8, RecvQueueEntries = 64,
@@ -157,7 +157,7 @@ internal static class CoreTests
             (int port, _, _) = TestServer.StartConfigured(PortEchoHandler,
                 new ServerConfig
                 {
-                    RecvBufferSize = 4096, BufferRingEntries = 64,
+                    RecvBufferSize = 4096, RecvSlots = 64,
                     Tcp = new TcpOptions
                     {
                         WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 64,
@@ -221,7 +221,7 @@ internal static class CoreTests
                 },
                 new ServerConfig
                 {
-                    RecvBufferSize = 64, BufferRingEntries = 256,
+                    RecvBufferSize = 64, RecvSlots = 256,
                     Tcp = new TcpOptions
                     {
                         WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 8,
@@ -265,7 +265,7 @@ internal static class CoreTests
                 },
                 new ServerConfig
                 {
-                    RecvBufferSize = 1024, BufferRingEntries = 64,
+                    RecvBufferSize = 1024, RecvSlots = 64,
                     Tcp = new TcpOptions
                     {
                         WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 64,
@@ -305,7 +305,7 @@ internal static class CoreTests
             (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(Handlers.Raw,
                 new ServerConfig
                 {
-                    RecvBufferSize = 4096, BufferRingEntries = 64,
+                    RecvBufferSize = 4096, RecvSlots = 64,
                     Tcp = new TcpOptions
                     {
                         WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 64,
@@ -449,7 +449,7 @@ internal static class CoreTests
         (int port, _, _) = TestServer.StartConfigured(BodyHandler(body),
             new ServerConfig
             {
-                RecvBufferSize = 4096, BufferRingEntries = 64,
+                RecvBufferSize = 4096, RecvSlots = 64,
                 Tcp = new TcpOptions
                 {
                     WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 64,

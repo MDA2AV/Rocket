@@ -39,7 +39,7 @@ internal static class Program
         var config = new ServerConfig
         {
             ReactorCount = int.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_REACTORS"), out int reactors) ? reactors : 12,
-            Incremental = Environment.GetEnvironmentVariable("PLAYGROUND_INCREMENTAL") == "1",
+            Incremental = Environment.GetEnvironmentVariable("PLAYGROUND_INCREMENTAL") == "1" ? new IncrementalOptions() : null,
             Tcp = new TcpOptions
             {
                 Port = 8080,

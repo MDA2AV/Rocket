@@ -481,7 +481,7 @@ internal static class Handlers
     /// </summary>
     public static Task H3(Reactor reactor, QuicConnection conn)
         => new ioxide.h3.H3Connection(conn).RunAsync(
-            static req => ioxide.h3.H3Response.Text($"hello {req.Path} over HTTP/3 via io_uring\n"));
+            static req => ioxide.h3.H3Response.Text($"hello {System.Text.Encoding.ASCII.GetString(req.Path.Span)} over HTTP/3 via io_uring\n"));
 
     /// <summary>Self-signed localhost cert for the quic mode (PLAYGROUND_QUIC_CERT/KEY override it).</summary>
     public static (string CertPath, string KeyPath) EnsureQuicCert()

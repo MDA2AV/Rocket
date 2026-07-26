@@ -167,11 +167,11 @@
       <tr><td><code>RingEntries</code></td><td>8192</td><td>io_uring SQ/CQ depth</td></tr>
       <tr><td><code>DualStack</code></td><td>false</td><td>bind listeners (TCP and UDP) as dual-stack IPv6</td></tr>
       <tr><td><code>RecvBufferSize</code></td><td>32 KB</td><td>shared mode: bytes per recv buffer</td></tr>
-      <tr><td><code>BufferRingEntries</code></td><td>4096</td><td>shared mode: buffers per reactor (power of two)</td></tr>
-      <tr><td><code>Incremental</code></td><td>false</td><td>per-connection buffer rings (kernel 6.12+)</td></tr>
-      <tr><td><code>MaxConnections</code></td><td>4096</td><td>incremental: one buffer-group id per live connection</td></tr>
-      <tr><td><code>ConnBufRingEntries</code></td><td>16</td><td>incremental: buffers per connection ring</td></tr>
-      <tr><td><code>IncRecvBufferSize</code></td><td>4 KB</td><td>incremental: bytes per buffer (kernel appends into it)</td></tr>
+      <tr><td><code>RecvSlots</code></td><td>4096</td><td>shared mode: buffers per reactor (power of two)</td></tr>
+      <tr><td><code>Incremental</code></td><td>null</td><td>per-connection buffer rings (kernel 6.12+); null = shared ring</td></tr>
+      <tr><td><code>Incremental.MaxConnections</code></td><td>4096</td><td>incremental: one buffer-group id per live connection</td></tr>
+      <tr><td><code>Incremental.RecvSlots</code></td><td>16</td><td>incremental: buffers per connection ring</td></tr>
+      <tr><td><code>Incremental.RecvBufferSize</code></td><td>4 KB</td><td>incremental: bytes per buffer (kernel appends into it)</td></tr>
       <tr><td><code>Tcp.Port</code></td><td>8080</td><td>SO_REUSEPORT listener port (every reactor binds it)</td></tr>
       <tr><td><code>Tcp.ExtraPorts</code></td><td>[]</td><td>additional listener ports; <code>conn.ListenerPort</code> says which one a connection used</td></tr>
       <tr><td><code>Tcp.ListenBacklog</code></td><td>1024</td><td>accept-queue depth per listener</td></tr>

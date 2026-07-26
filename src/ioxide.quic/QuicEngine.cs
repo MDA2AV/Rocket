@@ -34,7 +34,7 @@ public sealed unsafe class QuicEngine : IDisposable
     {
         CidLength = cidLength;
 
-        var cbs = new Ngtcp2.Callbacks
+        var callbacks = new Ngtcp2.Callbacks
         {
             OnStreamData         = &QuicEngineConnection.CbStreamData,
             OnStreamClose        = &QuicEngineConnection.CbStreamClose,
@@ -50,7 +50,7 @@ public sealed unsafe class QuicEngine : IDisposable
         fixed (byte* pAlpn = alpnWire)
         {
             _engine = Ngtcp2.iq_engine_new(certPemPath, keyPemPath, (nuint)cidLength,
-                alpnWire.Length > 0 ? pAlpn : null, (nuint)alpnWire.Length, cbs);
+                alpnWire.Length > 0 ? pAlpn : null, (nuint)alpnWire.Length, callbacks);
         }
         if (_engine == 0)
         {

@@ -246,7 +246,7 @@ internal sealed class EchoQuicConnection : QuicConnection
 {
     public static int Created;
 
-    public override void OnDatagram(ReadOnlySpan<byte> payload, byte tos, int groSegmentSize) => Send(payload);
+    public override void OnDatagram(ReadOnlySpan<byte> payload, byte tos) => Send(payload);
     public override long GetNextTimeout(long nowMs) => long.MaxValue;
     public override void OnTimer(long nowMs) { }
     public override void OnEvicted(QuicEvictReason reason) { }
@@ -281,7 +281,7 @@ internal sealed class TestQuicConnection : QuicConnection
         ArmTimerDelayMs = 0;
     }
 
-    public override void OnDatagram(ReadOnlySpan<byte> payload, byte tos, int groSegmentSize)
+    public override void OnDatagram(ReadOnlySpan<byte> payload, byte tos)
     {
         int idx = payload.IndexOf("retire:"u8);
         if (idx >= 0)

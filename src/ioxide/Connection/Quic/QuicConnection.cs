@@ -37,10 +37,11 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
     }
 
     /// <summary>
-    /// One UDP payload for this connection (with GRO, a train of <paramref name="groSegmentSize"/>-
-    /// sized datagrams to split before feeding the engine). Spans are valid only during the call.
+    /// One wire datagram for this connection - the transport pre-splits GRO trains before demux
+    /// (see Reactor.QuicDispatch), so one call is always exactly one datagram. The span is valid
+    /// only during the call.
     /// </summary>
-    public abstract void OnDatagram(ReadOnlySpan<byte> payload, byte tos, int groSegmentSize);
+    public abstract void OnDatagram(ReadOnlySpan<byte> payload, byte tos);
 
     /// <summary>Next engine deadline in <see cref="Environment.TickCount64"/> ms; long.MaxValue = none.</summary>
     public abstract long GetNextTimeout(long nowMs);

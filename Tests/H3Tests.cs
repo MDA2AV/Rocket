@@ -27,7 +27,7 @@ internal static class H3Tests
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
                 quicHandle: static (_, conn) => new H3Connection(conn).RunAsync(
-                    static req => H3Response.Text($"hello {req.Path} via {req.Method}")));
+                    static req => H3Response.Text($"hello {Encoding.ASCII.GetString(req.Path.Span)} via {Encoding.ASCII.GetString(req.Method.Span)}")));
 
             using var client = new H3TestClient("127.0.0.1", udpPort);
             client.Connect();
