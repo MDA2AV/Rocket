@@ -25,6 +25,8 @@ public unsafe partial class QuicEngineConnection
     {
         // One call = one wire datagram: the transport pre-splits GRO trains before demux.
         int rv;
+        
+        // TODO: can we get the byte* without a fixed
         fixed (byte* p = payload)
         {
             // milestone: no migration - the path is fixed at accept, so remote_sa is unused.
@@ -39,9 +41,11 @@ public unsafe partial class QuicEngineConnection
         {
             // Deferred from OnStreamData: tear down now that the engine call has unwound.
             Console.Error.WriteLine("[ioxide.quic] recv queue overflow; closing connection.");
+            
             _closed = true;
             _reactor.QuicRemoveConnection(this);
             Destroy();
+            
             return;
         }
 
