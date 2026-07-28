@@ -475,13 +475,65 @@ internal static class Handlers
     }
 
     /// <summary>
-    /// The QUIC handler: HTTP/3 via ioxide.h3 - the h3 twin of <see cref="Raw"/>. H3Connection
-    /// feeds the connection's stream items into nghttp3 (the raw ReadAsync/TryGetItem loop lives
-    /// inside it) and runs one call here per assembled request; it owns the handler ref.
+    /// The QUIC handler: HTTP/3 via ioxide.nghttp3 - the h3 twin of <see cref="Raw"/>, on the STREAMING
+    /// overload: requests dispatch at end-of-headers, and POST /upload pulls its body through
+    /// <c>req.BodyReader</c> chunk by chunk while the stream's flow-control window paces the peer
+    /// (memory bound = one window, not the body size). Everything else answers hello. Try it:
+    ///
+    ///   h2load --alpn-list=h3 -n 1 -c 1 -d bigfile.bin https://127.0.0.1:8443/upload
     /// </summary>
     public static Task H3(Reactor reactor, QuicConnection conn)
-        => new ioxide.h3.H3Connection(conn).RunAsync(
-            static req => ioxide.h3.H3Response.Text($"hello {System.Text.Encoding.ASCII.GetString(req.Path.Span)} over HTTP/3 via io_uring\n"));
+    {
+        return new ioxide.nghttp3.H3Connection(conn).RunAsync(static async req =>
+        {
+            if (req.Path.Span.SequenceEqual("/upload"u8))
+            {
+                long total = 0;
+                while (true)
+                {
+                    ReadOnlyMemory<byte> chunk = await req.BodyReader!.ReadAsync();
+                    if (chunk.IsEmpty)
+                    {
+                        break;
+                    }
+
+                    total += chunk.Length; // a real app would parse/store the chunk here
+                }
+
+                return ioxide.nghttp3.H3Response.Text($"received {total} bytes over HTTP/3\n");
+            }
+
+            return ioxide.nghttp3.H3Response.Text(
+                $"hello {System.Text.Encoding.ASCII.GetString(req.Path.Span)} over HTTP/3 via io_uring\n");
+        });
+    }
+
+    /// <summary>
+    /// The pure-C# HTTP/3 stack (ioxide.http3: frames + QPACK + Huffman, no native h3 code) on
+    /// the same streaming surface as <see cref="H3"/> - POST /upload pulls the body chunk by
+    /// chunk under flow-control pacing, everything else answers hello.
+    /// </summary>
+    public static Task Http3(Reactor reactor, QuicConnection conn)
+        => new ioxide.http3.Http3Connection(conn).RunAsync(
+            static async req =>
+            {
+                if (req.Path.Span.SequenceEqual("/upload"u8))
+                {
+                    long total = 0;
+                    while (true)
+                    {
+                        ReadOnlyMemory<byte> chunk = await req.BodyReader!.ReadAsync();
+                        if (chunk.IsEmpty)
+                        {
+                            break;
+                        }
+                        total += chunk.Length;
+                    }
+                    return ioxide.http3.Http3Response.Text($"received {total} bytes over pure-C# HTTP/3\n");
+                }
+
+                return ioxide.http3.Http3Response.Text($"hello {System.Text.Encoding.ASCII.GetString(req.Path.Span)} over pure-C# HTTP/3\n");
+            });
 
     /// <summary>Self-signed localhost cert for the quic mode (PLAYGROUND_QUIC_CERT/KEY override it).</summary>
     public static (string CertPath, string KeyPath) EnsureQuicCert()

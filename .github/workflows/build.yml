@@ -97,11 +97,11 @@ jobs:
       - name: Pack ioxide.Kestrel
         run: dotnet pack src/ioxide.Kestrel/ioxide.Kestrel.csproj --configuration Release --no-build --output ./artifacts
 
-      - name: Pack ioxide.quic
-        run: dotnet pack src/ioxide.quic/ioxide.quic.csproj --configuration Release --no-build --output ./artifacts
+      - name: Pack ioxide.ngtcp2
+        run: dotnet pack src/ioxide.ngtcp2/ioxide.ngtcp2.csproj --configuration Release --no-build --output ./artifacts
 
-      - name: Pack ioxide.h3
-        run: dotnet pack src/ioxide.h3/ioxide.h3.csproj --configuration Release --no-build --output ./artifacts
+      - name: Pack ioxide.nghttp3
+        run: dotnet pack src/ioxide.nghttp3/ioxide.nghttp3.csproj --configuration Release --no-build --output ./artifacts
 
       - name: Publish to NuGet
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

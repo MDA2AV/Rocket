@@ -1,13 +1,13 @@
 using System.Buffers;
 using System.Text;
 using ioxide;
-using ioxide.h3;
+using ioxide.nghttp3;
 
 namespace Examples.Quic;
 
 /// <summary>
 /// One QUIC listener, two protocols, picked by ALPN: "h3" connections get real HTTP/3 through
-/// ioxide.h3, anything else gets a raw stream echo through the QuicConnectionDualPipe adapters -
+/// ioxide.nghttp3, anything else gets a raw stream echo through the QuicConnectionDualPipe adapters -
 /// the QUIC twin of <see cref="Raw.PipesExample"/>.
 ///
 /// The QUIC handler launches before the handshake, so the ALPN isn't known at entry. The demux

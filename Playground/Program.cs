@@ -2,7 +2,7 @@ using System.Runtime.InteropServices;
 using ioxide;
 using ioxide.file;
 using ioxide.pg;
-using ioxide.quic;
+using ioxide.ngtcp2;
 
 namespace Playground;
 
@@ -22,7 +22,7 @@ internal static class Program
         // reactor binds the UDP port via SO_REUSEPORT and demuxes its own flows.
         QuicEngine? quicEngine = null;
         QuicOptions? quicOptions = null;
-        if (mode is "quic" or "h3")
+        if (mode is "quic" or "h3" or "http3")
         {
             (string certPath, string keyPath) = Handlers.EnsureQuicCert();
             quicEngine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
@@ -129,6 +129,11 @@ internal static class Program
                 case "h3":
                     reactor.TcpHandle = Handlers.Raw;   // :8080 still listens (until a TCP opt-out exists)
                     reactor.QuicHandle = Handlers.H3;
+                    break;
+
+                case "http3":
+                    reactor.TcpHandle = Handlers.Raw;
+                    reactor.QuicHandle = Handlers.Http3;   // the pure-C# h3 stack
                     break;
 
                 default:

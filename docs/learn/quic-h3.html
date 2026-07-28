@@ -65,8 +65,8 @@
   <main class="doc">
     <h1>QUIC &amp; HTTP/3</h1>
     <p class="lead">ioxide serves HTTP/3 through three layers, each with one job: the core's QUIC
-    transport routes UDP datagrams to logical connections, <code>ioxide.quic</code> runs the
-    protocol engine (ngtcp2 + picotls, bundled native), and <code>ioxide.h3</code> turns decrypted
+    transport routes UDP datagrams to logical connections, <code>ioxide.ngtcp2</code> runs the
+    protocol engine (ngtcp2 + picotls, bundled native), and <code>ioxide.nghttp3</code> turns decrypted
     stream bytes into requests and responses (nghttp3, bundled native). This page walks the whole
     path a request takes, and ends with the invariants that were learned the hard way.</p>
 
@@ -101,11 +101,11 @@
         parses the DCID (RFC 8999), routes to a live connection or adopts a new one via the
         factory.</span><br><code>Reactor/Transport/Quic/Reactor.Quic.cs</code></div></div>
       <div class="qh3-down"><div></div><div>&darr;</div></div>
-      <div class="qh3-row"><div class="qh3-tag">ioxide.quic</div>
+      <div class="qh3-row"><div class="qh3-tag">ioxide.ngtcp2</div>
         <div class="qh3-box qh3-hot"><b>QuicEngineConnection</b> <span>- feeds datagrams to ngtcp2
         (decrypt, ACK, flow control), copies decrypted stream events into the recv queue, pumps
         egress back out with GSO batching. picotls does the TLS 1.3 handshake.</span>
-        <br><code>src/ioxide.quic/*</code> + <code>libioxide_quic.so</code></div></div>
+        <br><code>src/ioxide.ngtcp2/*</code> + <code>libioxide_ngtcp2.so</code></div></div>
       <div class="qh3-down"><div></div><div>&darr;</div></div>
       <div class="qh3-row"><div class="qh3-tag">core &middot; read surface</div>
         <div class="qh3-box"><b>QuicConnection</b> <span>- the handler-facing API:
@@ -117,11 +117,11 @@
         <div class="qh3-box"><b>Reactor.QuicHandle</b> <span>- your delegate, launched once per
         adopted connection; the QUIC twin of <code>TcpHandle</code>.</span></div></div>
       <div class="qh3-down"><div></div><div>&darr;</div></div>
-      <div class="qh3-row"><div class="qh3-tag">ioxide.h3</div>
+      <div class="qh3-row"><div class="qh3-tag">ioxide.nghttp3</div>
         <div class="qh3-box"><b>H3Connection</b> <span>- nghttp3 rides the read surface: assembles
         requests (QPACK, framing), runs your <code>req =&gt; resp</code> callback, drains response
         frames back through SendStream.</span>
-        <br><code>src/ioxide.h3/*</code> + <code>libioxide_h3.so</code></div></div>
+        <br><code>src/ioxide.nghttp3/*</code> + <code>libioxide_nghttp3.so</code></div></div>
     </div>
 
     <p>Wiring it up is two lines in the host:</p>
@@ -251,14 +251,14 @@ reactor.QuicHandle = async (r, conn) =>
     owns every struct layout (compiled against the exact vendored headers) and exposes a flat,
     stable ABI:</p>
     <ul>
-      <li><code>libioxide_quic.so</code> (~1.2&nbsp;MB) - ngtcp2 + its picotls crypto backend +
+      <li><code>libioxide_ngtcp2.so</code> (~1.2&nbsp;MB) - ngtcp2 + its picotls crypto backend +
       picotls, statically linked; the only system dependency is <code>libcrypto.so.3</code>.
       Exports <code>iq_*</code>: engine/accept/read/write, uni-stream open, ALPN, expiry.
-      Built by <code>scripts/build-quic-native.sh</code>.</li>
-      <li><code>libioxide_h3.so</code> (~244&nbsp;KB) - nghttp3, statically linked, zero external
+      Built by <code>scripts/build-ngtcp2-native.sh</code>.</li>
+      <li><code>libioxide_nghttp3.so</code> (~244&nbsp;KB) - nghttp3, statically linked, zero external
       dependencies (it does no I/O and no crypto). Exports <code>ih3_*</code>: conn create/bind,
       read_stream, submit_response, writev, shutdown/close. Built by
-      <code>scripts/build-h3-native.sh</code>.</li>
+      <code>scripts/build-nghttp3-native.sh</code>.</li>
     </ul>
     <p>Both <code>.so</code> files are committed and packed into the NuGet
     <code>runtimes/linux-x64/native/</code>, so consumers install nothing.</p>
@@ -276,7 +276,7 @@ reactor.QuicHandle = async (r, conn) =>
     <code>QuicConnection.NegotiatedProtocol</code> after the handshake.</p>
 
     <h2>The HTTP/3 layer</h2>
-    <p><code>ioxide.h3</code> references only the core - not <code>ioxide.quic</code>. It needs
+    <p><code>ioxide.nghttp3</code> references only the core - not <code>ioxide.ngtcp2</code>. It needs
     nothing but the abstract read/write surface, so it would ride any future engine (quicly, etc.)
     unchanged. One <code>H3Connection</code> wraps one <code>QuicConnection</code>:</p>
 <pre><code class="language-csharp">reactor.QuicHandle = (r, conn) => new H3Connection(conn).RunAsync(

@@ -70,6 +70,20 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
     /// <summary>The ALPN token the handshake negotiated (e.g. "h3"); null before completion.</summary>
     public string? NegotiatedProtocol { get; protected set; }
 
+    /// <summary>
+    /// Pace a stream's receive window: the engine stops auto-crediting flow control for its bytes,
+    /// so the peer can send at most a window's worth beyond what <see cref="ConsumeStreamData"/>
+    /// has credited - real backpressure for slow consumers. Reactor thread only.
+    /// </summary>
+    public virtual void SetStreamPaced(long streamId, bool paced) { }
+
+    /// <summary>
+    /// Open the peer's flow-control window (stream + connection) for consumed bytes of a paced
+    /// stream. Extending is permission, never obligation - over-crediting is harmless. Reactor
+    /// thread only.
+    /// </summary>
+    public virtual void ConsumeStreamData(long streamId, long bytes) { }
+
     /// <summary>Send one datagram (or a GSO batch) to the connection's current peer address.</summary>
     protected void Send(ReadOnlySpan<byte> payload, int gsoSegmentSize = 0)
     {

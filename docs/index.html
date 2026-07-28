@@ -415,7 +415,7 @@ reactor.QuicHandle = async (r, conn) =&gt;
     // One QUIC stream as a duplex pipe. QUIC multiplexes streams and a
     // PipeReader is one byte stream, so the pipe binds to a single stream:
     // the first one the peer opens (auto-bind), or an explicit id.
-    // Multi-stream protocols use the raw surface - that's what ioxide.h3 does.
+    // Multi-stream protocols use the raw surface - that's what ioxide.nghttp3 does.
     var pipe = new QuicConnectionDualPipe(conn);
 
     while (true)
@@ -501,7 +501,7 @@ reactor.QuicHandle = async (r, conn) =&gt;
 new Thread(reactor.Run).Start();</code></pre>
   </div>
   <div class="pane pane-h3">
-<pre><code class="language-csharp">// ioxide.h3: nghttp3 over the QUIC surface - real HTTP/3, ALPN-pinned.
+<pre><code class="language-csharp">// ioxide.nghttp3: nghttp3 over the QUIC surface - real HTTP/3, ALPN-pinned.
 var engine = new QuicEngine("cert.pem", "key.pem", cidLength: 8, alpn: ["h3"]);
 
 var config = new ServerConfig

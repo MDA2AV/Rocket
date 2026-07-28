@@ -4,7 +4,7 @@ using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
 using ioxide;
-using ioxide.quic;
+using ioxide.ngtcp2;
 
 namespace Ioxide.E2E;
 
@@ -321,7 +321,7 @@ internal sealed unsafe class QuicTestClient : IDisposable
         public delegate* unmanaged<void*, long, ulong, ulong, void>     OnAckedStreamData;
     }
 
-    private const string Lib = "ioxide_quic";
+    private const string Lib = "ioxide_ngtcp2";
     [DllImport(Lib)] private static extern nint iq_client_engine_new([MarshalAs(UnmanagedType.LPUTF8Str)] string alpn, IqCallbacks cbs);
     [DllImport(Lib)] private static extern void iq_client_engine_free(nint e);
     [DllImport(Lib)] private static extern nint iq_client_connect(nint e, byte* localSa, nuint localLen, byte* remoteSa, nuint remoteLen, [MarshalAs(UnmanagedType.LPUTF8Str)] string serverName, [MarshalAs(UnmanagedType.LPUTF8Str)] string alpn, ulong ts, void* user);

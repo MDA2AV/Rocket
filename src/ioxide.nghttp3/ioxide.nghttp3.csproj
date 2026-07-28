@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net10.0;net11.0</TargetFrameworks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>ioxide.nghttp3</RootNamespace>
+
+    <PackageId>ioxide.nghttp3</PackageId>
+    <Version>0.2.3</Version>
+    <Authors>MDA2AV</Authors>
+    <Description>HTTP/3 layer for the ioxide io_uring runtime: nghttp3 (H3 + QPACK) bundled as a single self-contained native library with no external dependencies. Rides any QuicConnection via its stream read surface - engine-agnostic, no ioxide.ngtcp2 dependency.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://mda2av.github.io/ioxide/</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/MDA2AV/ioxide</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>io_uring;http3;h3;qpack;nghttp3;quic;linux;ioxide</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+    <ProjectReference Include="../ioxide/ioxide.csproj" />
+
+    <!-- The self-contained native bundle (built by scripts/build-nghttp3-native.sh): packed into the
+         nupkg's runtimes/ so consumers get it with no prerequisites, and copied next to the output
+         for ProjectReference/dev runs so DllImport probing finds it. -->
+    <None Include="runtimes/linux-x64/native/libioxide_nghttp3.so"
+          Pack="true" PackagePath="runtimes/linux-x64/native/"
+          CopyToOutputDirectory="PreserveNewest" Link="libioxide_nghttp3.so" />
+  </ItemGroup>
+
+</Project>

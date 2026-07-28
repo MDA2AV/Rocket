@@ -1,7 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using ioxide;
-using ioxide.quic;
+using ioxide.ngtcp2;
 
 namespace Ioxide.E2E;
 
