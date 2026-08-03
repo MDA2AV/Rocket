@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Buffers.Text;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks.Sources;
+using ioxide.httpclient;
 using ioxide.nghttp3;
 using ioxide.ngtcp2;
 
@@ -39,10 +40,10 @@ public sealed class Http3ClientConnection : IDisposable
     // RECORD them; the waiters are resumed after the native call unwinds - resuming inside the
     // callback would let the caller's next request re-enter nghttp3 while nghttp3_conn_read_stream
     // is still on the stack (the same rule the server side follows).
-    private readonly List<(PendingRequest Pending, Http3ClientResponse Response)> _completedThisPass = [];
+    private readonly List<(PendingRequest Pending, HttpClientResponse Response)> _completedThisPass = [];
 
     // Requests waiting for the peer to hand back stream credit (see SendCore). Drained each pump pass.
-    private readonly Queue<(Http3ClientRequest Request, PendingRequest Pending)> _blockedOnStreamCredit = new();
+    private readonly Queue<(HttpClientRequest Request, PendingRequest Pending)> _blockedOnStreamCredit = new();
     private bool _disposed;
 
     private readonly Dictionary<long, PendingRequest> _pending = new();
@@ -51,10 +52,16 @@ public sealed class Http3ClientConnection : IDisposable
     // before that wait on it rather than failing - a fresh pool is the normal case.
     private readonly TaskCompletionSource<bool> _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    internal Http3ClientConnection(QuicEngineConnection quic, string authority)
+    // How long a caller waits for handshake + h3 setup. Without a bound, a black-holed UDP path
+    // (no listener, or a firewall dropping the packets) parks every request until QUIC's idle
+    // timer eventually fires - and a caller with an HTTP/1.1 fallback never gets to use it.
+    private readonly int _readyTimeoutMs;
+
+    internal Http3ClientConnection(QuicEngineConnection quic, string authority, int readyTimeoutMs)
     {
         _quic = quic;
         _authority = System.Text.Encoding.ASCII.GetBytes(authority);
+        _readyTimeoutMs = readyTimeoutMs;
 
         // Nothing else wakes a client connection until the peer sends stream data, and the peer
         // has nothing to send until we ask - so the handshake signal is what starts h3 setup.
@@ -74,7 +81,7 @@ public sealed class Http3ClientConnection : IDisposable
     /// Send one request on its own stream and await the response. The response owns its bytes -
     /// dispose it when done.
     /// </summary>
-    public ValueTask<Http3ClientResponse> SendAsync(Http3ClientRequest request)
+    public ValueTask<HttpClientResponse> SendAsync(HttpClientRequest request)
     {
         if (IsBroken)
         {
@@ -85,13 +92,25 @@ public sealed class Http3ClientConnection : IDisposable
         return _isReady ? SendCore(request) : SendWhenReadyAsync(request);
     }
 
-    private async ValueTask<Http3ClientResponse> SendWhenReadyAsync(Http3ClientRequest request)
+    private async ValueTask<HttpClientResponse> SendWhenReadyAsync(HttpClientRequest request)
     {
-        await _ready.Task;   // handshake + h3 setup; faulted if the connection died first
+        Task ready = _ready.Task;
+        if (await Task.WhenAny(ready, Task.Delay(_readyTimeoutMs)) != ready)
+        {
+            // Fail the connection, not just this request: the pool drops it and opens a fresh one
+            // rather than leaving every later caller to wait out the same timeout.
+            var timedOut = new Http3ClientException(
+                $"handshake did not complete within {_readyTimeoutMs} ms");
+            _failed = true;
+            _ready.TrySetException(timedOut);
+            throw timedOut;
+        }
+
+        await ready;   // observe a handshake that failed rather than timed out
         return await SendCore(request);
     }
 
-    private unsafe ValueTask<Http3ClientResponse> SendCore(Http3ClientRequest request)
+    private unsafe ValueTask<HttpClientResponse> SendCore(HttpClientRequest request)
     {
         if (IsBroken || !_isReady)
         {
@@ -115,7 +134,7 @@ public sealed class Http3ClientConnection : IDisposable
     /// concurrency limit is reached, so the caller should park the request (every other failure
     /// throws).
     /// </summary>
-    private unsafe bool TrySubmit(Http3ClientRequest request, PendingRequest pending)
+    private unsafe bool TrySubmit(HttpClientRequest request, PendingRequest pending)
     {
         long streamId = _quic.OpenBidiStream();
         if (streamId < 0)
@@ -344,7 +363,7 @@ public sealed class Http3ClientConnection : IDisposable
 
     // [u16 namelen][name][u16 valuelen][value]... - the shim's packed field format. Pseudo-headers
     // first, in the order h3 requires.
-    private unsafe byte[] PackRequestHeaders(Http3ClientRequest request, out int written)
+    private unsafe byte[] PackRequestHeaders(HttpClientRequest request, out int written)
     {
         int capacity = 64 + request.Method.Length + request.Path.Length + _authority.Length + 32;
         foreach (KeyValuePair<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>> field in request.Headers.AsSpan())
@@ -402,7 +421,7 @@ public sealed class Http3ClientConnection : IDisposable
         var finished = _completedThisPass.ToArray();
         _completedThisPass.Clear();
 
-        foreach ((PendingRequest pending, Http3ClientResponse response) in finished)
+        foreach ((PendingRequest pending, HttpClientResponse response) in finished)
         {
             pending.Complete(response);
         }
@@ -419,7 +438,7 @@ public sealed class Http3ClientConnection : IDisposable
                 return;   // FailAll will drain the queue with the connection's error
             }
 
-            (Http3ClientRequest request, PendingRequest pending) = _blockedOnStreamCredit.Peek();
+            (HttpClientRequest request, PendingRequest pending) = _blockedOnStreamCredit.Peek();
             if (!TrySubmit(request, pending))
             {
                 return;   // still no credit - stay parked, retry on the next pass
@@ -476,7 +495,7 @@ public sealed class Http3ClientConnection : IDisposable
         Http3ClientConnection connection = From(user);
         if (connection._pending.TryGetValue(streamId, out PendingRequest? pending))
         {
-            pending.Response ??= new Http3ClientResponse();
+            pending.Response ??= new HttpClientResponse();
         }
     }
 
@@ -548,7 +567,7 @@ public sealed class Http3ClientConnection : IDisposable
             return;
         }
 
-        Http3ClientResponse response = pending.Response ?? new Http3ClientResponse();
+        HttpClientResponse response = pending.Response ?? new HttpClientResponse();
         response.SetBodyRange((pending.BodyStart, pending.BodyLength));
         response.Freeze();
 
@@ -567,29 +586,29 @@ public sealed class Http3ClientConnection : IDisposable
     /// assembled from the callbacks. Completions fire from inside ih3_read_stream, so the waiter
     /// resumes on the reactor thread - which is exactly where it awaited.
     /// </summary>
-    private sealed class PendingRequest : IValueTaskSource<Http3ClientResponse>
+    private sealed class PendingRequest : IValueTaskSource<HttpClientResponse>
     {
-        private ManualResetValueTaskSourceCore<Http3ClientResponse> _core = new()
+        private ManualResetValueTaskSourceCore<HttpClientResponse> _core = new()
         {
             RunContinuationsAsynchronously = false,
         };
 
-        public Http3ClientResponse? Response;
+        public HttpClientResponse? Response;
         public bool HeadersDone;   // first field section seen; a later one is trailers
         public int BodyStart;
         public int BodyLength;
 
-        public ValueTask<Http3ClientResponse> Task => new(this, _core.Version);
+        public ValueTask<HttpClientResponse> Task => new(this, _core.Version);
 
-        public void Complete(Http3ClientResponse response) => _core.SetResult(response);
+        public void Complete(HttpClientResponse response) => _core.SetResult(response);
 
         public void Fail(Exception error) => _core.SetException(error);
 
-        Http3ClientResponse IValueTaskSource<Http3ClientResponse>.GetResult(short token) => _core.GetResult(token);
+        HttpClientResponse IValueTaskSource<HttpClientResponse>.GetResult(short token) => _core.GetResult(token);
 
-        ValueTaskSourceStatus IValueTaskSource<Http3ClientResponse>.GetStatus(short token) => _core.GetStatus(token);
+        ValueTaskSourceStatus IValueTaskSource<HttpClientResponse>.GetStatus(short token) => _core.GetStatus(token);
 
-        void IValueTaskSource<Http3ClientResponse>.OnCompleted(Action<object?> continuation, object? state,
+        void IValueTaskSource<HttpClientResponse>.OnCompleted(Action<object?> continuation, object? state,
             short token, ValueTaskSourceOnCompletedFlags flags)
             => _core.OnCompleted(continuation, state, token,
                 flags & ~ValueTaskSourceOnCompletedFlags.UseSchedulingContext);

@@ -1,5 +1,6 @@
 using System.Text;
 using ioxide;
+using ioxide.httpclient;
 using ioxide.httpclient3;
 using ioxide.nghttp3;
 using ioxide.ngtcp2;
@@ -137,7 +138,7 @@ internal static class Http3ClientTests
                     int status;
                     try
                     {
-                        using Http3ClientResponse response = await upstream.GetAsync(path);
+                        using HttpClientResponse response = await upstream.GetAsync(path);
                         status = response.Status;
                         detail = Encoding.ASCII.GetString(response.Body.Span);
                     }

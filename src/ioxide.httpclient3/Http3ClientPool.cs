@@ -1,3 +1,4 @@
+using ioxide.httpclient;
 using ioxide.ngtcp2;
 
 namespace ioxide.httpclient3;
@@ -30,7 +31,7 @@ public sealed record Http3ClientOptions
 /// reactor.OnStart = r => Http3ClientPool.Start(r, new Http3ClientOptions { Host = "10.0.0.7", Port = 8443 });
 /// ...
 /// var upstream = reactor.GetService&lt;Http3ClientPool&gt;();
-/// using Http3ClientResponse response = await upstream.GetAsync("/api/things"u8);
+/// using HttpClientResponse response = await upstream.GetAsync("/api/things"u8);
 /// </code>
 /// </summary>
 /// <remarks>
@@ -73,17 +74,17 @@ public sealed class Http3ClientPool : IDisposable
     /// <summary>Live connections (for diagnostics).</summary>
     public int ConnectionCount => _connections.Count;
 
-    public ValueTask<Http3ClientResponse> GetAsync(ReadOnlyMemory<byte> path)
-        => SendAsync(new Http3ClientRequest(Http3Methods.Get, path));
+    public ValueTask<HttpClientResponse> GetAsync(ReadOnlyMemory<byte> path)
+        => SendAsync(new HttpClientRequest(HttpMethods.Get, path));
 
-    public ValueTask<Http3ClientResponse> GetAsync(string path)
-        => SendAsync(new Http3ClientRequest(Http3Methods.Get, path));
+    public ValueTask<HttpClientResponse> GetAsync(string path)
+        => SendAsync(new HttpClientRequest(HttpMethods.Get, path));
 
-    public ValueTask<Http3ClientResponse> PostAsync(ReadOnlyMemory<byte> path, ReadOnlyMemory<byte> body)
-        => SendAsync(new Http3ClientRequest(Http3Methods.Post, path) { Body = body });
+    public ValueTask<HttpClientResponse> PostAsync(ReadOnlyMemory<byte> path, ReadOnlyMemory<byte> body)
+        => SendAsync(new HttpClientRequest(HttpMethods.Post, path) { Body = body });
 
     /// <summary>Send one request on a live connection; the response owns its bytes.</summary>
-    public ValueTask<Http3ClientResponse> SendAsync(Http3ClientRequest request)
+    public ValueTask<HttpClientResponse> SendAsync(HttpClientRequest request)
     {
         Http3ClientConnection connection = Pick()
             ?? throw new Http3ClientException($"no HTTP/3 connection to {_options.Host}:{_options.Port}");
@@ -120,7 +121,7 @@ public sealed class Http3ClientPool : IDisposable
         try
         {
             QuicEngineConnection quic = _engine.Connect(_reactor, _options.Host, _options.Port, _options.ServerName);
-            _connections.Add(new Http3ClientConnection(quic, $"{_options.ServerName}:{_options.Port}"));
+            _connections.Add(new Http3ClientConnection(quic, $"{_options.ServerName}:{_options.Port}", _options.AcquireTimeoutMs));
         }
         catch (Exception e)
         {

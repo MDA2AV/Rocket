@@ -22,6 +22,7 @@
   <ItemGroup>
     <None Include="../../README.md" Pack="true" PackagePath="/" />
     <ProjectReference Include="../ioxide/ioxide.csproj" />
+    <ProjectReference Include="../ioxide.httpclient/ioxide.httpclient.csproj" />
     <ProjectReference Include="../ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
     <ProjectReference Include="../ioxide.nghttp3/ioxide.nghttp3.csproj" />
   </ItemGroup>

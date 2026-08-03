@@ -1,5 +1,11 @@
 using System.Buffers;
 
+using System.Runtime.CompilerServices;
+
+// The HTTP/3 client builds these same responses from its own arena, so it needs the range-recording
+// internals below.
+[assembly: InternalsVisibleTo("ioxide.httpclient3")]
+
 namespace ioxide.httpclient;
 
 /// <summary>
