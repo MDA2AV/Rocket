@@ -2,7 +2,7 @@ namespace ioxide;
 
 /// <summary>
 /// One completed <see cref="QuicConnection.ReadAsync"/> cycle: drain items up to Tail with
-/// <see cref="QuicConnection.TryGetItem"/>. QUIC's mirror of the TCP RecvSnapshot - separate type,
+/// <see cref="QuicConnection.TryGetDelivery"/>. QUIC's mirror of the TCP RecvSnapshot - separate type,
 /// the transports share the pattern but no code.
 /// </summary>
 public readonly struct QuicRecvSnapshot

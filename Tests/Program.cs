@@ -30,6 +30,7 @@ internal static class Program
         QuicTests.Register(runner);
         QuicEngineTests.Register(runner);
         H3Tests.Register(runner);
+        Http3Tests.Register(runner);
         PgTests.Register(runner, pg, pgUp);
         RedisTests.Register(runner, redis, redisUp);
         FileTests.Register(runner);

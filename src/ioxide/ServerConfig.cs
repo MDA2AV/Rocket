@@ -23,17 +23,16 @@ public sealed record ServerConfig
     // --- reactor recv machinery: io_uring provided-buffer rings, registered per reactor at
     //     startup (TCP recv draws on them; UDP has its own ring, sized by UdpOptions.RecvSlots). ---
 
-    // Shared buffer ring (Incremental == false).
-    public int RecvBufferSize    { get; init; } = 32 * 1024;
-    public int BufferRingEntries { get; init; } = 4096;
+    // Shared buffer ring - the default recv mode, used when Incremental is null.
+    public int RecvBufferSize { get; init; } = 32 * 1024;
+    public int RecvSlots      { get; init; } = 4096;
 
-    // Incremental mode (IOU_PBUF_RING_INC, kernel 6.12+): per-connection buffer rings, and the
-    // reactor runs its incremental loop variant. Reserved native memory ≈
-    // MaxConnections × ConnBufRingEntries × IncRecvBufferSize × ReactorCount.
-    public bool Incremental        { get; init; } = false;
-    public int  MaxConnections     { get; init; } = 4096;   // one bgid per active connection
-    public int  ConnBufRingEntries { get; init; } = 16;
-    public int  IncRecvBufferSize  { get; init; } = 4096;
+    /// <summary>
+    /// Per-connection buffer rings (IOU_PBUF_RING_INC, kernel 6.12+): setting this IS enabling
+    /// the mode - the reactor runs its incremental loop variant and the shared-ring knobs above
+    /// go unused. Null (default) = shared ring.
+    /// </summary>
+    public IncrementalOptions? Incremental { get; init; }
 
     /// <summary>The TCP transport: listeners, connection pool, and the write path.</summary>
     public TcpOptions Tcp { get; init; } = new();
@@ -47,4 +46,21 @@ public sealed record ServerConfig
     /// port are demultiplexed by connection ID instead of reaching <see cref="Reactor.OnDatagram"/>.
     /// </summary>
     public QuicOptions? Quic { get; init; }
+}
+
+/// <summary>
+/// The incremental recv mode (kernel 6.12+): one small provided-buffer ring per connection, the
+/// kernel appending successive recvs into the same buffer until it fills. Reserved native memory
+/// ≈ MaxConnections × RecvSlots × RecvBufferSize × ReactorCount.
+/// </summary>
+public sealed record IncrementalOptions
+{
+    /// <summary>One buffer-group id per active connection; accepts past this are shed.</summary>
+    public int MaxConnections { get; init; } = 4096;
+
+    /// <summary>Buffers per connection ring.</summary>
+    public int RecvSlots { get; init; } = 16;
+
+    /// <summary>Bytes per buffer - the kernel appends into it across recvs.</summary>
+    public int RecvBufferSize { get; init; } = 4096;
 }

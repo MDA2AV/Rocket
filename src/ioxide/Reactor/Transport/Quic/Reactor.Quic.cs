@@ -30,12 +30,21 @@ public sealed unsafe partial class Reactor
         AddTicker(QuicSweep);
     }
 
+    /// <summary>
+    /// Un-coalesce GRO, then demux by DCID. UDP_GRO packs a burst from one 4-tuple into ONE recv:
+    /// <c>Payload</c> is the whole train, <c>GroSegmentSize</c> the wire size of each datagram in
+    /// it (0 = none); only the last segment may be shorter - the Math.Min.
+    ///
+    ///   Payload = 6040, GroSegmentSize = 1452:
+    ///   [ 1452 ][ 1452 ][ 1452 ][ 1452 ][ 232 ]
+    ///
+    /// Split BEFORE CID routing: connections can share a 4-tuple, so adjacent segments can carry
+    /// DIFFERENT DCIDs - routing the train by its first DCID feeds the wrong engine, which
+    /// silently drops (peers stall). The bottom call is the no-train path (GroSegmentSize 0, or
+    /// exactly one datagram - excluded by the strict &lt;).
+    /// </summary>
     private void QuicDispatch(in UdpDatagram datagram)
     {
-        // A GRO train can interleave datagrams of DIFFERENT connections - they share the client's
-        // 4-tuple, so the kernel coalesces across them. Demux per segment: routing the whole train
-        // by its first packet's DCID would feed other connections' packets to the wrong engine
-        // (which silently drops them - the peers just stall).
         if (datagram.GroSegmentSize > 0 && datagram.GroSegmentSize < datagram.Payload.Length)
         {
             int stride = datagram.GroSegmentSize;
@@ -52,6 +61,23 @@ public sealed unsafe partial class Reactor
         QuicDispatchDatagram(in datagram);
     }
 
+    /// <summary>
+    /// Route one datagram by DCID. The known-connection hot path runs two independent clocks:
+    ///
+    /// <c>LastSeenMs</c> is the coarse one - a "peer said something" stamp the 250 ms sweep
+    /// compares against IdleTimeoutMs to garbage-collect vanished clients. Nothing else reads it.
+    ///
+    /// <c>QuicArmTimer</c> is the fine one, and it must run AFTER <c>OnDatagram</c>: that call
+    /// (iq_conn_read) just rewrote the engine's deadlines - arriving ACKs cancelled retransmit
+    /// timers and freed send-retention below the acked offset, and the handler may have resumed
+    /// inline and sent, arming fresh PTO deadlines for THAT data. Timers only ever guard data we
+    /// SENT and await the peer's ACK for (received data is already safe; ACKs themselves are
+    /// never acked, never retransmitted). GetNextTimeout samples the settled state and folds it
+    /// into the reactor-wide min that QuicFireDueTimers checks each loop pass; when it fires,
+    /// OnTimer/handle_expiry re-frames the unacked stream bytes from retention into NEW packets
+    /// (packet numbers are never reused - a spurious resend costs bandwidth only, the receiver
+    /// dedups by stream offset).
+    /// </summary>
     private void QuicDispatchDatagram(in UdpDatagram datagram)
     {
         // Reads only the cleartext prefix per RFC 8999
@@ -60,11 +86,10 @@ public sealed unsafe partial class Reactor
             return;   // not parseable as QUIC - drop
         }
 
-        // Quick connection lookup
         if (_quicConns.TryGetValue(dcid, out QuicConnection? conn))
         {
             conn.LastSeenMs = Environment.TickCount64;
-            conn.OnDatagram(datagram.Payload, datagram.Tos, datagram.GroSegmentSize);
+            conn.OnDatagram(datagram.Payload, datagram.Tos);
             QuicArmTimer(conn);   // reads/handler sends (inline above) moved the engine deadline
             return;
         }
@@ -74,38 +99,44 @@ public sealed unsafe partial class Reactor
             return;   // short header for an unknown CID: stale/garbage (stateless reset later)
         }
 
-        QuicConnection? fresh = _quicOptions.ConnectionFactory?.Invoke(this, in datagram, in dcid);
-        if (fresh == null)
+        QuicConnection? freshQuicConnection = _quicOptions.ConnectionFactory?.Invoke(this, in datagram, in dcid);
+        if (freshQuicConnection == null)
         {
             return;
         }
 
-        fresh.Reactor     = this;
-        fresh.SocketFd    = datagram.SocketFd;
-        fresh.PeerAddr    = (nint)NativeMemory.Alloc(UdpNameCap);
-        fresh.PeerAddrLen = datagram.PeerAddrLen;
-        Buffer.MemoryCopy((void*)datagram.PeerAddr, (void*)fresh.PeerAddr, UdpNameCap, datagram.PeerAddrLen);
-        fresh.LastSeenMs = Environment.TickCount64;
+        freshQuicConnection.Reactor     = this;
+        freshQuicConnection.SocketFd    = datagram.SocketFd;
+        freshQuicConnection.PeerAddr    = (nint)NativeMemory.Alloc(UdpNameCap);
+        freshQuicConnection.PeerAddrLen = datagram.PeerAddrLen;
+        
+        Buffer.MemoryCopy(
+            (void*)datagram.PeerAddr,
+            (void*)freshQuicConnection.PeerAddr, 
+            UdpNameCap, 
+            datagram.PeerAddrLen);
+        
+        freshQuicConnection.LastSeenMs = Environment.TickCount64;
 
-        fresh.Cids.Add(dcid);
-        _quicConns[dcid] = fresh;
-        _quicConnSet.Add(fresh);
+        freshQuicConnection.Cids.Add(dcid);
+        _quicConns[dcid] = freshQuicConnection;
+        _quicConnSet.Add(freshQuicConnection);
 
         // Two owners: this transport (released in QuicRemoveConnection) and the handler. The
         // handler launches before the first datagram is fed - if the engine delivers stream data
         // right away, the sticky pending flag completes the handler's first ReadAsync.
-        fresh.InitRefs();
+        freshQuicConnection.InitRefs();
         if (QuicHandle is not null)
         {
-            _ = RunQuicHandlerAsync(fresh);
+            _ = RunQuicHandlerAsync(freshQuicConnection);
         }
         else
         {
-            fresh.DecRef();   // no handler configured: the transport stays the only owner
+            freshQuicConnection.DecRef();   // no handler configured: the transport stays the only owner
         }
 
-        fresh.OnDatagram(datagram.Payload, datagram.Tos, datagram.GroSegmentSize);
-        QuicArmTimer(fresh);
+        freshQuicConnection.OnDatagram(datagram.Payload, datagram.Tos);
+        QuicArmTimer(freshQuicConnection);
     }
 
     // RFC 8999 (version-independent invariants): long header (bit 0x80) carries an explicit DCID

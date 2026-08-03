@@ -5,8 +5,9 @@
   <Project Path="src/ioxide.pg/ioxide.pg.csproj" />
   <Project Path="src/ioxide.Kestrel/ioxide.Kestrel.csproj" />
   <Project Path="src/ioxide/ioxide.csproj" />
-  <Project Path="src/ioxide.quic/ioxide.quic.csproj" />
-  <Project Path="src/ioxide.h3/ioxide.h3.csproj" />
+  <Project Path="src/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
+  <Project Path="src/ioxide.nghttp3/ioxide.nghttp3.csproj" />
+  <Project Path="src/ioxide.http3/ioxide.http3.csproj" />
   <Project Path="Playground/Playground.csproj" />
   <Project Path="Examples/Examples.csproj" />
   <Project Path="Examples.AspNet/Examples.AspNet.csproj" />

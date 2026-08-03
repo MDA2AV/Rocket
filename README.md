@@ -4,8 +4,8 @@
 [![ioxide.tls](https://img.shields.io/nuget/v/ioxide.tls?label=ioxide.tls)](https://www.nuget.org/packages/ioxide.tls/)
 [![ioxide.redis](https://img.shields.io/nuget/v/ioxide.redis?label=ioxide.redis)](https://www.nuget.org/packages/ioxide.redis/)
 [![ioxide.Kestrel](https://img.shields.io/nuget/v/ioxide.Kestrel?label=ioxide.Kestrel)](https://www.nuget.org/packages/ioxide.Kestrel/)
-[![ioxide.quic](https://img.shields.io/nuget/v/ioxide.quic?label=ioxide.quic)](https://www.nuget.org/packages/ioxide.quic/)
-[![ioxide.h3](https://img.shields.io/nuget/v/ioxide.h3?label=ioxide.h3)](https://www.nuget.org/packages/ioxide.h3/)
+[![ioxide.ngtcp2](https://img.shields.io/nuget/v/ioxide.ngtcp2?label=ioxide.ngtcp2)](https://www.nuget.org/packages/ioxide.ngtcp2/)
+[![ioxide.nghttp3](https://img.shields.io/nuget/v/ioxide.nghttp3?label=ioxide.nghttp3)](https://www.nuget.org/packages/ioxide.nghttp3/)
 
 **A shared-nothing io_uring runtime for .NET.**
 

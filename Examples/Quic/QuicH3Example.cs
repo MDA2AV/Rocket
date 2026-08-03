@@ -1,19 +1,20 @@
 using System.Buffers;
+using System.Text;
 using ioxide;
-using ioxide.h3;
+using ioxide.nghttp3;
 
 namespace Examples.Quic;
 
 /// <summary>
 /// One QUIC listener, two protocols, picked by ALPN: "h3" connections get real HTTP/3 through
-/// ioxide.h3, anything else gets a raw stream echo through the QuicConnectionDualPipe adapters -
+/// ioxide.nghttp3, anything else gets a raw stream echo through the QuicConnectionDualPipe adapters -
 /// the QUIC twin of <see cref="Raw.PipesExample"/>.
 ///
 /// The QUIC handler launches before the handshake, so the ALPN isn't known at entry. The demux
 /// awaits the first read WITHOUT draining it (1-RTT stream data implies the handshake finished),
 /// peeks <see cref="QuicConnection.NegotiatedProtocol"/>, and hands the still-queued items to
 /// whichever layer owns the connection from here - both start by reading the same queue, so
-/// nothing is lost. H3Connection sets itself up on its first wake anyway, so the deferral changes
+/// nothing is lost. Nghttp3Connection sets itself up on its first wake anyway, so the deferral changes
 /// no h3 timing.
 /// </summary>
 public static class QuicH3Example
@@ -24,9 +25,12 @@ public static class QuicH3Example
 
         if (conn.NegotiatedProtocol == "h3")
         {
-            // Owns the handler ref (DecRef on exit).
-            await new H3Connection(conn).RunAsync(
-                static req => H3Response.Text($"hello {req.Path} over HTTP/3 via io_uring\n"));
+            // Owns the handler ref (DecRef on exit). Nghttp3Request is bytes throughout - route
+            // by byte compare (no per-request strings), decode only what goes into the text.
+            await new Nghttp3Connection(conn).RunBufferedAsync(
+                static req => req.Path.Span.SequenceEqual("/plaintext"u8)
+                    ? Nghttp3Response.Text("Hello, World!")
+                    : Nghttp3Response.Text($"hello {Encoding.ASCII.GetString(req.Path.Span)} over HTTP/3 via io_uring\n"));
             return;
         }
 

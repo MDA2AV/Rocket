@@ -2,7 +2,7 @@ using System.Runtime.InteropServices;
 using ioxide;
 using ioxide.file;
 using ioxide.pg;
-using ioxide.quic;
+using ioxide.ngtcp2;
 
 namespace Playground;
 
@@ -22,7 +22,7 @@ internal static class Program
         // reactor binds the UDP port via SO_REUSEPORT and demuxes its own flows.
         QuicEngine? quicEngine = null;
         QuicOptions? quicOptions = null;
-        if (mode is "quic" or "h3")
+        if (mode is "quic" or "h3" or "h3-buffered" or "http3")
         {
             (string certPath, string keyPath) = Handlers.EnsureQuicCert();
             quicEngine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
@@ -39,7 +39,7 @@ internal static class Program
         var config = new ServerConfig
         {
             ReactorCount = int.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_REACTORS"), out int reactors) ? reactors : 12,
-            Incremental = Environment.GetEnvironmentVariable("PLAYGROUND_INCREMENTAL") == "1",
+            Incremental = Environment.GetEnvironmentVariable("PLAYGROUND_INCREMENTAL") == "1" ? new IncrementalOptions() : null,
             Tcp = new TcpOptions
             {
                 Port = 8080,
@@ -87,6 +87,20 @@ internal static class Program
             Console.WriteLine($"[playground] reloaded - now serving {assets.Count} files");
         });
         
+        // Graceful shutdown for the h3 modes: SIGTERM GOAWAYs every live connection, gives
+        // in-flight requests a grace period to finish, then exits. Without this the process dies
+        // mid-request and clients see resets.
+        using IDisposable? drainOnSigterm = mode is not ("h3" or "h3-buffered") ? null :
+            PosixSignalRegistration.Create(PosixSignal.SIGTERM, context =>
+            {
+                context.Cancel = true;
+                Console.WriteLine("[playground] SIGTERM: draining h3 connections (GOAWAY)...");
+                Handlers.ShutdownAllH3();
+                Thread.Sleep(2000);   // grace period for in-flight requests
+                Console.WriteLine("[playground] drain complete, exiting");
+                Environment.Exit(0);
+            });
+
         Console.WriteLine($"[playground] {config.ReactorCount} reactors on :{config.Tcp.Port} (mode={mode})");
 
         var threads = new Thread[config.ReactorCount];
@@ -128,7 +142,17 @@ internal static class Program
                 case "quic":
                 case "h3":
                     reactor.TcpHandle = Handlers.Raw;   // :8080 still listens (until a TCP opt-out exists)
-                    reactor.QuicHandle = Handlers.H3;
+                    reactor.QuicHandle = Handlers.Nghttp3Streamed;
+                    break;
+
+                case "h3-buffered":
+                    reactor.TcpHandle = Handlers.Raw;
+                    reactor.QuicHandle = Handlers.Nghttp3Buffered;   // whole body in req.Body, handler may await
+                    break;
+
+                case "http3":
+                    reactor.TcpHandle = Handlers.Raw;
+                    reactor.QuicHandle = Handlers.Http3;   // the pure-C# h3 stack
                     break;
 
                 default:

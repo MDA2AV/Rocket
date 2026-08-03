@@ -18,7 +18,7 @@ internal sealed class QuicStreamBinding
 /// stream, so the pipe binds to a single QUIC stream: pass the id, or let it auto-bind to the
 /// first stream the peer sends on (the usual server shape - one bidi stream per connection).
 /// Items for any other stream are dropped; multi-stream protocols use the raw
-/// ReadAsync/TryGetItem surface (or ioxide.h3) instead. One dual pipe per connection - the reader
+/// ReadAsync/TryGetDelivery surface (or ioxide.nghttp3) instead. One dual pipe per connection - the reader
 /// is the connection queue's sole consumer.
 /// </summary>
 public sealed class QuicConnectionDualPipe : IDuplexPipe

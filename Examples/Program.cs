@@ -2,7 +2,7 @@ using System.Security.Cryptography.X509Certificates;
 using ioxide;
 using ioxide.file;
 using ioxide.pg;
-using ioxide.quic;
+using ioxide.ngtcp2;
 using ioxide.redis;
 using ioxide.tls;
 using Examples.Quic;
@@ -24,7 +24,7 @@ namespace Examples;
 ///   file                                                      - static files off the asset cache
 ///   tls-ktls | tls-sslstream                                  - TLS: kernel offload vs managed SslStream
 ///   quic-h3                                                   - QUIC on UDP :8443, demuxed by ALPN:
-///                                                               HTTP/3 (ioxide.h3) for "h3", dual-pipe
+///                                                               HTTP/3 (ioxide.nghttp3) for "h3", dual-pipe
 ///                                                               stream echo for anything else
 ///
 /// Backends via env: EXAMPLES_PG_* (host/port/user/db/password/pool), EXAMPLES_REDIS_*,

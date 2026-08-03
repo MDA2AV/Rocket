@@ -63,7 +63,7 @@
     <div class="tab-rawgroup">
       <span class="tab-group">http/3</span>
       <div class="tab-rawtabs">
-        <label for="tab-h3">H3Connection</label>
+        <label for="tab-h3">Nghttp3Connection</label>
       </div>
     </div>
   </div>
@@ -74,12 +74,10 @@
     RingEntries  = 8192,                   // io_uring submission/completion queue depth
 
     // reactor recv machinery: io_uring provided-buffer rings
-    RecvBufferSize     = 32 * 1024,        // size of each receive buffer
-    BufferRingEntries  = 4096,             // receive buffers shared by a reactor's connections
-    Incremental        = false,            // kernel 6.12+: per-connection buffer rings
-    MaxConnections     = 4096,             //   one buffer group per live connection
-    ConnBufRingEntries = 16,               //   buffers per connection ring
-    IncRecvBufferSize  = 4096,             //   bytes per incremental buffer
+    RecvBufferSize = 32 * 1024,            // size of each receive buffer
+    RecvSlots      = 4096,                 // buffers in the shared recv ring
+    // (or set Incremental = new IncrementalOptions { ... } - kernel 6.12+ - for
+    //  per-connection buffer rings; the shared-ring knobs then go unused)
 
     Tcp = new TcpOptions
     {
@@ -153,12 +151,10 @@ new Thread(reactor.Run).Start();</code></pre>
     RingEntries  = 8192,                   // io_uring submission/completion queue depth
 
     // reactor recv machinery: io_uring provided-buffer rings
-    RecvBufferSize     = 32 * 1024,        // size of each receive buffer
-    BufferRingEntries  = 4096,             // receive buffers shared by a reactor's connections
-    Incremental        = false,            // kernel 6.12+: per-connection buffer rings
-    MaxConnections     = 4096,             //   one buffer group per live connection
-    ConnBufRingEntries = 16,               //   buffers per connection ring
-    IncRecvBufferSize  = 4096,             //   bytes per incremental buffer
+    RecvBufferSize = 32 * 1024,            // size of each receive buffer
+    RecvSlots      = 4096,                 // buffers in the shared recv ring
+    // (or set Incremental = new IncrementalOptions { ... } - kernel 6.12+ - for
+    //  per-connection buffer rings; the shared-ring knobs then go unused)
 
     Tcp = new TcpOptions
     {
@@ -261,12 +257,14 @@ new Thread(reactor.Run).Start();</code></pre>
     ReactorCount = Environment.ProcessorCount,
     RingEntries  = 8192,                   // io_uring submission/completion queue depth
 
-    // reactor recv machinery: per-connection buffer rings, incremental loop variant
-    // (RecvBufferSize / BufferRingEntries are shared-ring knobs - unused here)
-    Incremental        = true,             // per-connection buffer rings (kernel 6.12+)
-    MaxConnections     = 4096,             // one buffer group per live connection
-    ConnBufRingEntries = 16,               // buffers per connection ring
-    IncRecvBufferSize  = 4096,             // bytes per buffer - the kernel appends into it
+    // per-connection buffer rings (kernel 6.12+): setting this IS enabling the
+    // mode - the shared-ring knobs (RecvBufferSize / RecvSlots) go unused
+    Incremental = new IncrementalOptions
+    {
+        MaxConnections = 4096,             // one buffer group per live connection
+        RecvSlots      = 16,               // buffers per connection ring
+        RecvBufferSize = 4096,             // bytes per buffer - the kernel appends into it
+    },
 
     Tcp = new TcpOptions
     {
@@ -387,8 +385,9 @@ new Thread(reactor.Run).Start();</code></pre>
         <tr><td>return path</td><td>push the id back</td><td>refcounted: you + kernel both done</td></tr>
         <tr><td>kernel</td><td>6.1+</td><td>6.12+</td></tr>
       </table>
-      <p>The handler code is identical in both modes - flip <code>Incremental</code> and size the
-      per-connection knobs; <code>ReturnBuffers</code> routes the right return path internally.
+      <p>The handler code is identical in both modes - set <code>Incremental</code> to an
+      <code>IncrementalOptions</code> (or null for the shared ring); <code>ReturnBuffers</code>
+      routes the right return path internally.
       The pipes tab is API sugar over either mode: the reader owns the carry for you.</p>
     </div>
   </div>
@@ -416,7 +415,7 @@ reactor.QuicHandle = async (r, conn) =&gt;
     // One QUIC stream as a duplex pipe. QUIC multiplexes streams and a
     // PipeReader is one byte stream, so the pipe binds to a single stream:
     // the first one the peer opens (auto-bind), or an explicit id.
-    // Multi-stream protocols use the raw surface - that's what ioxide.h3 does.
+    // Multi-stream protocols use the raw surface - that's what ioxide.nghttp3 does.
     var pipe = new QuicConnectionDualPipe(conn);
 
     while (true)
@@ -481,10 +480,10 @@ reactor.QuicHandle = async (r, conn) =&gt;
             // loop serves every stream the peer multiplexes - here, an echo.
             // Replies queue on the engine; framing, encryption, pacing and
             // retransmission are its job (no flush to await).
-            while (conn.TryGetItem(in snap, out QuicRecvRing.Item item))
+            while (conn.TryGetDelivery(in snap, out QuicRecvRing.Delivery item))
             {
                 conn.SendStream(item.StreamId, item.AsSpan(), item.Fin);
-                conn.ReturnItem(in item);
+                conn.ReturnBuffer(in item);
             }
 
             if (snap.IsClosed)
@@ -502,7 +501,7 @@ reactor.QuicHandle = async (r, conn) =&gt;
 new Thread(reactor.Run).Start();</code></pre>
   </div>
   <div class="pane pane-h3">
-<pre><code class="language-csharp">// ioxide.h3: nghttp3 over the QUIC surface - real HTTP/3, ALPN-pinned.
+<pre><code class="language-csharp">// ioxide.nghttp3: nghttp3 over the QUIC surface - real HTTP/3, ALPN-pinned.
 var engine = new QuicEngine("cert.pem", "key.pem", cidLength: 8, alpn: ["h3"]);
 
 var config = new ServerConfig
@@ -519,17 +518,16 @@ var config = new ServerConfig
 
 var reactor = new Reactor(id, config);
 
-// H3Connection owns the connection's read loop: it feeds stream items into
+// Nghttp3Connection owns the connection's read loop: it feeds stream items into
 // nghttp3, assembles each request - headers, body and all - and calls your
 // function once per request. QPACK, control streams, fin and stream teardown
-// are its problem, not yours.
+// are its problem, not yours. The request is post-QPACK BYTES throughout
+// (ReadOnlyMemory&lt;byte&gt;) - route by byte compare, decode only at the edge.
 reactor.QuicHandle = (r, conn) =&gt;
-    new H3Connection(conn).RunAsync(req =&gt; req.Path switch
-    {
-        "/"          =&gt; H3Response.Text("hello from HTTP/3 over io_uring\n"),
-        "/plaintext" =&gt; H3Response.Text("Hello, World!"),
-        _            =&gt; H3Response.Text("not found\n", status: 404),
-    });
+    new Nghttp3Connection(conn).RunBufferedAsync(static req =&gt;
+        req.Path.Span.SequenceEqual("/"u8)          ? Nghttp3Response.Text("hello from HTTP/3 over io_uring\n")
+      : req.Path.Span.SequenceEqual("/plaintext"u8) ? Nghttp3Response.Text("Hello, World!")
+      : Nghttp3Response.Text("not found\n", status: 404));
 
 // One reactor per core.
 new Thread(reactor.Run).Start();

@@ -25,10 +25,10 @@ public sealed class QuicConnectionPipeReader : PipeReader, IValueTaskSource<Read
     // original item (needed to return the buffer).
     private sealed class Slice : ReadOnlySequenceSegment<byte>
     {
-        public QuicRecvRing.Item Item;
+        public QuicRecvRing.Delivery Item;
         public Slice? NextSlice;
 
-        public void Set(in QuicRecvRing.Item item)
+        public void Set(in QuicRecvRing.Delivery item)
         {
             Item = item;
             Memory = item.Buf!.AsMemory(0, item.Len);   // only byte-carrying items are chained
@@ -158,7 +158,7 @@ public sealed class QuicConnectionPipeReader : PipeReader, IValueTaskSource<Read
     {
         bool any = false;
 
-        while (_conn.TryGetItem(in snapshot, out QuicRecvRing.Item item))
+        while (_conn.TryGetDelivery(in snapshot, out QuicRecvRing.Delivery item))
         {
             long bound = _binding.StreamId;
             if (bound == -1)
@@ -168,7 +168,7 @@ public sealed class QuicConnectionPipeReader : PipeReader, IValueTaskSource<Read
 
             if (item.StreamId != bound)
             {
-                _conn.ReturnItem(in item);   // single-stream contract: foreign streams are dropped
+                _conn.ReturnBuffer(in item);   // single-stream contract: foreign streams are dropped
                 continue;
             }
 
@@ -189,7 +189,7 @@ public sealed class QuicConnectionPipeReader : PipeReader, IValueTaskSource<Read
 
             if (item.Len == 0)
             {
-                _conn.ReturnItem(in item);   // fin-only, no bytes to chain
+                _conn.ReturnBuffer(in item);   // fin-only, no bytes to chain
                 continue;
             }
 
@@ -281,7 +281,7 @@ public sealed class QuicConnectionPipeReader : PipeReader, IValueTaskSource<Read
 
             if (remaining >= available)
             {
-                _conn.ReturnItem(in _head.Item);
+                _conn.ReturnBuffer(in _head.Item);
 
                 Slice released = _head;
                 _head = released.NextSlice;
@@ -318,7 +318,7 @@ public sealed class QuicConnectionPipeReader : PipeReader, IValueTaskSource<Read
 
         while (_head != null)
         {
-            _conn.ReturnItem(in _head.Item);
+            _conn.ReturnBuffer(in _head.Item);
             Slice released = _head;
             _head = released.NextSlice;
             _pool.Push(released);
