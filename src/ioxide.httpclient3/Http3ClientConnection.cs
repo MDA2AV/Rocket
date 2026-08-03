@@ -40,6 +40,9 @@ public sealed class Http3ClientConnection : IDisposable
     // callback would let the caller's next request re-enter nghttp3 while nghttp3_conn_read_stream
     // is still on the stack (the same rule the server side follows).
     private readonly List<(PendingRequest Pending, Http3ClientResponse Response)> _completedThisPass = [];
+
+    // Requests waiting for the peer to hand back stream credit (see SendCore). Drained each pump pass.
+    private readonly Queue<(Http3ClientRequest Request, PendingRequest Pending)> _blockedOnStreamCredit = new();
     private bool _disposed;
 
     private readonly Dictionary<long, PendingRequest> _pending = new();
@@ -95,10 +98,29 @@ public sealed class Http3ClientConnection : IDisposable
             throw new Http3ClientException("connection is not usable");
         }
 
+        var pending = new PendingRequest();
+        if (!TrySubmit(request, pending))
+        {
+            // Out of the peer's stream credit. Park the request instead of failing it: credit comes
+            // back as in-flight responses finish (MAX_STREAMS), and a client that throws here melts
+            // down under concurrency - measured 100% failures at 1024 concurrent requests, because
+            // every caller failed instantly and then immediately retried.
+            _blockedOnStreamCredit.Enqueue((request, pending));
+        }
+        return pending.Task;
+    }
+
+    /// <summary>
+    /// Open a stream and hand the request to nghttp3. False means only one thing: the peer's
+    /// concurrency limit is reached, so the caller should park the request (every other failure
+    /// throws).
+    /// </summary>
+    private unsafe bool TrySubmit(Http3ClientRequest request, PendingRequest pending)
+    {
         long streamId = _quic.OpenBidiStream();
         if (streamId < 0)
         {
-            throw new Http3ClientException("no stream available (peer's concurrency limit reached)");
+            return false;
         }
 
         byte[] headers = PackRequestHeaders(request, out int headersLength);
@@ -116,7 +138,6 @@ public sealed class Http3ClientConnection : IDisposable
             throw new Http3ClientException($"submit_request failed: {Nghttp3.StrError(submitResult)}");
         }
 
-        var pending = new PendingRequest();
         _pending[streamId] = pending;
 
         if (_inPumpPass)
@@ -127,7 +148,7 @@ public sealed class Http3ClientConnection : IDisposable
         {
             PumpEgress();          // issued from outside a pass: send it now
         }
-        return pending.Task;
+        return true;
     }
 
     // --- the pump: inbound stream data into nghttp3, completions out to the waiters -------------
@@ -162,6 +183,9 @@ public sealed class Http3ClientConnection : IDisposable
                     // nghttp3 has unwound: safe to resume the waiters. Their follow-up requests
                     // submit while _inPumpPass is still set, so they all ride one batched drain.
                     CompleteFinishedRequests();
+
+                    // Finished responses closed their streams, so credit may be available now.
+                    DrainStreamCreditQueue();
                 }
                 finally
                 {
@@ -384,6 +408,26 @@ public sealed class Http3ClientConnection : IDisposable
         }
     }
 
+    // Re-submit parked requests while the peer's stream credit allows. Runs after completions, on
+    // the reactor thread, outside any native call.
+    private void DrainStreamCreditQueue()
+    {
+        while (_blockedOnStreamCredit.Count > 0)
+        {
+            if (IsBroken || !_isReady)
+            {
+                return;   // FailAll will drain the queue with the connection's error
+            }
+
+            (Http3ClientRequest request, PendingRequest pending) = _blockedOnStreamCredit.Peek();
+            if (!TrySubmit(request, pending))
+            {
+                return;   // still no credit - stay parked, retry on the next pass
+            }
+            _blockedOnStreamCredit.Dequeue();
+        }
+    }
+
     private void FailAll(Exception error)
     {
         _ready.TrySetException(error);   // unblock anyone waiting for a connection that died
@@ -392,6 +436,13 @@ public sealed class Http3ClientConnection : IDisposable
             pending.Fail(error);
         }
         _pending.Clear();
+
+        // Requests parked for stream credit never reached _pending; without this they wait forever
+        // for a connection that is already gone.
+        while (_blockedOnStreamCredit.Count > 0)
+        {
+            _blockedOnStreamCredit.Dequeue().Pending.Fail(error);
+        }
     }
 
     public void Dispose()
