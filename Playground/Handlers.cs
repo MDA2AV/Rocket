@@ -15,8 +15,26 @@ namespace Playground;
 /// </summary>
 internal static class Handlers
 {
-    private static ReadOnlySpan<byte> Ok =>
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok"u8;
+    private static ReadOnlySpan<byte> Ok => RawOk;
+
+    // PLAYGROUND_BODY=<n> serves an n-byte body instead of "ok", so the raw handler can be
+    // compared against other servers on the object size they conventionally measure (1024 B).
+    // Built once; the handler still writes one fixed, pre-encoded buffer per request.
+    private static readonly byte[] RawOk = BuildRawOk();
+
+    private static byte[] BuildRawOk()
+    {
+        int size = int.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_BODY"), out int parsed) && parsed > 0
+            ? parsed
+            : 2;
+
+        byte[] body = size == 2
+            ? "ok"u8.ToArray()
+            : [.. Enumerable.Repeat((byte)'x', size - 1), (byte)'\n'];
+
+        return [.. System.Text.Encoding.ASCII.GetBytes(
+            $"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {body.Length}\r\n\r\n"), .. body];
+    }
 
     private static ReadOnlySpan<byte> NotFound =>
         "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"u8;
