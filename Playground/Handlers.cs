@@ -496,6 +496,19 @@ internal static class Handlers
         };
     }
 
+    // A fixed 1 KiB body. Load-generator grids conventionally measure a 1024-byte object, and
+    // echoing the path (33 bytes) is not comparable with them. Static, so serving it costs no
+    // allocation per request.
+    private static readonly byte[] OneKiBBody = BuildOneKiB();
+
+    private static byte[] BuildOneKiB()
+    {
+        var body = new byte[1024];
+        body.AsSpan().Fill((byte)'x');
+        body[^1] = (byte)'\n';
+        return body;
+    }
+
     // Live h3 connections, so a SIGTERM can GOAWAY them all (see Program.cs). Each reactor only
     // ever adds its own, but a plain lock keeps the signal handler - which runs off-reactor -
     // honest.
@@ -629,6 +642,13 @@ internal static class Handlers
                 response.Headers.Add(ContentType, TextPlain);
                 response.Headers.Add(SetCookie, SessionCookie);   // repeat the Add for more cookies
                 return response;
+            }
+
+            if (path.SequenceEqual("/1k"u8))
+            {
+                var oneKiB = new ioxide.nghttp3.Nghttp3Response { Body = OneKiBBody };
+                oneKiB.Headers.Add(ContentType, TextPlain);
+                return oneKiB;
             }
 
             return ioxide.nghttp3.Nghttp3Response.Text(
