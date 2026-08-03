@@ -137,11 +137,54 @@ internal static class TestServer
     }
 
     /// <summary>
-    /// A server with a TCP handler AND a QUIC socket configured for CLIENT use (no accept
-    /// factory): the shape an app needs when its handlers make outbound HTTP/3 calls, since client
-    /// connections ride the reactor's QUIC socket and their replies route back through it.
+    /// A server with a TCP handler and NO QUIC configuration whatsoever - the standalone-client
+    /// shape. Outbound HTTP/3 connections make the reactor open its own ephemeral-port socket on
+    /// first use, so being an h3 client needs no listener, no fixed port and no accept factory.
     /// </summary>
     public static int StartQuicClientHost(Func<Reactor, TcpConnection, Task> tcpHandle, Action<Reactor> onStart)
+    {
+        int tcpPort = Interlocked.Increment(ref _nextPort);
+
+        var config = new ServerConfig
+        {
+            ReactorCount = 1,
+            RecvBufferSize = 4096,
+            RecvSlots = 256,
+            Tcp = new TcpOptions
+            {
+                Port = (ushort)tcpPort,
+                WriteSlabSize = 16 * 1024,
+                PoolMax = 64,
+                RecvQueueEntries = 64,
+            },
+            Udp = new UdpOptions { RecvSlots = 16 },
+            // No Quic block at all: the client opens its own socket when it first connects.
+        };
+
+        var reactor = new Reactor(0, config)
+        {
+            TcpHandle = tcpHandle,
+            OnStart = onStart,
+        };
+
+        var thread = new Thread(reactor.Run)
+        {
+            IsBackground = true,
+            Name = $"test-reactor-h3client-{tcpPort}",
+        };
+        thread.Start();
+
+        WaitForListen(tcpPort);
+        return tcpPort;
+    }
+
+    /// <summary>
+    /// A driver whose reactor BOTH serves QUIC (accept factory + h3 handler) and makes outbound
+    /// HTTP/3 calls - the proxy shape, where client connections share the configured QUIC socket
+    /// rather than opening one.
+    /// </summary>
+    public static int StartQuicServingH3Driver(
+        Func<Reactor, TcpConnection, Task> tcpHandle, QuicConnectionFactory quicFactory, Action<Reactor> onStart)
     {
         int tcpPort = Interlocked.Increment(ref _nextPort);
         int udpPort = Interlocked.Increment(ref _nextPort);
@@ -163,7 +206,7 @@ internal static class TestServer
             {
                 Port = (ushort)udpPort,
                 LocalCidLength = 8,
-                ConnectionFactory = null,   // outbound only: nothing is accepted here
+                ConnectionFactory = quicFactory,   // this reactor accepts QUIC too
             },
         };
 
@@ -176,7 +219,7 @@ internal static class TestServer
         var thread = new Thread(reactor.Run)
         {
             IsBackground = true,
-            Name = $"test-reactor-h3client-{tcpPort}",
+            Name = $"test-reactor-h3proxy-{tcpPort}",
         };
         thread.Start();
 

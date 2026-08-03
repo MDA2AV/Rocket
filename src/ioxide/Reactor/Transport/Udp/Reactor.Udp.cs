@@ -101,6 +101,54 @@ public sealed unsafe partial class Reactor
         }
     }
 
+    /// <summary>
+    /// Open a UDP socket on an ephemeral port for outbound QUIC and arm it on this ring, appending
+    /// it to the fd tables. Used by a reactor with no datagram transport configured at all, so it
+    /// brings up the buffer ring on the way if OpenUdpSockets never ran. Returns its index.
+    /// </summary>
+    private int OpenClientUdpSocket()
+    {
+        if (_udpFds.Length == 0)
+        {
+            InitUdpBufRing();   // no UDP/QUIC in config, so startup skipped it
+        }
+
+        int fd = OpenUdpSocket(0, _config.DualStack, _config.Udp.Gro);   // port 0: the kernel picks
+
+        // Append. Indices stay stable (recv completions carry theirs in user_data), so growing the
+        // tables cannot disturb the multishot recvs already armed on the existing sockets.
+        int index = _udpFds.Length;
+        _udpFds     = [.. _udpFds, fd];
+        _udpFdPorts = [.. _udpFdPorts, BoundPort(fd, _config.DualStack)];
+
+        ArmUdpRecv(index);
+        return index;
+    }
+
+    // The port the kernel assigned to a bind(:0) - ngtcp2 needs the real local address for its
+    // path, so 0 will not do.
+    private static ushort BoundPort(int fd, bool dualStack)
+    {
+        if (dualStack)
+        {
+            sockaddr_in6 addr6 = default;
+            uint len6 = (uint)sizeof(sockaddr_in6);
+            if (getsockname(fd, &addr6, &len6) < 0)
+            {
+                throw new InvalidOperationException("getsockname failed on the QUIC client socket");
+            }
+            return Htons(addr6.sin6_port);   // Htons is its own inverse (16-bit swap)
+        }
+
+        sockaddr_in addr = default;
+        uint len = (uint)sizeof(sockaddr_in);
+        if (getsockname(fd, &addr, &len) < 0)
+        {
+            throw new InvalidOperationException("getsockname failed on the QUIC client socket");
+        }
+        return Htons(addr.sin_port);
+    }
+
     // Provided-buffer ring (power-of-two depth) + a slab of UdpRecvBufSize buffers, plus the shared
     // msghdr template. Mirrors the TCP shared-ring setup; buffer 0's entry overlaps the tail field at
     // offset 14, so the fill writes only addr/len/bid and publishes the tail afterwards.
@@ -327,7 +375,9 @@ public sealed unsafe partial class Reactor
                                        new ReadOnlySpan<byte>(buf + UdpRecvPayloadOff, payloadLen), gro, tos);
         try
         {
-            if (_quicOptions != null && _udpFdPorts[socketIndex] == _quicOptions.Port)
+            // Either the configured QUIC socket, or the ephemeral one a standalone client opened.
+            if ((_quicOptions != null && _udpFdPorts[socketIndex] == _quicOptions.Port) ||
+                socketIndex == _quicClientSocketIndex)
             {
                 QuicDispatch(in datagram);   // QUIC
             }

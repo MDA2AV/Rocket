@@ -51,16 +51,12 @@ public sealed unsafe class QuicClientEngine : IDisposable
     /// Open a QUIC connection to <paramref name="ipv4"/>:<paramref name="port"/> and adopt it on
     /// <paramref name="reactor"/>: the handshake rides that reactor's ring, replies route back by
     /// connection ID, and the returned connection's read surface is awaitable straight away.
-    /// Reactor thread only. The reactor must have QUIC enabled (its UDP socket carries this
-    /// connection's datagrams).
+    /// Reactor thread only. Needs no server: if the app serves QUIC the connection shares that
+    /// socket, otherwise the reactor opens one on an ephemeral port for outbound use.
     /// </summary>
     public QuicEngineConnection Connect(Reactor reactor, string ipv4, ushort port, string serverName)
     {
-        if (reactor.QuicSocketFd < 0)
-        {
-            throw new InvalidOperationException(
-                "the reactor has no QUIC socket - set ServerConfig.Quic (client connections ride it)");
-        }
+        int socketFd = reactor.QuicEnsureClientTransport();
 
         // Peer sockaddr, owned by the connection for its lifetime (ngtcp2 keeps the pointer).
         nint peerAddr = (nint)NativeMemory.AllocZeroed(128);
@@ -70,7 +66,7 @@ public sealed unsafe class QuicClientEngine : IDisposable
         Span<byte> localCid = stackalloc byte[QuicCid.MaxLength];
 
         var connection = new QuicEngineConnection(this);
-        if (!connection.TryConnect(_engine, reactor, reactor.QuicSocketFd, reactor.QuicLocalPort,
+        if (!connection.TryConnect(_engine, reactor, socketFd, reactor.QuicLocalPort,
                 peerAddr, peerAddrLen, serverName, Alpn, cidLength, localCid))
         {
             NativeMemory.Free((void*)peerAddr);

@@ -34,8 +34,13 @@ public sealed record Http3ClientOptions
 /// </code>
 /// </summary>
 /// <remarks>
-/// Reactor thread only. The reactor must have QUIC configured - client connections ride its QUIC
-/// socket, which is also what routes the replies back.
+/// Reactor thread only, and it needs no server: the first connection makes the reactor open a UDP
+/// socket on an ephemeral port for outbound use. When the app already serves QUIC, outbound
+/// connections share that socket instead - either way the replies route back by connection ID.
+///
+/// The pool deliberately lives on the caller's reactor rather than one of its own, so a handler
+/// awaiting an upstream response resumes inline on its own reactor thread. A client with its own
+/// thread would have to post continuations back through the synchronization context.
 /// </remarks>
 public sealed class Http3ClientPool : IDisposable
 {
