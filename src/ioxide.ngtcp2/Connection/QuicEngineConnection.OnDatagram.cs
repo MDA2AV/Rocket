@@ -56,5 +56,6 @@ public unsafe partial class QuicEngineConnection
 
         FlushEgress();
         FireRecv();
+        FireHandshakeSignal();
     }
 }

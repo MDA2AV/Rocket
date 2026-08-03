@@ -136,6 +136,54 @@ internal static class TestServer
         return (tcpPort, udpPort);
     }
 
+    /// <summary>
+    /// A server with a TCP handler AND a QUIC socket configured for CLIENT use (no accept
+    /// factory): the shape an app needs when its handlers make outbound HTTP/3 calls, since client
+    /// connections ride the reactor's QUIC socket and their replies route back through it.
+    /// </summary>
+    public static int StartQuicClientHost(Func<Reactor, TcpConnection, Task> tcpHandle, Action<Reactor> onStart)
+    {
+        int tcpPort = Interlocked.Increment(ref _nextPort);
+        int udpPort = Interlocked.Increment(ref _nextPort);
+
+        var config = new ServerConfig
+        {
+            ReactorCount = 1,
+            RecvBufferSize = 4096,
+            RecvSlots = 256,
+            Tcp = new TcpOptions
+            {
+                Port = (ushort)tcpPort,
+                WriteSlabSize = 16 * 1024,
+                PoolMax = 64,
+                RecvQueueEntries = 64,
+            },
+            Udp = new UdpOptions { RecvSlots = 16 },
+            Quic = new QuicOptions
+            {
+                Port = (ushort)udpPort,
+                LocalCidLength = 8,
+                ConnectionFactory = null,   // outbound only: nothing is accepted here
+            },
+        };
+
+        var reactor = new Reactor(0, config)
+        {
+            TcpHandle = tcpHandle,
+            OnStart = onStart,
+        };
+
+        var thread = new Thread(reactor.Run)
+        {
+            IsBackground = true,
+            Name = $"test-reactor-h3client-{tcpPort}",
+        };
+        thread.Start();
+
+        WaitForListen(tcpPort);
+        return tcpPort;
+    }
+
     private static void WaitForListen(int port)
     {
         for (int attempt = 0; attempt < 100; attempt++)

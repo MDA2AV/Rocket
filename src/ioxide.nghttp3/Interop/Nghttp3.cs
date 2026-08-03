@@ -1,4 +1,9 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+
+// The HTTP/3 CLIENT package drives the same shim from the other side; it is a sibling of this
+// package rather than an outside consumer, so it sees the P/Invoke surface.
+[assembly: InternalsVisibleTo("ioxide.httpclient3")]
 
 namespace ioxide.nghttp3;
 
@@ -68,6 +73,17 @@ internal static unsafe class Nghttp3
     /// <summary>Retire a fully-closed stream and free its retained state (response body, header
     /// block). Unknown/already-closed ids (e.g. uni streams) are tolerated and return 0.</summary>
     [DllImport(Lib)] internal static extern int  ih3_close_stream(nint connection, long streamId, ulong appError);
+
+    // --- client side (ioxide.httpclient3) ------------------------------------------------------
+
+    /// <summary>Create the client-side nghttp3 connection; same event surface as the server one,
+    /// requests out instead of responses. 0 on failure.</summary>
+    [DllImport(Lib)] internal static extern nint ih3_client_new(Callbacks callbacks, void* user);
+
+    /// <summary>Submit a request on a client-opened bidi stream: packed headers, optional body
+    /// (copied by the shim, freed at stream close). 0 or a negative nghttp3 error.</summary>
+    [DllImport(Lib)] internal static extern int  ih3_submit_request(
+        nint connection, long streamId, byte* headers, nuint headersLength, byte* body, nuint bodyLength);
 
     /// <summary>Queue the GOAWAY pair on the control stream (carried out by the next
     /// <see cref="ih3_writev"/> drain) and start rejecting NEW request streams; in-flight

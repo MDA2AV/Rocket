@@ -8,6 +8,8 @@
   <Project Path="src/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
   <Project Path="src/ioxide.nghttp3/ioxide.nghttp3.csproj" />
   <Project Path="src/ioxide.http3/ioxide.http3.csproj" />
+  <Project Path="src/ioxide.httpclient/ioxide.httpclient.csproj" />
+  <Project Path="src/ioxide.httpclient3/ioxide.httpclient3.csproj" />
   <Project Path="Playground/Playground.csproj" />
   <Project Path="Examples/Examples.csproj" />
   <Project Path="Examples.AspNet/Examples.AspNet.csproj" />

@@ -66,7 +66,8 @@ typedef struct iq_engine {
 
 typedef struct iq_conn {
     ngtcp2_conn                *conn;
-    iq_engine                  *engine;
+    iq_engine                  *engine;    /* server connections only (CID length, ptls ctx) */
+    iq_callbacks                cbs;       /* copied from whichever engine created this conn */
     ngtcp2_crypto_conn_ref      conn_ref;
     ngtcp2_crypto_picotls_ctx   cptls;
     ngtcp2_sockaddr_union       local_addr;
@@ -76,6 +77,8 @@ typedef struct iq_conn {
     void                       *user;
     void (*on_stream_data_raw)(void *user, int64_t stream_id, const uint8_t *data, size_t datalen, int fin);
     ptls_raw_extension_t        exts[2];   /* [0] QUIC transport params (filled by ngtcp2), [1] terminator */
+    char                        alpn[64];  /* client: the single protocol we offer */
+    ptls_iovec_t                alpn_vec;  /* points into alpn[], handed to picotls for the CH */
 
     /* Streams whose receive window the APPLICATION paces: delivery skips the auto-credit below
      * and the app opens the window explicitly via iq_conn_consume as it consumes. Bounded set -
@@ -145,7 +148,7 @@ static int iq_cb_handshake_completed(ngtcp2_conn *conn, void *user_data)
 {
     (void)conn;
     iq_conn *c = user_data;
-    if (c->engine) c->engine->cbs.on_handshake_completed(c->user);
+    if (c->cbs.on_handshake_completed) c->cbs.on_handshake_completed(c->user);
     return 0;
 }
 
@@ -163,9 +166,9 @@ static int iq_cb_recv_stream_data(ngtcp2_conn *conn, uint32_t flags, int64_t str
         ngtcp2_conn_extend_max_stream_offset(conn, stream_id, datalen);
     }
 
-    if (c->engine) {
-        c->engine->cbs.on_stream_data(c->user, stream_id, data, datalen,
-                                      (flags & NGTCP2_STREAM_DATA_FLAG_FIN) != 0);
+    if (c->cbs.on_stream_data) {
+        c->cbs.on_stream_data(c->user, stream_id, data, datalen,
+                              (flags & NGTCP2_STREAM_DATA_FLAG_FIN) != 0);
     } else if (c->on_stream_data_raw) {
         c->on_stream_data_raw(c->user, stream_id, data, datalen,
                               (flags & NGTCP2_STREAM_DATA_FLAG_FIN) != 0);
@@ -195,7 +198,7 @@ static int iq_cb_stream_close(ngtcp2_conn *conn, uint32_t flags, int64_t stream_
         c->paced[pi] = c->paced[--c->paced_count];
     }
 
-    if (c->engine) c->engine->cbs.on_stream_close(c->user, stream_id, app_error_code);
+    if (c->cbs.on_stream_close) c->cbs.on_stream_close(c->user, stream_id, app_error_code);
     return 0;
 }
 
@@ -204,8 +207,8 @@ static int iq_cb_stream_reset(ngtcp2_conn *conn, int64_t stream_id, uint64_t fin
 {
     (void)conn; (void)final_size; (void)stream_user_data;
     iq_conn *c = user_data;
-    if (c->engine && c->engine->cbs.on_stream_reset) {
-        c->engine->cbs.on_stream_reset(c->user, stream_id, app_error_code);
+    if (c->cbs.on_stream_reset) {
+        c->cbs.on_stream_reset(c->user, stream_id, app_error_code);
     }
     return 0;
 }
@@ -215,8 +218,8 @@ static int iq_cb_stream_stop_sending(ngtcp2_conn *conn, int64_t stream_id, uint6
 {
     (void)conn; (void)stream_user_data;
     iq_conn *c = user_data;
-    if (c->engine && c->engine->cbs.on_stream_stop_sending) {
-        c->engine->cbs.on_stream_stop_sending(c->user, stream_id, app_error_code);
+    if (c->cbs.on_stream_stop_sending) {
+        c->cbs.on_stream_stop_sending(c->user, stream_id, app_error_code);
     }
     return 0;
 }
@@ -226,8 +229,8 @@ static int iq_cb_acked_stream_data_offset(ngtcp2_conn *conn, int64_t stream_id, 
 {
     (void)conn; (void)stream_user_data;
     iq_conn *c = user_data;
-    if (c->engine && c->engine->cbs.on_acked_stream_data) {
-        c->engine->cbs.on_acked_stream_data(c->user, stream_id, offset, datalen);
+    if (c->cbs.on_acked_stream_data) {
+        c->cbs.on_acked_stream_data(c->user, stream_id, offset, datalen);
     }
     return 0;
 }
@@ -240,7 +243,7 @@ static int iq_cb_get_new_connection_id(ngtcp2_conn *conn, ngtcp2_cid *cid, uint8
     ptls_openssl_random_bytes(cid->data, cidlen);
     cid->datalen = cidlen;
     ptls_openssl_random_bytes(token, NGTCP2_STATELESS_RESET_TOKENLEN);
-    c->engine->cbs.on_new_cid(c->user, cid->data, cid->datalen);
+    if (c->cbs.on_new_cid) c->cbs.on_new_cid(c->user, cid->data, cid->datalen);
     return 0;
 }
 
@@ -248,7 +251,7 @@ static int iq_cb_remove_connection_id(ngtcp2_conn *conn, const ngtcp2_cid *cid, 
 {
     (void)conn;
     iq_conn *c = user_data;
-    c->engine->cbs.on_retire_cid(c->user, cid->data, cid->datalen);
+    if (c->cbs.on_retire_cid) c->cbs.on_retire_cid(c->user, cid->data, cid->datalen);
     return 0;
 }
 
@@ -366,6 +369,7 @@ iq_conn *iq_accept(iq_engine *e,
         return NULL;
     }
     c->engine = e;
+    c->cbs = e->cbs;
     c->user   = user;
 
     memcpy(&c->local_addr, local_sa, local_salen);
@@ -575,16 +579,19 @@ const char *iq_strerror(int liberr)
 typedef struct iq_client_engine {
     ptls_context_t ptls_ctx;
     iq_callbacks   cbs;
+    char           alpn[64];   /* the protocol every connection from this engine offers */
 } iq_client_engine;
 
 iq_client_engine *iq_client_engine_new(const char *alpn, iq_callbacks cbs)
 {
-    (void)alpn;
     iq_client_engine *e = calloc(1, sizeof(*e));
     if (e == NULL) {
         return NULL;
     }
     e->cbs = cbs;
+    if (alpn != NULL) {
+        snprintf(e->alpn, sizeof(e->alpn), "%s", alpn);
+    }
     e->ptls_ctx.random_bytes  = ptls_openssl_random_bytes;
     e->ptls_ctx.get_time      = &ptls_get_time;
     e->ptls_ctx.key_exchanges = ptls_openssl_key_exchanges;
@@ -602,18 +609,24 @@ void iq_client_engine_free(iq_client_engine *e)
     free(e);
 }
 
+/* Open a client connection. scid_len is the length of the connection ID we ask the peer to send
+ * back to us: it MUST match the demux slice of whoever routes our inbound datagrams (the reactor
+ * uses QuicOptions.LocalCidLength), because short-header packets carry no CID length on the wire.
+ * scid_out receives that CID so the caller can register the route. */
 iq_conn *iq_client_connect(iq_client_engine *e,
                            const void *local_sa, size_t local_salen,
                            const void *remote_sa, size_t remote_salen,
                            const char *server_name, const char *alpn,
-                           uint64_t ts, void *user)
+                           size_t scid_len, uint64_t ts, void *user,
+                           uint8_t *scid_out)
 {
     iq_conn *c = calloc(1, sizeof(*c));
     if (c == NULL) {
         return NULL;
     }
     c->user = user;
-    c->on_stream_data_raw = e->cbs.on_stream_data;   // route received stream data to the C# client
+    c->cbs = e->cbs;
+    c->on_stream_data_raw = e->cbs.on_stream_data;   // legacy raw path for the bare test drivers
 
     memcpy(&c->local_addr, local_sa, local_salen);
     memcpy(&c->remote_addr, remote_sa, remote_salen);
@@ -658,7 +671,8 @@ iq_conn *iq_client_connect(iq_client_engine *e,
 
     ngtcp2_cid dcid, scid;
     dcid.datalen = 16; ptls_openssl_random_bytes(dcid.data, dcid.datalen);
-    scid.datalen = 16; ptls_openssl_random_bytes(scid.data, scid.datalen);
+    scid.datalen = (scid_len > 0 && scid_len <= NGTCP2_MAX_CIDLEN) ? scid_len : 16;
+    ptls_openssl_random_bytes(scid.data, scid.datalen);
 
     if (ngtcp2_conn_client_new(&c->conn, &dcid, &scid, &c->path, NGTCP2_PROTO_VER_V1,
                                &callbacks, &settings, &params, NULL, c) != 0) {
@@ -689,8 +703,25 @@ iq_conn *iq_client_connect(iq_client_engine *e,
         return NULL;
     }
 
+    /* ALPN: RFC 9001 requires QUIC clients to offer one, and a server pinned to "h3" fails the
+     * handshake (no_application_protocol -> ERR_CRYPTO) against a client that offers none. The
+     * iovec must outlive the handshake, so it points into the connection's own buffer. */
+    const char *offer = (alpn != NULL && alpn[0] != '\0') ? alpn : e->alpn;
+    if (offer != NULL && offer[0] != '\0') {
+        snprintf(c->alpn, sizeof(c->alpn), "%s", offer);
+        c->alpn_vec.base = (uint8_t *)c->alpn;
+        c->alpn_vec.len  = strlen(c->alpn);
+        c->cptls.handshake_properties.client.negotiated_protocols.list  = &c->alpn_vec;
+        c->cptls.handshake_properties.client.negotiated_protocols.count = 1;
+    }
+
+
     ngtcp2_conn_set_tls_native_handle(c->conn, &c->cptls);
     ngtcp2_ccerr_default(&c->last_error);
+
+    if (scid_out != NULL) {
+        memcpy(scid_out, scid.data, scid.datalen);
+    }
     return c;
 }
 

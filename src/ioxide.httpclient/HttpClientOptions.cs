@@ -1,0 +1,33 @@
+namespace ioxide.httpclient;
+
+/// <summary>
+/// One origin (host + port) and how many ring-native connections to keep to it. One pool per
+/// reactor - create from <c>Reactor.OnStart</c> so the connections ride that reactor's ring.
+/// </summary>
+public sealed record HttpClientOptions
+{
+    /// <summary>IPv4 literal. DNS resolution would block the reactor, so resolve up front and
+    /// pass the address.</summary>
+    public string Host { get; init; } = "127.0.0.1";
+
+    public ushort Port { get; init; } = 80;
+
+    /// <summary>Connections opened to the origin. Requests round-robin across them, one request
+    /// in flight each, so this is the concurrency ceiling for this reactor.</summary>
+    public int PoolSize { get; init; } = 4;
+
+    /// <summary>Per-request ceiling for headers + body; a bigger response fails the request
+    /// instead of growing the buffer without bound.</summary>
+    public int MaxResponseBytes { get; init; } = 8 * 1024 * 1024;
+
+    /// <summary>Per-connection send buffer; larger request bodies are sent straight from the
+    /// caller's memory instead of being copied through it.</summary>
+    public int SendBufferSize { get; init; } = 16 * 1024;
+
+    /// <summary>Per-connection receive buffer; grows (up to MaxResponseBytes) when a response
+    /// needs more.</summary>
+    public int ReceiveBufferSize { get; init; } = 16 * 1024;
+
+    /// <summary>How long a request may wait for a free connection when every one is busy.</summary>
+    public int AcquireTimeoutMs { get; init; } = 10_000;
+}

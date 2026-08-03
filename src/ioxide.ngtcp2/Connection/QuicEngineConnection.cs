@@ -21,7 +21,8 @@ public unsafe partial class QuicEngineConnection : QuicConnection
     // sockaddr cap the transport uses for its peer-address blocks; large enough for sockaddr_in6.
     private const int PeerAddrCap = 128;
 
-    private readonly QuicEngine _engine;
+    private readonly QuicEngine? _engine;              // server connections
+    private readonly QuicClientEngine? _clientEngine;   // client connections
     private nint _conn;                        // iq_conn*, null once closed
     private GCHandle _self;                    // stable void* user passed to the shim
     private bool _handshakeDone;
@@ -40,9 +41,27 @@ public unsafe partial class QuicEngineConnection : QuicConnection
     private bool _recvEnqueued;
     private bool _recvOverflow;
 
+    // Set when the handshake completes, raised after the engine call unwinds (firing it from
+    // inside the shim callback would re-enter ngtcp2). Client connections depend on this: nothing
+    // else wakes them until the peer sends stream data, and they must open their streams first.
+    private bool _handshakeSignalPending;
+
+    /// <summary>
+    /// Raised once, on the reactor thread, after the handshake completes AND the engine call has
+    /// unwound - so it is safe to open streams and send from here. Client connections use it to
+    /// start their protocol setup; server connections are woken by the peer's request instead.
+    /// </summary>
+    public Action? HandshakeCompleted { get; set; }
+
     public QuicEngineConnection(QuicEngine engine)
     {
         _engine = engine;
+    }
+
+    /// <summary>Client-side connection; <see cref="QuicClientEngine.Connect"/> builds these.</summary>
+    public QuicEngineConnection(QuicClientEngine clientEngine)
+    {
+        _clientEngine = clientEngine;
     }
 
     /// <summary>Handshake finished; safe to open server-initiated streams and send.</summary>
@@ -136,8 +155,66 @@ public unsafe partial class QuicEngineConnection : QuicConnection
             _self.Free();
             return false;
         }
-        scidLen = (int)_engine.CidLength;
+        scidLen = (int)_engine!.CidLength;
         return true;
+    }
+
+    /// <summary>
+    /// Client-side creation: build the ngtcp2 connection toward <paramref name="remoteAddr"/> and
+    /// report the connection ID we asked the peer to address us by, so the reactor can route the
+    /// replies back here. The handshake itself starts on the first pump (the caller flushes).
+    /// </summary>
+    internal bool TryConnect(nint clientEnginePtr, Reactor reactor, int socketFd, ushort localPort,
+        nint remoteAddr, int remoteAddrLen, string serverName, string alpn, int scidLen, Span<byte> scidOut)
+    {
+        _reactor  = reactor;
+        _socketFd = socketFd;
+        _self     = GCHandle.Alloc(this);
+
+        Span<byte> local = stackalloc byte[16];
+        FillSockaddrInLoopback(local, localPort);
+
+        fixed (byte* loc = local)
+        fixed (byte* scid = scidOut)
+        {
+            _conn = Ngtcp2.iq_client_connect(
+                clientEnginePtr,
+                loc, (nuint)local.Length,
+                (byte*)remoteAddr, (nuint)remoteAddrLen,
+                serverName, alpn,
+                (nuint)scidLen, NowNs(), (void*)GCHandle.ToIntPtr(_self), scid);
+        }
+
+        if (_conn == 0)
+        {
+            _self.Free();
+            return false;
+        }
+        return true;
+    }
+
+    /// <summary>Open a client-initiated bidirectional stream; the id, or negative when the peer's
+    /// allowance is exhausted.</summary>
+    public long OpenBidiStream() => _closed ? -1 : Ngtcp2.iq_client_open_bidi(_conn);
+
+    /// <summary>Drive the handshake/egress once - the client calls this after connecting so the
+    /// Initial packet goes out without waiting for an inbound datagram.</summary>
+    public void Pump()
+    {
+        if (_closed)
+        {
+            return;
+        }
+        _inEngineCycle = true;
+        try
+        {
+            FlushEgress();
+        }
+        finally
+        {
+            _inEngineCycle = false;
+            FlushGso();
+        }
     }
 
     // Single handshake-done funnel (the engine callback and the OnDatagram poll can both detect
@@ -145,6 +222,7 @@ public unsafe partial class QuicEngineConnection : QuicConnection
     private void HandshakeCompletedOnce()
     {
         _handshakeDone = true;
+        _handshakeSignalPending = HandshakeCompleted is not null;
 
         Span<byte> alpn = stackalloc byte[64];
         fixed (byte* p = alpn)
@@ -157,6 +235,18 @@ public unsafe partial class QuicEngineConnection : QuicConnection
         }
 
         OnHandshakeCompleted();
+    }
+
+    // The deferred handshake wake, raised after iq_conn_read / handle_expiry has fully unwound so
+    // the callback can safely call back into the engine (open streams, send).
+    internal void FireHandshakeSignal()
+    {
+        if (!_handshakeSignalPending)
+        {
+            return;
+        }
+        _handshakeSignalPending = false;
+        HandshakeCompleted?.Invoke();
     }
 
     // The once-per-read wake: the engine is idle again, so the handler resuming inline (and

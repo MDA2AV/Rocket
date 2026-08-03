@@ -68,6 +68,22 @@ internal static unsafe class Ngtcp2
     [DllImport(Lib)] internal static extern void  iq_conn_consume(nint conn, long streamId, ulong n);
     [DllImport(Lib)] internal static extern nuint iq_conn_get_alpn(nint conn, byte* buf, nuint bufLen);
 
+    // --- client side (ioxide.httpclient3 / QuicClientEngine) ---------------------------------
+
+    [DllImport(Lib)] internal static extern nint iq_client_engine_new(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string alpn, Callbacks callbacks);
+    [DllImport(Lib)] internal static extern void iq_client_engine_free(nint engine);
+
+    /// <summary>Open a client connection. scidLen must equal the demux slice of whoever routes our
+    /// inbound datagrams (the reactor's QuicOptions.LocalCidLength); scidOut receives the CID to
+    /// register for that routing.</summary>
+    [DllImport(Lib)] internal static extern nint iq_client_connect(
+        nint engine, byte* localSockaddr, nuint localLen, byte* remoteSockaddr, nuint remoteLen,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string serverName, [MarshalAs(UnmanagedType.LPUTF8Str)] string alpn,
+        nuint scidLen, ulong ts, void* user, byte* scidOut);
+
+    [DllImport(Lib)] internal static extern long iq_client_open_bidi(nint conn);
+
     [DllImport(Lib)] internal static extern nint iq_version();
     [DllImport(Lib)] internal static extern nint iq_strerror(int liberr);
 

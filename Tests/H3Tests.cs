@@ -259,7 +259,7 @@ internal sealed unsafe class H3TestClient : IDisposable
         fixed (byte* r = remote)
         {
             _conn = iq_client_connect(_clientEngine, l, 16, r, 16, "localhost", "h3",
-                                      NowNs(), (void*)GCHandle.ToIntPtr(_self));
+                                      0, NowNs(), (void*)GCHandle.ToIntPtr(_self), null);
         }
         Assert.True(_conn != 0, "client connect failed");
     }
@@ -588,7 +588,7 @@ internal sealed unsafe class H3TestClient : IDisposable
     private const string QuicLib = "ioxide_ngtcp2";
     [DllImport(QuicLib)] private static extern nint iq_client_engine_new([MarshalAs(UnmanagedType.LPUTF8Str)] string alpn, IqCallbacks cbs);
     [DllImport(QuicLib)] private static extern void iq_client_engine_free(nint e);
-    [DllImport(QuicLib)] private static extern nint iq_client_connect(nint e, byte* localSa, nuint localLen, byte* remoteSa, nuint remoteLen, [MarshalAs(UnmanagedType.LPUTF8Str)] string serverName, [MarshalAs(UnmanagedType.LPUTF8Str)] string alpn, ulong ts, void* user);
+    [DllImport(QuicLib)] private static extern nint iq_client_connect(nint e, byte* localSa, nuint localLen, byte* remoteSa, nuint remoteLen, [MarshalAs(UnmanagedType.LPUTF8Str)] string serverName, [MarshalAs(UnmanagedType.LPUTF8Str)] string alpn, nuint scidLen, ulong ts, void* user, byte* scidOut);
     [DllImport(QuicLib)] private static extern long iq_client_open_bidi(nint conn);
     [DllImport(QuicLib)] private static extern long iq_conn_open_uni(nint conn);
     [DllImport(QuicLib)] private static extern nint iq_conn_write(nint conn, byte* dest, nuint destLen, long streamId, byte* data, nuint dataLen, int fin, long* pConsumed, ulong ts);

@@ -695,6 +695,64 @@ internal static class Handlers
                 return ioxide.http3.Http3Response.Text($"hello {System.Text.Encoding.ASCII.GetString(req.Path.Span)} over pure-C# HTTP/3\n");
             });
 
+    /// <summary>
+    /// Reverse proxy: every inbound request is forwarded to an upstream origin through the
+    /// ring-native HTTP client, and the upstream's status and body are relayed back. Both hops -
+    /// the inbound connection and the outbound call - run on this reactor's ring and resume
+    /// inline, so a proxied request never leaves the thread it arrived on.
+    ///
+    ///   PLAYGROUND_UPSTREAM_HOST / _PORT point at the origin (default 127.0.0.1:8081)
+    ///   PLAYGROUND_UPSTREAM_POOL sizes the connection pool per reactor (default 8)
+    /// </summary>
+    public static async Task Proxy(Reactor reactor, TcpConnection conn)
+    {
+        try
+        {
+            ioxide.httpclient.HttpClientPool upstream = reactor.GetService<ioxide.httpclient.HttpClientPool>()!;
+
+            while (true)
+            {
+                RecvSnapshot snapshot = await conn.ReadAsync();
+                string path = ReadRequestPath(conn, snapshot);
+
+                try
+                {
+                    using ioxide.httpclient.HttpClientResponse response = await upstream.GetAsync(path);
+                    conn.Write(System.Text.Encoding.ASCII.GetBytes(
+                        $"HTTP/1.1 {response.Status} X\r\nContent-Length: {response.Body.Length}\r\n\r\n"));
+                    conn.Write(response.Body.Span);
+                }
+                catch (ioxide.httpclient.HttpClientException e)
+                {
+                    byte[] message = System.Text.Encoding.ASCII.GetBytes($"upstream: {e.Message}");
+                    conn.Write(System.Text.Encoding.ASCII.GetBytes(
+                        $"HTTP/1.1 502 Bad Gateway\r\nContent-Length: {message.Length}\r\n\r\n"));
+                    conn.Write(message);
+                }
+
+                await conn.FlushAsync();
+
+                if (snapshot.IsClosed)
+                {
+                    return;
+                }
+                conn.ResetRead();
+            }
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    }
+
+    /// <summary>Upstream options for the proxy mode.</summary>
+    public static ioxide.httpclient.HttpClientOptions UpstreamOptions() => new()
+    {
+        Host = Environment.GetEnvironmentVariable("PLAYGROUND_UPSTREAM_HOST") ?? "127.0.0.1",
+        Port = ushort.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_UPSTREAM_PORT"), out ushort port) ? port : (ushort)8081,
+        PoolSize = int.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_UPSTREAM_POOL"), out int pool) ? pool : 8,
+    };
+
     /// <summary>Self-signed localhost cert for the quic mode (PLAYGROUND_QUIC_CERT/KEY override it).</summary>
     public static (string CertPath, string KeyPath) EnsureQuicCert()
     {

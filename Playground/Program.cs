@@ -42,7 +42,7 @@ internal static class Program
             Incremental = Environment.GetEnvironmentVariable("PLAYGROUND_INCREMENTAL") == "1" ? new IncrementalOptions() : null,
             Tcp = new TcpOptions
             {
-                Port = 8080,
+                Port = ushort.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_PORT"), out ushort tcpPort) ? tcpPort : (ushort)8080,
             },
             Udp = new UdpOptions
             {
@@ -125,6 +125,11 @@ internal static class Program
                         r.AddService(assets!);
                         AssetReader.CreatePool(r, readers: 4, bufferBytes: 1 << 20);
                     };
+                    break;
+
+                case "proxy":
+                    reactor.TcpHandle = Handlers.Proxy;   // forwards through ioxide.httpclient
+                    reactor.OnStart = r => ioxide.httpclient.HttpClientPool.Start(r, Handlers.UpstreamOptions());
                     break;
 
                 case "pipe":
