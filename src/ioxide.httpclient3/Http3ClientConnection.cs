@@ -27,6 +27,19 @@ public sealed class Http3ClientConnection : IDisposable
     private GCHandle _self;
     private bool _isReady;     // uni streams bound, ready to submit
     private bool _failed;
+
+    // Submissions made while the pump loop is processing a batch don't pump immediately: the loop
+    // drains once at the end, so every request that a batch of completions produced leaves in ONE
+    // sendmsg instead of one per request. Without this, each inline-resumed caller submits and
+    // syscalls on its own.
+    private bool _inPumpPass;
+    private bool _pumpPending;
+
+    // Requests whose response completed during the current ih3_read_stream call. Callbacks only
+    // RECORD them; the waiters are resumed after the native call unwinds - resuming inside the
+    // callback would let the caller's next request re-enter nghttp3 while nghttp3_conn_read_stream
+    // is still on the stack (the same rule the server side follows).
+    private readonly List<(PendingRequest Pending, Http3ClientResponse Response)> _completedThisPass = [];
     private bool _disposed;
 
     private readonly Dictionary<long, PendingRequest> _pending = new();
@@ -106,7 +119,14 @@ public sealed class Http3ClientConnection : IDisposable
         var pending = new PendingRequest();
         _pending[streamId] = pending;
 
-        PumpEgress();   // the request leaves now, not on the next inbound wake
+        if (_inPumpPass)
+        {
+            _pumpPending = true;   // the loop's own drain will carry it, batched with its siblings
+        }
+        else
+        {
+            PumpEgress();          // issued from outside a pass: send it now
+        }
         return pending.Task;
     }
 
@@ -127,17 +147,30 @@ public sealed class Http3ClientConnection : IDisposable
                     TrySetup();   // belt and braces: the handshake signal normally gets here first
                 }
 
-                while (_quic.TryGetDelivery(in snapshot, out QuicRecvRing.Delivery delivery))
+                _inPumpPass = true;
+                try
                 {
-                    if (!_failed)
+                    while (_quic.TryGetDelivery(in snapshot, out QuicRecvRing.Delivery delivery))
                     {
-                        Feed(in delivery);
+                        if (!_failed)
+                        {
+                            Feed(in delivery);   // callbacks only record completions
+                        }
+                        _quic.ReturnBuffer(in delivery);
                     }
-                    _quic.ReturnBuffer(in delivery);
+
+                    // nghttp3 has unwound: safe to resume the waiters. Their follow-up requests
+                    // submit while _inPumpPass is still set, so they all ride one batched drain.
+                    CompleteFinishedRequests();
+                }
+                finally
+                {
+                    _inPumpPass = false;
                 }
 
                 if (!_failed)
                 {
+                    _pumpPending = false;
                     PumpEgress();
                 }
 
@@ -162,8 +195,18 @@ public sealed class Http3ClientConnection : IDisposable
 
     private unsafe void Feed(in QuicRecvRing.Delivery delivery)
     {
+        if (_nghttp3Handle == 0 || _failed)
+        {
+            return;   // torn down by an inline resume earlier in this pass
+        }
+
         if (delivery.Kind != QuicStreamEvent.Data)
         {
+            // Mirror the QUIC-level teardown into nghttp3 so it frees the stream's state (and the
+            // shim frees a copied request body); without this a long-lived connection accretes
+            // stream objects for every request it ever made.
+            Nghttp3.ih3_close_stream(_nghttp3Handle, delivery.StreamId, delivery.AppError);
+
             if (_pending.Remove(delivery.StreamId, out PendingRequest? aborted))
             {
                 aborted.Fail(new Http3ClientException($"stream {delivery.Kind.ToString().ToLowerInvariant()}"));
@@ -186,16 +229,28 @@ public sealed class Http3ClientConnection : IDisposable
         }
     }
 
-    private unsafe void PumpEgress()
+    // Every datagram this drain produces rides one batched sendmsg (see SendBatched) - without
+    // the wrapper each request would cost its own syscall.
+    private void PumpEgress()
     {
         if (_nghttp3Handle == 0)
         {
             return;
         }
+        _quic.SendBatched(PumpEgressCore);
+    }
+
+    private unsafe void PumpEgressCore()
+    {
         fixed (byte* egressPointer = _egress)
         {
             while (true)
             {
+                if (_nghttp3Handle == 0 || _failed)
+                {
+                    return;   // an inline teardown (send failure) freed the engine mid-drain
+                }
+
                 long streamId;
                 int fin;
                 long produced = Nghttp3.ih3_writev(_nghttp3Handle, &streamId, &fin,
@@ -218,6 +273,11 @@ public sealed class Http3ClientConnection : IDisposable
     // peer's stream allowance isn't known yet) and is retried on the next wake.
     private unsafe bool TrySetup()
     {
+        if (_isReady || _failed)
+        {
+            return _isReady;   // both the handshake signal and the loop's retry can land here
+        }
+
         long control = _quic.OpenUniStream();
         long encoder = _quic.OpenUniStream();
         long decoder = _quic.OpenUniStream();
@@ -305,6 +365,25 @@ public sealed class Http3ClientConnection : IDisposable
         }
     }
 
+    // Resume every caller whose response finished during this pass. Runs OUTSIDE the native call.
+    private void CompleteFinishedRequests()
+    {
+        if (_completedThisPass.Count == 0)
+        {
+            return;
+        }
+
+        // Snapshot-and-clear first: a resumed caller may submit again and land new completions
+        // here, and the list must not be mutated while it is being walked.
+        var finished = _completedThisPass.ToArray();
+        _completedThisPass.Clear();
+
+        foreach ((PendingRequest pending, Http3ClientResponse response) in finished)
+        {
+            pending.Complete(response);
+        }
+    }
+
     private void FailAll(Exception error)
     {
         _ready.TrySetException(error);   // unblock anyone waiting for a connection that died
@@ -322,6 +401,7 @@ public sealed class Http3ClientConnection : IDisposable
             return;
         }
         _disposed = true;
+        _failed = true;   // the pump's guards key off this; the handle is about to go
 
         if (_nghttp3Handle != 0)
         {
@@ -387,10 +467,13 @@ public sealed class Http3ClientConnection : IDisposable
     {
         Http3ClientConnection connection = From(user);
         if (connection._pending.TryGetValue(streamId, out PendingRequest? pending) &&
-            pending.Response is { } response)
+            pending.Response is { } response && !pending.HeadersDone)
         {
+            pending.HeadersDone = true;
             pending.BodyStart = response.ArenaLength;   // body bytes follow the header bytes
         }
+        // A second field section is TRAILERS: leaving BodyStart alone keeps the body range valid
+        // (moving it here would slice past the body into the trailer bytes).
     }
 
     [UnmanagedCallersOnly]
@@ -417,7 +500,15 @@ public sealed class Http3ClientConnection : IDisposable
         Http3ClientResponse response = pending.Response ?? new Http3ClientResponse();
         response.SetBodyRange((pending.BodyStart, pending.BodyLength));
         response.Freeze();
-        pending.Complete(response);
+
+        // Record only - the waiter is resumed by CompleteFinishedRequests once nghttp3 unwinds.
+        connection._completedThisPass.Add((pending, response));
+
+        // nghttp3 is done with this stream; let it release the stream's state.
+        if (connection._nghttp3Handle != 0)
+        {
+            Nghttp3.ih3_close_stream(connection._nghttp3Handle, streamId, 0);
+        }
     }
 
     /// <summary>
@@ -433,6 +524,7 @@ public sealed class Http3ClientConnection : IDisposable
         };
 
         public Http3ClientResponse? Response;
+        public bool HeadersDone;   // first field section seen; a later one is trailers
         public int BodyStart;
         public int BodyLength;
 

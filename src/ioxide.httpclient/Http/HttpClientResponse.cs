@@ -85,6 +85,16 @@ public sealed class HttpClientResponse : IDisposable
 
     internal void SetBodyRange((int Offset, int Length) range) => _bodyRange = range;
 
+    /// <summary>Discard an interim (1xx) head and reuse the arena for the real response.</summary>
+    internal void ResetForInterim()
+    {
+        _ranges.Clear();
+        _arenaUsed = 0;
+        _bodyRange = (0, -1);
+        Status = 0;
+        ConnectionClose = false;
+    }
+
     internal void Freeze()
     {
         foreach ((int nameOffset, int nameLength, int valueOffset, int valueLength) in _ranges)

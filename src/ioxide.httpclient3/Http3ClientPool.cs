@@ -104,7 +104,10 @@ public sealed class Http3ClientPool : IDisposable
             return _connections.Count > 0 ? _connections[0] : null;
         }
 
-        return _connections[_next++ % _connections.Count];
+        // _next is masked, not just incremented: a bare _next++ wraps negative after ~2^31
+        // requests and the modulo then throws on every call.
+        _next = (_next + 1) & int.MaxValue;
+        return _connections[_next % _connections.Count];
     }
 
     private void OpenOne()

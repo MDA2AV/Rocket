@@ -151,6 +151,18 @@ internal sealed class HttpClientConnection : IDisposable
             ParseHead(response, headEnd);
             _consumed = headEnd;
 
+            // 1xx are INTERIM (103 Early Hints, 100 Continue): the real response follows on the
+            // same connection. Returning one as final would hand the caller a placeholder and
+            // leave the true response buffered for the NEXT request to misread.
+            while (response.Status is >= 100 and < 200)
+            {
+                response.ResetForInterim();
+                Compact();
+                headEnd = await ReadHeadAsync();
+                ParseHead(response, headEnd);
+                _consumed = headEnd;
+            }
+
             await ReadBodyAsync(response, headRequest: request.Method.Span.SequenceEqual("HEAD"u8));
 
             response.Freeze();
@@ -191,7 +203,7 @@ internal sealed class HttpClientConnection : IDisposable
         _chunked = false;
 
         // Responses that carry no body whatever the headers say (RFC 9110 §6.4.1).
-        if (headRequest || response.Status is 204 or 304 || response.Status is >= 100 and < 200)
+        if (headRequest || response.Status is 204 or 304)
         {
             response.SetBodyRange((0, 0));
             return;
@@ -237,7 +249,8 @@ internal sealed class HttpClientConnection : IDisposable
     private async ValueTask ReadChunkedBodyAsync(HttpClientResponse response)
     {
         int bodyStart = response.ArenaLength;
-        int bodyLength = 0;
+        long bodyLength = 0;   // long: an int here wraps negative on a hostile chunk size and
+                               // slips past the MaxResponseBytes check below
 
         while (true)
         {
@@ -283,7 +296,7 @@ internal sealed class HttpClientConnection : IDisposable
             _consumed = await ReadLineAsync() + 2;   // the CRLF terminating the chunk
         }
 
-        response.SetBodyRange((bodyStart, bodyLength));
+        response.SetBodyRange((bodyStart, (int)bodyLength));
     }
 
     private async ValueTask ReadUntilCloseAsync(HttpClientResponse response)

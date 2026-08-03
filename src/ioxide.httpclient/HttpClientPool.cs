@@ -118,6 +118,19 @@ public sealed class HttpClientPool
             Task completed = await Task.WhenAny(pending, Task.Delay(_options.AcquireTimeoutMs));
             if (completed != pending)
             {
+                // Abandon the slot so a later Release can't hand a connection to a caller that has
+                // already given up: TrySetResult then fails and the connection goes to the next
+                // waiter or back to the idle list. Losing this race means one WAS handed to us
+                // between the timeout and the cancel - give it back rather than leak it.
+                if (!waiter.TrySetCanceled())
+                {
+                    HttpClientConnection? raced = await pending;
+                    if (raced is not null)
+                    {
+                        Release(raced);
+                    }
+                }
+
                 throw new HttpClientException(
                     $"no connection to {_options.Host}:{_options.Port} within {_options.AcquireTimeoutMs} ms");
             }
@@ -126,6 +139,10 @@ public sealed class HttpClientPool
             if (handed is not null && !handed.IsBroken)
             {
                 return handed;
+            }
+            if (handed is not null)
+            {
+                Discard(handed);   // handed a corpse: drop it so the slot is replenished
             }
             // Woken by a failed open, or handed a corpse: loop and try again.
         }
