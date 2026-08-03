@@ -14,7 +14,7 @@ namespace Examples.Quic;
 /// awaits the first read WITHOUT draining it (1-RTT stream data implies the handshake finished),
 /// peeks <see cref="QuicConnection.NegotiatedProtocol"/>, and hands the still-queued items to
 /// whichever layer owns the connection from here - both start by reading the same queue, so
-/// nothing is lost. H3Connection sets itself up on its first wake anyway, so the deferral changes
+/// nothing is lost. Nghttp3Connection sets itself up on its first wake anyway, so the deferral changes
 /// no h3 timing.
 /// </summary>
 public static class QuicH3Example
@@ -25,12 +25,12 @@ public static class QuicH3Example
 
         if (conn.NegotiatedProtocol == "h3")
         {
-            // Owns the handler ref (DecRef on exit). H3Request is bytes throughout - route
+            // Owns the handler ref (DecRef on exit). Nghttp3Request is bytes throughout - route
             // by byte compare (no per-request strings), decode only what goes into the text.
-            await new H3Connection(conn).RunAsync(
+            await new Nghttp3Connection(conn).RunBufferedAsync(
                 static req => req.Path.Span.SequenceEqual("/plaintext"u8)
-                    ? H3Response.Text("Hello, World!")
-                    : H3Response.Text($"hello {Encoding.ASCII.GetString(req.Path.Span)} over HTTP/3 via io_uring\n"));
+                    ? Nghttp3Response.Text("Hello, World!")
+                    : Nghttp3Response.Text($"hello {Encoding.ASCII.GetString(req.Path.Span)} over HTTP/3 via io_uring\n"));
             return;
         }
 

@@ -102,10 +102,10 @@ internal static class QuicEngineTests
             {
                 QuicRecvSnapshot snap = await conn.ReadAsync();
 
-                while (conn.TryGetItem(in snap, out QuicRecvRing.Item item))
+                while (conn.TryGetDelivery(in snap, out QuicRecvRing.Delivery item))
                 {
                     conn.SendStream(item.StreamId, item.AsSpan(), item.Fin);
-                    conn.ReturnItem(in item);
+                    conn.ReturnBuffer(in item);
                 }
 
                 if (snap.IsClosed)

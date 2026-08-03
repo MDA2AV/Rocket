@@ -23,7 +23,7 @@ public enum QuicStreamEvent : byte
 /// </summary>
 public sealed class QuicRecvRing
 {
-    public struct Item
+    public struct Delivery
     {
         public long StreamId;
         public bool Fin;
@@ -35,7 +35,7 @@ public sealed class QuicRecvRing
         public ReadOnlySpan<byte> AsSpan() => Buf is null ? default : Buf.AsSpan(0, Len);
     }
 
-    private readonly Item[] _items;
+    private readonly Delivery[] _items;
     private readonly int _mask;
     private long _tail;
     private long _head;
@@ -47,12 +47,12 @@ public sealed class QuicRecvRing
             throw new ArgumentException("capacity must be a power of two", nameof(capacityPow2));
         }
 
-        _items = new Item[capacityPow2];
+        _items = new Delivery[capacityPow2];
         _mask  = capacityPow2 - 1;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool TryEnqueue(in Item item)
+    public bool TryEnqueue(in Delivery item)
     {
         long head = Volatile.Read(ref _head);
         long tail = _tail;
@@ -69,7 +69,7 @@ public sealed class QuicRecvRing
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool TryDequeue(out Item item)
+    public bool TryDequeue(out Delivery item)
     {
         long head = _head;
         long tail = Volatile.Read(ref _tail);
@@ -95,7 +95,7 @@ public sealed class QuicRecvRing
     public int CountUntil(long tailSnapshot) => (int)Math.Max(0, tailSnapshot - _head);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool TryDequeueUntil(long tailSnapshot, out Item item)
+    public bool TryDequeueUntil(long tailSnapshot, out Delivery item)
     {
         long head = _head;
 

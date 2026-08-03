@@ -63,7 +63,7 @@
     <div class="tab-rawgroup">
       <span class="tab-group">http/3</span>
       <div class="tab-rawtabs">
-        <label for="tab-h3">H3Connection</label>
+        <label for="tab-h3">Nghttp3Connection</label>
       </div>
     </div>
   </div>
@@ -480,10 +480,10 @@ reactor.QuicHandle = async (r, conn) =&gt;
             // loop serves every stream the peer multiplexes - here, an echo.
             // Replies queue on the engine; framing, encryption, pacing and
             // retransmission are its job (no flush to await).
-            while (conn.TryGetItem(in snap, out QuicRecvRing.Item item))
+            while (conn.TryGetDelivery(in snap, out QuicRecvRing.Delivery item))
             {
                 conn.SendStream(item.StreamId, item.AsSpan(), item.Fin);
-                conn.ReturnItem(in item);
+                conn.ReturnBuffer(in item);
             }
 
             if (snap.IsClosed)
@@ -518,16 +518,16 @@ var config = new ServerConfig
 
 var reactor = new Reactor(id, config);
 
-// H3Connection owns the connection's read loop: it feeds stream items into
+// Nghttp3Connection owns the connection's read loop: it feeds stream items into
 // nghttp3, assembles each request - headers, body and all - and calls your
 // function once per request. QPACK, control streams, fin and stream teardown
 // are its problem, not yours. The request is post-QPACK BYTES throughout
 // (ReadOnlyMemory&lt;byte&gt;) - route by byte compare, decode only at the edge.
 reactor.QuicHandle = (r, conn) =&gt;
-    new H3Connection(conn).RunAsync(static req =&gt;
-        req.Path.Span.SequenceEqual("/"u8)          ? H3Response.Text("hello from HTTP/3 over io_uring\n")
-      : req.Path.Span.SequenceEqual("/plaintext"u8) ? H3Response.Text("Hello, World!")
-      : H3Response.Text("not found\n", status: 404));
+    new Nghttp3Connection(conn).RunBufferedAsync(static req =&gt;
+        req.Path.Span.SequenceEqual("/"u8)          ? Nghttp3Response.Text("hello from HTTP/3 over io_uring\n")
+      : req.Path.Span.SequenceEqual("/plaintext"u8) ? Nghttp3Response.Text("Hello, World!")
+      : Nghttp3Response.Text("not found\n", status: 404));
 
 // One reactor per core.
 new Thread(reactor.Run).Start();

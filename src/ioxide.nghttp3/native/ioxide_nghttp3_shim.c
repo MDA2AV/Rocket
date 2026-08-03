@@ -187,7 +187,8 @@ static nghttp3_ssize ih3_read_body(nghttp3_conn *conn, int64_t stream_id, nghttp
 
 /* ---- API -------------------------------------------------------------------------------- */
 
-static ih3_conn *ih3_new(ih3_callbacks cbs, void *user, int server)
+static ih3_conn *ih3_new(ih3_callbacks cbs, void *user, int server,
+                         uint64_t qpack_max_dtable_capacity, uint64_t qpack_blocked_streams)
 {
     ih3_conn *c = calloc(1, sizeof(*c));
     if (c == NULL) {
@@ -208,6 +209,12 @@ static ih3_conn *ih3_new(ih3_callbacks cbs, void *user, int server)
 
     nghttp3_settings settings;
     nghttp3_settings_default(&settings);
+    /* QPACK dynamic table: 0 (the default) pins peers to static refs + literals; a nonzero
+     * capacity advertises a decode-side table and lets peers compress repeated headers
+     * (cookies!) to ~2-byte references. blocked_streams bounds how many header blocks may wait
+     * on an unacknowledged insertion. */
+    settings.qpack_max_dtable_capacity = (size_t)qpack_max_dtable_capacity;
+    settings.qpack_blocked_streams     = (size_t)qpack_blocked_streams;
 
     int rv = server
         ? nghttp3_conn_server_new(&c->conn, &callbacks, &settings, nghttp3_mem_default(), c)
@@ -219,15 +226,16 @@ static ih3_conn *ih3_new(ih3_callbacks cbs, void *user, int server)
     return c;
 }
 
-ih3_conn *ih3_server_new(ih3_callbacks cbs, void *user)
+ih3_conn *ih3_server_new(ih3_callbacks cbs, void *user,
+                         uint64_t qpack_max_dtable_capacity, uint64_t qpack_blocked_streams)
 {
-    return ih3_new(cbs, user, 1);
+    return ih3_new(cbs, user, 1, qpack_max_dtable_capacity, qpack_blocked_streams);
 }
 
 /* Client conn (test drivers): same event surface, requests out instead of responses. */
 ih3_conn *ih3_client_new(ih3_callbacks cbs, void *user)
 {
-    return ih3_new(cbs, user, 0);
+    return ih3_new(cbs, user, 0, 0, 0);   /* test drivers: no decode-side dynamic table */
 }
 
 void ih3_free(ih3_conn *c)
@@ -436,6 +444,24 @@ int ih3_close_stream(ih3_conn *c, int64_t stream_id, uint64_t app_error)
         return 0;   /* uni streams and already-closed streams are not an error */
     }
     return rv;
+}
+
+/* Graceful shutdown: queue the GOAWAY pair (shutdown notice + final bound) on the control
+ * stream - the next writev drain carries it out - and start rejecting NEW request streams.
+ * Streams already in flight are processed normally. */
+int ih3_shutdown(ih3_conn *c)
+{
+    int rv = nghttp3_conn_submit_shutdown_notice(c->conn);
+    if (rv != 0) {
+        return rv;
+    }
+    return nghttp3_conn_shutdown(c->conn);
+}
+
+/* Nonzero once a shutdown finished draining: every accepted stream has completed. */
+int ih3_is_drained(ih3_conn *c)
+{
+    return nghttp3_conn_is_drained(c->conn);
 }
 
 const char *ih3_strerror(int liberr)

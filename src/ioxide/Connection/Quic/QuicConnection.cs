@@ -31,6 +31,7 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
     internal readonly List<QuicCid> Cids = [];
     internal long LastSeenMs;
 
+    // TODO: 256? This should not be hardcoded
     protected QuicConnection(int recvQueueEntries = 256)
     {
         _recv = new QuicRecvRing(recvQueueEntries);
@@ -83,6 +84,15 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
     /// thread only.
     /// </summary>
     public virtual void ConsumeStreamData(long streamId, long bytes) { }
+
+    /// <summary>
+    /// Close the connection from the application side: a CONNECTION_CLOSE carrying
+    /// <paramref name="applicationErrorCode"/> goes to the peer and the connection tears down
+    /// (parked reads resume with a closed snapshot). The graceful path for h3 is
+    /// Nghttp3Connection.Shutdown, which drains in-flight requests first and then calls this
+    /// with H3_NO_ERROR. Reactor thread only. Idempotent.
+    /// </summary>
+    public virtual void Close(ulong applicationErrorCode) { }
 
     /// <summary>Send one datagram (or a GSO batch) to the connection's current peer address.</summary>
     protected void Send(ReadOnlySpan<byte> payload, int gsoSegmentSize = 0)
@@ -162,12 +172,12 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
         return new ValueTask<QuicRecvSnapshot>(this, (short)gen);
     }
 
-    /// <summary>Drain the snapshot one event at a time; hand each buffer back with <see cref="ReturnItem"/>.</summary>
-    public bool TryGetItem(in QuicRecvSnapshot snap, out QuicRecvRing.Item item)
+    /// <summary>Drain the snapshot one event at a time; hand each buffer back with <see cref="ReturnBuffer"/>.</summary>
+    public bool TryGetDelivery(in QuicRecvSnapshot snap, out QuicRecvRing.Delivery item)
         => _recv.TryDequeueUntil(snap.Tail, out item);
 
     /// <summary>Return a consumed item's pooled buffer.</summary>
-    public void ReturnItem(in QuicRecvRing.Item item)
+    public void ReturnBuffer(in QuicRecvRing.Delivery item)
     {
         if (item.Buf is not null)
         {
@@ -192,7 +202,7 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
             data.CopyTo(buf);
         }
 
-        if (!_recv.TryEnqueue(new QuicRecvRing.Item
+        if (!_recv.TryEnqueue(new QuicRecvRing.Delivery
                  {
                      StreamId = streamId,
                      Fin = fin,
@@ -216,7 +226,7 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
     /// <see cref="EnqueueStreamData"/>.
     /// </summary>
     public bool EnqueueStreamEvent(long streamId, QuicStreamEvent kind, ulong appError)
-        => _recv.TryEnqueue(new QuicRecvRing.Item
+        => _recv.TryEnqueue(new QuicRecvRing.Delivery
            {
                StreamId = streamId,
                Kind = kind,
@@ -283,9 +293,9 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
 
     private void DrainRecv()
     {
-        while (_recv.TryDequeue(out QuicRecvRing.Item item))
+        while (_recv.TryDequeue(out QuicRecvRing.Delivery item))
         {
-            ReturnItem(in item);
+            ReturnBuffer(in item);
         }
     }
 

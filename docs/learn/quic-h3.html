@@ -118,7 +118,7 @@
         adopted connection; the QUIC twin of <code>TcpHandle</code>.</span></div></div>
       <div class="qh3-down"><div></div><div>&darr;</div></div>
       <div class="qh3-row"><div class="qh3-tag">ioxide.nghttp3</div>
-        <div class="qh3-box"><b>H3Connection</b> <span>- nghttp3 rides the read surface: assembles
+        <div class="qh3-box"><b>Nghttp3Connection</b> <span>- nghttp3 rides the read surface: assembles
         requests (QPACK, framing), runs your <code>req =&gt; resp</code> callback, drains response
         frames back through SendStream.</span>
         <br><code>src/ioxide.nghttp3/*</code> + <code>libioxide_nghttp3.so</code></div></div>
@@ -139,8 +139,8 @@ var config = new ServerConfig
 };
 
 reactor.TcpHandle  = Handlers.Raw;
-reactor.QuicHandle = (r, conn) => new H3Connection(conn).RunAsync(
-    static req => H3Response.Text($"hello {Encoding.ASCII.GetString(req.Path.Span)}"));</code></pre>
+reactor.QuicHandle = (r, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+    static req => Nghttp3Response.Text($"hello {Encoding.ASCII.GetString(req.Path.Span)}"));</code></pre>
 
     <h2>Ingress: the life of a datagram</h2>
     <p>A client datagram lands as a multishot <code>recvmsg</code> completion on the reactor
@@ -196,11 +196,11 @@ reactor.QuicHandle = async (r, conn) =>
         {
             QuicRecvSnapshot snap = await conn.ReadAsync();
 
-            while (conn.TryGetItem(in snap, out QuicRecvRing.Item item))
+            while (conn.TryGetDelivery(in snap, out QuicRecvRing.Delivery item))
             {
                 if (item.Kind == QuicStreamEvent.Data)
                     conn.SendStream(item.StreamId, item.AsSpan(), item.Fin);  // echo
-                conn.ReturnItem(in item);   // pooled buffer back to the pool
+                conn.ReturnBuffer(in item);   // pooled buffer back to the pool
             }
 
             if (snap.IsClosed) break;
@@ -278,9 +278,9 @@ reactor.QuicHandle = async (r, conn) =>
     <h2>The HTTP/3 layer</h2>
     <p><code>ioxide.nghttp3</code> references only the core - not <code>ioxide.ngtcp2</code>. It needs
     nothing but the abstract read/write surface, so it would ride any future engine (quicly, etc.)
-    unchanged. One <code>H3Connection</code> wraps one <code>QuicConnection</code>:</p>
-<pre><code class="language-csharp">reactor.QuicHandle = (r, conn) => new H3Connection(conn).RunAsync(
-    static req => H3Response.Text($"hello {Encoding.ASCII.GetString(req.Path.Span)} via {Encoding.ASCII.GetString(req.Method.Span)}"));</code></pre>
+    unchanged. One <code>Nghttp3Connection</code> wraps one <code>QuicConnection</code>:</p>
+<pre><code class="language-csharp">reactor.QuicHandle = (r, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+    static req => Nghttp3Response.Text($"hello {Encoding.ASCII.GetString(req.Path.Span)} via {Encoding.ASCII.GetString(req.Method.Span)}"));</code></pre>
     <p>Inside <code>RunAsync</code>:</p>
     <ol>
       <li><b>Lazy setup.</b> On the first wake (which is by definition post-handshake), it opens
@@ -288,11 +288,11 @@ reactor.QuicHandle = async (r, conn) =>
       binds them into nghttp3, and the SETTINGS preface rides out on that same drain.</li>
       <li><b>Assembly.</b> Every recv item is fed to <code>nghttp3_conn_read_stream</code>;
       nghttp3 demuxes uni-stream types itself and fires header/data/end callbacks, which
-      accumulate into an <code>H3Request</code> (method, path, headers, body - all post-QPACK
+      accumulate into an <code>Nghttp3Request</code> (method, path, headers, body - all post-QPACK
       bytes as <code>ReadOnlyMemory&lt;byte&gt;</code>; the library never decodes to strings, and the
       memories are valid until the handler returns).</li>
       <li><b>Dispatch.</b> Completed requests run your callback on the reactor thread; the
-      <code>H3Response</code> (status, headers, body) is submitted back to nghttp3, whose output
+      <code>Nghttp3Response</code> (status, headers, body) is submitted back to nghttp3, whose output
       frames are drained through <code>SendStream</code> - response bodies are copied into shim
       memory that lives until the stream closes, because nghttp3 holds references too.</li>
       <li><b>Lifecycle mirroring.</b> The <code>Kind</code>-tagged items keep nghttp3's view of

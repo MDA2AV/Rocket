@@ -505,6 +505,16 @@ ngtcp2_ssize iq_conn_write_close(iq_conn *c, uint8_t *dest, size_t destlen, uint
                                               &c->last_error, ts);
 }
 
+/* App-initiated close: record an APPLICATION error (e.g. H3_NO_ERROR for graceful shutdown) and
+ * build the CONNECTION_CLOSE datagram carrying it. The caller sends it and tears the conn down. */
+ngtcp2_ssize iq_conn_close(iq_conn *c, uint64_t app_error_code,
+                           uint8_t *dest, size_t destlen, uint64_t ts)
+{
+    ngtcp2_ccerr_set_application_error(&c->last_error, app_error_code, NULL, 0);
+    return ngtcp2_conn_write_connection_close(c->conn, &c->path, NULL, dest, destlen,
+                                              &c->last_error, ts);
+}
+
 uint64_t iq_conn_expiry(iq_conn *c)
 {
     return ngtcp2_conn_get_expiry(c->conn);

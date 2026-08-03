@@ -54,6 +54,8 @@ internal static unsafe class Ngtcp2
         long streamId, byte* data, nuint dataLen, int fin,
         long* pConsumed, ulong ts);
 
+    [DllImport(Lib)] internal static extern nint iq_conn_close(
+        nint conn, ulong appErrorCode, byte* dest, nuint destLen, ulong ts);
     [DllImport(Lib)] internal static extern nint iq_conn_write_close(
         nint conn, byte* dest, nuint destLen, ulong ts);
 

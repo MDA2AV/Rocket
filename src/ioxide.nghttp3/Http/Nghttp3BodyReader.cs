@@ -4,7 +4,7 @@ using System.Threading.Tasks.Sources;
 namespace ioxide.nghttp3;
 
 /// <summary>
-/// Pull surface for a streaming request body (the async <see cref="H3Connection.RunAsync(Func{H3Request, ValueTask{H3Response}})"/>
+/// Pull surface for a streaming request body (the <see cref="Nghttp3Connection.RunStreamingAsync"/>
 /// overload): the connection loop pushes body chunks in as nghttp3 delivers them, the handler
 /// pulls with <see cref="ReadAsync"/>. An empty chunk means end of body (fin or stream reset).
 ///
@@ -17,9 +17,14 @@ namespace ioxide.nghttp3;
 /// chunk's memory (its pooled buffer is recycled). Wakes are deferred by the connection loop to
 /// after nghttp3 unwinds - same discipline as the engine's once-per-read fire.
 /// </summary>
-public sealed class H3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
+public sealed class Nghttp3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
 {
-    private readonly H3Connection _owner;
+    /// <summary>Shared pre-ended reader for bodyless requests (fin arrived with the headers):
+    /// stateless on its read path, so every such request hands out the same instance - no
+    /// allocation, no pacing, reads return empty immediately.</summary>
+    internal static readonly Nghttp3BodyReader Ended = new(null, 0, ended: true);
+
+    private readonly Nghttp3Connection? _owner;
     private readonly long _streamId;
 
     private readonly Queue<(byte[] Buf, int Len)> _chunks = new();
@@ -32,7 +37,7 @@ public sealed class H3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         RunContinuationsAsynchronously = false,
     };
 
-    internal H3BodyReader(H3Connection owner, long streamId, bool ended)
+    internal Nghttp3BodyReader(Nghttp3Connection? owner, long streamId, bool ended)
     {
         _owner = owner;
         _streamId = streamId;
@@ -50,7 +55,7 @@ public sealed class H3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         if (_chunks.TryDequeue(out (byte[] Buf, int Len) chunk))
         {
             _handedOut = chunk;
-            _owner.CreditBody(_streamId, chunk.Len);   // consumption opens the peer's window
+            _owner?.CreditBody(_streamId, chunk.Len);   // consumption opens the peer's window
             return new ValueTask<ReadOnlyMemory<byte>>(chunk.Buf.AsMemory(0, chunk.Len));
         }
 
@@ -73,12 +78,12 @@ public sealed class H3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         {
             return;
         }
-        byte[] buf = ArrayPool<byte>.Shared.Rent(data.Length);
-        data.CopyTo(buf);
-        _chunks.Enqueue((buf, data.Length));
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(data.Length);
+        data.CopyTo(buffer);
+        _chunks.Enqueue((buffer, data.Length));
         if (_armed)
         {
-            _owner.NoteBodyWake(this);
+            _owner?.NoteBodyWake(this);
         }
     }
 
@@ -92,7 +97,7 @@ public sealed class H3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         _ended = true;
         if (_armed)
         {
-            _owner.NoteBodyWake(this);
+            _owner?.NoteBodyWake(this);
         }
     }
 
@@ -107,7 +112,7 @@ public sealed class H3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         {
             _armed = false;
             _handedOut = chunk;
-            _owner.CreditBody(_streamId, chunk.Len);
+            _owner?.CreditBody(_streamId, chunk.Len);
             _core.SetResult(chunk.Buf.AsMemory(0, chunk.Len));
         }
         else if (_ended)

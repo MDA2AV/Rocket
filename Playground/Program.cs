@@ -22,7 +22,7 @@ internal static class Program
         // reactor binds the UDP port via SO_REUSEPORT and demuxes its own flows.
         QuicEngine? quicEngine = null;
         QuicOptions? quicOptions = null;
-        if (mode is "quic" or "h3" or "http3")
+        if (mode is "quic" or "h3" or "h3-buffered" or "http3")
         {
             (string certPath, string keyPath) = Handlers.EnsureQuicCert();
             quicEngine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
@@ -87,6 +87,20 @@ internal static class Program
             Console.WriteLine($"[playground] reloaded - now serving {assets.Count} files");
         });
         
+        // Graceful shutdown for the h3 modes: SIGTERM GOAWAYs every live connection, gives
+        // in-flight requests a grace period to finish, then exits. Without this the process dies
+        // mid-request and clients see resets.
+        using IDisposable? drainOnSigterm = mode is not ("h3" or "h3-buffered") ? null :
+            PosixSignalRegistration.Create(PosixSignal.SIGTERM, context =>
+            {
+                context.Cancel = true;
+                Console.WriteLine("[playground] SIGTERM: draining h3 connections (GOAWAY)...");
+                Handlers.ShutdownAllH3();
+                Thread.Sleep(2000);   // grace period for in-flight requests
+                Console.WriteLine("[playground] drain complete, exiting");
+                Environment.Exit(0);
+            });
+
         Console.WriteLine($"[playground] {config.ReactorCount} reactors on :{config.Tcp.Port} (mode={mode})");
 
         var threads = new Thread[config.ReactorCount];
@@ -128,7 +142,12 @@ internal static class Program
                 case "quic":
                 case "h3":
                     reactor.TcpHandle = Handlers.Raw;   // :8080 still listens (until a TCP opt-out exists)
-                    reactor.QuicHandle = Handlers.H3;
+                    reactor.QuicHandle = Handlers.Nghttp3Streamed;
+                    break;
+
+                case "h3-buffered":
+                    reactor.TcpHandle = Handlers.Raw;
+                    reactor.QuicHandle = Handlers.Nghttp3Buffered;   // whole body in req.Body, handler may await
                     break;
 
                 case "http3":

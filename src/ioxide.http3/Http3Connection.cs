@@ -102,13 +102,13 @@ public sealed class Http3Connection
                     SendControlStream();
                 }
 
-                while (_quicConnection.TryGetItem(in snap, out QuicRecvRing.Item item))
+                while (_quicConnection.TryGetDelivery(in snap, out QuicRecvRing.Delivery item))
                 {
                     if (!_fatal)
                     {
                         Feed(in item);
                     }
-                    _quicConnection.ReturnItem(in item);
+                    _quicConnection.ReturnBuffer(in item);
                 }
 
                 if (!_fatal)
@@ -170,7 +170,7 @@ public sealed class Http3Connection
 
     // --- ingress -------------------------------------------------------------------------------
 
-    private void Feed(in QuicRecvRing.Item item)
+    private void Feed(in QuicRecvRing.Delivery item)
     {
         if (item.Kind != QuicStreamEvent.Data)
         {

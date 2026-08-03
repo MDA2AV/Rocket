@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
@@ -26,8 +27,8 @@ internal static class H3Tests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new H3Connection(conn).RunAsync(
-                    static req => H3Response.Text($"hello {Encoding.ASCII.GetString(req.Path.Span)} via {Encoding.ASCII.GetString(req.Method.Span)}")));
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                    static req => Nghttp3Response.Text($"hello {Encoding.ASCII.GetString(req.Path.Span)} via {Encoding.ASCII.GetString(req.Method.Span)}")));
 
             using var client = new H3TestClient("127.0.0.1", udpPort);
             client.Connect();
@@ -48,7 +49,7 @@ internal static class H3Tests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new H3Connection(conn).RunAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunStreamingAsync(
                     static async req =>
                     {
                         long total = 0;
@@ -61,7 +62,7 @@ internal static class H3Tests
                             }
                             total += chunk.Length;
                         }
-                        return H3Response.Text($"got {total}");
+                        return Nghttp3Response.Text($"got {total}");
                     }));
 
             using var client = new H3TestClient("127.0.0.1", udpPort);
@@ -76,6 +77,134 @@ internal static class H3Tests
             (int status, string text) = client.Request("POST", "/upload", body, timeoutMs: 10_000);
             Assert.Equal(200, status);
             Assert.Equal("got 600000", text);
+        });
+
+        runner.Test("h3: buffered-async handler (whole body in req.Body, handler may await)", () =>
+        {
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                    static async req =>
+                    {
+                        // Dispatch fired at end-of-stream: the body is complete before we run.
+                        await ValueTask.CompletedTask;   // where a db call would slot in
+                        return Nghttp3Response.Text(
+                            $"buffered got {req.Body.Length} first {req.Body.Span[0]} last {req.Body.Span[^1]}");
+                    }));
+
+            using var client = new H3TestClient("127.0.0.1", udpPort);
+            client.Connect();
+            Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");
+
+            var body = new byte[200_000];
+            new Random(21).NextBytes(body);
+
+            (int status, string text) = client.Request("POST", "/upload", body, timeoutMs: 10_000);
+            Assert.Equal(200, status);
+            Assert.Equal($"buffered got 200000 first {body[0]} last {body[^1]}", text);
+        });
+        runner.Test("h3: QPACK dynamic table enabled (fat cookie decodes via insertions)", () =>
+        {
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+
+            var options = new Nghttp3Options
+            {
+                QpackDynamicTableCapacity = 4096,
+                QpackBlockedStreams = 100,
+            };
+
+            // Handler echoes the cookie's length - proving the header survived the dynamic-table
+            // encode/decode round trip (the client's nghttp3 encoder inserts eligible headers the
+            // moment our SETTINGS advertise capacity).
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: (_, conn) => new Nghttp3Connection(conn, options).RunBufferedAsync(
+                    static req =>
+                    {
+                        // Byte-level cookie lookup - no strings, and it sees cookie field lines
+                        // however h3 split them.
+                        return req.TryGetCookie("session"u8, out ReadOnlyMemory<byte> session)
+                            ? Nghttp3Response.Text($"cookie {session.Length}")
+                            : Nghttp3Response.Text("no cookie", status: 400);
+                    }));
+
+            using var client = new H3TestClient("127.0.0.1", udpPort);
+            client.Connect();
+            Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");
+
+            // Two pairs in one field line: the parser must find "session" and stop at the ';'.
+            string cookie = "session=" + new string('s', 400) + "; tracking=abc";
+            (int status, string text) = client.Request("GET", "/", null,
+                [("cookie", cookie)], timeoutMs: 5000);
+            Assert.Equal(200, status);
+            Assert.Equal("cookie 400", text);
+        });
+
+        runner.Test("h3: cookies split across multiple field lines (RFC 9114 4.2.1)", () =>
+        {
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+
+            // Echo every cookie found, in order - proves the enumerator walks BOTH field lines
+            // (a Headers.TryGet("cookie") would only ever see the first).
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                    static req =>
+                    {
+                        var pairs = new List<string>();
+                        foreach ((ReadOnlyMemory<byte> name, ReadOnlyMemory<byte> value) in req.Cookies)
+                        {
+                            pairs.Add($"{Encoding.ASCII.GetString(name.Span)}={Encoding.ASCII.GetString(value.Span)}");
+                        }
+                        return Nghttp3Response.Text(string.Join('|', pairs));
+                    }));
+
+            using var client = new H3TestClient("127.0.0.1", udpPort);
+            client.Connect();
+            Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");
+
+            // Two separate cookie field lines, the second carrying two pairs - exactly the shape
+            // h3 permits and h1 never produces.
+            (int status, string text) = client.Request("GET", "/", null,
+                [("cookie", "a=1"), ("cookie", "b=2; c=3")], timeoutMs: 5000);
+            Assert.Equal(200, status);
+            Assert.Equal("a=1|b=2|c=3", text);
+        });
+        runner.Test("h3: graceful shutdown (GOAWAY) still answers the in-flight request", () =>
+        {
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+
+            // The handler calls Shutdown() while ITS OWN request is in flight: the GOAWAY goes
+            // out, new streams are refused, and this response must still reach the client.
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: static (_, conn) =>
+                {
+                    Nghttp3Connection h3 = new(conn);
+                    return h3.RunBufferedAsync(req =>
+                    {
+                        h3.Shutdown();   // drain begins; this request completes normally
+                        return Nghttp3Response.Text("bye after goaway");
+                    });
+                });
+
+            using var client = new H3TestClient("127.0.0.1", udpPort);
+            client.Connect();
+            Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");
+
+            (int status, string text) = client.Get("/last", timeoutMs: 5000);
+            Assert.Equal(200, status);
+            Assert.Equal("bye after goaway", text);
         });
     }
 }
@@ -156,6 +285,9 @@ internal sealed unsafe class H3TestClient : IDisposable
     /// <summary>Submit one request (optional body, served through the shim's data reader) and
     /// pump until the response completes.</summary>
     public (int Status, string Body) Request(string method, string path, byte[]? body, int timeoutMs)
+        => Request(method, path, body, extraHeaders: null, timeoutMs);
+
+    public (int Status, string Body) Request(string method, string path, byte[]? body, (string Name, string Value)[]? extraHeaders, int timeoutMs)
     {
         // Client H3 conn + its control/QPACK uni streams.
         var h3Cbs = new Ih3Callbacks
@@ -178,12 +310,27 @@ internal sealed unsafe class H3TestClient : IDisposable
         _requestSid = iq_client_open_bidi(_conn);
         Assert.True(_requestSid >= 0, "failed to open request stream");
 
-        byte[] headers = PackHeaders([
+        // Let the server's SETTINGS land before encoding: with a dynamic-table capacity
+        // advertised, the client encoder only uses it once it has SEEN that advertisement.
+        for (int settle = 0; settle < 10; settle++)
+        {
+            DrainH3Out();
+            FlushOut();
+            PumpIn();
+        }
+
+        var headerList = new List<(string, string)>
+        {
             (":method", method),
             (":scheme", "https"),
             (":authority", "localhost"),
             (":path", path),
-        ]);
+        };
+        if (extraHeaders is not null)
+        {
+            headerList.AddRange(extraHeaders.Select(h => (h.Name, h.Value)));
+        }
+        byte[] headers = PackHeaders([.. headerList]);
         fixed (byte* p = headers)
         fixed (byte* pb = body)
         {
