@@ -34,8 +34,6 @@
        "dotnet run" against its own project directory; see Playground/README.md. -->
   <Folder Name="/apps/playground/">
     <Project Path="Playground/Shared/Playground.Shared.csproj" />
-    <Project Path="Playground/Shared.Quic/Playground.Shared.Quic.csproj" />
-    <Project Path="Playground/Shared.Nghttp3/Playground.Shared.Nghttp3.csproj" />
     <Project Path="Playground/Raw/Playground.Raw.csproj" />
     <Project Path="Playground/Pipe/Playground.Pipe.csproj" />
     <Project Path="Playground/Hop/Playground.Hop.csproj" />

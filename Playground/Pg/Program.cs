@@ -1,80 +1,148 @@
-using System.Buffers.Text;
 using System.Text;
 using ioxide;
 using ioxide.pg;
+using ioxide.utils;
 using Playground.Shared;
-using Playground.Shared.Http;
 
-// pg - a PgPool per reactor; each request runs a query on the reactor's own ring and resumes inline.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//  pg - a Postgres-backed ioxide server, whole. A pool per reactor; connect, query and row
+//  streaming are all ring operations, so a request never leaves the thread it arrived on.
 //
-//   /       SELECT 42
-//   /sleep  a 100ms query, to watch pool concurrency
-//   /hang   a 10s query, to watch the command timeout
-//   /err    a server error, which becomes a 500 while the connection stays usable
+//      docker run --rm -d -p 5432:5432 -e POSTGRES_USER=bench -e POSTGRES_DB=bench \
+//        -e POSTGRES_HOST_AUTH_METHOD=trust postgres:18
+//      dotnet run -c Release --project Playground/Pg
+//      curl http://127.0.0.1:8080/          # -> db=42
+//
+//      /        SELECT 42
+//      /sleep   a 100ms query, to watch pool concurrency
+//      /hang    a 10s query, to watch the command timeout
+//      /err     a server error -> 500, and the connection stays usable
+//
+//  Needs: ioxide, ioxide.pg
+// ─────────────────────────────────────────────────────────────────────────────────────────────
 
-var options = new PgOptions
+var config = new ServerConfig
+{
+    ReactorCount = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
+    Tcp = new TcpOptions
+    {
+        Port = Env.Port("PLAYGROUND_PORT", 8080),
+    },
+};
+
+var pgOptions = new PgOptions
 {
     Host = Env.Str("PLAYGROUND_PG_HOST", "127.0.0.1"),
     Port = Env.Port("PLAYGROUND_PG_PORT", 5432),
     User = Env.Str("PLAYGROUND_PG_USER", "bench"),
     Database = Env.Str("PLAYGROUND_PG_DB", "bench"),
-    PoolSize = Env.Int("PLAYGROUND_PG_POOL", 4),
+    PoolSize = Env.Int("PLAYGROUND_PG_POOL", 4),          // per reactor, not global
     CommandTimeoutMs = Env.Int("PLAYGROUND_PG_TIMEOUT", 30_000),
 };
 
-return PlaygroundHost.Run(new PlaygroundSample
-{
-    Name = "pg",
-    Summary = $"a PgPool per reactor against {options.Host}:{options.Port}",
-    // OnStart runs on the reactor thread, so the pool's connections belong to that reactor's ring.
-    Start = reactor => PgPool.Start(reactor, options),
-    Tcp = (reactor, conn) => ConnectionLoop.ServeAsync(conn, new PgResponder(reactor.GetService<PgPool>())),
-});
+var threads = new Thread[config.ReactorCount];
 
-internal readonly struct PgResponder(PgPool pool) : ITcpResponder
+for (int i = 0; i < threads.Length; i++)
 {
-    public async ValueTask RespondAsync(TcpConnection conn, RecvSnapshot snapshot)
+    var reactor = new Reactor(i, config);
+
+    // OnStart runs ON the reactor thread, so every connection the pool opens belongs to THIS
+    // reactor's ring. Start registers the pool as a reactor service; the handler fetches it back
+    // with GetService. One pool per reactor, no sharing, no lock.
+    reactor.OnStart = r => PgPool.Start(r, pgOptions);
+
+    reactor.TcpHandle = async (r, conn) =>
     {
-        string path = RequestParser.ReadPath(conn, snapshot);
-
-        string sql = path switch
-        {
-            "/sleep" => "SELECT 42 FROM pg_sleep(0.1)",
-            "/hang"  => "SELECT pg_sleep(10)",
-            "/err"   => "SELECT * FROM this_table_does_not_exist",
-            _        => "SELECT 42",
-        };
+        PgPool pg = r.GetService<PgPool>();
 
         try
         {
-            PgResult result = await pool.QueryAsync(sql);
-            WriteDbResult(conn, result.Value ?? "");
+            while (true)
+            {
+                RecvSnapshot snapshot = await conn.ReadAsync();
+
+                // Drain the recv, pulling the request target out on the way past. The buffers must
+                // go back to the ring, so read what you need before returning them.
+                string path = "/";
+                while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                {
+                    if (item.HasBuffer)
+                    {
+                        if (TryReadTarget(item.AsSpan(), out ReadOnlySpan<byte> target))
+                        {
+                            path = Encoding.ASCII.GetString(target);
+                        }
+                        conn.ReturnBuffer(in item);
+                    }
+                }
+
+                string sql = path switch
+                {
+                    "/sleep" => "SELECT 42 FROM pg_sleep(0.1)",
+                    "/hang"  => "SELECT pg_sleep(10)",
+                    "/err"   => "SELECT * FROM this_table_does_not_exist",
+                    _        => "SELECT 42",
+                };
+
+                try
+                {
+                    // io_uring send + recv to Postgres, on the same ring that accepted the request.
+                    // The continuation resumes inline, on this thread.
+                    PgResult result = await pg.QueryAsync(sql);
+
+                    string responseBody = $"db={result.Value}";
+                    conn.Write(Encoding.ASCII.GetBytes(
+                        $"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {responseBody.Length}\r\n\r\n{responseBody}"));
+                }
+                catch (PgException e)
+                {
+                    // A server error is just an exception. The connection goes back to the pool
+                    // usable - Postgres told us about a bad query, it didn't break the socket.
+                    Console.Error.WriteLine($"[pg] query failed: {e.Message}");
+                    conn.Write("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n"u8);
+                }
+
+                await conn.FlushAsync();
+
+                if (snapshot.IsClosed) return;
+                conn.ResetRead();
+            }
         }
-        catch (PgException e)
+        finally
         {
-            Console.Error.WriteLine($"[pg] query failed: {e.Message}");
-            conn.Write(Responses.ServerError);
+            conn.DecRef();
         }
+    };
 
-        await conn.FlushAsync();
-    }
+    threads[i] = new Thread(reactor.Run) { Name = $"reactor-{i}" };
+    threads[i].Start();
+}
 
-    /// <summary>Frame a "db=&lt;value&gt;" plaintext response into the write slab - no allocation.</summary>
-    private static void WriteDbResult(TcpConnection conn, string value)
-    {
-        Span<byte> response = stackalloc byte[160];
-        int position = 0;
+Console.WriteLine($"[pg] {config.ReactorCount} reactors on :{config.Tcp.Port} "
+                + $"-> {pgOptions.Host}:{pgOptions.Port}, {pgOptions.PoolSize} connections each");
 
-        position += Responses.Copy(response[position..],
-            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: "u8);
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}
 
-        int bodyLength = 3 + value.Length;   // "db=" + value
-        Utf8Formatter.TryFormat(bodyLength, response[position..], out int digits);
-        position += digits;
+// "GET /sleep?x=1 HTTP/1.1" -> "/sleep". Your framework of choice would do this for you; ioxide
+// deliberately doesn't, so here it is in full.
+static bool TryReadTarget(ReadOnlySpan<byte> request, out ReadOnlySpan<byte> target)
+{
+    target = default;
 
-        position += Responses.Copy(response[position..], "\r\n\r\ndb="u8);
-        position += Encoding.ASCII.GetBytes(value, response[position..]);
+    int firstSpace = request.IndexOf((byte)' ');
+    if (firstSpace < 0) return false;
 
-        conn.Write(response[..position]);
-    }
+    ReadOnlySpan<byte> afterMethod = request[(firstSpace + 1)..];
+    int secondSpace = afterMethod.IndexOf((byte)' ');
+    if (secondSpace < 0) return false;
+
+    target = afterMethod[..secondSpace];
+
+    int query = target.IndexOf((byte)'?');
+    if (query >= 0) target = target[..query];
+
+    return true;
 }

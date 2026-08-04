@@ -1,38 +1,84 @@
 using System.Text;
 using System.Text.Json;
 using ioxide;
+using ioxide.utils;
 using Playground.Shared;
-using Playground.Shared.Http;
 
-// taskrun - the raw workload, but each request awaits a Task.Run JSON serialization. With the
-// reactor SynchronizationContext installed the continuation comes home to the reactor; without it,
-// it stays on the thread pool. The sample logs once if the post-await thread is off-reactor, which
-// is the whole point of running it.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//  taskrun - proof that ordinary .NET async works inside a handler. Each request awaits a
+//  Task.Run, which is the escape hatch for anything CPU-bound or not ring-native.
+//
+//  The point: with the per-reactor SynchronizationContext installed, the continuation comes HOME
+//  to the reactor, so connection state stays single-threaded and you can keep touching conn after
+//  the await. The sample logs once if it ever resumes off-reactor - if that line never prints,
+//  the guarantee held.
+//
+//      dotnet run -c Release --project Playground/TaskRun
+//      curl http://127.0.0.1:8080/          # -> "hello world"
+//
+//  Needs: ioxide
+// ─────────────────────────────────────────────────────────────────────────────────────────────
 
-return PlaygroundHost.Run(new PlaygroundSample
+var config = new ServerConfig
 {
-    Name = "taskrun",
-    Summary = "raw, but each request awaits a Task.Run serialization",
-    Tcp = (reactor, conn) => ConnectionLoop.ServeAsync(conn, new TaskRunResponder(reactor)),
-});
-
-internal readonly struct TaskRunResponder(Reactor reactor) : ITcpResponder
-{
-    private static int _offReactorSeen;
-
-    public async ValueTask RespondAsync(TcpConnection conn, RecvSnapshot snapshot)
+    ReactorCount = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
+    Tcp = new TcpOptions
     {
-        RequestParser.Drain(conn, snapshot);
+        Port = Env.Port("PLAYGROUND_PORT", 8080),
+    },
+};
 
-        string json = await Task.Run(static () => JsonSerializer.Serialize("hello world"));
+int offReactorSeen = 0;
 
-        if (!reactor.OnReactorThread && Interlocked.Exchange(ref _offReactorSeen, 1) == 0)
+var threads = new Thread[config.ReactorCount];
+
+for (int i = 0; i < threads.Length; i++)
+{
+    var reactor = new Reactor(i, config);
+
+    reactor.TcpHandle = async (r, conn) =>
+    {
+        try
         {
-            Console.WriteLine("[taskrun] continuation resumed OFF the reactor (no sync context)");
-        }
+            while (true)
+            {
+                RecvSnapshot snapshot = await conn.ReadAsync();
 
-        conn.Write(Responses.JsonHeader);
-        conn.Write(Encoding.UTF8.GetBytes(json));
-        await conn.FlushAsync();
-    }
+                while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                {
+                    if (item.HasBuffer) conn.ReturnBuffer(in item);
+                }
+
+                // Ordinary thread-pool work, awaited from a reactor handler.
+                string json = await Task.Run(static () => JsonSerializer.Serialize("hello world"));
+
+                // We should be back on the reactor here. If not, say so once.
+                if (!r.OnReactorThread && Interlocked.Exchange(ref offReactorSeen, 1) == 0)
+                {
+                    Console.WriteLine("[taskrun] continuation resumed OFF the reactor (no sync context)");
+                }
+
+                conn.Write("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 13\r\n\r\n"u8);
+                conn.Write(Encoding.UTF8.GetBytes(json));
+                await conn.FlushAsync();
+
+                if (snapshot.IsClosed) return;
+                conn.ResetRead();
+            }
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    };
+
+    threads[i] = new Thread(reactor.Run) { Name = $"reactor-{i}" };
+    threads[i].Start();
+}
+
+Console.WriteLine($"[taskrun] {config.ReactorCount} reactors on :{config.Tcp.Port} (each request awaits a Task.Run)");
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
 }

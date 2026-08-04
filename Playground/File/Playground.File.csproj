@@ -12,6 +12,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../Shared/Playground.Shared.csproj" />
+    <ProjectReference Include="../../src/ioxide/ioxide.csproj" />
     <ProjectReference Include="../../src/clients/ioxide.file/ioxide.file.csproj" />
   </ItemGroup>
 

@@ -1,7 +1,7 @@
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 
-namespace Playground.Shared.Setup;
+namespace Playground.Shared;
 
 /// <summary>Self-signed localhost cert for the QUIC modes.</summary>
 public static class QuicCert

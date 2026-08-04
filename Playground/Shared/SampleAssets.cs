@@ -1,4 +1,4 @@
-namespace Playground.Shared.Setup;
+namespace Playground.Shared;
 
 /// <summary>Seeds a small asset directory so <c>file</c> mode has something to serve.</summary>
 public static class SampleAssets

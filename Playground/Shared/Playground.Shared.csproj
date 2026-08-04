@@ -4,14 +4,12 @@
     <TargetFramework>net11.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <RootNamespace>Playground.Shared</RootNamespace>
   </PropertyGroup>
 
-  <ItemGroup>
-    <!-- Core only. A sample that needs pg, file, nghttp3 and so on references it directly, so no
-         sample drags in a package it does not demonstrate. -->
-    <ProjectReference Include="../../src/ioxide/ioxide.csproj" />
-  </ItemGroup>
+  <!-- Deliberately NO reference to ioxide. Nothing in this project touches an ioxide API: it is
+       env-var parsing, self-signed cert generation and seeding a demo directory - plumbing that
+       would otherwise bury the part of each sample worth reading. Everything that shows how to USE
+       ioxide lives inline in the sample, so a Program.cs can be copied out whole. -->
 
 </Project>
