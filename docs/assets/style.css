@@ -165,19 +165,33 @@ nav.top .links a.gh svg { display: block; }
 #tab-vs:checked     ~ .tab-bar label[for="tab-vs"],
 #tab-qpipe:checked  ~ .tab-bar label[for="tab-qpipe"],
 #tab-qraw:checked   ~ .tab-bar label[for="tab-qraw"],
-#tab-h3:checked     ~ .tab-bar label[for="tab-h3"] {
+#tab-h3:checked     ~ .tab-bar label[for="tab-h3"],
+#tab-h3pure:checked ~ .tab-bar label[for="tab-h3pure"],
+#tab-http:checked   ~ .tab-bar label[for="tab-http"],
+#tab-pg:checked     ~ .tab-bar label[for="tab-pg"],
+#tab-redis:checked  ~ .tab-bar label[for="tab-redis"],
+#tab-files:checked  ~ .tab-bar label[for="tab-files"],
+#tab-tls:checked    ~ .tab-bar label[for="tab-tls"],
+#tab-kestrel:checked ~ .tab-bar label[for="tab-kestrel"] {
   color: var(--accent-soft);
   background: var(--code-bg);
 }
 
 .pane { display: none; }
-#tab-shared:checked ~ .pane-shared { display: block; }
-#tab-inc:checked    ~ .pane-inc    { display: block; }
-#tab-pipe:checked   ~ .pane-pipe   { display: block; }
-#tab-vs:checked     ~ .pane-vs     { display: block; }
-#tab-qpipe:checked  ~ .pane-qpipe  { display: block; }
-#tab-qraw:checked   ~ .pane-qraw   { display: block; }
-#tab-h3:checked     ~ .pane-h3     { display: block; }
+#tab-shared:checked ~ .pane-shared  { display: block; }
+#tab-inc:checked    ~ .pane-inc     { display: block; }
+#tab-pipe:checked   ~ .pane-pipe    { display: block; }
+#tab-vs:checked     ~ .pane-vs      { display: block; }
+#tab-qpipe:checked  ~ .pane-qpipe   { display: block; }
+#tab-qraw:checked   ~ .pane-qraw    { display: block; }
+#tab-h3:checked     ~ .pane-h3      { display: block; }
+#tab-h3pure:checked ~ .pane-h3pure  { display: block; }
+#tab-http:checked   ~ .pane-http    { display: block; }
+#tab-pg:checked     ~ .pane-pg      { display: block; }
+#tab-redis:checked  ~ .pane-redis   { display: block; }
+#tab-files:checked  ~ .pane-files   { display: block; }
+#tab-tls:checked    ~ .pane-tls     { display: block; }
+#tab-kestrel:checked ~ .pane-kestrel { display: block; }
 .pane pre { margin: 0; }
 
 /* the explainer pane: same panel chrome as the code blocks */
