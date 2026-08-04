@@ -206,7 +206,10 @@ public sealed class RingHttpClient : IDisposable
         }
         catch (Exception e) when (_options.Policy != HttpProtocolPolicy.Http3Only)
         {
-            return await DemoteAndRetryOverHttp1Async(request, e);
+            // Failed before anything reached the origin (no pool, no connection), so resending is
+            // safe whatever the method.
+            Demote(e);
+            return await SendOverHttp1Async(request);
         }
 
         try
@@ -215,21 +218,39 @@ public sealed class RingHttpClient : IDisposable
         }
         catch (Exception e) when (_options.Policy != HttpProtocolPolicy.Http3Only)
         {
-            return await DemoteAndRetryOverHttp1Async(request, e);
+            // This request was already on the wire, so the origin may have processed it. Resending
+            // it would execute a POST twice. Demote the origin either way, but only replay methods
+            // that are safe to repeat; anything else surfaces the failure to the caller.
+            Demote(e);
+            if (!IsIdempotent(request.Method.Span))
+            {
+                throw;
+            }
+            return await SendOverHttp1Async(request);
         }
     }
 
-    // A UDP path that is blocked or an origin that stopped serving h3: serve this request over
-    // HTTP/1.1 and stay there for the cooldown, so one failure does not become one per request.
-    private ValueTask<HttpClientResponse> DemoteAndRetryOverHttp1Async(HttpClientRequest request, Exception cause)
+    // A UDP path that is blocked, or an origin that stopped serving h3: stay on HTTP/1.1 for the
+    // cooldown so one failure does not become one per request. Logged once per demotion rather
+    // than once per request - under load the per-request form is thousands of lines.
+    private void Demote(Exception cause)
     {
+        bool alreadyDemoted = Environment.TickCount64 < _http3BlockedUntilMs;
         _http3BlockedUntilMs = Environment.TickCount64 + _options.Http3CooldownMs;
-        Console.Error.WriteLine(
-            $"[ringhttpclient] {_options.Host}:{_http3Port} h3 failed ({cause.Message}); " +
-            $"using http/1.1 for {_options.Http3CooldownMs} ms");
 
-        return SendOverHttp1Async(request);
+        if (!alreadyDemoted)
+        {
+            Console.Error.WriteLine(
+                $"[ringhttpclient] {_options.Host}:{_http3Port} h3 failed ({cause.Message}); " +
+                $"using http/1.1 for {_options.Http3CooldownMs} ms");
+        }
     }
+
+    // Safe to repeat per RFC 9110 section 9.2.2. POST and PATCH are deliberately absent.
+    private static bool IsIdempotent(ReadOnlySpan<byte> method)
+        => method.SequenceEqual("GET"u8) || method.SequenceEqual("HEAD"u8) ||
+           method.SequenceEqual("PUT"u8) || method.SequenceEqual("DELETE"u8) ||
+           method.SequenceEqual("OPTIONS"u8) || method.SequenceEqual("TRACE"u8);
 
     private Http3ClientPool EnsureHttp3Pool()
     {

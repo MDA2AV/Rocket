@@ -57,6 +57,9 @@ public sealed class Http3ClientConnection : IDisposable
     // timer eventually fires - and a caller with an HTTP/1.1 fallback never gets to use it.
     private readonly int _readyTimeoutMs;
 
+    // RFC 9114 H3_NO_ERROR - what a clean application-level close carries.
+    private const ulong H3NoError = 0x100;
+
     internal Http3ClientConnection(QuicEngineConnection quic, string authority, int readyTimeoutMs)
     {
         _quic = quic;
@@ -99,10 +102,22 @@ public sealed class Http3ClientConnection : IDisposable
         {
             // Fail the connection, not just this request: the pool drops it and opens a fresh one
             // rather than leaving every later caller to wait out the same timeout.
+            // A handshake that completed between the delay firing and this continuation running
+            // must not be condemned - the connection is healthy and may already be serving.
+            if (_isReady)
+            {
+                return await SendCore(request);
+            }
+
             var timedOut = new Http3ClientException(
                 $"handshake did not complete within {_readyTimeoutMs} ms");
             _failed = true;
             _ready.TrySetException(timedOut);
+
+            // Close the QUIC connection too. Nothing else will: the client sets no handshake or
+            // idle timeout, so a black-holed path would PTO-retransmit forever and the connection
+            // would stay adopted on the reactor with an armed timer.
+            _quic.Close(H3NoError);
             throw timedOut;
         }
 
@@ -230,6 +245,9 @@ public sealed class Http3ClientConnection : IDisposable
         }
         finally
         {
+            // Before waking anyone: a resumed caller that retries must not be handed this same
+            // connection again (the pool checks IsBroken), or the retry ping-pongs inside FailAll.
+            _failed = true;
             FailAll(new Http3ClientException("connection closed"));
             _quic.DecRef();
             Dispose();
@@ -423,6 +441,11 @@ public sealed class Http3ClientConnection : IDisposable
 
         foreach ((PendingRequest pending, HttpClientResponse response) in finished)
         {
+            // Outside the native call now: safe to let nghttp3 release the stream.
+            if (_nghttp3Handle != 0)
+            {
+                Nghttp3.ih3_close_stream(_nghttp3Handle, pending.StreamId, 0);
+            }
             pending.Complete(response);
         }
     }
@@ -478,6 +501,10 @@ public sealed class Http3ClientConnection : IDisposable
             Nghttp3.ih3_free(_nghttp3Handle);
             _nghttp3Handle = 0;
         }
+
+        // Close the QUIC connection too, so ngtcp2/picotls tear down while the engine that owns
+        // their TLS context is still alive, and the reactor stops holding it with an armed timer.
+        _quic.Close(H3NoError);
         if (_self.IsAllocated)
         {
             _self.Free();
@@ -571,14 +598,13 @@ public sealed class Http3ClientConnection : IDisposable
         response.SetBodyRange((pending.BodyStart, pending.BodyLength));
         response.Freeze();
 
-        // Record only - the waiter is resumed by CompleteFinishedRequests once nghttp3 unwinds.
+        // Record only - the waiter is resumed by CompleteFinishedRequests once nghttp3 unwinds,
+        // and the stream is closed there too. Closing here would free nghttp3's stream while
+        // nghttp3_conn_read_stream is still on the stack, which is the re-entrancy this file
+        // forbids; it happens to be safe in the bundled version only because end_stream is the
+        // last access to the stream.
+        pending.StreamId = streamId;
         connection._completedThisPass.Add((pending, response));
-
-        // nghttp3 is done with this stream; let it release the stream's state.
-        if (connection._nghttp3Handle != 0)
-        {
-            Nghttp3.ih3_close_stream(connection._nghttp3Handle, streamId, 0);
-        }
     }
 
     /// <summary>
@@ -594,6 +620,7 @@ public sealed class Http3ClientConnection : IDisposable
         };
 
         public HttpClientResponse? Response;
+        public long StreamId;
         public bool HeadersDone;   // first field section seen; a later one is trailers
         public int BodyStart;
         public int BodyLength;

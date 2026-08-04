@@ -50,6 +50,7 @@ public sealed class Http3ClientPool : IDisposable
     private readonly QuicClientEngine _engine;
     private readonly List<Http3ClientConnection> _connections = [];
     private int _next;
+    private bool _disposed;
 
     private Http3ClientPool(Reactor reactor, Http3ClientOptions options)
     {
@@ -131,6 +132,12 @@ public sealed class Http3ClientPool : IDisposable
 
     private void Sweep()
     {
+        if (_disposed)
+        {
+            return;   // AddTicker has no removal API, so a disposed pool must no-op: reopening
+                      // here would hand QuicClientEngine.Connect an engine handle we already freed.
+        }
+
         for (int i = _connections.Count - 1; i >= 0; i--)
         {
             if (_connections[i].IsBroken)
@@ -148,6 +155,15 @@ public sealed class Http3ClientPool : IDisposable
 
     public void Dispose()
     {
+        if (_disposed)
+        {
+            return;
+        }
+        _disposed = true;
+
+        // Order matters: each connection closes its QUIC connection (and with it the picotls
+        // session, which points into the engine) BEFORE the engine itself is freed. Freeing the
+        // engine first leaves every live session reading freed memory on its next crypto op.
         foreach (Http3ClientConnection connection in _connections)
         {
             connection.Dispose();
