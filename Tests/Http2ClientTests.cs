@@ -1,6 +1,6 @@
 using System.Text;
 using ioxide;
-using ioxide.http;
+using ioxide.http11;
 using ioxide.nghttp2;
 
 namespace Ioxide.E2E;

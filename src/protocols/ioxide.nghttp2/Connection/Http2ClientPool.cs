@@ -1,4 +1,4 @@
-using ioxide.http;
+using ioxide.http11;
 
 namespace ioxide.nghttp2;
 

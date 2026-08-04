@@ -5,9 +5,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <RootNamespace>ioxide.http</RootNamespace>
+    <RootNamespace>ioxide.http11</RootNamespace>
 
-    <PackageId>ioxide.http</PackageId>
+    <PackageId>ioxide.http11</PackageId>
     <Version>0.2.4</Version>
     <Authors>MDA2AV</Authors>
     <Description>HTTP message types and the ring-native HTTP/1.1 client for the ioxide io_uring runtime: byte-oriented requests and responses over a pooled arena, keep-alive connection pool, no native dependencies.</Description>

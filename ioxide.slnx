@@ -2,33 +2,38 @@
   <!-- The runtime core, first and unnested: everything below builds on it. -->
   <Project Path="src/ioxide/ioxide.csproj" />
 
-  <!-- Native bindings: each bundles a C library into one self-contained .so. -->
-  <Folder Name="/bindings/">
-    <Project Path="src/bindings/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
-    <Project Path="src/bindings/ioxide.nghttp2/ioxide.nghttp2.csproj" />
-    <Project Path="src/bindings/ioxide.nghttp3/ioxide.nghttp3.csproj" />
+  <!-- Protocol layers, native-bundled or pure C#. -->
+  <Folder Name="/protocols/">
+    <Project Path="src/protocols/ioxide.http11/ioxide.http11.csproj" />
+    <Project Path="src/protocols/ioxide.nghttp2/ioxide.nghttp2.csproj" />
+    <Project Path="src/protocols/ioxide.nghttp3/ioxide.nghttp3.csproj" />
+    <Project Path="src/protocols/ioxide.http3/ioxide.http3.csproj" />
+    <Project Path="src/protocols/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
   </Folder>
 
   <!-- Outbound: what an app calls out to. -->
   <Folder Name="/clients/">
-    <Project Path="src/clients/ioxide.http/ioxide.http.csproj" />
     <Project Path="src/clients/ioxide.httpclient/ioxide.httpclient.csproj" />
+    <Project Path="src/clients/ioxide.file/ioxide.file.csproj" />
     <Project Path="src/clients/ioxide.pg/ioxide.pg.csproj" />
     <Project Path="src/clients/ioxide.redis/ioxide.redis.csproj" />
   </Folder>
 
-  <!-- Inbound: what serves traffic. -->
+  <!-- Inbound: hosting and transport security for served traffic. -->
   <Folder Name="/serving/">
-    <Project Path="src/serving/ioxide.file/ioxide.file.csproj" />
-    <Project Path="src/serving/ioxide.http3/ioxide.http3.csproj" />
     <Project Path="src/serving/ioxide.Kestrel/ioxide.Kestrel.csproj" />
     <Project Path="src/serving/ioxide.tls/ioxide.tls.csproj" />
   </Folder>
 
   <Folder Name="/apps/">
     <Project Path="Playground/Playground.csproj" />
-    <Project Path="Research/Examples/Examples.csproj" />
+    <Project Path="Examples/Examples.csproj" />
     <Project Path="Examples.AspNet/Examples.AspNet.csproj" />
+  </Folder>
+
+  <!-- Nested so it does not collide with /apps/Examples - same project name, different project. -->
+  <Folder Name="/apps/research/">
+    <Project Path="Research/Examples/Examples.csproj" />
   </Folder>
 
   <Folder Name="/tests/">

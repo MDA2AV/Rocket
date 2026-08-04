@@ -22,7 +22,7 @@
   <ItemGroup>
     <None Include="../../README.md" Pack="true" PackagePath="/" />
     <ProjectReference Include="../../ioxide/ioxide.csproj" />
-    <ProjectReference Include="../../clients/ioxide.http/ioxide.http.csproj" />
+    <ProjectReference Include="../ioxide.http11/ioxide.http11.csproj" />
 
     <!-- The self-contained native bundle (built by scripts/build-nghttp2-native.sh): packed into the
          nupkg's runtimes/ so consumers get it with no prerequisites, and copied next to the output

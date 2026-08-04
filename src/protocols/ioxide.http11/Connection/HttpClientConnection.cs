@@ -2,7 +2,7 @@ using System.Buffers;
 using System.Buffers.Text;
 using System.Runtime.InteropServices;
 
-namespace ioxide.http;
+namespace ioxide.http11;
 
 /// <summary>
 /// One keep-alive HTTP/1.1 connection whose connect, sends and receives all run on the owning

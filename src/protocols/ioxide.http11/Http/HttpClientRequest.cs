@@ -1,4 +1,4 @@
-namespace ioxide.http;
+namespace ioxide.http11;
 
 /// <summary>Method tokens as wire bytes, so a request costs no string encoding.</summary>
 public static class HttpMethods

@@ -7,7 +7,7 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("ioxide.httpclient")]
 [assembly: InternalsVisibleTo("ioxide.nghttp2")]
 
-namespace ioxide.http;
+namespace ioxide.http11;
 
 /// <summary>
 /// One HTTP/1.1 response - status, field lines and body as raw bytes. Headers and body slice ONE

@@ -128,8 +128,8 @@ internal static class Program
                     break;
 
                 case "proxy":
-                    reactor.TcpHandle = Handlers.Proxy;   // forwards through ioxide.http
-                    reactor.OnStart = r => ioxide.http.HttpClientPool.Start(r, Handlers.UpstreamOptions());
+                    reactor.TcpHandle = Handlers.Proxy;   // forwards through ioxide.http11
+                    reactor.OnStart = r => ioxide.http11.HttpClientPool.Start(r, Handlers.UpstreamOptions());
                     break;
 
                 case "pipe":

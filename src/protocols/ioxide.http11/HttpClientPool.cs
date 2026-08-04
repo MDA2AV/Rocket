@@ -1,4 +1,4 @@
-namespace ioxide.http;
+namespace ioxide.http11;
 
 /// <summary>
 /// N keep-alive HTTP/1.1 connections to one origin on a single reactor's ring. Requests take a

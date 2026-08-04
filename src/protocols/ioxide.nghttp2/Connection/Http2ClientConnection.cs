@@ -1,7 +1,7 @@
 using System.Buffers;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks.Sources;
-using ioxide.http;
+using ioxide.http11;
 
 namespace ioxide.nghttp2;
 
