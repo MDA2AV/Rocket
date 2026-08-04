@@ -4,12 +4,8 @@ One project per sample, and **each `Program.cs` is a complete ioxide server you 
 run**. The config, the reactors, the threads, the connection loop and the handler are all there in
 the file — nothing that touches an ioxide API is hidden behind a helper.
 
-```bash
-dotnet run -c Release --project Playground/Tcp/Raw
-curl http://127.0.0.1:8080/
-```
-
-Linux only — the engine is io_uring.
+Run any of them with `dotnet run -c Release --project Playground/<Name>`, then hit
+`http://127.0.0.1:8080/`. Linux only — the engine is io_uring.
 
 ## Samples
 
@@ -47,16 +43,13 @@ shared `ServeAsync` would make the Playground shorter and make it useless.
 
 ## HTTP/3
 
-Both samples answer every request with a single reused response object, so the handler stays
-small enough to read at a glance. `Nghttp3` reads the request body through `BodyReader` while it
-is still arriving; `Nghttp3Buffered` gets it complete in `request.Body`. That one difference is
-the reason both exist.
+Both samples answer every request with a single reused response object, so the handler stays small
+enough to read at a glance. `Nghttp3` reads the request body through `BodyReader` while it is still
+arriving; `Nghttp3Buffered` gets it complete in `request.Body`. That one difference is the reason
+both exist.
 
-They also listen on TCP `:8080` alongside UDP `:8443`.
-
-```bash
-curl --http3-only -k https://127.0.0.1:8443/
-```
+They also listen on TCP `:8080` alongside UDP `:8443`, and answer
+`curl --http3-only -k https://127.0.0.1:8443/`.
 
 ## Environment
 
@@ -91,7 +84,7 @@ descriptors close after a grace period.
 | `PLAYGROUND_QUIC_PORT` | `8443` | UDP listen port. |
 | `PLAYGROUND_QUIC_CERT` | generated | Cert path. Unset generates a self-signed `CN=localhost` pair under the temp directory. |
 | `PLAYGROUND_QUIC_KEY` | generated | Key path. Must be set together with `_CERT`. |
-| `PLAYGROUND_QPACK_CAP` | `0` | QPACK dynamic table capacity, `Nghttp3`/`Nghttp3Buffered` only; `>0` also advertises 100 blocked streams. |
+| `PLAYGROUND_QPACK_CAP` | `0` | QPACK dynamic table capacity; `>0` also advertises 100 blocked streams. |
 
 `SIGTERM` GOAWAYs every live nghttp3 connection, waits 2 s, then exits — without it the process dies
 mid-request and clients see resets. Both samples register that handler themselves, in the file.
@@ -107,11 +100,9 @@ mid-request and clients see resets. Both samples register that handler themselve
 | `PLAYGROUND_PG_POOL` | `4` (per reactor) |
 | `PLAYGROUND_PG_TIMEOUT` | `30000` ms |
 
-```bash
-docker run --rm -d -p 5432:5432 -e POSTGRES_USER=bench -e POSTGRES_DB=bench \
-  -e POSTGRES_HOST_AUTH_METHOD=trust postgres:18
-dotnet run -c Release --project Playground/Pg
-```
+Needs a Postgres to talk to — the defaults match a `postgres:18` container started with
+`POSTGRES_USER=bench`, `POSTGRES_DB=bench` and `POSTGRES_HOST_AUTH_METHOD=trust`. Without one it
+answers `500`, which is the error path working.
 
 ### Proxy
 
@@ -121,21 +112,13 @@ dotnet run -c Release --project Playground/Pg
 | `PLAYGROUND_UPSTREAM_PORT` | `8081` |
 | `PLAYGROUND_UPSTREAM_POOL` | `8` (per reactor) |
 
-```bash
-PLAYGROUND_PORT=8081 dotnet run -c Release --project Playground/Tcp/Raw   # terminal 1: an origin
-dotnet run -c Release --project Playground/Proxy                          # terminal 2: the proxy
-```
+Needs an origin to forward to: run `Tcp.Raw` with `PLAYGROUND_PORT=8081` in one terminal and the
+proxy in another. With nothing listening it answers `502` once the acquire timeout elapses.
 
 ## Docker
 
-One image per sample, selected at build time:
-
-```bash
-docker build -f Playground/Dockerfile --build-arg SAMPLE=Tcp/Raw -t playground-raw .
-docker run --rm -p 8080:8080 playground-raw
-
-docker build -f Playground/Dockerfile --build-arg SAMPLE=Nghttp3 -t playground-h3 .
-docker run --rm -p 8080:8080 -p 8443:8443/udp playground-h3
-```
+`Playground/Dockerfile` builds one image per sample, selected with `--build-arg SAMPLE=<path>` from
+the repo root — `Tcp/Raw`, `Pg`, `Nghttp3` and so on, matching the directory layout. Publish
+`8080/tcp`, and `8443/udp` as well for the HTTP/3 samples.
 
 io_uring pins memory, so a container running many reactors may need `--ulimit memlock=-1:-1`.
