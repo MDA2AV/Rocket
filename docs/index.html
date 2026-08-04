@@ -29,7 +29,6 @@
 </div>
 
 <section class="block examples">
-  <h2>A normal async handler. An abnormal runtime under it.</h2>
 <div class="tabs">
   <input type="radio" name="mode-tabs" id="tab-none" checked>
   <input type="radio" name="mode-tabs" id="tab-pipe">
@@ -75,6 +74,8 @@
   </nav>
 
   <div class="ex-intro">
+    <h2>A normal async handler. An abnormal runtime under it.</h2>
+
     <p class="lead">You write ordinary C#. Underneath, every await is a request placed on this
     core's queue, and your code resumes right where it left off when the kernel answers. The same
     model rides TCP and QUIC (ngtcp2 + picotls bundled in the package, TLS 1.3 inside the

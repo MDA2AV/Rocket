@@ -17,62 +17,8 @@ same thread. No thread pool on the hot path. No native dependencies - raw syscal
 
 > Linux 6.1+ · .NET 10 / .NET 11 · status `0.2.6` - experimental
 
-**[Documentation](https://mda2av.github.io/ioxide/)** - architecture, guides, the full picture
-
-## Hello, ring
-
-```csharp
-using ioxide;
-using ioxide.utils;
-
-var config = new ServerConfig
-{
-    ReactorCount = Environment.ProcessorCount,
-    Tcp = new TcpOptions { Port = 8080 },
-};
-
-// One reactor per core. Every one binds :8080 via SO_REUSEPORT and owns its own ring.
-for (int i = 0; i < config.ReactorCount; i++)
-{
-    var reactor = new Reactor(i, config);
-
-    reactor.TcpHandle = async (r, conn) =>
-    {
-        try
-        {
-            while (true)
-            {
-                // io_uring recv. Resumes inline on this reactor thread - no thread pool hop.
-                RecvSnapshot snapshot = await conn.ReadAsync();
-
-                // ioxide hands you raw bytes; parsing is your code. Here we just drain,
-                // returning each buffer to the ring.
-                while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
-                {
-                    if (item.HasBuffer) conn.ReturnBuffer(in item);
-                }
-
-                conn.Write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"u8);
-                await conn.FlushAsync();
-
-                if (snapshot.IsClosed) return;
-                conn.ResetRead();
-            }
-        }
-        finally
-        {
-            conn.DecRef();
-        }
-    };
-
-    new Thread(reactor.Run).Start();
-}
-```
-
-```bash
-dotnet add package ioxide
-curl http://localhost:8080/
-```
+**[Documentation](https://mda2av.github.io/ioxide/)** - architecture, guides, and every example
+below as runnable code you can read side by side.
 
 ## First-class async/await
 
@@ -90,175 +36,22 @@ connection, pool and handler state stays single-threaded without a lock in sight
 
 ## Clients ride the same ring
 
-Every client is opened from `OnStart`, which runs on the reactor thread - so the connections it
-makes belong to that reactor's ring. `Start` registers the client as a reactor service; the handler
-fetches it with `GetService<T>()`. There is one pool per reactor and no sharing between them.
+Every client is opened from the reactor's start hook, which runs on the reactor thread - so the
+connections it makes belong to that reactor's ring. The handler fetches it back as a reactor
+service. There is one pool per reactor and no sharing between them, which is why none of it needs
+a lock.
 
-### Postgres
+That holds for a Postgres query, a Redis command, an outbound HTTP call and a positional file
+read alike: each is submitted on the ring that accepted the request and resumes on the same
+thread, so a request never leaves the core it arrived on. A reverse proxy built this way keeps
+both hops - inbound connection and outbound call - on one thread for the life of the request.
 
-```csharp
-using ioxide.pg;
+## Scope
 
-reactor.OnStart = r => PgPool.Start(r, new PgOptions
-{
-    Host = "127.0.0.1", Port = 5432, User = "bench", Database = "bench",
-    PoolSize = 4,                 // per reactor
-});
-
-reactor.TcpHandle = async (r, conn) =>
-{
-    PgPool pg = r.GetService<PgPool>();
-
-    // Submitted on this reactor's ring; the continuation resumes on this thread.
-    PgResult result = await pg.QueryAsync("SELECT 42");
-    // result.Value  ->  "42"
-};
-```
-
-### Redis
-
-```csharp
-using ioxide.redis;
-
-reactor.OnStart = r => RedisPool.Start(r, new RedisOptions
-{
-    Host = "127.0.0.1", Port = 6379, PoolSize = 8,
-});
-
-reactor.TcpHandle = async (r, conn) =>
-{
-    RedisPool redis = r.GetService<RedisPool>();
-
-    await redis.ExecuteAsync("SET", "user:1", "ada");
-    string? name = await redis.GetAsync("user:1");   // "ada"
-
-    // The generic command surface reaches anything RESP2 speaks.
-    RespValue hits = await redis.ExecuteAsync("INCR", "hits");
-};
-```
-
-### HTTP client
-
-`ioxide.httpclient` is one client per origin over HTTP/1.1, HTTP/2 (h2c) or HTTP/3. Requests and
-responses are the same types whichever protocol serves them, so the protocol is a configuration
-decision, not an API one. Both hops of a proxy - inbound and outbound - stay on one reactor thread.
-
-```csharp
-using ioxide.http11;      // HttpClientRequest / HttpClientResponse live here
-using ioxide.httpclient;
-
-reactor.OnStart = r => RingHttpClient.Start(r, new RingHttpClientOptions
-{
-    Host = "127.0.0.1", Port = 8081,
-    PoolSize = 8,
-
-    // Start on HTTP/1.1 and switch to HTTP/3 once the origin advertises it via Alt-Svc.
-    // Http1Only / Http2Only (h2c, prior knowledge) / Http3Only pin it instead.
-    Policy = HttpProtocolPolicy.Negotiate,
-});
-
-reactor.TcpHandle = async (r, conn) =>
-{
-    RingHttpClient http = r.GetService<RingHttpClient>();
-
-    using HttpClientResponse response = await http.GetAsync("/api/thing");
-    int status = response.Status;              // 200
-    ReadOnlyMemory<byte> body = response.Body; // bytes, not a string - decode at the edge
-};
-```
-
-### Static files
-
-The asset cache opens every file once and shares the descriptors across reactors; small files are
-served from a pre-baked HTTP response with no I/O at all, larger ones stream off the ring. Every hit
-is revalidated against disk (size + mtime + inode), so an edit or an atomic rename is served live
-rather than stale.
-
-```csharp
-using ioxide.file;
-
-var assets = new StaticAssets("/srv/www", maxCachedFileBytes: 256 * 1024);
-
-reactor.OnStart = r =>
-{
-    r.AddService(assets);
-    AssetReader.CreatePool(r, readers: 4, bufferBytes: 1 << 20);
-};
-
-reactor.TcpHandle = async (r, conn) =>
-{
-    StaticAssets snapshot = r.GetService<StaticAssets>();
-
-    // The lease pins the snapshot for the whole request, so a concurrent reload
-    // can't free the fd mid-send.
-    using StaticAssets.Lease lease = snapshot.Acquire();
-    if (lease.TryGet("/index.html", out AssetCache.Asset asset))
-    {
-        // asset.Response is the baked HTTP response; asset.Fd reads off the ring.
-    }
-};
-```
-
-`assets.Reload()` swaps in a fresh snapshot atomically - the old descriptors close after a grace
-period, so in-flight requests finish on the bytes they started with.
-
-## HTTP/3
-
-`ioxide.ngtcp2` bundles ngtcp2 + picotls as one self-contained native library (TLS 1.3 lives inside
-the transport). `ioxide.nghttp3` puts real HTTP/3 on top. `Nghttp3Connection` owns the read loop -
-QPACK, control streams, fin and teardown are its problem - and calls your function once per request.
-
-```csharp
-using ioxide.ngtcp2;
-using ioxide.nghttp3;
-
-var engine = new QuicEngine("cert.pem", "key.pem", cidLength: 8, alpn: ["h3"]);
-
-var config = new ServerConfig
-{
-    ReactorCount = Environment.ProcessorCount,
-    Udp  = new UdpOptions { RecvSlots = 16 },
-    Quic = new QuicOptions
-    {
-        Port = 8443,                            // every reactor binds it via SO_REUSEPORT
-        LocalCidLength = 8,
-        ConnectionFactory = engine.CreateFactory(),
-    },
-};
-
-// The request is post-QPACK BYTES throughout - route by byte compare, decode only at the edge.
-reactor.QuicHandle = (r, conn) =>
-    new Nghttp3Connection(conn).RunBufferedAsync(static req =>
-        req.Path.Span.SequenceEqual("/plaintext"u8)
-            ? Nghttp3Response.Text("Hello, World!")
-            : Nghttp3Response.Text("not found\n", status: 404));
-```
-
-```bash
-curl --http3-only -k https://localhost:8443/plaintext
-```
-
-For large or hostile uploads, `RunStreamingAsync` dispatches at end-of-headers and pulls the body
-through `req.BodyReader` under flow-control pacing - memory is bound by one window, not the body
-size. `ioxide.http3` is the same surface implemented in pure C# (frames + QPACK + Huffman, no native
-h3 code), engine-agnostic over any QUIC connection.
-
-## ASP.NET Core
-
-Already have an app? `ioxide.Kestrel` swaps the transport underneath it - one ring per core, with
-Kestrel's request loop pinned to the reactor thread. Your endpoints do not change.
-
-```csharp
-using ioxide.Kestrel;
-
-var builder = WebApplication.CreateBuilder(args);
-
-builder.WebHost.UseIoxide(o => o.ReactorCount = 16);
-
-var app = builder.Build();
-app.MapGet("/", () => "hello from io_uring");
-app.Run();
-```
+ioxide hands you raw bytes and stays out of HTTP. Request parsing and response bytes are your
+code; the runtime owns the ring, the connections and the clients. When you want a framework on
+top, `ioxide.Kestrel` swaps the transport under an existing ASP.NET Core app - one ring per core,
+with Kestrel's request loop pinned to the reactor thread, and your endpoints unchanged.
 
 ## Packages
 
@@ -277,22 +70,13 @@ app.Run();
 | `ioxide.file` | Static assets. Immutable snapshots, baked responses, positional ring reads. |
 | `ioxide.Kestrel` | ASP.NET Core transport: `UseIoxide()` and Kestrel runs one ring per core. |
 
-## Scope
+## Where the code is
 
-ioxide hands you raw bytes and stays out of HTTP. Request parsing and response bytes are your
-code; the runtime owns the ring, the connections and the clients. When you want a framework
-on top, `ioxide.Kestrel` plugs the same engine under ASP.NET Core.
+Nothing here is pseudocode. Every pattern above exists as something you can run:
 
-## Try it
-
-The [Playground](Playground/) is one project per workload — `Tcp.Raw`, `Pg`, `File`, `Proxy`, two
-HTTP/3 flavors, and the synthetic `Tcp.Pipe`/`Tcp.Hop`/`Tcp.TaskRun` variants. Each `Program.cs` is
-a **complete** ioxide server: config, reactors, threads, connection loop and handler all in the one
-file, so you can copy it out and run it.
-
-```bash
-PLAYGROUND_REACTORS=4 dotnet run -c Release --project Playground/Tcp/Raw
-```
-
-The [Examples project](Examples/) builds every snippet above as runnable code, with
-[benchmark results](Examples/RESULTS.md).
+| | What you get |
+| --- | --- |
+| **[Documentation](https://mda2av.github.io/ioxide/)** | The examples browser - TCP, QUIC, HTTP/3, every client, and the ASP.NET drop-in, side by side. |
+| **[Playground](Playground/)** | One project per workload. Each `Program.cs` is a **complete** server - config, reactors, threads, handler - so you can copy the file out and run it. |
+| **[Examples](Examples/)** | The raw, pg, redis, file and tls variants plus a `quic-h3` mode, with [benchmark results](Examples/RESULTS.md). |
+| **[Examples.AspNet](Examples.AspNet/)** | `UseIoxide()` measured against a stock Kestrel baseline. |

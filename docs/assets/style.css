@@ -187,16 +187,26 @@ nav.top .links a.gh svg { display: block; }
   background: var(--code-bg);
 }
 
-/* The overview prose: the default state, replaced the moment an example is picked. */
-.ex-intro { display: none; max-width: 780px; }
+/* The overview: the default state. It carries the section heading too, so picking an example
+   leaves nothing on screen but the code. */
+.ex-intro {
+  display: none;
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 1.5rem 0 2rem;
+  text-align: center;
+}
 #tab-none:checked ~ .ex-intro { display: block; }
-.ex-intro p { color: var(--text-dim); margin: 0 0 1rem; }
+.ex-intro h2 { margin-bottom: 1.2rem; }
+.ex-intro p { color: var(--text-dim); margin: 0 0 1.1rem; }
 .ex-intro .lead { font-size: 1.15rem; }
 .ex-hint {
   font-size: 0.85rem;
-  opacity: 0.7;
-  border-left: 2px solid var(--line);
-  padding-left: 0.8rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent-soft);
+  opacity: 0.8;
+  margin-top: 1.8rem !important;
 }
 
 .pane { display: none; min-width: 0; }
