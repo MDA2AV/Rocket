@@ -11,11 +11,12 @@
 
   <ItemGroup>
     <ProjectReference Include="../src/ioxide/ioxide.csproj" />
-    <ProjectReference Include="../src/ioxide.pg/ioxide.pg.csproj" />
-    <ProjectReference Include="../src/ioxide.file/ioxide.file.csproj" />
-    <ProjectReference Include="../src/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
-    <ProjectReference Include="../src/ioxide.nghttp3/ioxide.nghttp3.csproj" />
-    <ProjectReference Include="../src/ioxide.http3/ioxide.http3.csproj" />
+    <ProjectReference Include="../src/clients/ioxide.pg/ioxide.pg.csproj" />
+    <ProjectReference Include="../src/clients/ioxide.file/ioxide.file.csproj" />
+    <ProjectReference Include="../src/protocols/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
+    <ProjectReference Include="../src/protocols/ioxide.nghttp3/ioxide.nghttp3.csproj" />
+    <ProjectReference Include="../src/protocols/ioxide.http3/ioxide.http3.csproj" />
+    <ProjectReference Include="../src/protocols/ioxide.http11/ioxide.http11.csproj" />
   </ItemGroup>
 
 </Project>

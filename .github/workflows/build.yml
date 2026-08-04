@@ -79,29 +79,44 @@ jobs:
           echo "memlock for e2e: $(ulimit -Sl) KB"
           dotnet run --project Tests/ioxide.e2e.csproj --configuration Release --no-build
 
+      # Paths mirror the src/ grouping in ioxide.slnx (core, protocols/, clients/, serving/).
+      # Every project carrying a PackageId is packed: ioxide.httpclient project-references
+      # http11/nghttp2/ngtcp2/nghttp3, so those ship as its NuGet dependencies.
       - name: Pack ioxide
         run: dotnet pack src/ioxide/ioxide.csproj --configuration Release --no-build --output ./artifacts
 
-      - name: Pack ioxide.pg
-        run: dotnet pack src/ioxide.pg/ioxide.pg.csproj --configuration Release --no-build --output ./artifacts
+      - name: Pack ioxide.http11
+        run: dotnet pack src/protocols/ioxide.http11/ioxide.http11.csproj --configuration Release --no-build --output ./artifacts
 
-      - name: Pack ioxide.file
-        run: dotnet pack src/ioxide.file/ioxide.file.csproj --configuration Release --no-build --output ./artifacts
+      - name: Pack ioxide.nghttp2
+        run: dotnet pack src/protocols/ioxide.nghttp2/ioxide.nghttp2.csproj --configuration Release --no-build --output ./artifacts
 
-      - name: Pack ioxide.tls
-        run: dotnet pack src/ioxide.tls/ioxide.tls.csproj --configuration Release --no-build --output ./artifacts
-
-      - name: Pack ioxide.redis
-        run: dotnet pack src/ioxide.redis/ioxide.redis.csproj --configuration Release --no-build --output ./artifacts
-
-      - name: Pack ioxide.Kestrel
-        run: dotnet pack src/ioxide.Kestrel/ioxide.Kestrel.csproj --configuration Release --no-build --output ./artifacts
-
-      - name: Pack ioxide.ngtcp2
-        run: dotnet pack src/ioxide.ngtcp2/ioxide.ngtcp2.csproj --configuration Release --no-build --output ./artifacts
+      - name: Pack ioxide.http3
+        run: dotnet pack src/protocols/ioxide.http3/ioxide.http3.csproj --configuration Release --no-build --output ./artifacts
 
       - name: Pack ioxide.nghttp3
-        run: dotnet pack src/ioxide.nghttp3/ioxide.nghttp3.csproj --configuration Release --no-build --output ./artifacts
+        run: dotnet pack src/protocols/ioxide.nghttp3/ioxide.nghttp3.csproj --configuration Release --no-build --output ./artifacts
+
+      - name: Pack ioxide.ngtcp2
+        run: dotnet pack src/protocols/ioxide.ngtcp2/ioxide.ngtcp2.csproj --configuration Release --no-build --output ./artifacts
+
+      - name: Pack ioxide.tls
+        run: dotnet pack src/protocols/ioxide.tls/ioxide.tls.csproj --configuration Release --no-build --output ./artifacts
+
+      - name: Pack ioxide.httpclient
+        run: dotnet pack src/clients/ioxide.httpclient/ioxide.httpclient.csproj --configuration Release --no-build --output ./artifacts
+
+      - name: Pack ioxide.file
+        run: dotnet pack src/clients/ioxide.file/ioxide.file.csproj --configuration Release --no-build --output ./artifacts
+
+      - name: Pack ioxide.pg
+        run: dotnet pack src/clients/ioxide.pg/ioxide.pg.csproj --configuration Release --no-build --output ./artifacts
+
+      - name: Pack ioxide.redis
+        run: dotnet pack src/clients/ioxide.redis/ioxide.redis.csproj --configuration Release --no-build --output ./artifacts
+
+      - name: Pack ioxide.Kestrel
+        run: dotnet pack src/serving/ioxide.Kestrel/ioxide.Kestrel.csproj --configuration Release --no-build --output ./artifacts
 
       - name: Publish to NuGet
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

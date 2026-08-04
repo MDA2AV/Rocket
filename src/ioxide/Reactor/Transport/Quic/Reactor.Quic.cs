@@ -81,7 +81,7 @@ public sealed unsafe partial class Reactor
     private void QuicDispatchDatagram(in UdpDatagram datagram)
     {
         // Reads only the cleartext prefix per RFC 8999
-        if (!TryExtractDcid(datagram.Payload, _quicOptions!.LocalCidLength, out QuicCid dcid, out bool longHeader))
+        if (!TryExtractDcid(datagram.Payload, QuicLocalCidLength, out QuicCid dcid, out bool longHeader))
         {
             return;   // not parseable as QUIC - drop
         }
@@ -99,7 +99,8 @@ public sealed unsafe partial class Reactor
             return;   // short header for an unknown CID: stale/garbage (stateless reset later)
         }
 
-        QuicConnection? freshQuicConnection = _quicOptions.ConnectionFactory?.Invoke(this, in datagram, in dcid);
+        // No factory (or no QuicOptions at all, on a client-only reactor): nothing is accepted here.
+        QuicConnection? freshQuicConnection = _quicOptions?.ConnectionFactory?.Invoke(this, in datagram, in dcid);
         if (freshQuicConnection == null)
         {
             return;
@@ -233,7 +234,7 @@ public sealed unsafe partial class Reactor
     private void QuicSweep()
     {
         long now = Environment.TickCount64;
-        int idleMs = _quicOptions!.IdleTimeoutMs;
+        int idleMs = QuicIdleTimeoutMs;
 
         _quicSweepScratch.Clear();
         _quicSweepScratch.AddRange(_quicConnSet);
@@ -294,9 +295,9 @@ public sealed unsafe partial class Reactor
 
     private void TeardownQuic()
     {
-        if (_quicOptions == null)
+        if (_quicOptions == null && _quicConnSet.Count == 0)
         {
-            return;
+            return;   // no inbound QUIC and no client connections to close
         }
         _quicSweepScratch.Clear();
         _quicSweepScratch.AddRange(_quicConnSet);

@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net10.0;net11.0</TargetFrameworks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>ioxide.http11</RootNamespace>
+
+    <PackageId>ioxide.http11</PackageId>
+    <Version>0.2.5</Version>
+    <Authors>MDA2AV</Authors>
+    <Description>HTTP message types and the ring-native HTTP/1.1 client for the ioxide io_uring runtime: byte-oriented requests and responses over a pooled arena, keep-alive connection pool, no native dependencies.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://mda2av.github.io/ioxide/</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/MDA2AV/ioxide</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>io_uring;http;httpclient;rest;proxy;linux;ioxide</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../../README.md" Pack="true" PackagePath="/" />
+    <ProjectReference Include="../../ioxide/ioxide.csproj" />
+  </ItemGroup>
+
+</Project>

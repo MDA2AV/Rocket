@@ -1,0 +1,32 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+	<TargetFrameworks>net10.0;net11.0</TargetFrameworks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>ioxide.Kestrel</RootNamespace>
+
+    <PackageId>ioxide.Kestrel</PackageId>
+    <Version>0.2.5</Version>
+    <Authors>MDA2AV</Authors>
+    <Description>ASP.NET Core Kestrel transport backed by the ioxide io_uring runtime: one reactor (ring) per core, SO_REUSEPORT load-balanced, with Kestrel's HTTP request loop pinned to the reactor thread. Drop-in via UseIoxide().</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://mda2av.github.io/ioxide/</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/MDA2AV/ioxide</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>io_uring;kestrel;aspnetcore;transport;linux;ioxide;thread-per-core</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="/" />
+    <ProjectReference Include="../../ioxide/ioxide.csproj" />
+    <ProjectReference Include="../../protocols/ioxide.tls/ioxide.tls.csproj" />
+  </ItemGroup>
+
+</Project>

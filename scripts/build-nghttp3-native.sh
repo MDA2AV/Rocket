@@ -13,7 +13,7 @@ cd "$(dirname "$0")/.."
 
 NGHTTP3_REF=${NGHTTP3_REF:-master}
 WORK=${WORK:-/tmp/ioxide-h3-native}
-OUT=src/ioxide.nghttp3/runtimes/linux-x64/native
+OUT=src/bindings/ioxide.nghttp3/runtimes/linux-x64/native
 
 rm -rf "$WORK" && mkdir -p "$WORK" "$OUT"
 cd "$WORK"
@@ -30,7 +30,7 @@ cmake -S nghttp3 -B nghttp3/build -DCMAKE_BUILD_TYPE=Release \
 cmake --build nghttp3/build -j"$(nproc)" >/dev/null
 
 echo "==> compiling the C# facade shim"
-SHIM="$OLDPWD/src/ioxide.nghttp3/native/ioxide_nghttp3_shim.c"
+SHIM="$OLDPWD/src/bindings/ioxide.nghttp3/native/ioxide_nghttp3_shim.c"
 gcc -c -O2 -fPIC -o shim.o "$SHIM" \
     -Inghttp3/lib/includes -Inghttp3/build/lib/includes
 

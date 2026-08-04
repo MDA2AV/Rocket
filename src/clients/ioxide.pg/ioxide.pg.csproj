@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+	<TargetFrameworks>net10.0;net11.0</TargetFrameworks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>ioxide.pg</RootNamespace>
+
+    <PackageId>ioxide.pg</PackageId>
+    <Version>0.2.5</Version>
+    <Authors>MDA2AV</Authors>
+    <Description>Postgres driver for the ioxide io_uring runtime: pooled ring-native connections per reactor, ring-native connect and handshake, inline completion resume.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://mda2av.github.io/ioxide/learn/postgres.html</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/MDA2AV/ioxide</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>io_uring;postgres;postgresql;driver;linux;ioxide</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../../README.md" Pack="true" PackagePath="/" />
+    <ProjectReference Include="../../ioxide/ioxide.csproj" />
+  </ItemGroup>
+
+</Project>

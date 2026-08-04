@@ -15,8 +15,26 @@ namespace Playground;
 /// </summary>
 internal static class Handlers
 {
-    private static ReadOnlySpan<byte> Ok =>
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok"u8;
+    private static ReadOnlySpan<byte> Ok => RawOk;
+
+    // PLAYGROUND_BODY=<n> serves an n-byte body instead of "ok", so the raw handler can be
+    // compared against other servers on the object size they conventionally measure (1024 B).
+    // Built once; the handler still writes one fixed, pre-encoded buffer per request.
+    private static readonly byte[] RawOk = BuildRawOk();
+
+    private static byte[] BuildRawOk()
+    {
+        int size = int.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_BODY"), out int parsed) && parsed > 0
+            ? parsed
+            : 2;
+
+        byte[] body = size == 2
+            ? "ok"u8.ToArray()
+            : [.. Enumerable.Repeat((byte)'x', size - 1), (byte)'\n'];
+
+        return [.. System.Text.Encoding.ASCII.GetBytes(
+            $"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {body.Length}\r\n\r\n"), .. body];
+    }
 
     private static ReadOnlySpan<byte> NotFound =>
         "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"u8;
@@ -496,6 +514,19 @@ internal static class Handlers
         };
     }
 
+    // A fixed 1 KiB body. Load-generator grids conventionally measure a 1024-byte object, and
+    // echoing the path (33 bytes) is not comparable with them. Static, so serving it costs no
+    // allocation per request.
+    private static readonly byte[] OneKiBBody = BuildOneKiB();
+
+    private static byte[] BuildOneKiB()
+    {
+        var body = new byte[1024];
+        body.AsSpan().Fill((byte)'x');
+        body[^1] = (byte)'\n';
+        return body;
+    }
+
     // Live h3 connections, so a SIGTERM can GOAWAY them all (see Program.cs). Each reactor only
     // ever adds its own, but a plain lock keeps the signal handler - which runs off-reactor -
     // honest.
@@ -631,6 +662,13 @@ internal static class Handlers
                 return response;
             }
 
+            if (path.SequenceEqual("/1k"u8))
+            {
+                var oneKiB = new ioxide.nghttp3.Nghttp3Response { Body = OneKiBBody };
+                oneKiB.Headers.Add(ContentType, TextPlain);
+                return oneKiB;
+            }
+
             return ioxide.nghttp3.Nghttp3Response.Text(
                 $"hello {System.Text.Encoding.ASCII.GetString(path)} over HTTP/3 via io_uring\n");
         });
@@ -694,6 +732,64 @@ internal static class Handlers
 
                 return ioxide.http3.Http3Response.Text($"hello {System.Text.Encoding.ASCII.GetString(req.Path.Span)} over pure-C# HTTP/3\n");
             });
+
+    /// <summary>
+    /// Reverse proxy: every inbound request is forwarded to an upstream origin through the
+    /// ring-native HTTP client, and the upstream's status and body are relayed back. Both hops -
+    /// the inbound connection and the outbound call - run on this reactor's ring and resume
+    /// inline, so a proxied request never leaves the thread it arrived on.
+    ///
+    ///   PLAYGROUND_UPSTREAM_HOST / _PORT point at the origin (default 127.0.0.1:8081)
+    ///   PLAYGROUND_UPSTREAM_POOL sizes the connection pool per reactor (default 8)
+    /// </summary>
+    public static async Task Proxy(Reactor reactor, TcpConnection conn)
+    {
+        try
+        {
+            ioxide.http11.HttpClientPool upstream = reactor.GetService<ioxide.http11.HttpClientPool>()!;
+
+            while (true)
+            {
+                RecvSnapshot snapshot = await conn.ReadAsync();
+                string path = ReadRequestPath(conn, snapshot);
+
+                try
+                {
+                    using ioxide.http11.HttpClientResponse response = await upstream.GetAsync(path);
+                    conn.Write(System.Text.Encoding.ASCII.GetBytes(
+                        $"HTTP/1.1 {response.Status} X\r\nContent-Length: {response.Body.Length}\r\n\r\n"));
+                    conn.Write(response.Body.Span);
+                }
+                catch (ioxide.http11.HttpClientException e)
+                {
+                    byte[] message = System.Text.Encoding.ASCII.GetBytes($"upstream: {e.Message}");
+                    conn.Write(System.Text.Encoding.ASCII.GetBytes(
+                        $"HTTP/1.1 502 Bad Gateway\r\nContent-Length: {message.Length}\r\n\r\n"));
+                    conn.Write(message);
+                }
+
+                await conn.FlushAsync();
+
+                if (snapshot.IsClosed)
+                {
+                    return;
+                }
+                conn.ResetRead();
+            }
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    }
+
+    /// <summary>Upstream options for the proxy mode.</summary>
+    public static ioxide.http11.HttpClientOptions UpstreamOptions() => new()
+    {
+        Host = Environment.GetEnvironmentVariable("PLAYGROUND_UPSTREAM_HOST") ?? "127.0.0.1",
+        Port = ushort.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_UPSTREAM_PORT"), out ushort port) ? port : (ushort)8081,
+        PoolSize = int.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_UPSTREAM_POOL"), out int pool) ? pool : 8,
+    };
 
     /// <summary>Self-signed localhost cert for the quic mode (PLAYGROUND_QUIC_CERT/KEY override it).</summary>
     public static (string CertPath, string KeyPath) EnsureQuicCert()
