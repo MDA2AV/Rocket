@@ -31,6 +31,11 @@ public sealed class Http2ClientPool : IDisposable
     private readonly string _authority;
     private readonly List<Http2ClientConnection> _connections = [];
 
+    // Callers that arrived before a connection was up. Without these the pool fails a request the
+    // instant it is created - the connect is asynchronous, so the first requests would all throw
+    // and a caller that retries would spin.
+    private readonly Queue<TaskCompletionSource<bool>> _waiters = new();
+
     private int _next;
     private int _opening;
     private bool _disposed;
@@ -72,11 +77,81 @@ public sealed class Http2ClientPool : IDisposable
     public ValueTask<HttpClientResponse> SendAsync(HttpClientRequest request)
     {
         Http2ClientConnection? connection = Pick();
-        if (connection is null)
+        return connection is not null
+            ? SendWithRetryAsync(connection, request)
+            : SendWhenConnectedAsync(request);
+    }
+
+    // A refused stream was never processed by the peer, so resending it is safe - and expected,
+    // since it is how a server retires a connection (GOAWAY, or a max-requests limit). Picking
+    // again lands on a replacement, because the refused connection has marked itself broken.
+    private async ValueTask<HttpClientResponse> SendWithRetryAsync(
+        Http2ClientConnection connection, HttpClientRequest request)
+    {
+        try
         {
-            throw new Http2ClientException($"no HTTP/2 connection to {_options.Host}:{_options.Port}");
+            return await connection.SendAsync(request);
         }
-        return connection.SendAsync(request);
+        catch (Http2StreamRefusedException)
+        {
+            return await SendWhenConnectedAsync(request);
+        }
+    }
+
+    private async ValueTask<HttpClientResponse> SendWhenConnectedAsync(HttpClientRequest request)
+    {
+        long deadline = Environment.TickCount64 + _options.AcquireTimeoutMs;
+
+        while (true)
+        {
+            if (_disposed)
+            {
+                throw new Http2ClientException("pool disposed");
+            }
+
+            int remaining = (int)(deadline - Environment.TickCount64);
+            if (remaining <= 0)
+            {
+                throw new Http2ClientException(
+                    $"no HTTP/2 connection to {_options.Host}:{_options.Port} within {_options.AcquireTimeoutMs} ms");
+            }
+
+            if (_connections.Count + _opening == 0)
+            {
+                OpenOne();   // every connection died and the sweep has not run yet
+            }
+
+            var waiter = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _waiters.Enqueue(waiter);
+
+            Task signalled = waiter.Task;
+            if (await Task.WhenAny(signalled, Task.Delay(remaining)) != signalled)
+            {
+                waiter.TrySetCanceled();   // abandon the slot so WakeWaiters cannot hand it to us
+                continue;                  // loop re-checks the deadline and gives up there
+            }
+
+            Http2ClientConnection? connection = Pick();
+            if (connection is not null)
+            {
+                try
+                {
+                    return await connection.SendAsync(request);
+                }
+                catch (Http2StreamRefusedException)
+                {
+                    continue;   // that connection is retiring too; wait for the replacement
+                }
+            }
+        }
+    }
+
+    private void WakeWaiters()
+    {
+        while (_waiters.Count > 0)
+        {
+            _waiters.Dequeue().TrySetResult(true);
+        }
     }
 
     private Http2ClientConnection? Pick()
@@ -120,10 +195,12 @@ public sealed class Http2ClientPool : IDisposable
                 return;
             }
             _connections.Add(connection);
+            WakeWaiters();
         }
         catch (Exception e)
         {
             Console.Error.WriteLine($"[nghttp2] connect to {_options.Host}:{_options.Port} failed: {e.Message}");
+            WakeWaiters();   // fail fast: waiters re-check and time out rather than hang
         }
         finally
         {
@@ -162,5 +239,6 @@ public sealed class Http2ClientPool : IDisposable
             connection.Dispose();
         }
         _connections.Clear();
+        WakeWaiters();
     }
 }

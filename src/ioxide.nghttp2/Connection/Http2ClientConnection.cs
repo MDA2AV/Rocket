@@ -61,7 +61,12 @@ public sealed class Http2ClientConnection : IDisposable
         _authority = System.Text.Encoding.ASCII.GetBytes(authority);
     }
 
-    public bool IsBroken => _failed || _disposed;
+    public bool IsBroken => _failed || _disposed || _retiring;
+
+    // Set when the peer refuses a stream (GOAWAY / max-requests reached). The connection can still
+    // finish what is in flight, but the pool must stop handing it new requests and open a
+    // replacement.
+    private bool _retiring;
 
     public int InFlight => _pending.Count;
 
@@ -222,6 +227,12 @@ public sealed class Http2ClientConnection : IDisposable
                 }
 
                 await PumpEgressAsync();   // ACKs, WINDOW_UPDATEs and any newly submitted requests
+
+                if (_nghttp2Handle != 0 && Nghttp2.ih2_is_dead(_nghttp2Handle) != 0)
+                {
+                    _retiring = true;   // GOAWAY drained; the pool opens a replacement
+                    break;
+                }
             }
         }
         catch (Exception e)
@@ -440,11 +451,26 @@ public sealed class Http2ClientConnection : IDisposable
     private static unsafe void CallbackStreamError(void* user, int streamId, uint errorCode)
     {
         Http2ClientConnection connection = FromUser(user);
+
+        // REFUSED_STREAM means the peer never processed the request - it is retiring the connection
+        // (GOAWAY, or a max-requests limit like nginx's keepalive_requests). RFC 9113 8.7 makes
+        // retrying it explicitly safe, so it is surfaced as retryable and the connection retires.
+        bool refused = errorCode == RefusedStream;
+        if (refused)
+        {
+            connection._retiring = true;
+        }
+
         if (connection._pending.Remove(streamId, out PendingRequest? pending))
         {
-            pending.Fail(new Http2ClientException($"stream {streamId} reset (error {errorCode})"));
+            pending.Fail(refused
+                ? new Http2StreamRefusedException($"stream {streamId} refused; connection is retiring")
+                : new Http2ClientException($"stream {streamId} reset (error {errorCode})"));
         }
     }
+
+    /// <summary>HTTP/2 REFUSED_STREAM (RFC 9113 section 7).</summary>
+    private const uint RefusedStream = 7;
 
     public unsafe void Dispose()
     {
@@ -498,7 +524,16 @@ public sealed class Http2ClientConnection : IDisposable
 }
 
 /// <summary>Any HTTP/2 client failure: connect, session, stream, or a protocol error.</summary>
-public sealed class Http2ClientException : Exception
+public class Http2ClientException : Exception
 {
     public Http2ClientException(string message) : base(message) { }
+}
+
+/// <summary>
+/// The peer refused the stream (REFUSED_STREAM), meaning it never processed the request - so
+/// resending it on a fresh connection is safe regardless of the method's idempotence.
+/// </summary>
+public sealed class Http2StreamRefusedException : Http2ClientException
+{
+    public Http2StreamRefusedException(string message) : base(message) { }
 }

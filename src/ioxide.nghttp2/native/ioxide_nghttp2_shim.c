@@ -236,6 +236,10 @@ ih2_conn *ih2_client_new(ih2_callbacks cbs, void *user)
 int32_t ih2_submit_request(ih2_conn *c, const uint8_t *headers, size_t headers_len,
                            const uint8_t *body, size_t body_len)
 {
+    if (c == NULL || c->session == NULL) {
+        return NGHTTP2_ERR_INVALID_STATE;
+    }
+
     enum { MAX_HEADERS = 64 };
     nghttp2_nv nv[MAX_HEADERS];
     size_t count = 0;
@@ -311,6 +315,9 @@ int32_t ih2_submit_request(ih2_conn *c, const uint8_t *headers, size_t headers_l
 /* Feed received bytes. Returns bytes consumed, or a negative nghttp2 error. */
 ssize_t ih2_read(ih2_conn *c, const uint8_t *data, size_t datalen)
 {
+    if (c == NULL || c->session == NULL) {
+        return NGHTTP2_ERR_INVALID_STATE;
+    }
     return nghttp2_session_mem_recv(c->session, data, datalen);
 }
 
@@ -318,6 +325,10 @@ ssize_t ih2_read(ih2_conn *c, const uint8_t *data, size_t datalen)
  * error. nghttp2 owns the returned pointer, so the bytes are copied out before returning. */
 ssize_t ih2_write(ih2_conn *c, uint8_t *buf, size_t buflen)
 {
+    if (c == NULL || c->session == NULL) {
+        return NGHTTP2_ERR_INVALID_STATE;
+    }
+
     size_t total = 0;
 
     while (total < buflen) {
@@ -345,6 +356,9 @@ ssize_t ih2_write(ih2_conn *c, uint8_t *buf, size_t buflen)
 /* Non-zero once the session can neither send nor receive - the bridge drops the connection. */
 int ih2_is_dead(ih2_conn *c)
 {
+    if (c == NULL || c->session == NULL) {
+        return 1;
+    }
     return nghttp2_session_want_read(c->session) == 0 &&
            nghttp2_session_want_write(c->session) == 0;
 }
