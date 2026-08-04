@@ -285,11 +285,12 @@ on top, `ioxide.Kestrel` plugs the same engine under ASP.NET Core.
 
 ## Try it
 
-The [Playground](Playground/) runs the engine under one workload at a time - `raw`, `pg`, `redis`,
-`file`, `proxy`, and four HTTP/3 flavors - selected by `PLAYGROUND_MODE`:
+The [Playground](Playground/) is one runnable project per workload — `Raw`, `Pg`, `File`, `Proxy`,
+three HTTP/3 flavors, and the synthetic `Pipe`/`Hop`/`TaskRun` variants — each a small `Program.cs`
+over a shared library:
 
 ```bash
-PLAYGROUND_MODE=raw PLAYGROUND_REACTORS=4 dotnet run -c Release --project Playground
+PLAYGROUND_REACTORS=4 dotnet run -c Release --project Playground/Raw
 ```
 
 The [Examples project](Examples/) builds every snippet above as runnable code, with

@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>Playground.Shared</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Core only. A sample that needs pg, file, nghttp3 and so on references it directly, so no
+         sample drags in a package it does not demonstrate. -->
+    <ProjectReference Include="../../src/ioxide/ioxide.csproj" />
+  </ItemGroup>
+
+</Project>

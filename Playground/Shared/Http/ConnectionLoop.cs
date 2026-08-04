@@ -1,33 +1,33 @@
 using ioxide;
 
-namespace Playground.Http;
+namespace Playground.Shared.Http;
 
 /// <summary>
 /// Produces the response for one read batch. Implementations are structs so the loop below can be
 /// shared without adding indirection to the request path - see <see cref="ConnectionLoop"/>.
 /// </summary>
-internal interface ITcpResponder
+public interface ITcpResponder
 {
     /// <summary>
     /// Handle one batch of received bytes. The implementation owns draining the recv and flushing
-    /// whatever it wrote (the file handler flushes several times per request, so the loop cannot
-    /// do it on the responder's behalf).
+    /// whatever it wrote (the file sample flushes several times per request, so the loop cannot do
+    /// it on the responder's behalf).
     /// </summary>
     ValueTask RespondAsync(TcpConnection conn, RecvSnapshot snapshot);
 }
 
 /// <summary>
-/// The connection loop every TCP mode shares: read, respond, repeat until the peer closes, then
-/// drop the reference. Only the response differs between modes, which is what
+/// The connection loop every TCP sample shares: read, respond, repeat until the peer closes, then
+/// drop the reference. Only the response differs between samples, which is what
 /// <see cref="ITcpResponder"/> supplies.
 /// </summary>
-internal static class ConnectionLoop
+public static class ConnectionLoop
 {
     /// <summary>
     /// Generic over a <c>struct</c> responder on purpose. The JIT compiles a separate instantiation
     /// per responder type and inlines <see cref="ITcpResponder.RespondAsync"/> into it, so sharing
     /// the loop costs no interface dispatch, no boxing and no closure allocation per request - the
-    /// raw mode stays a clean throughput baseline.
+    /// raw sample stays a clean throughput baseline.
     /// </summary>
     public static async Task ServeAsync<TResponder>(TcpConnection conn, TResponder responder)
         where TResponder : struct, ITcpResponder

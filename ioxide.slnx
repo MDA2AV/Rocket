@@ -26,9 +26,26 @@
   </Folder>
 
   <Folder Name="/apps/">
-    <Project Path="Playground/Playground.csproj" />
     <Project Path="Examples/Examples.csproj" />
     <Project Path="Examples.AspNet/Examples.AspNet.csproj" />
+  </Folder>
+
+  <!-- One runnable project per workload, over a shared library. Each is run directly with
+       "dotnet run" against its own project directory; see Playground/README.md. -->
+  <Folder Name="/apps/playground/">
+    <Project Path="Playground/Shared/Playground.Shared.csproj" />
+    <Project Path="Playground/Shared.Quic/Playground.Shared.Quic.csproj" />
+    <Project Path="Playground/Shared.Nghttp3/Playground.Shared.Nghttp3.csproj" />
+    <Project Path="Playground/Raw/Playground.Raw.csproj" />
+    <Project Path="Playground/Pipe/Playground.Pipe.csproj" />
+    <Project Path="Playground/Hop/Playground.Hop.csproj" />
+    <Project Path="Playground/TaskRun/Playground.TaskRun.csproj" />
+    <Project Path="Playground/Pg/Playground.Pg.csproj" />
+    <Project Path="Playground/File/Playground.File.csproj" />
+    <Project Path="Playground/Proxy/Playground.Proxy.csproj" />
+    <Project Path="Playground/H3/Playground.H3.csproj" />
+    <Project Path="Playground/H3Buffered/Playground.H3Buffered.csproj" />
+    <Project Path="Playground/Http3/Playground.Http3.csproj" />
   </Folder>
 
   <!-- Nested so it does not collide with /apps/Examples - same project name, different project. -->

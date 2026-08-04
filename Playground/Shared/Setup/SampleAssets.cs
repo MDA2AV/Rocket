@@ -1,7 +1,7 @@
-namespace Playground.Setup;
+namespace Playground.Shared.Setup;
 
 /// <summary>Seeds a small asset directory so <c>file</c> mode has something to serve.</summary>
-internal static class SampleAssets
+public static class SampleAssets
 {
     public static void Ensure(string dir)
     {

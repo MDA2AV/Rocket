@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net11.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>Playground.Http3</RootNamespace>
+    <AssemblyName>Playground.Http3</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Shared/Playground.Shared.csproj" />
+    <ProjectReference Include="../Shared.Quic/Playground.Shared.Quic.csproj" />
+    <ProjectReference Include="../../src/protocols/ioxide.http3/ioxide.http3.csproj" />
+  </ItemGroup>
+
+</Project>
