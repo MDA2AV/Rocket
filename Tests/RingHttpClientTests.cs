@@ -159,6 +159,16 @@ internal static class RingHttpClientTests
                 RecvSnapshot snapshot = await connection.ReadAsync();
                 string path = Wire.ReadPath(connection, snapshot);
 
+                // A close is not a request. The test client is lock-step (it closes only after
+                // reading the response), so a closed snapshot never carries request bytes here -
+                // but ReadPath defaults to "/" on an empty snapshot, and dispatching that would
+                // send a phantom upstream fetch whose h1 response carries Alt-Svc, promoting the
+                // origin to h3 before the test's first real /fetch.
+                if (snapshot.IsClosed)
+                {
+                    return;
+                }
+
                 if (path == "/protocol")
                 {
                     Wire.Write(connection, 200, upstream.NextProtocol);
@@ -183,8 +193,6 @@ internal static class RingHttpClientTests
                 }
 
                 await connection.FlushAsync();
-
-                if (snapshot.IsClosed) return;
                 connection.ResetRead();
             }
         }
