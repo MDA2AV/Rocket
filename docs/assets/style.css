@@ -84,9 +84,15 @@ nav.top .links a.gh svg { display: block; }
   position: relative;
   max-width: 980px;
   margin: 0 auto;
-  padding: 5.5rem 1.5rem 3.5rem;
+  padding: 4rem 1.5rem 2.5rem;
   text-align: center;
 }
+
+/* On the landing page the hero lives inside the example browser, so picking an example hides it
+   along with everything else and leaves the code at the top. Scoped to .tabs so a hero anywhere
+   else in the docs is untouched. */
+.tabs > .hero { display: none; }
+#tab-none:checked ~ .hero { display: block; }
 
 /* staggered entrance */
 .hero h1, .hero .sub { animation: rise 0.55s ease-out both; }
@@ -292,8 +298,10 @@ section.block { max-width: 980px; margin: 0 auto; padding: 3.5rem 1.5rem; }
 section.block.examples {
   max-width: none;
   margin: 0;
-  padding-left: calc(170px + 2.5rem);
-  padding-right: 2.5rem;
+  /* Little top padding: with the hero and prose hidden, the selected code block should start
+     near the top of the page rather than below a section's worth of whitespace. The overview
+     supplies its own breathing room instead. */
+  padding: 1.5rem 2.5rem 3.5rem calc(170px + 2.5rem);
 }
 @media (max-width: 1320px) {
   section.block.examples {
