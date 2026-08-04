@@ -32,6 +32,21 @@ internal static class Http2ClientTests
             Assert.Equal("200|1024", body);   // the sidecar's 1 KiB object
         }, skip: noSidecar);
 
+        // Regression guard: request bodies were silently dropped by the shim (NGHTTP2_DATA_FLAG_NO_COPY
+        // with a no-op send_data callback made nghttp2 account each DATA frame as sent without ever
+        // emitting it). Every earlier test was a GET, so nothing caught it.
+        runner.Test("httpclient2: POST body actually reaches the origin", () =>
+        {
+            int driver = TestServer.Start(PostDriverHandler, onStart: reactor =>
+                Http2ClientPool.Start(reactor, Options()));
+
+            // nginx answers a POST to a static file with 405, which is proof enough that the
+            // request arrived intact - a dropped body would hang the stream until timeout instead.
+            (int status, string body) = Client.Get(driver, "/index.html");
+            Assert.Equal(200, status);
+            Assert.Equal("405", body);
+        }, skip: noSidecar);
+
         runner.Test("httpclient2: many requests multiplex over one connection", () =>
         {
             int driver = TestServer.Start(DriverHandler, onStart: reactor =>
@@ -48,6 +63,48 @@ internal static class Http2ClientTests
             (_, string stats) = Client.Get(driver, "/connstats");
             Assert.Equal("conns=1", stats);
         }, skip: noSidecar);
+    }
+
+    // Sends a POST with a 4 KiB body and reports the status, so a dropped body shows up as a
+    // hang/timeout rather than a pass.
+    private static async Task PostDriverHandler(Reactor reactor, TcpConnection connection)
+    {
+        try
+        {
+            Http2ClientPool upstream = reactor.GetService<Http2ClientPool>()!;
+
+            while (true)
+            {
+                RecvSnapshot snapshot = await connection.ReadAsync();
+                if (snapshot.IsClosed)
+                {
+                    return;
+                }
+                string path = Wire.ReadPath(connection, snapshot);
+
+                string detail;
+                try
+                {
+                    byte[] payload = new byte[4096];
+                    payload.AsSpan().Fill((byte)'z');
+                    using HttpClientResponse response = await upstream.PostAsync(
+                        System.Text.Encoding.ASCII.GetBytes(path), payload);
+                    detail = response.Status.ToString();
+                }
+                catch (Exception e)
+                {
+                    detail = e.Message;
+                }
+
+                Wire.Write(connection, 200, detail);
+                await connection.FlushAsync();
+                connection.ResetRead();
+            }
+        }
+        finally
+        {
+            connection.DecRef();
+        }
     }
 
     private static Http2ClientOptions Options() => new()

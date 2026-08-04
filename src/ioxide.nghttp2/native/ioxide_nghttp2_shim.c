@@ -85,7 +85,12 @@ static int on_begin_headers(nghttp2_session *session, const nghttp2_frame *frame
 {
     (void)session;
     ih2_conn *c = user_data;
-    if (frame->hd.type == NGHTTP2_HEADERS && frame->headers.cat == NGHTTP2_HCAT_RESPONSE &&
+    /* HCAT_HEADERS too, not just HCAT_RESPONSE: nghttp2 categorises only the FIRST section as
+     * the response, so after a 1xx (103 Early Hints, 100 Continue) the real response arrives as
+     * HCAT_HEADERS. Reporting only the first section left the managed side treating the interim
+     * one as final and slicing the body from the wrong offset. */
+    if (frame->hd.type == NGHTTP2_HEADERS &&
+        (frame->headers.cat == NGHTTP2_HCAT_RESPONSE || frame->headers.cat == NGHTTP2_HCAT_HEADERS) &&
         c->cbs.on_begin_headers != NULL) {
         c->cbs.on_begin_headers(c->user, frame->hd.stream_id);
     }
@@ -109,7 +114,8 @@ static int on_frame_recv(nghttp2_session *session, const nghttp2_frame *frame, v
     (void)session;
     ih2_conn *c = user_data;
 
-    if (frame->hd.type == NGHTTP2_HEADERS && frame->headers.cat == NGHTTP2_HCAT_RESPONSE &&
+    if (frame->hd.type == NGHTTP2_HEADERS &&
+        (frame->headers.cat == NGHTTP2_HCAT_RESPONSE || frame->headers.cat == NGHTTP2_HCAT_HEADERS) &&
         c->cbs.on_end_headers != NULL) {
         c->cbs.on_end_headers(c->user, frame->hd.stream_id);
     }
@@ -151,12 +157,18 @@ static int on_stream_close(nghttp2_session *session, int32_t stream_id, uint32_t
     return 0;
 }
 
-/* Hand nghttp2 the remaining request body. NO_COPY keeps it zero-copy: the buffer stays valid
- * until the stream closes (ih2_stream_drop), so nghttp2 may reference it across calls. */
+/* Copy the next slice of the request body into nghttp2's buffer.
+ *
+ * Deliberately NOT NGHTTP2_DATA_FLAG_NO_COPY. With NO_COPY nghttp2 hands the frame to
+ * send_data_callback and, on its return, accounts the frame as sent and debits the flow-control
+ * window WITHOUT ever writing it to the mem_send buffer - so unless that callback does the framing
+ * itself, every DATA frame vanishes and the request hangs at the peer. The body is already copied
+ * into s->body at submit time, so a plain copy here costs nothing extra and keeps the framing
+ * inside nghttp2 where it belongs. */
 static ssize_t read_body(nghttp2_session *session, int32_t stream_id, uint8_t *buf, size_t length,
                          uint32_t *data_flags, nghttp2_data_source *source, void *user_data)
 {
-    (void)session; (void)buf; (void)source;
+    (void)session; (void)source;
     ih2_conn *c = user_data;
     ih2_stream *s = ih2_stream_find(c, stream_id);
 
@@ -167,23 +179,13 @@ static ssize_t read_body(nghttp2_session *session, int32_t stream_id, uint8_t *b
 
     size_t remaining = s->body_len - s->body_sent;
     size_t take = remaining < length ? remaining : length;
+    memcpy(buf, s->body + s->body_sent, take);
     s->body_sent += take;
 
     if (s->body_sent == s->body_len) {
         *data_flags |= NGHTTP2_DATA_FLAG_EOF;
     }
-    *data_flags |= NGHTTP2_DATA_FLAG_NO_COPY;
     return (ssize_t)take;
-}
-
-/* With NO_COPY, nghttp2 asks us to write the frame payload ourselves. */
-static int send_data(nghttp2_session *session, nghttp2_frame *frame, const uint8_t *framehd,
-                     size_t length, nghttp2_data_source *source, void *user_data)
-{
-    (void)session; (void)framehd; (void)source; (void)frame; (void)length; (void)user_data;
-    /* Unreachable: mem_send handles the framing when NO_COPY is combined with mem_send, but
-     * nghttp2 still requires the callback to exist. Returning an error would abort the session. */
-    return 0;
 }
 
 /* ---- API --------------------------------------------------------------------------------- */
@@ -207,7 +209,6 @@ ih2_conn *ih2_client_new(ih2_callbacks cbs, void *user)
     nghttp2_session_callbacks_set_on_frame_recv_callback(callbacks, on_frame_recv);
     nghttp2_session_callbacks_set_on_data_chunk_recv_callback(callbacks, on_data_chunk_recv);
     nghttp2_session_callbacks_set_on_stream_close_callback(callbacks, on_stream_close);
-    nghttp2_session_callbacks_set_send_data_callback(callbacks, send_data);
 
     int rv = nghttp2_session_client_new(&c->session, callbacks, c);
     nghttp2_session_callbacks_del(callbacks);
@@ -218,10 +219,11 @@ ih2_conn *ih2_client_new(ih2_callbacks cbs, void *user)
 
     /* Client connection preface + our SETTINGS; the first ih2_write drain carries them out. */
     nghttp2_settings_entry settings[] = {
+        {NGHTTP2_SETTINGS_ENABLE_PUSH, 0},   /* nothing routes a pushed stream; do not accept any */
         {NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, 1000},
         {NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE, 1 << 20},
     };
-    if (nghttp2_submit_settings(c->session, NGHTTP2_FLAG_NONE, settings, 2) != 0) {
+    if (nghttp2_submit_settings(c->session, NGHTTP2_FLAG_NONE, settings, 3) != 0) {
         nghttp2_session_del(c->session);
         free(c);
         return NULL;
@@ -270,6 +272,12 @@ int32_t ih2_submit_request(ih2_conn *c, const uint8_t *headers, size_t headers_l
         nv[count].valuelen = valuelen;
         nv[count].flags    = NGHTTP2_NV_FLAG_NONE;   /* nghttp2 copies during submit */
         count++;
+    }
+
+    /* Truncating here would silently drop headers - an omitted authorization is worse than a
+     * failed request, so refuse instead. */
+    if (off < headers_len) {
+        return NGHTTP2_ERR_INVALID_ARGUMENT;
     }
 
     ih2_stream *s = NULL;
@@ -329,9 +337,18 @@ ssize_t ih2_write(ih2_conn *c, uint8_t *buf, size_t buflen)
         return NGHTTP2_ERR_INVALID_STATE;
     }
 
+    /* Largest chunk mem_send can hand back: a 16 KiB frame payload plus its 9-byte header.
+     * nghttp2 caps frames at NGHTTP2_MAX_FRAME_SIZE_MIN regardless of the peer's SETTINGS. */
+    enum { MAX_CHUNK = 16384 + 9 };
+
     size_t total = 0;
 
-    while (total < buflen) {
+    while (buflen - total >= MAX_CHUNK) {
+        /* Checked BEFORE pulling, and that ordering is the whole point: mem_send runs
+         * session_after_frame_sent1 before it returns, so a chunk it hands back is already
+         * accounted as sent and is never offered again. Discarding one because it did not fit
+         * would lose the frame permanently. Stopping early just leaves it queued for the next
+         * call. */
         const uint8_t *chunk;
         ssize_t produced = nghttp2_session_mem_send(c->session, &chunk);
         if (produced < 0) {
@@ -339,12 +356,6 @@ ssize_t ih2_write(ih2_conn *c, uint8_t *buf, size_t buflen)
         }
         if (produced == 0) {
             break;
-        }
-        if (total + (size_t)produced > buflen) {
-            /* Does not fit this pass; nghttp2 has already advanced its state, so the caller must
-             * be given what we have and call again with an empty buffer. This cannot happen with
-             * a buffer at least NGHTTP2_MAX_FRAME_SIZE_MAX + 9 bytes, which the bridge uses. */
-            return NGHTTP2_ERR_NOMEM;
         }
         memcpy(buf + total, chunk, (size_t)produced);
         total += (size_t)produced;

@@ -186,6 +186,13 @@ public sealed class Http2ClientConnection : IDisposable
 
         static void Write(byte[] destination, ref int offset, ReadOnlySpan<byte> name, ReadOnlySpan<byte> value)
         {
+            // Lengths are framed as u16. Truncating one while still copying the bytes would
+            // desync the whole packed block, so refuse instead.
+            if (name.Length > ushort.MaxValue || value.Length > ushort.MaxValue)
+            {
+                throw new Http2ClientException("header name or value exceeds 65535 bytes");
+            }
+
             destination[offset++] = (byte)name.Length;
             destination[offset++] = (byte)(name.Length >> 8);
             name.CopyTo(destination.AsSpan(offset));
@@ -466,13 +473,31 @@ public sealed class Http2ClientConnection : IDisposable
     private static unsafe void CallbackEndHeaders(void* user, int streamId)
     {
         Http2ClientConnection connection = FromUser(user);
-        if (connection._pending.TryGetValue(streamId, out PendingRequest? pending) &&
-            pending.Response is { } response && !pending.HeadersDone)
+        if (!connection._pending.TryGetValue(streamId, out PendingRequest? pending) ||
+            pending.Response is not { } response)
+        {
+            return;
+        }
+
+        // 1xx is INTERIM (103 Early Hints, 100 Continue): the real response follows in another
+        // HEADERS section on the same stream. Keeping this section's bytes would leave BodyStart
+        // pointing at the interim headers, so the final response's headers would be returned as
+        // the body. Drop it and wait for the real one.
+        if (response.Status is >= 100 and < 200)
+        {
+            response.ResetForInterim();
+            pending.HeadersDone = false;
+            pending.BodyStart = 0;
+            pending.BodyLength = 0;
+            return;
+        }
+
+        if (!pending.HeadersDone)
         {
             pending.HeadersDone = true;
             pending.BodyStart = response.ArenaLength;   // body bytes follow the header bytes
         }
-        // A second field section is TRAILERS: leaving BodyStart alone keeps the body range valid.
+        // A later section is TRAILERS: leaving BodyStart alone keeps the body range valid.
     }
 
     [UnmanagedCallersOnly]
