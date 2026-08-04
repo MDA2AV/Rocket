@@ -82,11 +82,19 @@ nav.top .links a.gh svg { display: block; }
 
 .hero {
   position: relative;
-  max-width: 980px;
+  /* 900 rather than 980 so that at the 1320px breakpoint the hero's left edge still clears the
+     170px fixed menu: (1320-900)/2 = 210px. */
+  max-width: 900px;
   margin: 0 auto;
-  padding: 5.5rem 1.5rem 3.5rem;
+  padding: 3.5rem 1.5rem 2rem;
   text-align: center;
 }
+
+/* On the landing page the hero lives inside the example browser, so picking an example hides it
+   along with everything else and leaves the code at the top. Scoped to .tabs so a hero anywhere
+   else in the docs is untouched. */
+.tabs > .hero { display: none; }
+#tab-none:checked ~ .hero { display: block; }
 
 /* staggered entrance */
 .hero h1, .hero .sub { animation: rise 0.55s ease-out both; }
@@ -108,10 +116,12 @@ nav.top .links a.gh svg { display: block; }
 @media (max-width: 560px) { .hero h1 br { display: none; } }   /* wrap naturally on phones */
 
 .hero p.sub {
-  margin: 1.3rem auto 0;
-  max-width: 660px;
+  margin: 1.2rem auto 0;
+  max-width: 600px;      /* same measure as the overview prose, so the column reads as one */
   color: var(--text-dim);
-  font-size: 1.15rem;
+  font-size: 1.12rem;
+  line-height: 1.6;
+  text-wrap: balance;    /* even line lengths - centred text with a ragged tail looks broken */
 }
 
 /* ── example browser: fixed menu at the far left, code fills the rest ─────────── */
@@ -191,22 +201,34 @@ nav.top .links a.gh svg { display: block; }
    leaves nothing on screen but the code. */
 .ex-intro {
   display: none;
-  max-width: 760px;
+  max-width: 600px;      /* narrow measure: centred prose only reads well on short lines */
   margin: 0 auto;
-  padding: 1.5rem 0 2rem;
+  padding: 0 0 2.5rem;
   text-align: center;
 }
 #tab-none:checked ~ .ex-intro { display: block; }
-.ex-intro h2 { margin-bottom: 1.2rem; }
-.ex-intro p { color: var(--text-dim); margin: 0 0 1.1rem; }
-.ex-intro .lead { font-size: 1.15rem; }
+
+.ex-intro h2 {
+  font-size: 1.45rem;
+  margin: 0 0 0.9rem;
+  text-wrap: balance;
+}
+.ex-intro p {
+  color: var(--text-dim);
+  margin: 0 0 0.95rem;
+  line-height: 1.62;
+  text-wrap: pretty;     /* no one-word last lines dangling under centred text */
+}
+.ex-intro .lead { font-size: 1.05rem; color: var(--text); }
+.ex-intro p:last-of-type { margin-bottom: 0; }
+
 .ex-hint {
-  font-size: 0.85rem;
-  letter-spacing: 0.04em;
+  font-size: 0.75rem;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--accent-soft);
-  opacity: 0.8;
-  margin-top: 1.8rem !important;
+  opacity: 0.75;
+  margin-top: 2.2rem !important;
 }
 
 .pane { display: none; min-width: 0; }
@@ -292,8 +314,18 @@ section.block { max-width: 980px; margin: 0 auto; padding: 3.5rem 1.5rem; }
 section.block.examples {
   max-width: none;
   margin: 0;
-  padding-left: calc(170px + 2.5rem);
-  padding-right: 2.5rem;
+  /* Little top padding: with the hero and prose hidden, the selected code block should start
+     near the top of the page rather than below a section's worth of whitespace. The overview
+     supplies its own breathing room instead. */
+  padding: 1.5rem 2.5rem 3.5rem calc(170px + 2.5rem);
+}
+
+/* The overview has no code pane to keep clear of the menu, so drop the asymmetric padding and
+   let the block land on TRUE page centre. Without this it sits (170px)/2 = 85px right of centre,
+   which is what reads as skewed. The menu still clears it: the widest child is 900px, so at the
+   1320px breakpoint it starts at 210px against the menu's 170px. */
+section.block.examples:has(#tab-none:checked) {
+  padding-left: 2.5rem;
 }
 @media (max-width: 1320px) {
   section.block.examples {

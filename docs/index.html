@@ -19,15 +19,6 @@
   </div>
 </nav>
 
-<div class="hero">
-  <h1>The <em>shared-nothing</em> io_uring<br>runtime for .NET</h1>
-  <p class="sub">
-    One ring per reactor, one reactor per thread - run one per core. Every <code>await</code> -
-    an HTTP read, a Postgres query, a file read - is a completion on that ring, resumed inline
-    on the same thread. No thread pool on the hot path. The ring is the I/O.
-  </p>
-</div>
-
 <section class="block examples">
 <div class="tabs">
   <input type="radio" name="mode-tabs" id="tab-none" checked>
@@ -72,6 +63,15 @@
     <label for="tab-tls">ktls</label>
     <label for="tab-kestrel">asp.net</label>
   </nav>
+
+  <div class="hero">
+    <h1>The <em>shared-nothing</em> io_uring<br>runtime for .NET</h1>
+    <p class="sub">
+      One ring per reactor, one reactor per thread - run one per core. Every <code>await</code> -
+      an HTTP read, a Postgres query, a file read - is a completion on that ring, resumed inline
+      on the same thread. No thread pool on the hot path. The ring is the I/O.
+    </p>
+  </div>
 
   <div class="ex-intro">
     <h2>A normal async handler. An abnormal runtime under it.</h2>
