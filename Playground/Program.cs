@@ -1,185 +1,119 @@
 using System.Runtime.InteropServices;
 using ioxide;
-using ioxide.file;
-using ioxide.pg;
 using ioxide.ngtcp2;
+using Playground.Handlers;
+using Playground.Setup;
 
 namespace Playground;
 
 /// <summary>
-/// A host for the ioxide engine. PLAYGROUND_MODE picks the handler: raw (plaintext "ok"),
-/// pg (a PgPool per reactor), file (static files over the asset cache), hop (raw via the thread
-/// pool). Each mode registers its services from OnStart; handlers fetch them with GetService.
+/// A host for the ioxide engine. PLAYGROUND_MODE picks the mode; every mode declares its own
+/// handlers and services in <see cref="Modes"/>, so this file only wires them to reactors. See
+/// Playground/README.md for the full set of environment knobs.
 /// </summary>
 internal static class Program
 {
     private static int Main()
     {
-        string mode = Environment.GetEnvironmentVariable("PLAYGROUND_MODE") ?? "raw";
+        PlaygroundConfig config = PlaygroundConfig.FromEnvironment();
+        PlaygroundMode mode = Modes.Resolve(config);
 
-        // quic/h3 modes (aliases): ngtcp2+picotls next to the TCP listener, the nghttp3 layer
-        // answering real HTTP/3 requests, ALPN pinned. One engine for the whole server; every
-        // reactor binds the UDP port via SO_REUSEPORT and demuxes its own flows.
-        QuicEngine? quicEngine = null;
-        QuicOptions? quicOptions = null;
-        if (mode is "quic" or "h3" or "h3-buffered" or "http3")
+        // ngtcp2+picotls next to the TCP listener, ALPN pinned to h3. One engine for the whole
+        // server; every reactor binds the UDP port via SO_REUSEPORT and demuxes its own flows.
+        using QuicEngine? quicEngine = CreateQuicEngine(config, mode, out QuicOptions? quicOptions);
+
+        ServerConfig serverConfig = config.ToServerConfig(quicOptions);
+
+        using IDisposable? reloadOnSighup = RegisterAssetReload(mode);
+        using IDisposable? drainOnSigterm = RegisterH3Drain(mode);
+
+        Console.WriteLine($"[playground] {serverConfig.ReactorCount} reactors on :{config.TcpPort} "
+                        + $"(mode={mode.Name}) - {mode.Summary}");
+
+        var threads = new Thread[serverConfig.ReactorCount];
+
+        for (int i = 0; i < threads.Length; i++)
         {
-            (string certPath, string keyPath) = Handlers.EnsureQuicCert();
-            quicEngine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
-            ushort quicPort = ushort.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_QUIC_PORT"), out ushort qp) ? qp : (ushort)8443;
-            quicOptions = new QuicOptions
+            var reactor = new Reactor(i, serverConfig)
             {
-                Port = quicPort,
-                LocalCidLength = 8,
-                ConnectionFactory = quicEngine.CreateFactory(),
+                TcpHandle = mode.Tcp,
+                QuicHandle = mode.Quic,
+                // Runs on the reactor thread, so every client opened there rides that reactor's ring.
+                OnStart = mode.Start,
             };
-            Console.WriteLine($"[playground] {mode} on udp :{quicPort} (ngtcp2 {QuicEngine.NativeVersion()})");
-        }
-
-        var config = new ServerConfig
-        {
-            ReactorCount = int.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_REACTORS"), out int reactors) ? reactors : 12,
-            Incremental = Environment.GetEnvironmentVariable("PLAYGROUND_INCREMENTAL") == "1" ? new IncrementalOptions() : null,
-            Tcp = new TcpOptions
-            {
-                Port = ushort.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_PORT"), out ushort tcpPort) ? tcpPort : (ushort)8080,
-            },
-            Udp = new UdpOptions
-            {
-                RecvSlots = int.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_UDP_SLOTS"), out int udpSlots) ? udpSlots : 16,
-            },
-            Quic = quicOptions,
-        };
-        string assetDir = Environment.GetEnvironmentVariable("PLAYGROUND_DIR") ?? "/tmp/ioxide-assets";
-
-        var pgOptions = new PgOptions
-        {
-            Host = Environment.GetEnvironmentVariable("PLAYGROUND_PG_HOST") ?? "127.0.0.1",
-            Port = ushort.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_PG_PORT"), out ushort pgPort) ? pgPort : (ushort)5432,
-            User = Environment.GetEnvironmentVariable("PLAYGROUND_PG_USER") ?? "bench",
-            Database = Environment.GetEnvironmentVariable("PLAYGROUND_PG_DB") ?? "bench",
-            PoolSize = int.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_PG_POOL"), out int poolSize) ? poolSize : 4,
-            CommandTimeoutMs = int.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_PG_TIMEOUT"), out int pgTimeout) ? pgTimeout : 30_000,
-        };
-
-        // The asset cache opens every file once and is shared across all reactors (its descriptors
-        // are stable and read positionally). StaticAssets wraps it so it can be reloaded atomically.
-        StaticAssets? assets = null;
-        if (mode == "file")
-        {
-            // PLAYGROUND_CACHE_MAX: per-file byte ceiling for pinning bodies in memory
-            // (0 forces every request through the ring-read path; default 256KB).
-            int cacheMax = int.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_CACHE_MAX"), out int max)
-                ? max
-                : AssetCache.DefaultMaxCachedFileBytes;
-
-            Handlers.EnsureSampleDir(assetDir);
-            assets = new StaticAssets(assetDir, cacheMax);
-            Console.WriteLine($"[playground] asset cache: {assets.Count} files under {assets.RootDir} (pin ≤ {cacheMax}B)");
-        }
-
-        // Reload the assets on SIGHUP (e.g. `kill -HUP <pid>` after a deploy): a fresh snapshot is
-        // opened and swapped in atomically; the old descriptors close after a grace.
-        using IDisposable? reload = assets is null ? null : PosixSignalRegistration.Create(PosixSignal.SIGHUP, ctx =>
-        {
-            ctx.Cancel = true;   // handle it; don't let the default action terminate us
-            assets.Reload();
-            Console.WriteLine($"[playground] reloaded - now serving {assets.Count} files");
-        });
-        
-        // Graceful shutdown for the h3 modes: SIGTERM GOAWAYs every live connection, gives
-        // in-flight requests a grace period to finish, then exits. Without this the process dies
-        // mid-request and clients see resets.
-        using IDisposable? drainOnSigterm = mode is not ("h3" or "h3-buffered") ? null :
-            PosixSignalRegistration.Create(PosixSignal.SIGTERM, context =>
-            {
-                context.Cancel = true;
-                Console.WriteLine("[playground] SIGTERM: draining h3 connections (GOAWAY)...");
-                Handlers.ShutdownAllH3();
-                Thread.Sleep(2000);   // grace period for in-flight requests
-                Console.WriteLine("[playground] drain complete, exiting");
-                Environment.Exit(0);
-            });
-
-        Console.WriteLine($"[playground] {config.ReactorCount} reactors on :{config.Tcp.Port} (mode={mode})");
-
-        var threads = new Thread[config.ReactorCount];
-
-        for (int i = 0; i < config.ReactorCount; i++)
-        {
-            var reactor = new Reactor(i, config);
-
-            // Pick the handler, and register whatever per-reactor services it needs. OnStart runs
-            // on the reactor thread, so every client opened there rides that reactor's ring.
-            switch (mode)
-            {
-                case "pg":
-                    reactor.TcpHandle = Handlers.Pg;
-                    reactor.OnStart = r => PgPool.Start(r, pgOptions);
-                    break;
-
-                case "file":
-                    reactor.TcpHandle = Handlers.File;
-                    reactor.OnStart = r =>
-                    {
-                        r.AddService(assets!);
-                        AssetReader.CreatePool(r, readers: 4, bufferBytes: 1 << 20);
-                    };
-                    break;
-
-                case "proxy":
-                    reactor.TcpHandle = Handlers.Proxy;   // forwards through ioxide.http11
-                    reactor.OnStart = r => ioxide.http11.HttpClientPool.Start(r, Handlers.UpstreamOptions());
-                    break;
-
-                case "pipe":
-                    reactor.TcpHandle = Handlers.Pipe;
-                    break;
-
-                case "hop":
-                    reactor.TcpHandle = Handlers.Hop;
-                    break;
-
-                case "taskrun":
-                    reactor.TcpHandle = Handlers.TaskRun;
-                    break;
-
-                case "quic":
-                case "h3":
-                    reactor.TcpHandle = Handlers.Raw;   // :8080 still listens (until a TCP opt-out exists)
-                    reactor.QuicHandle = Handlers.Nghttp3Streamed;
-                    break;
-
-                case "h3-buffered":
-                    reactor.TcpHandle = Handlers.Raw;
-                    reactor.QuicHandle = Handlers.Nghttp3Buffered;   // whole body in req.Body, handler may await
-                    break;
-
-                case "http3":
-                    reactor.TcpHandle = Handlers.Raw;
-                    reactor.QuicHandle = Handlers.Http3;   // the pure-C# h3 stack
-                    break;
-
-                default:
-                    reactor.TcpHandle = Handlers.Raw;
-                    break;
-            }
 
             threads[i] = new Thread(reactor.Run)
             {
                 Name = $"reactor-{i}",
-                IsBackground = false
+                IsBackground = false,
             };
 
             threads[i].Start();
         }
 
-        foreach (var thread in threads)
+        foreach (Thread thread in threads)
         {
             thread.Join();
         }
 
-        quicEngine?.Dispose();
         return 0;
+    }
+
+    private static QuicEngine? CreateQuicEngine(PlaygroundConfig config, PlaygroundMode mode, out QuicOptions? options)
+    {
+        if (!mode.NeedsQuic)
+        {
+            options = null;
+            return null;
+        }
+
+        (string certPath, string keyPath) = QuicCert.Ensure(config.QuicCertPath, config.QuicKeyPath);
+        var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+
+        options = new QuicOptions
+        {
+            Port = config.QuicPort,
+            LocalCidLength = 8,
+            ConnectionFactory = engine.CreateFactory(),
+        };
+
+        Console.WriteLine($"[playground] {mode.Name} on udp :{config.QuicPort} (ngtcp2 {QuicEngine.NativeVersion()})");
+        return engine;
+    }
+
+    /// <summary>
+    /// Reload the assets on SIGHUP (e.g. <c>kill -HUP &lt;pid&gt;</c> after a deploy): a fresh
+    /// snapshot is opened and swapped in atomically; the old descriptors close after a grace.
+    /// </summary>
+    private static IDisposable? RegisterAssetReload(PlaygroundMode mode)
+    {
+        if (mode.Assets is not { } assets) return null;
+
+        return PosixSignalRegistration.Create(PosixSignal.SIGHUP, context =>
+        {
+            context.Cancel = true;   // handle it; don't let the default action terminate us
+            assets.Reload();
+            Console.WriteLine($"[playground] reloaded - now serving {assets.Count} files");
+        });
+    }
+
+    /// <summary>
+    /// Graceful shutdown for the nghttp3 modes: SIGTERM GOAWAYs every live connection, gives
+    /// in-flight requests a grace period to finish, then exits. Without this the process dies
+    /// mid-request and clients see resets.
+    /// </summary>
+    private static IDisposable? RegisterH3Drain(PlaygroundMode mode)
+    {
+        if (!mode.DrainsNghttp3) return null;
+
+        return PosixSignalRegistration.Create(PosixSignal.SIGTERM, context =>
+        {
+            context.Cancel = true;
+            Console.WriteLine("[playground] SIGTERM: draining h3 connections (GOAWAY)...");
+            H3Handlers.ShutdownAll();
+            Thread.Sleep(2000);   // grace period for in-flight requests
+            Console.WriteLine("[playground] drain complete, exiting");
+            Environment.Exit(0);
+        });
     }
 }

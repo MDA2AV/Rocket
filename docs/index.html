@@ -34,7 +34,9 @@
   core's queue, and your code resumes right where it left off when the kernel answers. The same
   model rides TCP and QUIC (ngtcp2 + picotls bundled in the package, TLS 1.3 inside the
   transport) - pick a transport and a surface, pipes first. HTTP/3 ships as a layer over the
-  QUIC surface.</p>
+  QUIC surface. The <em>clients</em> go the other way: a Postgres query, a Redis command, an
+  outbound HTTP call or a file read is submitted on the <em>same</em> ring that accepted the
+  request, and resumes on the same thread - so a request never leaves the core it arrived on.</p>
 <div class="tabs">
   <input type="radio" name="mode-tabs" id="tab-pipe" checked>
   <input type="radio" name="mode-tabs" id="tab-shared">
@@ -43,6 +45,13 @@
   <input type="radio" name="mode-tabs" id="tab-qpipe">
   <input type="radio" name="mode-tabs" id="tab-qraw">
   <input type="radio" name="mode-tabs" id="tab-h3">
+  <input type="radio" name="mode-tabs" id="tab-h3pure">
+  <input type="radio" name="mode-tabs" id="tab-http">
+  <input type="radio" name="mode-tabs" id="tab-pg">
+  <input type="radio" name="mode-tabs" id="tab-redis">
+  <input type="radio" name="mode-tabs" id="tab-files">
+  <input type="radio" name="mode-tabs" id="tab-tls">
+  <input type="radio" name="mode-tabs" id="tab-kestrel">
   <div class="tab-bar">
     <div class="tab-rawgroup">
       <span class="tab-group">tcp</span>
@@ -63,7 +72,24 @@
     <div class="tab-rawgroup">
       <span class="tab-group">http/3</span>
       <div class="tab-rawtabs">
-        <label for="tab-h3">Nghttp3Connection</label>
+        <label for="tab-h3">nghttp3</label>
+        <label for="tab-h3pure">pure C#</label>
+      </div>
+    </div>
+    <div class="tab-rawgroup">
+      <span class="tab-group">clients</span>
+      <div class="tab-rawtabs">
+        <label for="tab-http">http</label>
+        <label for="tab-pg">postgres</label>
+        <label for="tab-redis">redis</label>
+        <label for="tab-files">files</label>
+      </div>
+    </div>
+    <div class="tab-rawgroup">
+      <span class="tab-group">serving</span>
+      <div class="tab-rawtabs">
+        <label for="tab-tls">ktls</label>
+        <label for="tab-kestrel">asp.net</label>
       </div>
     </div>
   </div>
@@ -534,22 +560,266 @@ new Thread(reactor.Run).Start();
 
 // curl --http3-only -k https://localhost:8443/</code></pre>
   </div>
+  <div class="pane pane-h3pure">
+<pre><code class="language-csharp">// ioxide.http3: the same HTTP/3 surface implemented in pure C# - frames, QPACK
+// (static table + Huffman), request dispatch. No native h3 code at all. It rides
+// any QuicConnection via its stream read surface, so it is engine-agnostic and a
+// drop-in alternative to ioxide.nghttp3.
+using ioxide.http3;
+
+// Same QUIC setup as the nghttp3 tab - ngtcp2 still provides the transport.
+reactor.QuicHandle = (r, conn) =&gt;
+    new Http3Connection(conn).RunAsync(static async req =&gt;
+    {
+        if (req.Path.Span.SequenceEqual("/upload"u8))
+        {
+            // Streamed body: the handler runs while bytes are still arriving, and
+            // each read credits the peer's flow-control window - so memory is bound
+            // by one window, not by the size of the upload.
+            long total = 0;
+            while (true)
+            {
+                ReadOnlyMemory&lt;byte&gt; chunk = await req.BodyReader!.ReadAsync();
+                if (chunk.IsEmpty) break;
+                total += chunk.Length;
+            }
+            return Http3Response.Text($"received {total} bytes\n");
+        }
+
+        return Http3Response.Text("hello from pure-C# HTTP/3\n");
+    });</code></pre>
+  </div>
+  <div class="pane pane-http">
+<pre><code class="language-csharp">// ioxide.httpclient: one client per origin, over HTTP/1.1, HTTP/2 (h2c) or HTTP/3.
+// Requests and responses are the same types whichever protocol serves them, so the
+// protocol is a configuration decision rather than an API one.
+using ioxide.http11;      // HttpClientRequest / HttpClientResponse live here
+using ioxide.httpclient;
+
+// Opened on the reactor thread, so the outbound connections ride THIS reactor's ring.
+reactor.OnStart = r =&gt; RingHttpClient.Start(r, new RingHttpClientOptions
+{
+    Host     = "127.0.0.1",
+    Port     = 8081,
+    PoolSize = 8,                            // connections per protocol pool, per reactor
+
+    // Negotiate: start on HTTP/1.1, switch to HTTP/3 once the origin advertises it
+    // via Alt-Svc. Http1Only / Http2Only (h2c, prior knowledge) / Http3Only pin it.
+    Policy = HttpProtocolPolicy.Negotiate,
+});
+
+// A reverse proxy: both hops - the inbound connection and the outbound call - run on
+// this reactor's ring and resume inline, so a proxied request never leaves the thread
+// it arrived on. No thread pool, no cross-core handoff, no lock.
+reactor.TcpHandle = async (r, conn) =&gt;
+{
+    RingHttpClient http = r.GetService&lt;RingHttpClient&gt;();
+
+    using HttpClientResponse upstream = await http.GetAsync("/api/thing");
+
+    // upstream.Body is ReadOnlyMemory&lt;byte&gt; - relay the bytes, decode only if you must.
+    conn.Write(Encoding.ASCII.GetBytes(
+        $"HTTP/1.1 {upstream.Status} OK\r\nContent-Length: {upstream.Body.Length}\r\n\r\n"));
+    conn.Write(upstream.Body.Span);
+    await conn.FlushAsync();
+};</code></pre>
+  </div>
+  <div class="pane pane-pg">
+<pre><code class="language-csharp">// ioxide.pg: a Postgres pool per reactor. Connect, handshake, query and row
+// streaming are all ring operations - nothing touches the thread pool.
+using ioxide.pg;
+
+// OnStart runs ON the reactor thread, so every connection the pool opens belongs
+// to this reactor's ring. There is no sharing between reactors and no lock.
+reactor.OnStart = r =&gt; PgPool.Start(r, new PgOptions
+{
+    Host     = "127.0.0.1",
+    Port     = 5432,
+    User     = "bench",
+    Database = "bench",
+    PoolSize = 4,                     // per reactor - 12 reactors x 4 = 48 backends
+    CommandTimeoutMs = 30_000,
+});
+
+reactor.TcpHandle = async (r, conn) =&gt;
+{
+    PgPool pg = r.GetService&lt;PgPool&gt;();
+
+    try
+    {
+        // io_uring send + recv to Postgres. The continuation resumes inline, on this
+        // same thread, the moment the completion lands.
+        PgResult result = await pg.QueryAsync("SELECT 42");
+
+        string body = $"db={result.Value}";
+        conn.Write(Encoding.ASCII.GetBytes(
+            $"HTTP/1.1 200 OK\r\nContent-Length: {body.Length}\r\n\r\n{body}"));
+    }
+    catch (PgException e)
+    {
+        // A server error is just an exception; the connection stays usable.
+        Console.Error.WriteLine($"[pg] {e.Message}");
+        conn.Write("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n"u8);
+    }
+
+    await conn.FlushAsync();
+};</code></pre>
+  </div>
+  <div class="pane pane-redis">
+<pre><code class="language-csharp">// ioxide.redis: RESP2 over the ring - pooled per reactor, with pipelining, pub/sub,
+// transactions and scripting. Typed helpers for the common commands, plus a generic
+// command surface that reaches anything RESP2 speaks.
+using ioxide.redis;
+
+reactor.OnStart = r =&gt; RedisPool.Start(r, new RedisOptions
+{
+    Host     = "127.0.0.1",
+    Port     = 6379,
+    PoolSize = 8,                     // per reactor
+});
+
+reactor.TcpHandle = async (r, conn) =&gt;
+{
+    RedisPool redis = r.GetService&lt;RedisPool&gt;();
+
+    // Typed helper for the hot path.
+    string? cached = await redis.GetAsync("user:1");
+
+    if (cached is null)
+    {
+        // Generic surface: any command, any argument shape.
+        await redis.ExecuteAsync("SET", "user:1", "ada");
+        cached = "ada";
+    }
+
+    RespValue hits = await redis.ExecuteAsync("INCR", "hits");
+
+    conn.Write(Encoding.ASCII.GetBytes(
+        $"HTTP/1.1 200 OK\r\nContent-Length: {cached.Length}\r\n\r\n{cached}"));
+    await conn.FlushAsync();
+};</code></pre>
+  </div>
+  <div class="pane pane-files">
+<pre><code class="language-csharp">// ioxide.file: the asset cache opens every file ONCE and shares the descriptors
+// across all reactors - they are stable and read positionally, so nothing is locked.
+// Small files are served from a pre-baked HTTP response with no I/O at all; larger
+// ones stream off the ring through a rented reader.
+using ioxide.file;
+
+// Built once for the whole process, before the reactors start.
+var assets = new StaticAssets("/srv/www", maxCachedFileBytes: 256 * 1024);
+
+reactor.OnStart = r =&gt;
+{
+    r.AddService(assets);
+    AssetReader.CreatePool(r, readers: 4, bufferBytes: 1 &lt;&lt; 20);
+};
+
+reactor.TcpHandle = async (r, conn) =&gt;
+{
+    StaticAssets snapshot = r.GetService&lt;StaticAssets&gt;();
+
+    // The lease pins the snapshot for the whole request, so a concurrent reload
+    // cannot free the fd or the baked response out from under an in-flight send.
+    using StaticAssets.Lease lease = snapshot.Acquire();
+
+    if (!lease.TryGet("/index.html", out AssetCache.Asset asset))
+    {
+        conn.Write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"u8);
+        await conn.FlushAsync();
+        return;
+    }
+
+    // Revalidated against disk (size + mtime + inode): the baked response is the hot
+    // path only while the file is unchanged. An edit or an atomic rename is served
+    // live from the new inode instead, so RAM never goes stale.
+    bool fresh = AssetCache.IsFresh(asset, out bool exists, out long size);
+    // ... serve asset.Response when fresh, else stream asset.Fd off the ring ...
+};
+
+// After a deploy: swap in a fresh snapshot atomically. In-flight requests finish on
+// the bytes they started with; the old descriptors close after a grace period.
+assets.Reload();</code></pre>
+  </div>
+  <div class="pane pane-tls">
+<pre><code class="language-csharp">// ioxide.tls: the OpenSSL handshake is driven over the ring, then kernel TLS (kTLS)
+// takes over transmit. After that your handler writes PLAINTEXT through the same
+// connection API and the kernel produces the records - no user-space encrypt on the
+// send path. Needs the Linux 'tls' module (modprobe tls) and OpenSSL 3.
+using ioxide.tls;
+
+reactor.OnStart = r =&gt; TlsService.Start(r, new TlsOptions
+{
+    CertificatePath = "cert.pem",
+    KeyPath         = "key.pem",
+    Alpn            = "http/1.1",
+});
+
+reactor.TcpHandle = async (r, conn) =&gt;
+{
+    // The handshake itself is ring I/O - it awaits like everything else.
+    TlsSession tls = await r.GetService&lt;TlsService&gt;().AcceptAsync(conn);
+
+    // A request can ride in with the handshake's final flight - answer it first.
+    if (tls.DrainPlaintext().Length &gt; 0)
+    {
+        conn.Write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"u8);
+        await conn.FlushAsync();
+    }
+
+    while (true)
+    {
+        RecvSnapshot snap = await conn.ReadAsync();
+        // ... decrypt the received records, then answer in plaintext ...
+
+        conn.Write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"u8);
+        await conn.FlushAsync();
+
+        if (snap.IsClosed || tls.Closed) return;
+        conn.ResetRead();
+    }
+};</code></pre>
+  </div>
+  <div class="pane pane-kestrel">
+<pre><code class="language-csharp">// ioxide.Kestrel: already have an ASP.NET Core app? Swap the transport underneath
+// it. One ring per core, SO_REUSEPORT load-balanced, with Kestrel's HTTP request
+// loop pinned to the reactor thread. Your endpoints, middleware and DI do not change.
+using ioxide.Kestrel;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.WebHost.UseIoxide(o =&gt; o.ReactorCount = 16);   // that is the whole change
+
+var app = builder.Build();
+
+app.MapGet("/", () =&gt; "hello from io_uring");
+app.MapGet("/plaintext", () =&gt; Results.Text("Hello, World!"));
+
+app.Run();
+
+// This is the escape hatch from "ioxide hands you raw bytes": when you want routing,
+// model binding and the rest of the framework, the same engine runs underneath it.</code></pre>
+  </div>
 </div>
   <p>Each of those awaits is backed by a reusable <code>IValueTaskSource</code>: submitting the
   op parks your continuation, and the moment its completion arrives the reactor calls
   <code>SetResult</code> - which runs your code immediately, on the same thread, with nothing
   scheduled anywhere.</p>
 
-  <p>Every tab is runnable code: the
-  <a href="https://github.com/MDA2AV/ioxide/tree/main/Examples">Examples project</a> in the repo
-  builds each one - pg and raw variants plus a <code>quic-h3</code> mode that serves HTTP/3 and a
-  pipe echo off one listener - with
-  <a href="https://github.com/MDA2AV/ioxide/blob/main/Examples/RESULTS.md">benchmark results</a>.</p>
+  <p>Every tab is runnable code. The
+  <a href="https://github.com/MDA2AV/ioxide/tree/main/Examples">Examples project</a> builds the
+  raw, pg, redis, file and tls variants plus a <code>quic-h3</code> mode that serves HTTP/3 and a
+  pipe echo off one listener, with
+  <a href="https://github.com/MDA2AV/ioxide/blob/main/Examples/RESULTS.md">benchmark results</a>.
+  The <a href="https://github.com/MDA2AV/ioxide/tree/main/Playground">Playground</a> runs the
+  outbound HTTP client (<code>proxy</code>) and the pure-C# HTTP/3 stack (<code>http3</code>), and
+  <a href="https://github.com/MDA2AV/ioxide/tree/main/Examples.AspNet">Examples.AspNet</a> is the
+  <code>UseIoxide()</code> drop-in against a stock Kestrel baseline.</p>
 
 </section>
 
 <footer>
-  MIT · Linux 6.1+ · .NET 10 · <a href="https://github.com/MDA2AV/ioxide">github.com/MDA2AV/ioxide</a> · <a href="learn/overview.html">docs</a>
+  MIT · Linux 6.1+ · .NET 10 / .NET 11 · <a href="https://github.com/MDA2AV/ioxide">github.com/MDA2AV/ioxide</a> · <a href="learn/overview.html">docs</a>
 </footer>
 
 <script>hljs.highlightAll();</script>
