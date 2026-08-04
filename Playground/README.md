@@ -22,8 +22,8 @@ Linux only — the engine is io_uring.
 | [`Pg`](Pg/Program.cs) | 148 | A `PgPool` per reactor, queried on the same ring that accepted the request. | `ioxide.pg` |
 | [`File`](File/Program.cs) | 253 | Static files: baked responses, ring reads, disk revalidation, `SIGHUP` reload. | `ioxide.file` |
 | [`Proxy`](Proxy/Program.cs) | 131 | A reverse proxy where both hops stay on one reactor thread. | `ioxide.http11` |
-| [`Nghttp3`](Nghttp3/Program.cs) | 234 | HTTP/3 with **streamed** dispatch, byte-level routing, and a `SIGTERM` GOAWAY drain. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
-| [`Nghttp3Buffered`](Nghttp3Buffered/Program.cs) | 153 | The same server with **buffered** dispatch — one method call is the whole difference. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
+| [`Nghttp3`](Nghttp3/Program.cs) | 169 | HTTP/3 with **streamed** dispatch, and a `SIGTERM` GOAWAY drain. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
+| [`Nghttp3Buffered`](Nghttp3Buffered/Program.cs) | 146 | The same server with **buffered** dispatch — one method call is the whole difference. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
 
 Read `Tcp.Raw` first — the other eight are that same skeleton with one thing changed.
 
@@ -45,72 +45,18 @@ Everything else is duplicated across samples **on purpose**. The read/respond/`D
 in eight files because it is the ioxide idiom — the thing you came here to copy. Factoring it into a
 shared `ServeAsync` would make the Playground shorter and make it useless.
 
-## Common shape
+## HTTP/3
 
-Every sample is this, with one part swapped:
+Both samples answer every request with a single reused response object, so the handler stays
+small enough to read at a glance. `Nghttp3` reads the request body through `BodyReader` while it
+is still arriving; `Nghttp3Buffered` gets it complete in `request.Body`. That one difference is
+the reason both exist.
 
-```csharp
-var config = new ServerConfig
-{
-    ReactorCount = Environment.ProcessorCount,
-    Tcp = new TcpOptions { Port = 8080 },
-};
-
-var threads = new Thread[config.ReactorCount];
-
-for (int i = 0; i < threads.Length; i++)
-{
-    var reactor = new Reactor(i, config);
-
-    // Runs ON the reactor thread, so clients opened here ride this reactor's ring.
-    reactor.OnStart = r => PgPool.Start(r, pgOptions);
-
-    reactor.TcpHandle = async (r, conn) =>
-    {
-        try
-        {
-            while (true)
-            {
-                RecvSnapshot snapshot = await conn.ReadAsync();   // io_uring recv, resumes inline
-                // ... your bytes ...
-                conn.Write(response);
-                await conn.FlushAsync();
-
-                if (snapshot.IsClosed) return;
-                conn.ResetRead();
-            }
-        }
-        finally
-        {
-            conn.DecRef();
-        }
-    };
-
-    threads[i] = new Thread(reactor.Run) { Name = $"reactor-{i}" };
-    threads[i].Start();
-}
-
-foreach (Thread thread in threads) thread.Join();
-```
-
-## HTTP/3 routes
-
-`Nghttp3` serves the full set; `Nghttp3Buffered` serves `/plaintext` and `/upload`. Both answer
-hello elsewhere.
-
-| Path | Shows |
-| --- | --- |
-| `/plaintext` | A response instance built once and reused — zero allocations per request. |
-| `/upload` | Streamed request body; memory bound is one flow-control window, not the body size. |
-| `/headers` | Walks `req.Headers.AsSpan()` — the `KeyValueList`, no strings. |
-| `/cookies` | `req.TryGetCookie` plus `req.Cookies`, and sets one back via `set-cookie`. |
-| `/1k` | A fixed 1 KiB body, for comparability with load-generator grids. |
+They also listen on TCP `:8080` alongside UDP `:8443`.
 
 ```bash
-curl --http3-only -k https://127.0.0.1:8443/plaintext
+curl --http3-only -k https://127.0.0.1:8443/
 ```
-
-The HTTP/3 samples also listen on TCP `:8080` alongside UDP `:8443`.
 
 ## Environment
 

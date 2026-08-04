@@ -52,47 +52,31 @@
   <input type="radio" name="mode-tabs" id="tab-files">
   <input type="radio" name="mode-tabs" id="tab-tls">
   <input type="radio" name="mode-tabs" id="tab-kestrel">
-  <div class="tab-bar">
-    <div class="tab-rawgroup">
-      <span class="tab-group">tcp</span>
-      <div class="tab-rawtabs">
-        <label for="tab-pipe">pipes</label>
-        <label for="tab-shared">raw &middot; shared ring</label>
-        <label for="tab-inc">raw &middot; incremental</label>
-        <label for="tab-vs">shared vs incremental</label>
-      </div>
-    </div>
-    <div class="tab-rawgroup">
-      <span class="tab-group">quic</span>
-      <div class="tab-rawtabs">
-        <label for="tab-qpipe">pipes</label>
-        <label for="tab-qraw">raw</label>
-      </div>
-    </div>
-    <div class="tab-rawgroup">
-      <span class="tab-group">http/3</span>
-      <div class="tab-rawtabs">
-        <label for="tab-h3">nghttp3</label>
-        <label for="tab-h3pure">pure C#</label>
-      </div>
-    </div>
-    <div class="tab-rawgroup">
-      <span class="tab-group">clients</span>
-      <div class="tab-rawtabs">
-        <label for="tab-http">http</label>
-        <label for="tab-pg">postgres</label>
-        <label for="tab-redis">redis</label>
-        <label for="tab-files">files</label>
-      </div>
-    </div>
-    <div class="tab-rawgroup">
-      <span class="tab-group">serving</span>
-      <div class="tab-rawtabs">
-        <label for="tab-tls">ktls</label>
-        <label for="tab-kestrel">asp.net</label>
-      </div>
-    </div>
-  </div>
+  <nav class="ex-menu" aria-label="Examples">
+    <span class="ex-group">tcp</span>
+    <label for="tab-pipe">pipes</label>
+    <label for="tab-shared">raw &middot; shared ring</label>
+    <label for="tab-inc">raw &middot; incremental</label>
+    <label for="tab-vs">shared vs incremental</label>
+
+    <span class="ex-group">quic</span>
+    <label for="tab-qpipe">pipes</label>
+    <label for="tab-qraw">raw</label>
+
+    <span class="ex-group">http/3</span>
+    <label for="tab-h3">nghttp3</label>
+    <label for="tab-h3pure">pure C#</label>
+
+    <span class="ex-group">clients</span>
+    <label for="tab-http">http</label>
+    <label for="tab-pg">postgres</label>
+    <label for="tab-redis">redis</label>
+    <label for="tab-files">files</label>
+
+    <span class="ex-group">serving</span>
+    <label for="tab-tls">ktls</label>
+    <label for="tab-kestrel">asp.net</label>
+  </nav>
   <div class="pane pane-pipe">
 <pre><code class="language-csharp">var config = new ServerConfig
 {

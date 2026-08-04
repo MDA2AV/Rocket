@@ -1,5 +1,4 @@
 using System.Runtime.InteropServices;
-using System.Text;
 using ioxide;
 using ioxide.nghttp3;
 using ioxide.ngtcp2;
@@ -17,7 +16,7 @@ using Playground.Shared;
 //  when uploads can be large or hostile.
 //
 //      dotnet run -c Release --project Playground/Nghttp3Buffered
-//      curl --http3-only -k https://127.0.0.1:8443/plaintext
+//      curl --http3-only -k https://127.0.0.1:8443/
 //
 //  Needs: ioxide, ioxide.ngtcp2, ioxide.nghttp3
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -52,9 +51,9 @@ var h3Options = new Nghttp3Options
 
 // Built once and reused for every request - the h3 layer copies it into nghttp3 at submit and never
 // retains it, so this costs zero allocations per request.
-var plaintext = new Nghttp3Response { Body = "Hello, World!"u8.ToArray() };
-plaintext.Headers.Add("content-type"u8.ToArray(), "text/plain"u8.ToArray());
-plaintext.Headers.Add("server"u8.ToArray(), "ioxide"u8.ToArray());
+var response = new Nghttp3Response { Body = "Hello, World!"u8.ToArray() };
+response.Headers.Add("content-type"u8.ToArray(), "text/plain"u8.ToArray());
+response.Headers.Add("server"u8.ToArray(), "ioxide"u8.ToArray());
 
 byte[] tcpResponse = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok"u8.ToArray();
 
@@ -75,24 +74,18 @@ for (int i = 0; i < threads.Length; i++)
         }
 
         // RunBufferedAsync, not RunStreamingAsync - that one call is the whole difference.
-        return h3.RunBufferedAsync(async request =>
+        return h3.RunBufferedAsync(request =>
         {
-            ReadOnlySpan<byte> path = request.Path.Span;
+            // Dispatch waited for end-of-stream, so the body is ALREADY here: request.Body is
+            // complete and request.Body.Length is just a property read. No BodyReader, no pacing.
+            // This overload is synchronous, but the awaiting one exists too - a PgPool query or a
+            // Redis command resumes inline on this reactor, so you can await it right here.
+            _ = request.Body.Length;
 
-            if (path.SequenceEqual("/plaintext"u8))
-            {
-                return plaintext;
-            }
-
-            if (path.SequenceEqual("/upload"u8))
-            {
-                // Complete before we run: Length is a property read, the bytes are all here. This
-                // is where a real await - storing request.Body, say - would slot in.
-                await ValueTask.CompletedTask;
-                return Nghttp3Response.Text($"received {request.Body.Length} bytes (buffered) over HTTP/3\n");
-            }
-
-            return Nghttp3Response.Text($"hello {Encoding.ASCII.GetString(path)} over HTTP/3 via io_uring\n");
+            // One response object, reused for every request: zero allocations on this path. To
+            // route, compare request.Path.Span - it is post-QPACK bytes, so SequenceEqual against a
+            // u8 literal beats decoding it to a string.
+            return response;
         });
     };
 
