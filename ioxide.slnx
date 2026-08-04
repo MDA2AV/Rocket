@@ -1,18 +1,18 @@
 <Solution>
-  <Project Path="src/ioxide.file/ioxide.file.csproj" />
-  <Project Path="src/ioxide.tls/ioxide.tls.csproj" />
-  <Project Path="src/ioxide.redis/ioxide.redis.csproj" />
-  <Project Path="src/ioxide.pg/ioxide.pg.csproj" />
-  <Project Path="src/ioxide.Kestrel/ioxide.Kestrel.csproj" />
+  <Project Path="src/serving/ioxide.file/ioxide.file.csproj" />
+  <Project Path="src/serving/ioxide.tls/ioxide.tls.csproj" />
+  <Project Path="src/clients/ioxide.redis/ioxide.redis.csproj" />
+  <Project Path="src/clients/ioxide.pg/ioxide.pg.csproj" />
+  <Project Path="src/serving/ioxide.Kestrel/ioxide.Kestrel.csproj" />
   <Project Path="src/ioxide/ioxide.csproj" />
-  <Project Path="src/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
-  <Project Path="src/ioxide.nghttp3/ioxide.nghttp3.csproj" />
-  <Project Path="src/ioxide.http3/ioxide.http3.csproj" />
-  <Project Path="src/ioxide.http/ioxide.http.csproj" />
-  <Project Path="src/ioxide.nghttp2/ioxide.nghttp2.csproj" />
-  <Project Path="src/ioxide.httpclient/ioxide.httpclient.csproj" />
+  <Project Path="src/bindings/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
+  <Project Path="src/bindings/ioxide.nghttp3/ioxide.nghttp3.csproj" />
+  <Project Path="src/serving/ioxide.http3/ioxide.http3.csproj" />
+  <Project Path="src/clients/ioxide.http/ioxide.http.csproj" />
+  <Project Path="src/bindings/ioxide.nghttp2/ioxide.nghttp2.csproj" />
+  <Project Path="src/clients/ioxide.httpclient/ioxide.httpclient.csproj" />
   <Project Path="Playground/Playground.csproj" />
-  <Project Path="Examples/Examples.csproj" />
+  <Project Path="Research/Examples/Examples.csproj" />
   <Project Path="Examples.AspNet/Examples.AspNet.csproj" />
   <Project Path="Tests/ioxide.e2e.csproj" />
 </Solution>

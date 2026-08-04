@@ -16,7 +16,7 @@ cd "$(dirname "$0")/.."
 NGTCP2_REF=${NGTCP2_REF:-master}
 PICOTLS_REF=${PICOTLS_REF:-master}
 WORK=${WORK:-/tmp/ioxide-quic-native}
-OUT=src/ioxide.ngtcp2/runtimes/linux-x64/native
+OUT=src/bindings/ioxide.ngtcp2/runtimes/linux-x64/native
 
 rm -rf "$WORK" && mkdir -p "$WORK" "$OUT"
 cd "$WORK"
@@ -46,7 +46,7 @@ cmake -S ngtcp2 -B ngtcp2/build -DCMAKE_BUILD_TYPE=Release \
 cmake --build ngtcp2/build -j"$(nproc)" >/dev/null
 
 echo "==> compiling the C# facade shim"
-SHIM="$OLDPWD/src/ioxide.ngtcp2/native/ioxide_ngtcp2_shim.c"
+SHIM="$OLDPWD/src/bindings/ioxide.ngtcp2/native/ioxide_ngtcp2_shim.c"
 gcc -c -O2 -fPIC -o shim.o "$SHIM" \
     -Ingtcp2/lib/includes -Ingtcp2/build/lib/includes \
     -Ingtcp2/crypto/includes -Ipicotls/include

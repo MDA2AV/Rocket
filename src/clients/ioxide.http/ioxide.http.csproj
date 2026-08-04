@@ -5,23 +5,23 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <RootNamespace>ioxide.http3</RootNamespace>
+    <RootNamespace>ioxide.http</RootNamespace>
 
-    <PackageId>ioxide.http3</PackageId>
+    <PackageId>ioxide.http</PackageId>
     <Version>0.2.4</Version>
     <Authors>MDA2AV</Authors>
-    <Description>Pure C# HTTP/3 for the ioxide io_uring runtime: frame parsing, QPACK (static table + Huffman) and request dispatch with zero native dependencies. Rides any QuicConnection via its stream read surface - engine-agnostic, drop-in alternative to ioxide.nghttp3.</Description>
+    <Description>HTTP message types and the ring-native HTTP/1.1 client for the ioxide io_uring runtime: byte-oriented requests and responses over a pooled arena, keep-alive connection pool, no native dependencies.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://mda2av.github.io/ioxide/</PackageProjectUrl>
     <RepositoryUrl>https://github.com/MDA2AV/ioxide</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <PackageTags>io_uring;http3;h3;qpack;quic;linux;ioxide;managed</PackageTags>
+    <PackageTags>io_uring;http;httpclient;rest;proxy;linux;ioxide</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
   <ItemGroup>
     <None Include="../../README.md" Pack="true" PackagePath="/" />
-    <ProjectReference Include="../ioxide/ioxide.csproj" />
+    <ProjectReference Include="../../ioxide/ioxide.csproj" />
   </ItemGroup>
 
 </Project>

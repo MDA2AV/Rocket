@@ -10,7 +10,7 @@
     <PackageId>ioxide.httpclient</PackageId>
     <Version>0.2.4</Version>
     <Authors>MDA2AV</Authors>
-    <Description>Ring-native HTTP/3 client for the ioxide io_uring runtime: QUIC connections opened on the reactor's own ring (ngtcp2 + nghttp3, bundled), requests multiplexed over streams, responses resumed inline. The HTTP/3 counterpart of ioxide.http.</Description>
+    <Description>Ring-native HTTP client for the ioxide io_uring runtime: HTTP/1.1, HTTP/2 (h2c) and HTTP/3 behind one API, with the protocol chosen per origin via Alt-Svc. Requests and responses are the same types whichever protocol serves them, and every response resumes the awaiting handler inline on its own reactor thread.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://mda2av.github.io/ioxide/</PackageProjectUrl>
     <RepositoryUrl>https://github.com/MDA2AV/ioxide</RepositoryUrl>
@@ -21,11 +21,11 @@
 
   <ItemGroup>
     <None Include="../../README.md" Pack="true" PackagePath="/" />
-    <ProjectReference Include="../ioxide/ioxide.csproj" />
+    <ProjectReference Include="../../ioxide/ioxide.csproj" />
     <ProjectReference Include="../ioxide.http/ioxide.http.csproj" />
-    <ProjectReference Include="../ioxide.nghttp2/ioxide.nghttp2.csproj" />
-    <ProjectReference Include="../ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
-    <ProjectReference Include="../ioxide.nghttp3/ioxide.nghttp3.csproj" />
+    <ProjectReference Include="../../bindings/ioxide.nghttp2/ioxide.nghttp2.csproj" />
+    <ProjectReference Include="../../bindings/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
+    <ProjectReference Include="../../bindings/ioxide.nghttp3/ioxide.nghttp3.csproj" />
   </ItemGroup>
 
 </Project>

@@ -20,16 +20,16 @@
 
   <ItemGroup>
     <ProjectReference Include="../src/ioxide/ioxide.csproj" />
-    <ProjectReference Include="../src/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
-    <ProjectReference Include="../src/ioxide.nghttp3/ioxide.nghttp3.csproj" />
-    <ProjectReference Include="../src/ioxide.http3/ioxide.http3.csproj" />
-    <ProjectReference Include="../src/ioxide.http/ioxide.http.csproj" />
-    <ProjectReference Include="../src/ioxide.httpclient/ioxide.httpclient.csproj" />
-    <ProjectReference Include="../src/ioxide.nghttp2/ioxide.nghttp2.csproj" />
-    <ProjectReference Include="../src/ioxide.pg/ioxide.pg.csproj" />
-    <ProjectReference Include="../src/ioxide.redis/ioxide.redis.csproj" />
-    <ProjectReference Include="../src/ioxide.tls/ioxide.tls.csproj" />
-    <ProjectReference Include="../src/ioxide.file/ioxide.file.csproj" />
+    <ProjectReference Include="../src/bindings/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
+    <ProjectReference Include="../src/bindings/ioxide.nghttp3/ioxide.nghttp3.csproj" />
+    <ProjectReference Include="../src/serving/ioxide.http3/ioxide.http3.csproj" />
+    <ProjectReference Include="../src/clients/ioxide.http/ioxide.http.csproj" />
+    <ProjectReference Include="../src/clients/ioxide.httpclient/ioxide.httpclient.csproj" />
+    <ProjectReference Include="../src/bindings/ioxide.nghttp2/ioxide.nghttp2.csproj" />
+    <ProjectReference Include="../src/clients/ioxide.pg/ioxide.pg.csproj" />
+    <ProjectReference Include="../src/clients/ioxide.redis/ioxide.redis.csproj" />
+    <ProjectReference Include="../src/serving/ioxide.tls/ioxide.tls.csproj" />
+    <ProjectReference Include="../src/serving/ioxide.file/ioxide.file.csproj" />
   </ItemGroup>
 
 </Project>

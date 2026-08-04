@@ -25,7 +25,7 @@
 
   <ItemGroup>
     <None Include="README.md" Pack="true" PackagePath="/" />
-    <ProjectReference Include="../ioxide/ioxide.csproj" />
+    <ProjectReference Include="../../ioxide/ioxide.csproj" />
     <ProjectReference Include="../ioxide.tls/ioxide.tls.csproj" />
   </ItemGroup>
 
