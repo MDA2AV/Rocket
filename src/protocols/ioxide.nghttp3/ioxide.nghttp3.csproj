@@ -8,7 +8,7 @@
     <RootNamespace>ioxide.nghttp3</RootNamespace>
 
     <PackageId>ioxide.nghttp3</PackageId>
-    <Version>0.2.4</Version>
+    <Version>0.2.5</Version>
     <Authors>MDA2AV</Authors>
     <Description>HTTP/3 layer for the ioxide io_uring runtime: nghttp3 (H3 + QPACK) bundled as a single self-contained native library with no external dependencies. Rides any QuicConnection via its stream read surface - engine-agnostic, no ioxide.ngtcp2 dependency.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
@@ -20,7 +20,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <None Include="../../README.md" Pack="true" PackagePath="/" />
+    <None Include="../../../README.md" Pack="true" PackagePath="/" />
     <ProjectReference Include="../../ioxide/ioxide.csproj" />
 
     <!-- The self-contained native bundle (built by scripts/build-nghttp3-native.sh): packed into the
