@@ -91,6 +91,11 @@ public sealed class HttpClientPool
 
     private async ValueTask<HttpClientConnection> AcquireAsync()
     {
+        // One deadline for the whole acquire, not one per attempt. A refused connect completes in
+        // microseconds and wakes this waiter, so a per-attempt timer would be re-armed faster than
+        // it could ever elapse - the caller would spin here forever instead of failing.
+        long deadlineMs = Environment.TickCount64 + _options.AcquireTimeoutMs;
+
         while (true)
         {
             // Newest first: a recently used connection is the one most likely still warm at the
@@ -106,17 +111,35 @@ public sealed class HttpClientPool
                 Discard(candidate);   // died while idle (peer closed it)
             }
 
-            if (_live < _options.PoolSize && _opening == 0)
+            // Honour the same backoff gate Sweep() does. Without it, a dead origin turns this loop
+            // into a connect() storm: open, refuse, wake, reopen - thousands of syscalls a second
+            // on the reactor thread. Behind the gate the ticker paces the retries instead.
+            if (_live < _options.PoolSize && _opening == 0 && Environment.TickCount64 >= _reopenAtMs)
             {
                 StartOpen();
+            }
+
+            int remainingMs = (int)(deadlineMs - Environment.TickCount64);
+            if (remainingMs <= 0)
+            {
+                throw new HttpClientException(
+                    $"no connection to {_options.Host}:{_options.Port} within {_options.AcquireTimeoutMs} ms");
             }
 
             var waiter = new TaskCompletionSource<HttpClientConnection?>(TaskCreationOptions.RunContinuationsAsynchronously);
             _waiters.Enqueue(waiter);
 
             Task<HttpClientConnection?> pending = waiter.Task;
-            Task completed = await Task.WhenAny(pending, Task.Delay(_options.AcquireTimeoutMs));
-            if (completed != pending)
+
+            // Cancel the timer when the waiter wins, so a long-lived pool doesn't accumulate one
+            // pending delay per acquire.
+            using var timeoutCts = new CancellationTokenSource();
+            Task completed = await Task.WhenAny(pending, Task.Delay(remainingMs, timeoutCts.Token));
+            if (completed == pending)
+            {
+                timeoutCts.Cancel();
+            }
+            else
             {
                 // Abandon the slot so a later Release can't hand a connection to a caller that has
                 // already given up: TrySetResult then fails and the connection goes to the next
