@@ -6,15 +6,15 @@ using ioxide.utils;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  h3 - a real HTTP/3 server, whole. ngtcp2 + picotls are bundled as one native library (TLS 1.3
+//  nghttp3 - a real HTTP/3 server, whole. ngtcp2 + picotls are bundled as one native library (TLS 1.3
 //  lives inside the transport), and nghttp3 puts HTTP/3 on top. Every reactor binds the UDP port
 //  via SO_REUSEPORT and demuxes its own flows.
 //
 //  STREAMING dispatch: your handler runs at end-of-headers, while the body is still arriving.
 //  Each chunk you read credits the peer's flow-control window, so memory is bound by one window
-//  rather than by the size of the upload. Use Playground/H3Buffered when bodies are small.
+//  rather than by the size of the upload. Use Playground/Nghttp3Buffered when bodies are small.
 //
-//      dotnet run -c Release --project Playground/H3
+//      dotnet run -c Release --project Playground/Nghttp3
 //      curl --http3-only -k https://127.0.0.1:8443/plaintext
 //      h2load --alpn-list=h3 -n 1 -c 1 -d bigfile.bin https://127.0.0.1:8443/upload
 //
@@ -209,7 +209,7 @@ using var drain = System.Runtime.InteropServices.PosixSignalRegistration.Create(
     System.Runtime.InteropServices.PosixSignal.SIGTERM, context =>
     {
         context.Cancel = true;
-        Console.WriteLine("[h3] SIGTERM: draining connections (GOAWAY)...");
+        Console.WriteLine("[nghttp3] SIGTERM: draining connections (GOAWAY)...");
 
         lock (live)
         {
@@ -221,11 +221,11 @@ using var drain = System.Runtime.InteropServices.PosixSignalRegistration.Create(
         }
 
         Thread.Sleep(2000);   // let in-flight requests finish
-        Console.WriteLine("[h3] drain complete, exiting");
+        Console.WriteLine("[nghttp3] drain complete, exiting");
         Environment.Exit(0);
     });
 
-Console.WriteLine($"[h3] {config.ReactorCount} reactors - tcp :{config.Tcp.Port}, "
+Console.WriteLine($"[nghttp3] {config.ReactorCount} reactors - tcp :{config.Tcp.Port}, "
                 + $"udp :{quicPort} (ngtcp2 {QuicEngine.NativeVersion()})");
 
 foreach (Thread thread in threads)

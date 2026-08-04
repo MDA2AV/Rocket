@@ -6,13 +6,13 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <RootNamespace>Playground.Pipe</RootNamespace>
-    <AssemblyName>Playground.Pipe</AssemblyName>
+    <RootNamespace>Playground.Tcp.Pipe</RootNamespace>
+    <AssemblyName>Playground.Tcp.Pipe</AssemblyName>
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="../Shared/Playground.Shared.csproj" />
-    <ProjectReference Include="../../src/ioxide/ioxide.csproj" />
+    <ProjectReference Include="../../Shared/Playground.Shared.csproj" />
+    <ProjectReference Include="../../../src/ioxide/ioxide.csproj" />
   </ItemGroup>
 
 </Project>

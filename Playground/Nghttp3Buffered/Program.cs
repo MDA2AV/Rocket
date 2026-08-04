@@ -7,16 +7,16 @@ using ioxide.utils;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  h3-buffered - the same HTTP/3 server as Playground/H3, with the OTHER dispatch mode.
+//  nghttp3-buffered - the same HTTP/3 server as Playground/Nghttp3, with the OTHER dispatch mode.
 //
 //  BUFFERED: dispatch waits for end-of-stream, so the whole body is already in request.Body when
 //  your handler runs - no BodyReader, no pacing - and the handler may still await (a PgPool query,
 //  Redis, anything ioxide-native resumes inline on the reactor).
 //
-//  The trade: memory holds the entire body, so this suits normal-sized requests. Use Playground/H3
+//  The trade: memory holds the entire body, so this suits normal-sized requests. Use Playground/Nghttp3
 //  when uploads can be large or hostile.
 //
-//      dotnet run -c Release --project Playground/H3Buffered
+//      dotnet run -c Release --project Playground/Nghttp3Buffered
 //      curl --http3-only -k https://127.0.0.1:8443/plaintext
 //
 //  Needs: ioxide, ioxide.ngtcp2, ioxide.nghttp3
@@ -128,7 +128,7 @@ for (int i = 0; i < threads.Length; i++)
 using var drain = PosixSignalRegistration.Create(PosixSignal.SIGTERM, context =>
 {
     context.Cancel = true;
-    Console.WriteLine("[h3-buffered] SIGTERM: draining connections (GOAWAY)...");
+    Console.WriteLine("[nghttp3-buffered] SIGTERM: draining connections (GOAWAY)...");
 
     lock (live)
     {
@@ -140,11 +140,11 @@ using var drain = PosixSignalRegistration.Create(PosixSignal.SIGTERM, context =>
     }
 
     Thread.Sleep(2000);
-    Console.WriteLine("[h3-buffered] drain complete, exiting");
+    Console.WriteLine("[nghttp3-buffered] drain complete, exiting");
     Environment.Exit(0);
 });
 
-Console.WriteLine($"[h3-buffered] {config.ReactorCount} reactors - tcp :{config.Tcp.Port}, "
+Console.WriteLine($"[nghttp3-buffered] {config.ReactorCount} reactors - tcp :{config.Tcp.Port}, "
                 + $"udp :{quicPort} (ngtcp2 {QuicEngine.NativeVersion()})");
 
 foreach (Thread thread in threads)

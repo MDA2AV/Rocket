@@ -6,13 +6,13 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <RootNamespace>Playground.Hop</RootNamespace>
-    <AssemblyName>Playground.Hop</AssemblyName>
+    <RootNamespace>Playground.Tcp.TaskRun</RootNamespace>
+    <AssemblyName>Playground.Tcp.TaskRun</AssemblyName>
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="../Shared/Playground.Shared.csproj" />
-    <ProjectReference Include="../../src/ioxide/ioxide.csproj" />
+    <ProjectReference Include="../../Shared/Playground.Shared.csproj" />
+    <ProjectReference Include="../../../src/ioxide/ioxide.csproj" />
   </ItemGroup>
 
 </Project>

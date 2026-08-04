@@ -5,7 +5,7 @@ run**. The config, the reactors, the threads, the connection loop and the handle
 the file — nothing that touches an ioxide API is hidden behind a helper.
 
 ```bash
-dotnet run -c Release --project Playground/Raw
+dotnet run -c Release --project Playground/Tcp/Raw
 curl http://127.0.0.1:8080/
 ```
 
@@ -15,22 +15,21 @@ Linux only — the engine is io_uring.
 
 | Project | Lines | Shows | Packages |
 | --- | --- | --- | --- |
-| [`Raw`](Raw/Program.cs) | 88 | The whole shape: `ServerConfig`, a reactor per core, the read/respond/`DecRef` loop. Start here. | `ioxide` |
-| [`Pipe`](Pipe/Program.cs) | 77 | The same server through `PipeReader`/`PipeWriter`, if your code already speaks Pipelines. | `ioxide` |
-| [`Hop`](Hop/Program.cs) | 76 | Leaving the reactor on purpose (`Task.Yield`) and coming back — what it costs. | `ioxide` |
-| [`TaskRun`](TaskRun/Program.cs) | 84 | Awaiting ordinary thread-pool work and still resuming on the reactor. | `ioxide` |
+| [`Tcp.Raw`](Tcp/Raw/Program.cs) | 88 | The whole shape: `ServerConfig`, a reactor per core, the read/respond/`DecRef` loop. Start here. | `ioxide` |
+| [`Tcp.Pipe`](Tcp/Pipe/Program.cs) | 77 | The same server through `PipeReader`/`PipeWriter`, if your code already speaks Pipelines. | `ioxide` |
+| [`Tcp.Hop`](Tcp/Hop/Program.cs) | 76 | Leaving the reactor on purpose (`Task.Yield`) and coming back — what it costs. | `ioxide` |
+| [`Tcp.TaskRun`](Tcp/TaskRun/Program.cs) | 84 | Awaiting ordinary thread-pool work and still resuming on the reactor. | `ioxide` |
 | [`Pg`](Pg/Program.cs) | 148 | A `PgPool` per reactor, queried on the same ring that accepted the request. | `ioxide.pg` |
 | [`File`](File/Program.cs) | 253 | Static files: baked responses, ring reads, disk revalidation, `SIGHUP` reload. | `ioxide.file` |
 | [`Proxy`](Proxy/Program.cs) | 131 | A reverse proxy where both hops stay on one reactor thread. | `ioxide.http11` |
-| [`H3`](H3/Program.cs) | 234 | HTTP/3 with **streamed** dispatch, byte-level routing, and a `SIGTERM` GOAWAY drain. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
-| [`H3Buffered`](H3Buffered/Program.cs) | 153 | The same server with **buffered** dispatch — one method call is the whole difference. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
-| [`Http3`](Http3/Program.cs) | 112 | HTTP/3 with **no native h3 code**, on the pure-C# stack. | `ioxide.ngtcp2`, `ioxide.http3` |
+| [`Nghttp3`](Nghttp3/Program.cs) | 234 | HTTP/3 with **streamed** dispatch, byte-level routing, and a `SIGTERM` GOAWAY drain. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
+| [`Nghttp3Buffered`](Nghttp3Buffered/Program.cs) | 153 | The same server with **buffered** dispatch — one method call is the whole difference. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
 
-Read `Raw` first — the other nine are that same skeleton with one thing changed.
+Read `Tcp.Raw` first — the other eight are that same skeleton with one thing changed.
 
-Each project references only the packages it demonstrates, and that is load-bearing rather than
-tidiness: `Http3` publishes `libioxide_ngtcp2.so` and **no** nghttp3, so its "pure C#" claim is
-enforced by the build graph. `Raw` publishes three assemblies and no native libraries at all.
+Each project references only the packages it demonstrates: `Tcp.Raw` publishes three assemblies and
+no native libraries at all, while `Nghttp3` pulls in the ngtcp2 and nghttp3 bundles. So the build
+graph, not a comment, decides what each sample is allowed to touch.
 
 ## What is shared, and why so little
 
@@ -96,8 +95,8 @@ foreach (Thread thread in threads) thread.Join();
 
 ## HTTP/3 routes
 
-`H3` serves the full set; `H3Buffered` serves `/plaintext` and `/upload`; `Http3` serves `/upload`.
-All three answer hello elsewhere.
+`Nghttp3` serves the full set; `Nghttp3Buffered` serves `/plaintext` and `/upload`. Both answer
+hello elsewhere.
 
 | Path | Shows |
 | --- | --- |
@@ -123,7 +122,7 @@ The HTTP/3 samples also listen on TCP `:8080` alongside UDP `:8443`.
 | `PLAYGROUND_PORT` | `8080` | TCP listen port. |
 | `PLAYGROUND_UDP_SLOTS` | `16` | UDP recv slots per reactor (HTTP/3 samples). |
 
-### Raw
+### Tcp.Raw
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -139,17 +138,17 @@ The HTTP/3 samples also listen on TCP `:8080` alongside UDP `:8443`.
 `kill -HUP <pid>` reloads: a fresh snapshot is opened and swapped in atomically, and the old
 descriptors close after a grace period.
 
-### H3 · H3Buffered · Http3
+### Nghttp3 · Nghttp3Buffered
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `PLAYGROUND_QUIC_PORT` | `8443` | UDP listen port. |
 | `PLAYGROUND_QUIC_CERT` | generated | Cert path. Unset generates a self-signed `CN=localhost` pair under the temp directory. |
 | `PLAYGROUND_QUIC_KEY` | generated | Key path. Must be set together with `_CERT`. |
-| `PLAYGROUND_QPACK_CAP` | `0` | QPACK dynamic table capacity, `H3`/`H3Buffered` only; `>0` also advertises 100 blocked streams. |
+| `PLAYGROUND_QPACK_CAP` | `0` | QPACK dynamic table capacity, `Nghttp3`/`Nghttp3Buffered` only; `>0` also advertises 100 blocked streams. |
 
 `SIGTERM` GOAWAYs every live nghttp3 connection, waits 2 s, then exits — without it the process dies
-mid-request and clients see resets. `Http3` holds no nghttp3 session, so it has nothing to drain.
+mid-request and clients see resets. Both samples register that handler themselves, in the file.
 
 ### Pg
 
@@ -177,8 +176,8 @@ dotnet run -c Release --project Playground/Pg
 | `PLAYGROUND_UPSTREAM_POOL` | `8` (per reactor) |
 
 ```bash
-PLAYGROUND_PORT=8081 dotnet run -c Release --project Playground/Raw   # terminal 1: an origin
-dotnet run -c Release --project Playground/Proxy                      # terminal 2: the proxy
+PLAYGROUND_PORT=8081 dotnet run -c Release --project Playground/Tcp/Raw   # terminal 1: an origin
+dotnet run -c Release --project Playground/Proxy                          # terminal 2: the proxy
 ```
 
 ## Docker
@@ -186,10 +185,10 @@ dotnet run -c Release --project Playground/Proxy                      # terminal
 One image per sample, selected at build time:
 
 ```bash
-docker build -f Playground/Dockerfile --build-arg SAMPLE=Raw -t playground-raw .
+docker build -f Playground/Dockerfile --build-arg SAMPLE=Tcp/Raw -t playground-raw .
 docker run --rm -p 8080:8080 playground-raw
 
-docker build -f Playground/Dockerfile --build-arg SAMPLE=H3 -t playground-h3 .
+docker build -f Playground/Dockerfile --build-arg SAMPLE=Nghttp3 -t playground-h3 .
 docker run --rm -p 8080:8080 -p 8443:8443/udp playground-h3
 ```
 

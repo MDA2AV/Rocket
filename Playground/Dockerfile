@@ -1,14 +1,14 @@
 # One image per sample. Build from the repo root, naming the sample directory:
 #
-#   docker build -f Playground/Dockerfile --build-arg SAMPLE=Raw -t playground-raw .
+#   docker build -f Playground/Dockerfile --build-arg SAMPLE=Tcp/Raw -t playground-raw .
 #   docker run --rm -p 8080:8080 playground-raw
 #
-#   docker build -f Playground/Dockerfile --build-arg SAMPLE=H3 -t playground-h3 .
+#   docker build -f Playground/Dockerfile --build-arg SAMPLE=Nghttp3 -t playground-h3 .
 #   docker run --rm -p 8080:8080 -p 8443:8443/udp playground-h3
 #
-# SAMPLE is the directory name under Playground/: Raw, Pipe, Hop, TaskRun, Pg, File, Proxy, H3,
-# H3Buffered, Http3.
-ARG SAMPLE=Raw
+# SAMPLE is the directory path under Playground/: Tcp/Raw, Tcp/Pipe, Tcp/Hop, Tcp/TaskRun, Pg,
+# File, Proxy, Nghttp3, Nghttp3Buffered.
+ARG SAMPLE=Tcp/Raw
 
 FROM mcr.microsoft.com/dotnet/sdk:11.0-preview AS build
 ARG SAMPLE
@@ -26,9 +26,12 @@ COPY src/ src/
 COPY Playground/ Playground/
 
 # Publish just the requested sample; project references pull in only what it actually needs.
-# The symlink gives the final stage a fixed exec-form entrypoint despite the varying assembly name.
-RUN dotnet publish "Playground/${SAMPLE}/Playground.${SAMPLE}.csproj" -c Release -o /app \
- && ln -s "/app/Playground.${SAMPLE}" /app/playground
+# The csproj is discovered rather than spelled out, because SAMPLE may contain a directory
+# separator (Tcp/Raw) while the assembly it produces is dotted (Playground.Tcp.Raw). The symlink
+# then gives the final stage a fixed exec-form entrypoint despite the varying assembly name.
+RUN csproj="$(ls Playground/${SAMPLE}/*.csproj)" \
+ && dotnet publish "$csproj" -c Release -o /app \
+ && ln -s "/app/$(basename "$csproj" .csproj)" /app/playground
 
 # The ngtcp2 bundle's only external dependency is OpenSSL 3 (libcrypto.so.3), which the Debian-based
 # runtime image already carries.

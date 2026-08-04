@@ -1,17 +1,20 @@
+using System.Text;
+using System.Text.Json;
 using ioxide;
 using ioxide.utils;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  hop - Playground/Raw, except every request deliberately bounces off the reactor and back.
-//  Task.Yield() sends the continuation to the thread pool; the reactor's SynchronizationContext
-//  then posts it home, which wakes the reactor through its eventfd.
+//  taskrun - proof that ordinary .NET async works inside a handler. Each request awaits a
+//  Task.Run, which is the escape hatch for anything CPU-bound or not ring-native.
 //
-//  This is the sample to read if you need to call something that ISN'T ring-native - a blocking
-//  library, a CPU-bound step - and want to see what leaving the reactor costs. Run it against Raw.
+//  The point: with the per-reactor SynchronizationContext installed, the continuation comes HOME
+//  to the reactor, so connection state stays single-threaded and you can keep touching conn after
+//  the await. The sample logs once if it ever resumes off-reactor - if that line never prints,
+//  the guarantee held.
 //
-//      dotnet run -c Release --project Playground/Hop
-//      curl http://127.0.0.1:8080/
+//      dotnet run -c Release --project Playground/Tcp/TaskRun
+//      curl http://127.0.0.1:8080/          # -> "hello world"
 //
 //  Needs: ioxide
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -25,7 +28,7 @@ var config = new ServerConfig
     },
 };
 
-byte[] response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok"u8.ToArray();
+int offReactorSeen = 0;
 
 var threads = new Thread[config.ReactorCount];
 
@@ -41,17 +44,22 @@ for (int i = 0; i < threads.Length; i++)
             {
                 RecvSnapshot snapshot = await conn.ReadAsync();
 
-                // Off to the thread pool and back. Everything after this line runs on the reactor
-                // again, because the per-reactor SynchronizationContext posts it home - which is
-                // what makes it safe to touch the connection below.
-                await Task.Yield();
-
                 while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
                 {
                     if (item.HasBuffer) conn.ReturnBuffer(in item);
                 }
 
-                conn.Write(response);
+                // Ordinary thread-pool work, awaited from a reactor handler.
+                string json = await Task.Run(static () => JsonSerializer.Serialize("hello world"));
+
+                // We should be back on the reactor here. If not, say so once.
+                if (!r.OnReactorThread && Interlocked.Exchange(ref offReactorSeen, 1) == 0)
+                {
+                    Console.WriteLine("[taskrun] continuation resumed OFF the reactor (no sync context)");
+                }
+
+                conn.Write("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 13\r\n\r\n"u8);
+                conn.Write(Encoding.UTF8.GetBytes(json));
                 await conn.FlushAsync();
 
                 if (snapshot.IsClosed) return;
@@ -68,7 +76,7 @@ for (int i = 0; i < threads.Length; i++)
     threads[i].Start();
 }
 
-Console.WriteLine($"[hop] {config.ReactorCount} reactors on :{config.Tcp.Port} (every request bounces off-reactor)");
+Console.WriteLine($"[taskrun] {config.ReactorCount} reactors on :{config.Tcp.Port} (each request awaits a Task.Run)");
 
 foreach (Thread thread in threads)
 {

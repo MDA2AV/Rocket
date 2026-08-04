@@ -7,7 +7,7 @@ using Playground.Shared;
 //  raw - a complete ioxide server in one file. Everything below is the real thing: the config,
 //  the reactors, the threads, the connection loop. Copy it into your own project and it runs.
 //
-//      dotnet run -c Release --project Playground/Raw
+//      dotnet run -c Release --project Playground/Tcp/Raw
 //      curl http://127.0.0.1:8080/
 //
 //  No I/O beyond the socket, so this is the throughput baseline the other samples are read

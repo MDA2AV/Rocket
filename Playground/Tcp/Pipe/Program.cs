@@ -4,14 +4,14 @@ using ioxide.utils;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  pipe - the same workload as Playground/Raw, but read and written through the System.IO.Pipelines
+//  pipe - the same workload as Playground/Tcp/Raw, but read and written through the System.IO.Pipelines
 //  adapters instead of the raw connection API. If your code already speaks PipeReader/PipeWriter,
 //  this is the shape to copy; run it against Raw to price what the adapter costs.
 //
 //  The reader owns the carry: unconsumed bytes are held across reads with no copy and no slab, and
 //  buffers return to the ring automatically once fully consumed.
 //
-//      dotnet run -c Release --project Playground/Pipe
+//      dotnet run -c Release --project Playground/Tcp/Pipe
 //      curl http://127.0.0.1:8080/
 //
 //  Needs: ioxide

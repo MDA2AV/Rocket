@@ -11,7 +11,7 @@ using Playground.Shared;
 //  request never leaves the thread it arrived on. No thread pool, no cross-core handoff.
 //
 //      # terminal 1: an origin to forward to
-//      PLAYGROUND_PORT=8081 dotnet run -c Release --project Playground/Raw
+//      PLAYGROUND_PORT=8081 dotnet run -c Release --project Playground/Tcp/Raw
 //      # terminal 2: the proxy
 //      dotnet run -c Release --project Playground/Proxy
 //      curl http://127.0.0.1:8080/
