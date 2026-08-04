@@ -1,6 +1,6 @@
 using System.Text;
 using ioxide;
-using ioxide.httpclient;
+using ioxide.http;
 using ioxide.utils;
 
 namespace Ioxide.E2E;
@@ -8,7 +8,7 @@ namespace Ioxide.E2E;
 /// <summary>
 /// The ring-native HTTP/1.1 client, exercised the way it is meant to be used: a PROXY. One ioxide
 /// server is the origin, a second one handles inbound requests by calling the origin through
-/// ioxide.httpclient from inside its handler, and the test drives the proxy with a plain socket.
+/// ioxide.http from inside its handler, and the test drives the proxy with a plain socket.
 /// That covers the whole chain - pool on the reactor, connect/send/recv on the ring, response
 /// parsing - and proves the client is usable from where handlers actually live.
 ///
@@ -19,7 +19,7 @@ internal static class HttpClientTests
 {
     public static void Register(Runner runner)
     {
-        runner.Test("httpclient: GET through a proxy handler (pool on the reactor)", () =>
+        runner.Test("httpclient h1: GET through a proxy handler (pool on the reactor)", () =>
         {
             int origin = TestServer.Start(OriginHandler);
             int proxy = StartProxy(origin);
@@ -29,7 +29,7 @@ internal static class HttpClientTests
             Assert.Equal("200|hello from origin", body);
         });
 
-        runner.Test("httpclient: keep-alive reuses connections across requests", () =>
+        runner.Test("httpclient h1: keep-alive reuses connections across requests", () =>
         {
             int origin = TestServer.Start(OriginHandler);
             int proxy = StartProxy(origin, poolSize: 2);
@@ -47,7 +47,7 @@ internal static class HttpClientTests
             Assert.Equal("live=2", stats);   // /poolstats answers directly, no upstream hop
         });
 
-        runner.Test("httpclient: chunked response is de-chunked", () =>
+        runner.Test("httpclient h1: chunked response is de-chunked", () =>
         {
             int origin = TestServer.Start(OriginHandler);
             int proxy = StartProxy(origin);
@@ -57,7 +57,7 @@ internal static class HttpClientTests
             Assert.Equal("200|chunk-one chunk-two chunk-three", body);
         });
 
-        runner.Test("httpclient: 204 and HEAD-style bodyless responses", () =>
+        runner.Test("httpclient h1: 204 and HEAD-style bodyless responses", () =>
         {
             int origin = TestServer.Start(OriginHandler);
             int proxy = StartProxy(origin);
@@ -67,7 +67,7 @@ internal static class HttpClientTests
             Assert.Equal("204|", body);
         });
 
-        runner.Test("httpclient: connection close is honoured and the pool replaces the socket", () =>
+        runner.Test("httpclient h1: connection close is honoured and the pool replaces the socket", () =>
         {
             int origin = TestServer.Start(OriginHandler);
             int proxy = StartProxy(origin, poolSize: 1);
@@ -83,7 +83,7 @@ internal static class HttpClientTests
             Assert.Equal("200|closing now", secondBody);
         });
 
-        runner.Test("httpclient: response larger than the receive buffer grows correctly", () =>
+        runner.Test("httpclient h1: response larger than the receive buffer grows correctly", () =>
         {
             int origin = TestServer.Start(OriginHandler);
             int proxy = StartProxy(origin);
@@ -94,7 +94,7 @@ internal static class HttpClientTests
             Assert.Equal($"200|{100_000}", body);
         });
 
-        runner.Test("httpclient: POST body reaches the origin intact", () =>
+        runner.Test("httpclient h1: POST body reaches the origin intact", () =>
         {
             int origin = TestServer.Start(OriginHandler);
             int proxy = StartProxy(origin);
@@ -104,7 +104,7 @@ internal static class HttpClientTests
             Assert.Equal("200|got 11 bytes", body);
         });
 
-        runner.Test("httpclient: response headers are parsed and lowercased", () =>
+        runner.Test("httpclient h1: response headers are parsed and lowercased", () =>
         {
             int origin = TestServer.Start(OriginHandler);
             int proxy = StartProxy(origin);

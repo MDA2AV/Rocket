@@ -1,7 +1,7 @@
 using System.Text;
 using ioxide;
+using ioxide.http;
 using ioxide.httpclient;
-using ioxide.httpclient3;
 using ioxide.nghttp3;
 using ioxide.ngtcp2;
 

@@ -2,7 +2,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 // The client bridge lives in this assembly, but the negotiating client needs to construct one.
-[assembly: InternalsVisibleTo("ioxide.httpclient3")]
+[assembly: InternalsVisibleTo("ioxide.httpclient")]
 [assembly: InternalsVisibleTo("ioxide.e2e")]
 
 namespace ioxide.nghttp2;

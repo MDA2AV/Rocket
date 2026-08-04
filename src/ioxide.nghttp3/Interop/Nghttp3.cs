@@ -3,7 +3,7 @@ using System.Runtime.InteropServices;
 
 // The HTTP/3 CLIENT package drives the same shim from the other side; it is a sibling of this
 // package rather than an outside consumer, so it sees the P/Invoke surface.
-[assembly: InternalsVisibleTo("ioxide.httpclient3")]
+[assembly: InternalsVisibleTo("ioxide.httpclient")]
 
 namespace ioxide.nghttp3;
 
@@ -74,7 +74,7 @@ internal static unsafe class Nghttp3
     /// block). Unknown/already-closed ids (e.g. uni streams) are tolerated and return 0.</summary>
     [DllImport(Lib)] internal static extern int  ih3_close_stream(nint connection, long streamId, ulong appError);
 
-    // --- client side (ioxide.httpclient3) ------------------------------------------------------
+    // --- client side (ioxide.httpclient) ------------------------------------------------------
 
     /// <summary>Create the client-side nghttp3 connection; same event surface as the server one,
     /// requests out instead of responses. 0 on failure.</summary>

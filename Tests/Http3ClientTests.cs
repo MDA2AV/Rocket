@@ -1,7 +1,7 @@
 using System.Text;
 using ioxide;
+using ioxide.http;
 using ioxide.httpclient;
-using ioxide.httpclient3;
 using ioxide.nghttp3;
 using ioxide.ngtcp2;
 
@@ -21,7 +21,7 @@ internal static class Http3ClientTests
 {
     public static void Register(Runner runner)
     {
-        runner.Test("httpclient3: GET over HTTP/3 against our own h3 server", () =>
+        runner.Test("httpclient h3: GET over HTTP/3 against our own h3 server", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
             using var serverEngine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
@@ -40,7 +40,7 @@ internal static class Http3ClientTests
             Assert.Equal("200|h3 origin saw /from-h3-client", body);
         });
 
-        runner.Test("httpclient3: many requests multiplex over one QUIC connection", () =>
+        runner.Test("httpclient h3: many requests multiplex over one QUIC connection", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
             using var serverEngine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
@@ -66,7 +66,7 @@ internal static class Http3ClientTests
             Assert.Equal("conns=1", stats);
         });
 
-        runner.Test("httpclient3: outbound requests share a reactor that also serves QUIC", () =>
+        runner.Test("httpclient h3: outbound requests share a reactor that also serves QUIC", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
             using var originEngine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
@@ -101,7 +101,7 @@ internal static class Http3ClientTests
 
     // A TCP endpoint whose handler forwards to the h3 origin through the ring-native h3 client.
     // Its reactor has NO QUIC configuration: the first outbound connect opens an ephemeral-port
-    // socket for it, which is what makes ioxide.httpclient3 usable without running a server.
+    // socket for it, which is what makes ioxide.httpclient usable without running a server.
     private static int StartH3Driver(int originUdpPort)
     {
         var options = new Http3ClientOptions

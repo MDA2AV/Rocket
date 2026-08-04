@@ -746,7 +746,7 @@ internal static class Handlers
     {
         try
         {
-            ioxide.httpclient.HttpClientPool upstream = reactor.GetService<ioxide.httpclient.HttpClientPool>()!;
+            ioxide.http.HttpClientPool upstream = reactor.GetService<ioxide.http.HttpClientPool>()!;
 
             while (true)
             {
@@ -755,12 +755,12 @@ internal static class Handlers
 
                 try
                 {
-                    using ioxide.httpclient.HttpClientResponse response = await upstream.GetAsync(path);
+                    using ioxide.http.HttpClientResponse response = await upstream.GetAsync(path);
                     conn.Write(System.Text.Encoding.ASCII.GetBytes(
                         $"HTTP/1.1 {response.Status} X\r\nContent-Length: {response.Body.Length}\r\n\r\n"));
                     conn.Write(response.Body.Span);
                 }
-                catch (ioxide.httpclient.HttpClientException e)
+                catch (ioxide.http.HttpClientException e)
                 {
                     byte[] message = System.Text.Encoding.ASCII.GetBytes($"upstream: {e.Message}");
                     conn.Write(System.Text.Encoding.ASCII.GetBytes(
@@ -784,7 +784,7 @@ internal static class Handlers
     }
 
     /// <summary>Upstream options for the proxy mode.</summary>
-    public static ioxide.httpclient.HttpClientOptions UpstreamOptions() => new()
+    public static ioxide.http.HttpClientOptions UpstreamOptions() => new()
     {
         Host = Environment.GetEnvironmentVariable("PLAYGROUND_UPSTREAM_HOST") ?? "127.0.0.1",
         Port = ushort.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_UPSTREAM_PORT"), out ushort port) ? port : (ushort)8081,

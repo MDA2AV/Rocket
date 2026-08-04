@@ -68,7 +68,7 @@ internal static unsafe class Ngtcp2
     [DllImport(Lib)] internal static extern void  iq_conn_consume(nint conn, long streamId, ulong n);
     [DllImport(Lib)] internal static extern nuint iq_conn_get_alpn(nint conn, byte* buf, nuint bufLen);
 
-    // --- client side (ioxide.httpclient3 / QuicClientEngine) ---------------------------------
+    // --- client side (ioxide.httpclient / QuicClientEngine) ---------------------------------
 
     [DllImport(Lib)] internal static extern nint iq_client_engine_new(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string alpn, Callbacks callbacks);

@@ -1,7 +1,7 @@
-using ioxide.httpclient;
+using ioxide.http;
 using ioxide.ngtcp2;
 
-namespace ioxide.httpclient3;
+namespace ioxide.httpclient;
 
 /// <summary>Origin and connection settings for <see cref="Http3ClientPool"/>.</summary>
 public sealed record Http3ClientOptions
@@ -126,7 +126,7 @@ public sealed class Http3ClientPool : IDisposable
         }
         catch (Exception e)
         {
-            Console.Error.WriteLine($"[httpclient3] connect to {_options.Host}:{_options.Port} failed: {e.Message}");
+            Console.Error.WriteLine($"[httpclient] connect to {_options.Host}:{_options.Port} failed: {e.Message}");
         }
     }
 

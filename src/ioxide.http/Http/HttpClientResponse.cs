@@ -4,10 +4,10 @@ using System.Runtime.CompilerServices;
 
 // The HTTP/3 client builds these same responses from its own arena, so it needs the range-recording
 // internals below.
-[assembly: InternalsVisibleTo("ioxide.httpclient3")]
+[assembly: InternalsVisibleTo("ioxide.httpclient")]
 [assembly: InternalsVisibleTo("ioxide.nghttp2")]
 
-namespace ioxide.httpclient;
+namespace ioxide.http;
 
 /// <summary>
 /// One HTTP/1.1 response - status, field lines and body as raw bytes. Headers and body slice ONE

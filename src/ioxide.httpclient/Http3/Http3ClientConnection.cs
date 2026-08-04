@@ -2,11 +2,11 @@ using System.Buffers;
 using System.Buffers.Text;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks.Sources;
-using ioxide.httpclient;
+using ioxide.http;
 using ioxide.nghttp3;
 using ioxide.ngtcp2;
 
-namespace ioxide.httpclient3;
+namespace ioxide.httpclient;
 
 /// <summary>
 /// One HTTP/3 connection to an origin: a QUIC connection opened on the reactor's ring plus a

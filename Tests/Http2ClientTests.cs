@@ -1,6 +1,6 @@
 using System.Text;
 using ioxide;
-using ioxide.httpclient;
+using ioxide.http;
 using ioxide.nghttp2;
 
 namespace Ioxide.E2E;
@@ -22,7 +22,7 @@ internal static class Http2ClientTests
     {
         bool noSidecar = !Sidecars.Reachable(SidecarHost, SidecarPort);
 
-        runner.Test("httpclient2: GET over h2c", () =>
+        runner.Test("httpclient h2: GET over h2c", () =>
         {
             int driver = TestServer.Start(DriverHandler, onStart: reactor =>
                 Http2ClientPool.Start(reactor, Options()));
@@ -35,7 +35,7 @@ internal static class Http2ClientTests
         // Regression guard: request bodies were silently dropped by the shim (NGHTTP2_DATA_FLAG_NO_COPY
         // with a no-op send_data callback made nghttp2 account each DATA frame as sent without ever
         // emitting it). Every earlier test was a GET, so nothing caught it.
-        runner.Test("httpclient2: POST body actually reaches the origin", () =>
+        runner.Test("httpclient h2: POST body actually reaches the origin", () =>
         {
             int driver = TestServer.Start(PostDriverHandler, onStart: reactor =>
                 Http2ClientPool.Start(reactor, Options()));
@@ -47,7 +47,7 @@ internal static class Http2ClientTests
             Assert.Equal("405", body);
         }, skip: noSidecar);
 
-        runner.Test("httpclient2: many requests multiplex over one connection", () =>
+        runner.Test("httpclient h2: many requests multiplex over one connection", () =>
         {
             int driver = TestServer.Start(DriverHandler, onStart: reactor =>
                 Http2ClientPool.Start(reactor, Options()));

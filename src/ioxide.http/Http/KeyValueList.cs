@@ -1,6 +1,6 @@
 using System.Runtime.CompilerServices;
 
-namespace ioxide.httpclient;
+namespace ioxide.http;
 
 /// <summary>
 /// An ordered list of HTTP field lines as raw bytes - names and values both

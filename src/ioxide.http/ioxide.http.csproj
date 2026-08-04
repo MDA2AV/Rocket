@@ -5,27 +5,23 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <RootNamespace>ioxide.httpclient3</RootNamespace>
+    <RootNamespace>ioxide.http</RootNamespace>
 
-    <PackageId>ioxide.httpclient3</PackageId>
+    <PackageId>ioxide.http</PackageId>
     <Version>0.2.4</Version>
     <Authors>MDA2AV</Authors>
-    <Description>Ring-native HTTP/3 client for the ioxide io_uring runtime: QUIC connections opened on the reactor's own ring (ngtcp2 + nghttp3, bundled), requests multiplexed over streams, responses resumed inline. The HTTP/3 counterpart of ioxide.httpclient.</Description>
+    <Description>Ring-native HTTP/1.1 client for the ioxide io_uring runtime: connections open, send and receive on the reactor's own ring and resume inline - no thread pool, no System.Net.Http. Byte-level request/response surface, keep-alive pooling, chunked decoding. For REST calls and proxying from inside a handler.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://mda2av.github.io/ioxide/</PackageProjectUrl>
     <RepositoryUrl>https://github.com/MDA2AV/ioxide</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <PackageTags>io_uring;http3;h3;quic;httpclient;proxy;linux;ioxide</PackageTags>
+    <PackageTags>io_uring;http;httpclient;rest;proxy;linux;ioxide</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
   <ItemGroup>
     <None Include="../../README.md" Pack="true" PackagePath="/" />
     <ProjectReference Include="../ioxide/ioxide.csproj" />
-    <ProjectReference Include="../ioxide.httpclient/ioxide.httpclient.csproj" />
-    <ProjectReference Include="../ioxide.nghttp2/ioxide.nghttp2.csproj" />
-    <ProjectReference Include="../ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
-    <ProjectReference Include="../ioxide.nghttp3/ioxide.nghttp3.csproj" />
   </ItemGroup>
 
 </Project>

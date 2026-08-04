@@ -1,7 +1,7 @@
-using ioxide.httpclient;
+using ioxide.http;
 using ioxide.nghttp2;
 
-namespace ioxide.httpclient3;
+namespace ioxide.httpclient;
 
 /// <summary>Which protocol <see cref="RingHttpClient"/> should use for an origin.</summary>
 public enum HttpProtocolPolicy

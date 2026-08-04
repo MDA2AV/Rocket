@@ -1,4 +1,4 @@
-namespace ioxide.httpclient;
+namespace ioxide.http;
 
 /// <summary>
 /// One origin (host + port) and how many ring-native connections to keep to it. One pool per
