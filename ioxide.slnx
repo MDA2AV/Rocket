@@ -9,6 +9,7 @@
     <Project Path="src/protocols/ioxide.nghttp3/ioxide.nghttp3.csproj" />
     <Project Path="src/protocols/ioxide.http3/ioxide.http3.csproj" />
     <Project Path="src/protocols/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
+    <Project Path="src/protocols/ioxide.tls/ioxide.tls.csproj" />
   </Folder>
 
   <!-- Outbound: what an app calls out to. -->
@@ -19,10 +20,9 @@
     <Project Path="src/clients/ioxide.redis/ioxide.redis.csproj" />
   </Folder>
 
-  <!-- Inbound: hosting and transport security for served traffic. -->
+  <!-- Inbound: hosting integration. -->
   <Folder Name="/serving/">
     <Project Path="src/serving/ioxide.Kestrel/ioxide.Kestrel.csproj" />
-    <Project Path="src/serving/ioxide.tls/ioxide.tls.csproj" />
   </Folder>
 
   <Folder Name="/apps/">
