@@ -114,25 +114,39 @@ nav.top .links a.gh svg { display: block; }
   font-size: 1.15rem;
 }
 
-/* ── example browser: menu on the left, code on the right ─────────── */
+/* ── example browser: fixed menu at the far left, code fills the rest ─────────── */
 
-.tabs {
-  margin: 1.4rem 0;
-  display: grid;
-  grid-template-columns: 200px minmax(0, 1fr);
-  gap: 0 1.4rem;
-  align-items: start;
-}
+.tabs { margin: 1.4rem 0; }
 .tabs > input { display: none; }
 
+/* Pinned to the viewport edge and genuinely fixed - it does not travel with the scroll. */
 .ex-menu {
-  grid-column: 1;
-  grid-row: 1;
+  position: fixed;
+  left: 0;
+  top: 5.5rem;
+  z-index: 5;              /* under the sticky top nav */
+  width: 170px;
   display: flex;
   flex-direction: column;
-  border-left: 1px solid var(--line);
-  position: sticky;
-  top: 1rem;
+  padding: 0.9rem 0;
+  background: var(--bg);
+  border-right: 1px solid var(--line);
+  max-height: calc(100vh - 7rem);
+  overflow-y: auto;
+}
+
+.ex-home {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  padding: 0.42rem 0.6rem 0.42rem 0.85rem;
+  border-left: 2px solid transparent;
+  cursor: pointer;
+}
+.ex-home:hover { color: var(--text); }
+#tab-none:checked ~ .ex-menu .ex-home {
+  color: var(--accent-soft);
+  border-left-color: var(--accent-soft);
+  background: var(--code-bg);
 }
 
 .ex-group {
@@ -143,18 +157,16 @@ nav.top .links a.gh svg { display: block; }
   padding: 1rem 0 0.3rem 0.85rem;
   opacity: 0.85;
 }
-.ex-group:first-of-type { padding-top: 0; }
 
-.ex-menu label {
+.ex-menu label:not(.ex-home) {
   font-size: 0.85rem;
   line-height: 1.3;
   color: var(--text-dim);
   padding: 0.42rem 0.6rem 0.42rem 0.85rem;
-  margin-left: -1px;
   border-left: 2px solid transparent;
   cursor: pointer;
 }
-.ex-menu label:hover { color: var(--text); }
+.ex-menu label:not(.ex-home):hover { color: var(--text); }
 
 #tab-shared:checked ~ .ex-menu label[for="tab-shared"],
 #tab-inc:checked ~ .ex-menu label[for="tab-inc"],
@@ -175,12 +187,19 @@ nav.top .links a.gh svg { display: block; }
   background: var(--code-bg);
 }
 
-.pane {
-  display: none;
-  grid-column: 2;
-  grid-row: 1;
-  min-width: 0;          /* let <pre> scroll instead of stretching the grid */
+/* The overview prose: the default state, replaced the moment an example is picked. */
+.ex-intro { display: none; max-width: 780px; }
+#tab-none:checked ~ .ex-intro { display: block; }
+.ex-intro p { color: var(--text-dim); margin: 0 0 1rem; }
+.ex-intro .lead { font-size: 1.15rem; }
+.ex-hint {
+  font-size: 0.85rem;
+  opacity: 0.7;
+  border-left: 2px solid var(--line);
+  padding-left: 0.8rem;
 }
+
+.pane { display: none; min-width: 0; }
 #tab-shared:checked ~ .pane-shared { display: block; }
 #tab-inc:checked ~ .pane-inc { display: block; }
 #tab-pipe:checked ~ .pane-pipe { display: block; }
@@ -197,27 +216,29 @@ nav.top .links a.gh svg { display: block; }
 #tab-kestrel:checked ~ .pane-kestrel { display: block; }
 .pane pre { margin: 0; }
 
-/* stack the menu above the code on narrow screens */
-@media (max-width: 820px) {
-  .tabs { grid-template-columns: minmax(0, 1fr); gap: 0.9rem; }
+/* Below the menu's width budget it stops being fixed and stacks above the code. */
+@media (max-width: 1320px) {
   .ex-menu {
     position: static;
+    width: auto;
     flex-direction: row;
     flex-wrap: wrap;
     align-items: center;
     gap: 0.15rem;
-    border-left: none;
+    max-height: none;
+    overflow: visible;
+    border-right: none;
     border-bottom: 1px solid var(--line);
-    padding-bottom: 0.5rem;
+    padding: 0 0 0.5rem;
+    margin-bottom: 1.1rem;
   }
-  .ex-group { padding: 0 0.3rem 0 0.5rem; width: 100%; }
-  .ex-group:first-of-type { padding-top: 0; }
+  .ex-group { width: 100%; padding: 0.7rem 0.3rem 0.2rem 0; }
   .ex-menu label {
-    margin-left: 0;
-    border-left: none;
+    border-left: none !important;
     border-bottom: 2px solid transparent;
-    padding: 0.3rem 0.55rem;
+    padding: 0.3rem 0.55rem !important;
   }
+  #tab-none:checked ~ .ex-menu .ex-home,
   #tab-shared:checked ~ .ex-menu label[for="tab-shared"],
   #tab-inc:checked ~ .ex-menu label[for="tab-inc"],
   #tab-pipe:checked ~ .ex-menu label[for="tab-pipe"],
@@ -232,10 +253,8 @@ nav.top .links a.gh svg { display: block; }
   #tab-files:checked ~ .ex-menu label[for="tab-files"],
   #tab-tls:checked ~ .ex-menu label[for="tab-tls"],
   #tab-kestrel:checked ~ .ex-menu label[for="tab-kestrel"] {
-    border-left-color: transparent;
     border-bottom-color: var(--accent-soft);
   }
-  .pane { grid-column: 1; grid-row: 2; }
 }
 
 /* the explainer pane: same panel chrome as the code blocks */
@@ -256,6 +275,24 @@ nav.top .links a.gh svg { display: block; }
 
 /* sections */
 section.block { max-width: 980px; margin: 0 auto; padding: 3.5rem 1.5rem; }
+
+/* The examples section spans the page instead of the centred column, so the code block gets the
+   width. Its left padding clears the fixed menu; below 1180px the menu goes back into the flow
+   and this reverts to the normal centred section. */
+section.block.examples {
+  max-width: none;
+  margin: 0;
+  padding-left: calc(170px + 2.5rem);
+  padding-right: 2.5rem;
+}
+@media (max-width: 1320px) {
+  section.block.examples {
+    max-width: 980px;
+    margin: 0 auto;
+    padding-left: 1.5rem;
+    padding-right: 1.5rem;
+  }
+}
 section.block h2 { font-size: 1.7rem; letter-spacing: -0.02em; margin-bottom: 0.4rem; }
 section.block > p.lead { color: var(--text-dim); max-width: 700px; margin-bottom: 1.5rem; }
 
