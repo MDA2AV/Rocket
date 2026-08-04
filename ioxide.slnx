@@ -1,18 +1,44 @@
 <Solution>
-  <Project Path="src/serving/ioxide.file/ioxide.file.csproj" />
-  <Project Path="src/serving/ioxide.tls/ioxide.tls.csproj" />
-  <Project Path="src/clients/ioxide.redis/ioxide.redis.csproj" />
-  <Project Path="src/clients/ioxide.pg/ioxide.pg.csproj" />
-  <Project Path="src/serving/ioxide.Kestrel/ioxide.Kestrel.csproj" />
+  <!-- The runtime core, first and unnested: everything below builds on it. -->
   <Project Path="src/ioxide/ioxide.csproj" />
-  <Project Path="src/bindings/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
-  <Project Path="src/bindings/ioxide.nghttp3/ioxide.nghttp3.csproj" />
-  <Project Path="src/serving/ioxide.http3/ioxide.http3.csproj" />
-  <Project Path="src/clients/ioxide.http/ioxide.http.csproj" />
-  <Project Path="src/bindings/ioxide.nghttp2/ioxide.nghttp2.csproj" />
-  <Project Path="src/clients/ioxide.httpclient/ioxide.httpclient.csproj" />
-  <Project Path="Playground/Playground.csproj" />
-  <Project Path="Research/Examples/Examples.csproj" />
-  <Project Path="Examples.AspNet/Examples.AspNet.csproj" />
-  <Project Path="Tests/ioxide.e2e.csproj" />
+
+  <!-- Native bindings: each bundles a C library into one self-contained .so. -->
+  <Folder Name="/bindings/">
+    <Project Path="src/bindings/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
+    <Project Path="src/bindings/ioxide.nghttp2/ioxide.nghttp2.csproj" />
+    <Project Path="src/bindings/ioxide.nghttp3/ioxide.nghttp3.csproj" />
+  </Folder>
+
+  <!-- Outbound: what an app calls out to. -->
+  <Folder Name="/clients/">
+    <Project Path="src/clients/ioxide.http/ioxide.http.csproj" />
+    <Project Path="src/clients/ioxide.httpclient/ioxide.httpclient.csproj" />
+    <Project Path="src/clients/ioxide.pg/ioxide.pg.csproj" />
+    <Project Path="src/clients/ioxide.redis/ioxide.redis.csproj" />
+  </Folder>
+
+  <!-- Inbound: what serves traffic. -->
+  <Folder Name="/serving/">
+    <Project Path="src/serving/ioxide.file/ioxide.file.csproj" />
+    <Project Path="src/serving/ioxide.http3/ioxide.http3.csproj" />
+    <Project Path="src/serving/ioxide.Kestrel/ioxide.Kestrel.csproj" />
+    <Project Path="src/serving/ioxide.tls/ioxide.tls.csproj" />
+  </Folder>
+
+  <Folder Name="/apps/">
+    <Project Path="Playground/Playground.csproj" />
+    <Project Path="Research/Examples/Examples.csproj" />
+    <Project Path="Examples.AspNet/Examples.AspNet.csproj" />
+  </Folder>
+
+  <Folder Name="/tests/">
+    <Project Path="Tests/ioxide.e2e.csproj" />
+  </Folder>
+
+  <!-- Not built by the solution; here so the native bundle scripts are findable from the IDE. -->
+  <Folder Name="/build/">
+    <File Path="scripts/build-ngtcp2-native.sh" />
+    <File Path="scripts/build-nghttp2-native.sh" />
+    <File Path="scripts/build-nghttp3-native.sh" />
+  </Folder>
 </Solution>
