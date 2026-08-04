@@ -40,8 +40,11 @@ public sealed class Http2ClientConnection : IDisposable
 
     private readonly Dictionary<int, PendingRequest> _pending = new();
 
-    // Completions recorded during the current ih2_read call, resumed once it unwinds.
-    private readonly List<(PendingRequest Pending, HttpClientResponse Response)> _completedThisPass = [];
+    // Completions and stream failures recorded during the current ih2_read/ih2_write call,
+    // resumed once it unwinds. Failures ride the same list because a resumed waiter can retry
+    // through the pool - and the pool may dispose this connection, which must never happen while
+    // nghttp2 is still on the stack.
+    private readonly List<(PendingRequest Pending, HttpClientResponse? Response, Exception? Error)> _completedThisPass = [];
 
     // Set while the pump owns the drain, so a request submitted by a resumed caller rides the
     // pump's own egress pass instead of issuing its own.
@@ -122,7 +125,9 @@ public sealed class Http2ClientConnection : IDisposable
     {
         if (IsBroken)
         {
-            throw new Http2ClientException("connection is not usable");
+            // Nothing was submitted, so resending elsewhere is unconditionally safe - surfaced as
+            // the retryable kind so the pool moves the request to a replacement connection.
+            throw new Http2StreamRefusedException("connection is retiring or closed; request was not submitted");
         }
 
         byte[] headers = PackRequestHeaders(request, out int headersLength);
@@ -145,10 +150,26 @@ public sealed class Http2ClientConnection : IDisposable
 
         if (!_inPumpPass)
         {
-            _ = PumpEgressAsync();   // issued from outside a pass: put it on the wire now
+            _ = DrainDetachedAsync();   // issued from outside a pass: put it on the wire now
         }
 
         return pending.Task;
+    }
+
+    // The detached drain SendAsync fires. Swallowing its failure would strand every in-flight
+    // waiter until the pump happens to notice (_failed is set, but the pump sits in recv): fail
+    // them now and close the socket, which errors that recv out and lets the pump exit.
+    private async Task DrainDetachedAsync()
+    {
+        try
+        {
+            await PumpEgressAsync();
+        }
+        catch (Exception e)
+        {
+            FailAll(new Http2ClientException($"egress drain failed: {e.GetBaseException().Message}"));
+            Dispose();
+        }
     }
 
     // [u16 namelen][name][u16 valuelen][value]... - pseudo-headers first, in the order h2 requires.
@@ -242,7 +263,14 @@ public sealed class Http2ClientConnection : IDisposable
         finally
         {
             Marshal.FreeHGlobal(receive);
-            FailAll(new Http2ClientException("connection closed"));
+
+            // A clean retirement (GOAWAY drained, nothing left to read) leaves only streams the
+            // peer never processed: ones past last_stream_id or never sent. RFC 9113 8.7 makes
+            // resending those safe, so they fail retryable and the pool resends them. Anything
+            // else is a real connection failure.
+            FailAll(_retiring && !_failed
+                ? new Http2StreamRefusedException("connection retired (GOAWAY); request was not processed")
+                : new Http2ClientException("connection closed"));
             Dispose();
         }
     }
@@ -269,6 +297,11 @@ public sealed class Http2ClientConnection : IDisposable
         finally
         {
             _draining = false;
+
+            // Stream failures can be deposited DURING a drain: after a GOAWAY, nghttp2 refuses
+            // queued streams inside mem_send. Resolve them here, outside the native call - on the
+            // error path too, or they would be lost (their pendings left _pending already).
+            CompleteFinishedRequests();
         }
     }
 
@@ -330,7 +363,8 @@ public sealed class Http2ClientConnection : IDisposable
 
     private static unsafe nint PointerOf(MemoryHandle pinned) => (nint)pinned.Pointer;
 
-    // Runs OUTSIDE ih2_read, so a resumed caller may safely submit again.
+    // Runs OUTSIDE ih2_read/ih2_write, so a resumed caller may safely submit again - or retry
+    // through the pool, which may dispose this very connection.
     private void CompleteFinishedRequests()
     {
         if (_completedThisPass.Count == 0)
@@ -343,20 +377,43 @@ public sealed class Http2ClientConnection : IDisposable
         var finished = _completedThisPass.ToArray();
         _completedThisPass.Clear();
 
-        foreach ((PendingRequest pending, HttpClientResponse response) in finished)
+        foreach ((PendingRequest pending, HttpClientResponse? response, Exception? error) in finished)
         {
-            pending.Complete(response);
+            if (error is null)
+            {
+                pending.Complete(response!);
+            }
+            else
+            {
+                pending.Fail(error);
+            }
         }
     }
 
     private void FailAll(Exception error)
     {
+        // Broken before anything resumes: an inline-resumed caller that immediately retries must
+        // see IsBroken and go to the pool, not submit onto this connection.
+        _failed = true;
         _ready.TrySetException(error);
-        foreach (PendingRequest pending in _pending.Values)
+
+        // Deposited but not yet flushed: those pendings already left _pending, so they would be
+        // missed below. A recorded response is a real completed exchange - deliver it.
+        CompleteFinishedRequests();
+
+        if (_pending.Count == 0)
+        {
+            return;
+        }
+
+        // Snapshot-and-clear: resumes run inline and may re-enter (a retry submitting elsewhere
+        // still touches pool state), and _pending must not change under the enumeration.
+        PendingRequest[] pendings = [.. _pending.Values];
+        _pending.Clear();
+        foreach (PendingRequest pending in pendings)
         {
             pending.Fail(error);
         }
-        _pending.Clear();
     }
 
     // --- native callbacks: deposit only ---------------------------------------------------------
@@ -444,7 +501,7 @@ public sealed class Http2ClientConnection : IDisposable
         response.Freeze();
 
         // Record only - resumed by CompleteFinishedRequests once nghttp2 unwinds.
-        connection._completedThisPass.Add((pending, response));
+        connection._completedThisPass.Add((pending, response, null));
     }
 
     [UnmanagedCallersOnly]
@@ -463,9 +520,14 @@ public sealed class Http2ClientConnection : IDisposable
 
         if (connection._pending.Remove(streamId, out PendingRequest? pending))
         {
-            pending.Fail(refused
+            // Record only, exactly like EndStream. Failing here would resume the waiter INSIDE
+            // ih2_read/ih2_write (this callback fires during both - GOAWAY closes live streams in
+            // mem_recv and refuses queued ones in mem_send), and a resumed caller retries through
+            // the pool, which prunes retiring connections - Dispose would then run ih2_free while
+            // nghttp2 is still on this very stack.
+            connection._completedThisPass.Add((pending, null, refused
                 ? new Http2StreamRefusedException($"stream {streamId} refused; connection is retiring")
-                : new Http2ClientException($"stream {streamId} reset (error {errorCode})"));
+                : new Http2ClientException($"stream {streamId} reset (error {errorCode})")));
         }
     }
 

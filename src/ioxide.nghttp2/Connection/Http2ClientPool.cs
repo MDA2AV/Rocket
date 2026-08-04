@@ -109,6 +109,23 @@ public sealed class Http2ClientPool : IDisposable
                 throw new Http2ClientException("pool disposed");
             }
 
+            // Pick prunes broken connections as a side effect, so it must run BEFORE the
+            // replenish check below - a retiring corpse still parked in _connections would
+            // otherwise count as alive, nobody would open a replacement, and every waiter
+            // would stall until the sweep ticker got around to it.
+            Http2ClientConnection? connection = Pick();
+            if (connection is not null)
+            {
+                try
+                {
+                    return await connection.SendAsync(request);
+                }
+                catch (Http2StreamRefusedException)
+                {
+                    continue;   // that connection is retiring too; try the replacement
+                }
+            }
+
             int remaining = (int)(deadline - Environment.TickCount64);
             if (remaining <= 0)
             {
@@ -128,20 +145,6 @@ public sealed class Http2ClientPool : IDisposable
             if (await Task.WhenAny(signalled, Task.Delay(remaining)) != signalled)
             {
                 waiter.TrySetCanceled();   // abandon the slot so WakeWaiters cannot hand it to us
-                continue;                  // loop re-checks the deadline and gives up there
-            }
-
-            Http2ClientConnection? connection = Pick();
-            if (connection is not null)
-            {
-                try
-                {
-                    return await connection.SendAsync(request);
-                }
-                catch (Http2StreamRefusedException)
-                {
-                    continue;   // that connection is retiring too; wait for the replacement
-                }
             }
         }
     }
@@ -156,14 +159,7 @@ public sealed class Http2ClientPool : IDisposable
 
     private Http2ClientConnection? Pick()
     {
-        for (int i = _connections.Count - 1; i >= 0; i--)
-        {
-            if (_connections[i].IsBroken)
-            {
-                _connections[i].Dispose();
-                _connections.RemoveAt(i);
-            }
-        }
+        Prune();
 
         if (_connections.Count == 0)
         {
@@ -208,17 +204,31 @@ public sealed class Http2ClientPool : IDisposable
         }
     }
 
-    // Ticker: drop corpses and replenish toward PoolSize.
-    private void Sweep()
+    // Remove broken connections from rotation. A retiring connection that still has requests in
+    // flight is only REMOVED, never disposed - nginx keeps answering streams at or below the
+    // GOAWAY's last_stream_id, and disposing here would close the socket under those responses.
+    // Its own pump disposes it once it drains. Hard-failed connections have already failed their
+    // pending requests, so InFlight is 0 and they are disposed on the spot.
+    private void Prune()
     {
         for (int i = _connections.Count - 1; i >= 0; i--)
         {
-            if (_connections[i].IsBroken)
+            Http2ClientConnection connection = _connections[i];
+            if (connection.IsBroken)
             {
-                _connections[i].Dispose();
+                if (connection.InFlight == 0)
+                {
+                    connection.Dispose();
+                }
                 _connections.RemoveAt(i);
             }
         }
+    }
+
+    // Ticker: drop corpses and replenish toward PoolSize.
+    private void Sweep()
+    {
+        Prune();
 
         if (!_disposed && _connections.Count + _opening < _options.PoolSize)
         {
