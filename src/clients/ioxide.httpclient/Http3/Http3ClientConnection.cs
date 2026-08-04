@@ -33,8 +33,11 @@ public sealed class Http3ClientConnection : IDisposable
     // drains once at the end, so every request that a batch of completions produced leaves in ONE
     // sendmsg instead of one per request. Without this, each inline-resumed caller submits and
     // syscalls on its own.
+    //
+    // There is deliberately no "did anything submit?" flag gating that end-of-pass drain: the drain
+    // also carries QUIC's own egress (ACKs, flow-control updates), which is due whether or not this
+    // pass produced a request. Skipping it on an idle pass would stall the connection.
     private bool _inPumpPass;
-    private bool _pumpPending;
 
     // Requests whose response completed during the current ih3_read_stream call. Callbacks only
     // RECORD them; the waiters are resumed after the native call unwinds - resuming inside the
@@ -174,13 +177,11 @@ public sealed class Http3ClientConnection : IDisposable
 
         _pending[streamId] = pending;
 
-        if (_inPumpPass)
+        // Inside a pass, the loop's end-of-pass drain carries this request, batched with its
+        // siblings; outside one, nothing else is going to send it.
+        if (!_inPumpPass)
         {
-            _pumpPending = true;   // the loop's own drain will carry it, batched with its siblings
-        }
-        else
-        {
-            PumpEgress();          // issued from outside a pass: send it now
+            PumpEgress();
         }
         return true;
     }
@@ -228,7 +229,6 @@ public sealed class Http3ClientConnection : IDisposable
 
                 if (!_failed)
                 {
-                    _pumpPending = false;
                     PumpEgress();
                 }
 

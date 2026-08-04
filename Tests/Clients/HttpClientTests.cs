@@ -29,6 +29,24 @@ internal static class HttpClientTests
             Assert.Equal("200|hello from origin", body);
         });
 
+        runner.Test("httpclient h1: dead origin fails inside the acquire budget, no connect storm", () =>
+        {
+            // A refused connect completes in microseconds and wakes the waiter. When the acquire
+            // timeout was armed per ATTEMPT rather than per acquire, every failure re-armed it, so
+            // the deadline never arrived: the pool reopened at syscall speed (~94k connects in 6 s
+            // on one reactor), the caller never saw an error, and the request hung forever.
+            // The call must now fail within the acquire budget, and the handler must see it.
+            int proxy = StartProxy(originPort: 9099, poolSize: 1, acquireTimeoutMs: 1000);
+
+            long start = Environment.TickCount64;
+            (int status, string body) = Client.Get(proxy, "/plain", timeoutMs: 15_000);
+            long elapsed = Environment.TickCount64 - start;
+
+            Assert.Equal(200, status);   // the proxy handler answers 200 and reports upstream in the body
+            Assert.True(body.StartsWith("599|"), $"expected the upstream call to throw, got: {body}");
+            Assert.True(elapsed < 6_000, $"took {elapsed} ms - the acquire timeout did not bound the retry loop");
+        });
+
         runner.Test("httpclient h1: keep-alive reuses connections across requests", () =>
         {
             int origin = TestServer.Start(OriginHandler);
@@ -118,7 +136,7 @@ internal static class HttpClientTests
     // Start a proxy server: its handler calls the origin through the ring-native client and writes
     // "<upstream status>|<detail>" back. The pool is created in OnStart, so it belongs to this
     // reactor's ring - the documented way to use it.
-    private static int StartProxy(int originPort, int poolSize = 4)
+    private static int StartProxy(int originPort, int poolSize = 4, int? acquireTimeoutMs = null)
     {
         var options = new HttpClientOptions
         {
@@ -127,6 +145,11 @@ internal static class HttpClientTests
             PoolSize = poolSize,
             ReceiveBufferSize = 4096,   // small on purpose: /big must exercise buffer growth
         };
+
+        if (acquireTimeoutMs is { } timeout)
+        {
+            options = options with { AcquireTimeoutMs = timeout };
+        }
 
         return TestServer.StartConfigured(
             ProxyHandler,

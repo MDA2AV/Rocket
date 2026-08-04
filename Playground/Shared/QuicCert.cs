@@ -1,10 +1,10 @@
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 
-namespace Playground.Setup;
+namespace Playground.Shared;
 
 /// <summary>Self-signed localhost cert for the QUIC modes.</summary>
-internal static class QuicCert
+public static class QuicCert
 {
     /// <summary>
     /// Returns the configured cert/key pair, generating a self-signed one under the temp directory
