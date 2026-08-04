@@ -1,4 +1,5 @@
 using ioxide.httpclient;
+using ioxide.nghttp2;
 
 namespace ioxide.httpclient3;
 
@@ -13,6 +14,15 @@ public enum HttpProtocolPolicy
 
     /// <summary>HTTP/3 only - fail rather than fall back to HTTP/1.1.</summary>
     Http3Only,
+
+    /// <summary>
+    /// HTTP/2 cleartext (h2c) with prior knowledge, on <see cref="RingHttpClientOptions.Port"/>.
+    ///
+    /// Explicit rather than negotiated, and it has to be: h2 is chosen by ALPN during a TLS
+    /// handshake, and this client has no TLS. An origin cannot advertise h2c the way it advertises
+    /// h3 via Alt-Svc, so the caller must know the port speaks HTTP/2.
+    /// </summary>
+    Http2Only,
 }
 
 /// <summary>Origin and policy settings for <see cref="RingHttpClient"/>.</summary>
@@ -77,6 +87,7 @@ public sealed class RingHttpClient : IDisposable
 
     private readonly Reactor _reactor;
     private Http3ClientPool? _http3;      // created on first use, so h1-only origins never open QUIC
+    private Http2ClientPool? _http2;      // h2c, opened only under Http2Only
     private ushort _http3Port;            // pinned by options, or learned from Alt-Svc
     private long _http3BlockedUntilMs;    // set by a failed h3 attempt (cooldown)
     private bool _disposed;
@@ -113,7 +124,11 @@ public sealed class RingHttpClient : IDisposable
     }
 
     /// <summary>The protocol the next request would use, for diagnostics and tests.</summary>
-    public string NextProtocol => UseHttp3() ? "h3" : "http/1.1";
+    public string NextProtocol => _options.Policy switch
+    {
+        HttpProtocolPolicy.Http2Only => "h2c",
+        _ => UseHttp3() ? "h3" : "http/1.1",
+    };
 
     /// <summary>The h3 port in effect: pinned by options, or learned from Alt-Svc. 0 = none yet.</summary>
     public ushort NegotiatedHttp3Port => _http3Port;
@@ -132,7 +147,22 @@ public sealed class RingHttpClient : IDisposable
     /// bytes - dispose it when done.
     /// </summary>
     public ValueTask<HttpClientResponse> SendAsync(HttpClientRequest request)
-        => UseHttp3() ? SendOverHttp3Async(request) : SendOverHttp1Async(request);
+    {
+        if (_options.Policy == HttpProtocolPolicy.Http2Only)
+        {
+            return EnsureHttp2Pool().SendAsync(request);
+        }
+        return UseHttp3() ? SendOverHttp3Async(request) : SendOverHttp1Async(request);
+    }
+
+    private Http2ClientPool EnsureHttp2Pool()
+        => _http2 ??= Http2ClientPool.Start(_reactor, new Http2ClientOptions
+        {
+            Host = _options.Host,
+            Port = _options.Port,
+            PoolSize = _options.PoolSize,
+            AcquireTimeoutMs = _options.AcquireTimeoutMs,
+        });
 
     // --- protocol selection --------------------------------------------------------------------
 
@@ -291,5 +321,6 @@ public sealed class RingHttpClient : IDisposable
         }
         _disposed = true;
         _http3?.Dispose();
+        _http2?.Dispose();
     }
 }
