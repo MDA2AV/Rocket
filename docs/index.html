@@ -39,29 +39,39 @@
   <nav class="ex-menu" aria-label="Examples">
     <label class="ex-home" for="tab-none">overview</label>
 
-    <span class="ex-group">tcp</span>
-    <label for="tab-pipe">pipes</label>
-    <label for="tab-shared">raw &middot; shared ring</label>
-    <label for="tab-inc">raw &middot; incremental</label>
-    <label for="tab-vs">shared vs incremental</label>
+    <details class="ex-sect" open>
+      <summary>tcp</summary>
+      <label for="tab-pipe">pipes</label>
+      <label for="tab-shared">raw &middot; shared ring</label>
+      <label for="tab-inc">raw &middot; incremental</label>
+      <label for="tab-vs">shared vs incremental</label>
+    </details>
 
-    <span class="ex-group">quic</span>
-    <label for="tab-qpipe">pipes</label>
-    <label for="tab-qraw">raw</label>
+    <details class="ex-sect" open>
+      <summary>quic</summary>
+      <label for="tab-qpipe">pipes</label>
+      <label for="tab-qraw">raw</label>
+    </details>
 
-    <span class="ex-group">http/3</span>
-    <label for="tab-h3">nghttp3</label>
-    <label for="tab-h3pure">pure C#</label>
+    <details class="ex-sect" open>
+      <summary>http/3</summary>
+      <label for="tab-h3">nghttp3</label>
+      <label for="tab-h3pure">pure C#</label>
+    </details>
 
-    <span class="ex-group">clients</span>
-    <label for="tab-http">http</label>
-    <label for="tab-pg">postgres</label>
-    <label for="tab-redis">redis</label>
-    <label for="tab-files">files</label>
+    <details class="ex-sect" open>
+      <summary>clients</summary>
+      <label for="tab-http">http</label>
+      <label for="tab-pg">postgres</label>
+      <label for="tab-redis">redis</label>
+      <label for="tab-files">files</label>
+    </details>
 
-    <span class="ex-group">serving</span>
-    <label for="tab-tls">ktls</label>
-    <label for="tab-kestrel">asp.net</label>
+    <details class="ex-sect" open>
+      <summary>serving</summary>
+      <label for="tab-tls">ktls</label>
+      <label for="tab-kestrel">asp.net</label>
+    </details>
   </nav>
 
   <div class="hero">
@@ -74,32 +84,38 @@
   </div>
 
   <div class="ex-intro">
-    <h2>A normal async handler. An abnormal runtime under it.</h2>
+    <h2 class="lead">A normal async handler. An abnormal runtime under it.</h2>
 
-    <p class="lead">You write ordinary C#. Underneath, every await is a request placed on this
-    core's queue, and your code resumes right where it left off when the kernel answers. The same
-    model rides TCP and QUIC (ngtcp2 + picotls bundled in the package, TLS 1.3 inside the
-    transport) - pick a transport and a surface, pipes first. HTTP/3 ships as a layer over the
-    QUIC surface. The <em>clients</em> go the other way: a Postgres query, a Redis command, an
-    outbound HTTP call or a file read is submitted on the <em>same</em> ring that accepted the
-    request, and resumes on the same thread - so a request never leaves the core it arrived on.</p>
+    <div class="ex-cards">
+      <div class="ex-card">
+        <h3>Ordinary C#</h3>
+        <p>Every <code>await</code> is a request placed on this core's queue, and your code
+        resumes where it left off when the kernel answers.</p>
+      </div>
 
-    <p>Each of those awaits is backed by a reusable <code>IValueTaskSource</code>: submitting the
-    op parks your continuation, and the moment its completion arrives the reactor calls
-    <code>SetResult</code> - which runs your code immediately, on the same thread, with nothing
-    scheduled anywhere.</p>
+      <div class="ex-card">
+        <h3>Nothing scheduled</h3>
+        <p>Each await parks on a reusable <code>IValueTaskSource</code>. The completion arrives,
+        the reactor calls <code>SetResult</code>, your code runs — same thread, no queue.</p>
+      </div>
 
-    <p>Every example on the left is runnable code. The
-    <a href="https://github.com/MDA2AV/ioxide/tree/main/Examples">Examples project</a> builds the
-    raw, pg, redis, file and tls variants plus a <code>quic-h3</code> mode that serves HTTP/3 and a
-    pipe echo off one listener, with
-    <a href="https://github.com/MDA2AV/ioxide/blob/main/Examples/RESULTS.md">benchmark results</a>.
-    The <a href="https://github.com/MDA2AV/ioxide/tree/main/Playground">Playground</a> is one
-    self-contained project per workload - a complete server per file, copy-pasteable - and
-    <a href="https://github.com/MDA2AV/ioxide/tree/main/Examples.AspNet">Examples.AspNet</a> is the
-    <code>UseIoxide()</code> drop-in against a stock Kestrel baseline.</p>
+      <div class="ex-card">
+        <h3>Both directions</h3>
+        <p>A Postgres query, a Redis command, an outbound HTTP call or a file read rides the
+        <em>same</em> ring that accepted the request.</p>
+      </div>
+    </div>
 
-    <p class="ex-hint">Pick one to see the code.</p>
+    <p class="ex-links">
+      All of it runs: <a href="https://github.com/MDA2AV/ioxide/tree/main/Playground">Playground</a>
+      is a complete server per file,
+      <a href="https://github.com/MDA2AV/ioxide/tree/main/Examples">Examples</a> has
+      <a href="https://github.com/MDA2AV/ioxide/blob/main/Examples/RESULTS.md">benchmarks</a>, and
+      <a href="https://github.com/MDA2AV/ioxide/tree/main/Examples.AspNet">Examples.AspNet</a>
+      measures <code>UseIoxide()</code> against stock Kestrel.
+    </p>
+
+    <p class="ex-hint">Pick an example to see the code</p>
   </div>
   <div class="pane pane-pipe">
 <pre><code class="language-csharp">var config = new ServerConfig

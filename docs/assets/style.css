@@ -126,57 +126,82 @@ nav.top .links a.gh svg { display: block; }
 
 /* ── example browser: fixed menu at the far left, code fills the rest ─────────── */
 
-.tabs { margin: 1.4rem 0; }
+.tabs { margin: 0; }
 .tabs > input { display: none; }
 
 /* Pinned to the viewport edge and genuinely fixed - it does not travel with the scroll. */
 .ex-menu {
   position: fixed;
   left: 0;
-  top: 5.5rem;
+  top: 4.2rem;
   z-index: 5;              /* under the sticky top nav */
-  width: 170px;
+  width: 220px;
   display: flex;
   flex-direction: column;
-  padding: 0.9rem 0;
+  padding: 1rem 0 1.5rem;
   background: var(--bg);
   border-right: 1px solid var(--line);
-  max-height: calc(100vh - 7rem);
+  max-height: calc(100vh - 5.5rem);
   overflow-y: auto;
 }
 
+/* Section headers and the overview entry share one look: small caps, accent, uppercase. */
+.ex-menu summary,
 .ex-home {
-  font-size: 0.85rem;
-  color: var(--text-dim);
-  padding: 0.42rem 0.6rem 0.42rem 0.85rem;
-  border-left: 2px solid transparent;
+  font-size: 0.68rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent-soft);
+  padding: 0.5rem 0.9rem 0.5rem 1.1rem;
   cursor: pointer;
+  opacity: 0.85;
 }
-.ex-home:hover { color: var(--text); }
+.ex-menu summary:hover,
+.ex-home:hover { opacity: 1; }
+
+/* Collapsible groups - native <details>, no script. */
+.ex-sect { border-top: 1px solid var(--line); margin-top: 0.35rem; }
+.ex-sect summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.ex-sect summary::-webkit-details-marker { display: none; }
+.ex-sect summary::after {
+  content: "";
+  width: 0.42rem;
+  height: 0.42rem;
+  margin-left: 0.6rem;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg) translate(-1px, -1px);
+  transition: transform 0.15s ease;
+  opacity: 0.75;
+}
+.ex-sect[open] summary::after { transform: rotate(-135deg) translate(-2px, -2px); }
+
+/* The overview entry sits above the groups and is selectable, so it gets the active treatment. */
+.ex-home {
+  border-left: 2px solid transparent;
+  margin-bottom: 0.2rem;
+}
 #tab-none:checked ~ .ex-menu .ex-home {
   color: var(--accent-soft);
   border-left-color: var(--accent-soft);
   background: var(--code-bg);
-}
-
-.ex-group {
-  color: var(--accent-soft);
-  font-size: 0.65rem;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-  padding: 1rem 0 0.3rem 0.85rem;
-  opacity: 0.85;
+  opacity: 1;
 }
 
 .ex-menu label:not(.ex-home) {
-  font-size: 0.85rem;
-  line-height: 1.3;
+  font-size: 0.88rem;
+  line-height: 1.35;
   color: var(--text-dim);
-  padding: 0.42rem 0.6rem 0.42rem 0.85rem;
+  padding: 0.4rem 0.9rem 0.4rem 1.1rem;
   border-left: 2px solid transparent;
   cursor: pointer;
 }
-.ex-menu label:not(.ex-home):hover { color: var(--text); }
+.ex-menu label:not(.ex-home):hover { color: var(--text); background: var(--bg-soft); }
 
 #tab-shared:checked ~ .ex-menu label[for="tab-shared"],
 #tab-inc:checked ~ .ex-menu label[for="tab-inc"],
@@ -197,38 +222,70 @@ nav.top .links a.gh svg { display: block; }
   background: var(--code-bg);
 }
 
-/* The overview: the default state. It carries the section heading too, so picking an example
-   leaves nothing on screen but the code. */
-.ex-intro {
-  display: none;
-  max-width: 600px;      /* narrow measure: centred prose only reads well on short lines */
-  margin: 0 auto;
-  padding: 0 0 2.5rem;
-  text-align: center;
-}
+/* ── the overview: hero + three cards, the default state ───────────────────── */
+
+.ex-intro { display: none; }
 #tab-none:checked ~ .ex-intro { display: block; }
 
-.ex-intro h2 {
-  font-size: 1.45rem;
-  margin: 0 0 0.9rem;
+.ex-intro .lead {
+  max-width: 620px;
+  margin: 0 auto 2.2rem;
+  text-align: center;
+  font-size: 1.3rem;
+  color: var(--text);
+  letter-spacing: -0.01em;
   text-wrap: balance;
 }
-.ex-intro p {
-  color: var(--text-dim);
-  margin: 0 0 0.95rem;
-  line-height: 1.62;
-  text-wrap: pretty;     /* no one-word last lines dangling under centred text */
-}
-.ex-intro .lead { font-size: 1.05rem; color: var(--text); }
-.ex-intro p:last-of-type { margin-bottom: 0; }
 
-.ex-hint {
-  font-size: 0.75rem;
-  letter-spacing: 0.12em;
+/* Three short cards instead of a wall of centred prose: scannable, and each one holds a single
+   idea at a length that survives being centred. */
+.ex-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 1rem;
+  max-width: 940px;
+  margin: 0 auto;
+}
+.ex-card {
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  padding: 1.3rem 1.3rem 1.4rem;
+  text-align: center;
+}
+.ex-card h3 {
+  font-size: 0.72rem;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--accent-soft);
-  opacity: 0.75;
-  margin-top: 2.2rem !important;
+  margin-bottom: 0.7rem;
+}
+.ex-card p {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 0.94rem;
+  line-height: 1.6;
+  text-wrap: pretty;
+}
+.ex-card code { font-size: 0.85em; }
+
+.ex-links {
+  max-width: 640px;
+  margin: 2rem auto 0;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 0.92rem;
+  line-height: 1.7;
+  text-wrap: pretty;
+}
+
+.ex-hint {
+  margin: 2.4rem 0 0;
+  text-align: center;
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent-soft);
+  opacity: 0.7;
 }
 
 .pane { display: none; min-width: 0; }
@@ -249,7 +306,7 @@ nav.top .links a.gh svg { display: block; }
 .pane pre { margin: 0; }
 
 /* Below the menu's width budget it stops being fixed and stacks above the code. */
-@media (max-width: 1320px) {
+@media (max-width: 1400px) {
   .ex-menu {
     position: static;
     width: auto;
@@ -264,7 +321,18 @@ nav.top .links a.gh svg { display: block; }
     padding: 0 0 0.5rem;
     margin-bottom: 1.1rem;
   }
-  .ex-group { width: 100%; padding: 0.7rem 0.3rem 0.2rem 0; }
+  .ex-sect {
+    width: 100%;
+    border-top: none;
+    margin-top: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.15rem;
+  }
+  .ex-sect summary { padding: 0.45rem 0.7rem 0.45rem 0; }
+  .ex-sect summary::after { margin-left: 0.4rem; }
+  .ex-home { padding: 0.45rem 0.7rem 0.45rem 0 !important; }
   .ex-menu label {
     border-left: none !important;
     border-bottom: 2px solid transparent;
@@ -317,7 +385,7 @@ section.block.examples {
   /* Little top padding: with the hero and prose hidden, the selected code block should start
      near the top of the page rather than below a section's worth of whitespace. The overview
      supplies its own breathing room instead. */
-  padding: 1.5rem 2.5rem 3.5rem calc(170px + 2.5rem);
+  padding: 1.5rem 2.5rem 3.5rem calc(220px + 2.5rem);
 }
 
 /* The overview has no code pane to keep clear of the menu, so drop the asymmetric padding and
@@ -327,7 +395,7 @@ section.block.examples {
 section.block.examples:has(#tab-none:checked) {
   padding-left: 2.5rem;
 }
-@media (max-width: 1320px) {
+@media (max-width: 1400px) {
   section.block.examples {
     max-width: 980px;
     margin: 0 auto;
