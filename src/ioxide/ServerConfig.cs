@@ -34,8 +34,13 @@ public sealed record ServerConfig
     /// </summary>
     public IncrementalOptions? Incremental { get; init; }
 
-    /// <summary>The TCP transport: listeners, connection pool, and the write path.</summary>
-    public TcpOptions Tcp { get; init; } = new();
+    /// <summary>
+    /// The TCP transport: listeners, connection pool, and the write path. Defaults to an enabled
+    /// listener on <see cref="TcpOptions.Port"/>; set it to <c>null</c> to open no TCP listener at
+    /// all, which is what a QUIC-only server wants - otherwise the reactor binds 8080 regardless
+    /// and inbound connections reach a <see cref="Reactor.TcpHandle"/> that was never set.
+    /// </summary>
+    public TcpOptions? Tcp { get; init; } = new();
 
     /// <summary>Raw UDP sockets (datagrams reach <see cref="Reactor.OnDatagram"/>).</summary>
     public UdpOptions Udp { get; init; } = new();

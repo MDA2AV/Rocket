@@ -46,7 +46,13 @@ internal sealed class IoxideConnectionListener : IConnectionListener
         {
             cfg = options.ConfigureServer(cfg);
         }
-        cfg = cfg with { Tcp = cfg.Tcp with { Port = (ushort)endpoint.Port }, ReactorCount = reactorCount };
+        // ConfigureServer may have nulled Tcp out; Kestrel always needs a listener, so re-establish
+        // one rather than silently binding nothing.
+        cfg = cfg with
+        {
+            Tcp = (cfg.Tcp ?? new TcpOptions()) with { Port = (ushort)endpoint.Port },
+            ReactorCount = reactorCount,
+        };
 
         _reactors = new Reactor[reactorCount];
         _threads = new Thread[reactorCount];

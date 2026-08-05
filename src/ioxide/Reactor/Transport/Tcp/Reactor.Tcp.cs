@@ -238,8 +238,8 @@ public sealed unsafe partial class Reactor
             SetNoDelay(clientFd);
             TcpConnection conn = _pool.TryPop(out var pooled)
                 ? pooled.SetFd(clientFd)
-                : new TcpConnection(this, clientFd, _config.Tcp.WriteSlabSize, _config.Tcp.RecvQueueEntries,
-                                 _incremental ? WriteOverflowStrategy.Grow : _config.Tcp.WriteOverflow);
+                : new TcpConnection(this, clientFd, _tcp.WriteSlabSize, _tcp.RecvQueueEntries,
+                                 _incremental ? WriteOverflowStrategy.Grow : _tcp.WriteOverflow);
             Track(clientFd, conn);
             conn.InitRefs();
             conn.ListenerPort = PortOf(listenFd);
@@ -334,19 +334,26 @@ public sealed unsafe partial class Reactor
     private int[] _listenFds = [];
     private ushort[] _listenPorts = [];
 
-    // One SO_REUSEPORT listener per port; accepts route by listener fd.
+    // One SO_REUSEPORT listener per port; accepts route by listener fd. ServerConfig.Tcp == null
+    // opens none at all, which leaves _listenFds empty and makes ArmTcpAccepts a no-op - a
+    // QUIC-only server then binds no TCP port rather than accepting onto an unset TcpHandle.
     private void OpenTcpListeners()
     {
-        _listenFds = new int[1 + _config.Tcp.ExtraPorts.Length];
+        if (!_tcpEnabled)
+        {
+            return;
+        }
+
+        _listenFds = new int[1 + _tcp.ExtraPorts.Length];
         _listenPorts = new ushort[_listenFds.Length];
         _listenPorts[0] = _port;
-        for (int i = 0; i < _config.Tcp.ExtraPorts.Length; i++)
+        for (int i = 0; i < _tcp.ExtraPorts.Length; i++)
         {
-            _listenPorts[i + 1] = _config.Tcp.ExtraPorts[i];
+            _listenPorts[i + 1] = _tcp.ExtraPorts[i];
         }
         for (int i = 0; i < _listenFds.Length; i++)
         {
-            _listenFds[i] = OpenReusePortListener(_listenPorts[i], _config.Tcp.ListenBacklog, _config.DualStack);
+            _listenFds[i] = OpenReusePortListener(_listenPorts[i], _tcp.ListenBacklog, _config.DualStack);
         }
     }
 

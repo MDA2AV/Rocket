@@ -8,7 +8,7 @@
     <RootNamespace>ioxide.nghttp2</RootNamespace>
 
     <PackageId>ioxide.nghttp2</PackageId>
-    <Version>0.2.6</Version>
+    <Version>0.3.100</Version>
     <Authors>MDA2AV</Authors>
     <Description>HTTP/2 layer for the ioxide io_uring runtime: nghttp2 (HTTP/2 + HPACK) bundled as a single self-contained native library with no external dependencies. Sans-I/O - bytes ride any ioxide TcpConnection, so the reactor keeps ownership of the loop.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>

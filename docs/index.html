@@ -425,7 +425,6 @@ foreach (Thread t in threads) t.Join();</code></pre>
 using System.Buffers;
 using System.IO.Pipelines;
 using ioxide;
-using ioxide.utils;
 using ioxide.ngtcp2;
 
 // ngtcp2 + picotls, bundled native - TLS 1.3 lives inside the transport.
@@ -440,17 +439,7 @@ var config = new ServerConfig
     RecvBufferSize = 32 * 1024,
     RecvSlots      = 4096,
 
-    Tcp = new TcpOptions                         // the TCP listener still runs alongside QUIC
-    {
-        Port             = 8080,
-        ExtraPorts       = [],                   // more listeners; conn.ListenerPort says which
-        ListenBacklog    = 1024,                 // accept queue per SO_REUSEPORT listener
-        WriteSlabSize    = 16 * 1024,            // per-connection write buffer
-        PoolMax          = 1024,                 // connection objects recycled per reactor
-        WriteOverflow    = WriteOverflowStrategy.Grow,   // Segmented = chained slabs, one SENDMSG
-        ZeroCopySend     = false,                // SEND_ZC; only pays off on large responses
-        RecvQueueEntries = 64,                   // per-connection SPSC queue, power of two
-    },
+    Tcp = null,                                  // QUIC only: no TCP listener is opened
 
     Udp = new UdpOptions
     {
@@ -496,31 +485,6 @@ for (int id = 0; id &lt; threads.Length; id++)
         }
     };
 
-    // The reactor binds Tcp.Port regardless, so give it a handler rather than leaving it null.
-    reactor.TcpHandle = async (r, conn) =&gt;
-    {
-        try
-        {
-            while (true)
-            {
-                RecvSnapshot snapshot = await conn.ReadAsync();
-                while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
-                {
-                    if (item.HasBuffer) conn.ReturnBuffer(in item);
-                }
-
-                conn.Write(&quot;HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok&quot;u8);
-                await conn.FlushAsync();
-
-                if (snapshot.IsClosed) return;
-                conn.ResetRead();
-            }
-        }
-        finally
-        {
-            conn.DecRef();
-        }
-    };
 
     threads[id] = new Thread(reactor.Run) { Name = $&quot;reactor-{id}&quot; };
     threads[id].Start();
@@ -536,7 +500,6 @@ foreach (Thread t in threads) t.Join();</code></pre>
     </div>
 <pre><code class="language-csharp">// dotnet add package ioxide ioxide.ngtcp2      (needs cert.pem / key.pem)
 using ioxide;
-using ioxide.utils;
 using ioxide.ngtcp2;
 
 using var engine = new QuicEngine(&quot;cert.pem&quot;, &quot;key.pem&quot;, cidLength: 8, alpn: [&quot;echo&quot;]);
@@ -550,17 +513,7 @@ var config = new ServerConfig
     RecvBufferSize = 32 * 1024,
     RecvSlots      = 4096,
 
-    Tcp = new TcpOptions                         // the TCP listener still runs alongside QUIC
-    {
-        Port             = 8080,
-        ExtraPorts       = [],                   // more listeners; conn.ListenerPort says which
-        ListenBacklog    = 1024,                 // accept queue per SO_REUSEPORT listener
-        WriteSlabSize    = 16 * 1024,            // per-connection write buffer
-        PoolMax          = 1024,                 // connection objects recycled per reactor
-        WriteOverflow    = WriteOverflowStrategy.Grow,   // Segmented = chained slabs, one SENDMSG
-        ZeroCopySend     = false,                // SEND_ZC; only pays off on large responses
-        RecvQueueEntries = 64,                   // per-connection SPSC queue, power of two
-    },
+    Tcp = null,                                  // QUIC only: no TCP listener is opened
 
     Udp = new UdpOptions
     {
@@ -603,31 +556,6 @@ for (int id = 0; id &lt; threads.Length; id++)
         }
     };
 
-    // The reactor binds Tcp.Port regardless, so give it a handler rather than leaving it null.
-    reactor.TcpHandle = async (r, conn) =&gt;
-    {
-        try
-        {
-            while (true)
-            {
-                RecvSnapshot snapshot = await conn.ReadAsync();
-                while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
-                {
-                    if (item.HasBuffer) conn.ReturnBuffer(in item);
-                }
-
-                conn.Write(&quot;HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok&quot;u8);
-                await conn.FlushAsync();
-
-                if (snapshot.IsClosed) return;
-                conn.ResetRead();
-            }
-        }
-        finally
-        {
-            conn.DecRef();
-        }
-    };
 
     threads[id] = new Thread(reactor.Run) { Name = $&quot;reactor-{id}&quot; };
     threads[id].Start();
@@ -644,7 +572,6 @@ foreach (Thread t in threads) t.Join();</code></pre>
 <pre><code class="language-csharp">// dotnet add package ioxide ioxide.ngtcp2 ioxide.nghttp3      (needs cert.pem / key.pem)
 //   curl --http3-only -k https://127.0.0.1:8443/
 using ioxide;
-using ioxide.utils;
 using ioxide.nghttp3;
 using ioxide.ngtcp2;
 
@@ -659,17 +586,7 @@ var config = new ServerConfig
     RecvBufferSize = 32 * 1024,
     RecvSlots      = 4096,
 
-    Tcp = new TcpOptions                         // the TCP listener still runs alongside QUIC
-    {
-        Port             = 8080,
-        ExtraPorts       = [],                   // more listeners; conn.ListenerPort says which
-        ListenBacklog    = 1024,                 // accept queue per SO_REUSEPORT listener
-        WriteSlabSize    = 16 * 1024,            // per-connection write buffer
-        PoolMax          = 1024,                 // connection objects recycled per reactor
-        WriteOverflow    = WriteOverflowStrategy.Grow,   // Segmented = chained slabs, one SENDMSG
-        ZeroCopySend     = false,                // SEND_ZC; only pays off on large responses
-        RecvQueueEntries = 64,                   // per-connection SPSC queue, power of two
-    },
+    Tcp = null,                                  // QUIC only: no TCP listener is opened
 
     Udp = new UdpOptions
     {
@@ -715,31 +632,6 @@ for (int id = 0; id &lt; threads.Length; id++)
             return response;
         });
 
-    // The reactor binds Tcp.Port regardless, so give it a handler rather than leaving it null.
-    reactor.TcpHandle = async (r, conn) =&gt;
-    {
-        try
-        {
-            while (true)
-            {
-                RecvSnapshot snapshot = await conn.ReadAsync();
-                while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
-                {
-                    if (item.HasBuffer) conn.ReturnBuffer(in item);
-                }
-
-                conn.Write(&quot;HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok&quot;u8);
-                await conn.FlushAsync();
-
-                if (snapshot.IsClosed) return;
-                conn.ResetRead();
-            }
-        }
-        finally
-        {
-            conn.DecRef();
-        }
-    };
 
     threads[id] = new Thread(reactor.Run) { Name = $&quot;reactor-{id}&quot; };
     threads[id].Start();

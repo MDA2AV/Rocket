@@ -8,7 +8,7 @@
     <RootNamespace>ioxide.httpclient</RootNamespace>
 
     <PackageId>ioxide.httpclient</PackageId>
-    <Version>0.2.6</Version>
+    <Version>0.3.100</Version>
     <Authors>MDA2AV</Authors>
     <Description>Ring-native HTTP client for the ioxide io_uring runtime: HTTP/1.1, HTTP/2 (h2c) and HTTP/3 behind one API, with the protocol chosen per origin via Alt-Svc. Requests and responses are the same types whichever protocol serves them, and every response resumes the awaiting handler inline on its own reactor thread.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
