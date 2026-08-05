@@ -47,6 +47,38 @@ internal static class HttpClientTests
             Assert.True(elapsed < 6_000, $"took {elapsed} ms - the acquire timeout did not bound the retry loop");
         });
 
+        runner.Test("httpclient h1: a disposed pool closes its connections and stays closed", () =>
+        {
+            // The pool's Sweep runs off a reactor ticker, and AddTicker has no removal API. Before
+            // this the pool had no Dispose at all, so its connections were held for the rest of the
+            // reactor's life and the ticker reopened any that died - forever.
+            int origin = TestServer.Start(OriginHandler);
+            int proxy = StartProxy(origin, poolSize: 2);
+
+            (_, string warm) = Client.Get(proxy, "/plain");
+            Assert.Equal("200|hello from origin", warm);
+
+            Client.Get(proxy, "/dispose");
+
+            // Settled state, not the instant after: a connect already in flight cannot be
+            // cancelled, so it lands and is discarded on arrival. The sleep also spans several
+            // ticker intervals (250 ms each), which is where replenishment would show up.
+            Thread.Sleep(1200);
+
+            (_, string later) = Client.Get(proxy, "/poolstats");
+            Assert.Equal("live=0", later);
+
+            // And a request against the disposed pool fails cleanly rather than hanging out the
+            // acquire budget waiting for connections that are never coming.
+            long start = Environment.TickCount64;
+            (_, string refused) = Client.Get(proxy, "/plain");
+            long elapsed = Environment.TickCount64 - start;
+
+            Assert.True(refused.StartsWith("599|"), $"expected a failure, got: {refused}");
+            Assert.True(refused.Contains("disposed"), $"should say why, got: {refused}");
+            Assert.True(elapsed < 2_000, $"took {elapsed} ms - should fail immediately, not on the deadline");
+        });
+
         runner.Test("httpclient h1: keep-alive reuses connections across requests", () =>
         {
             int origin = TestServer.Start(OriginHandler);
@@ -175,6 +207,11 @@ internal static class HttpClientTests
 
                 if (path == "/poolstats")
                 {
+                    Wire.Write(connection, 200, $"live={upstream.ConnectionCount}");
+                }
+                else if (path == "/dispose")
+                {
+                    upstream.Dispose();
                     Wire.Write(connection, 200, $"live={upstream.ConnectionCount}");
                 }
                 else
