@@ -17,7 +17,7 @@ using Playground.Shared;
 // The engine. One ring per reactor, one reactor per thread - run one per core.
 var config = new ServerConfig
 {
-    ReactorCount = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
+    ReactorCount = Env.Int("PLAYGROUND_REACTORS", 12),
     Tcp = new TcpOptions
     {
         Port = Env.Port("PLAYGROUND_PORT", 8080),

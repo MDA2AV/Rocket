@@ -1,4 +1,4 @@
-using ioxide.http11;
+using ioxide.httpclient;
 using ioxide.ngtcp2;
 
 namespace ioxide.httpclient;

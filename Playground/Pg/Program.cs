@@ -35,6 +35,7 @@ var pgOptions = new PgOptions
     Host = Env.Str("PLAYGROUND_PG_HOST", "127.0.0.1"),
     Port = Env.Port("PLAYGROUND_PG_PORT", 5432),
     User = Env.Str("PLAYGROUND_PG_USER", "bench"),
+    Password = Env.StrOrNull("PLAYGROUND_PG_PASSWORD"),
     Database = Env.Str("PLAYGROUND_PG_DB", "bench"),
     PoolSize = Env.Int("PLAYGROUND_PG_POOL", 4),          // per reactor, not global
     CommandTimeoutMs = Env.Int("PLAYGROUND_PG_TIMEOUT", 30_000),
@@ -76,21 +77,54 @@ for (int i = 0; i < threads.Length; i++)
                     }
                 }
 
-                string sql = path switch
-                {
-                    "/sleep" => "SELECT 42 FROM pg_sleep(0.1)",
-                    "/hang"  => "SELECT pg_sleep(10)",
-                    "/err"   => "SELECT * FROM this_table_does_not_exist",
-                    _        => "SELECT 42",
-                };
-
                 try
                 {
-                    // io_uring send + recv to Postgres, on the same ring that accepted the request.
-                    // The continuation resumes inline, on this thread.
-                    PgResult result = await pg.QueryAsync(sql);
+                    string responseBody;
 
-                    string responseBody = $"db={result.Value}";
+                    if (path.StartsWith("/add/", StringComparison.Ordinal))
+                    {
+                        // Parameterized (prepared): each distinct SQL text is Parse'd once per
+                        // connection, then Bind/Execute'd on reuse - the server plans it once.
+                        long n = long.TryParse(path["/add/".Length..], out long parsed) ? parsed : 41;
+                        PgResult result = await pg.QueryAsync("SELECT $1::bigint + 1", [PgParam.Int(n)]);
+                        responseBody = $"{n}+1={result.Value}";
+                    }
+                    else if (path.StartsWith("/upper/", StringComparison.Ordinal))
+                    {
+                        // A text parameter rides the same prepared path - no SQL escaping, ever.
+                        PgResult result = await pg.QueryAsync("SELECT upper($1)", [PgParam.Text(path["/upper/".Length..])]);
+                        responseBody = $"upper={result.Value}";
+                    }
+                    else if (path.StartsWith("/rows/", StringComparison.Ordinal))
+                    {
+                        // Multiple rows stream through the inline callback as they arrive - fields
+                        // read by column name, no materialized result set.
+                        long count = Math.Clamp(long.TryParse(path["/rows/".Length..], out long c) ? c : 5, 1, 100);
+                        var values = new StringBuilder();
+                        int rows = await pg.QueryRowsAsync(
+                            $"SELECT n, n * n AS square FROM generate_series(1, {count}) AS n",
+                            row => values.Append(Encoding.ASCII.GetString(row.Field("n")))
+                                         .Append("^2=")
+                                         .Append(Encoding.ASCII.GetString(row.Field("square")))
+                                         .Append(' '));
+                        responseBody = $"rows={rows}: {values}";
+                    }
+                    else
+                    {
+                        string sql = path switch
+                        {
+                            "/sleep" => "SELECT 42 FROM pg_sleep(0.1)",
+                            "/hang"  => "SELECT pg_sleep(10)",   // outlives PLAYGROUND_PG_TIMEOUT -> torn down
+                            "/err"   => "SELECT * FROM this_table_does_not_exist",
+                            _        => "SELECT 42",
+                        };
+
+                        // io_uring send + recv to Postgres, on the same ring that accepted the
+                        // request. The continuation resumes inline, on this thread.
+                        PgResult result = await pg.QueryAsync(sql);
+                        responseBody = $"db={result.Value}";
+                    }
+
                     conn.Write(Encoding.ASCII.GetBytes(
                         $"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {responseBody.Length}\r\n\r\n{responseBody}"));
                 }

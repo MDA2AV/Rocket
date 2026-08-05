@@ -1,4 +1,9 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+
+// TryExtractDcid is the demux's packet parse: pure, and the first thing a hostile datagram meets.
+// The unit suite exercises it directly rather than through a live connection.
+[assembly: InternalsVisibleTo("Ioxide.Tests.Unit")]
 
 namespace ioxide;
 
@@ -110,13 +115,13 @@ public sealed unsafe partial class Reactor
         freshQuicConnection.SocketFd    = datagram.SocketFd;
         freshQuicConnection.PeerAddr    = (nint)NativeMemory.Alloc(UdpNameCap);
         freshQuicConnection.PeerAddrLen = datagram.PeerAddrLen;
-        
+
         Buffer.MemoryCopy(
             (void*)datagram.PeerAddr,
-            (void*)freshQuicConnection.PeerAddr, 
-            UdpNameCap, 
+            (void*)freshQuicConnection.PeerAddr,
+            UdpNameCap,
             datagram.PeerAddrLen);
-        
+
         freshQuicConnection.LastSeenMs = Environment.TickCount64;
 
         freshQuicConnection.Cids.Add(dcid);

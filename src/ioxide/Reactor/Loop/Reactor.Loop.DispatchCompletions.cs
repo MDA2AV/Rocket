@@ -5,9 +5,9 @@ namespace ioxide;
 // Loop - Dispatch Completions
 public sealed unsafe partial class Reactor
 {
-    
+
 #region Send
-    
+
     // Shared by both loops. Handles plain SEND (one CQE) and SEND_ZC (a data CQE carrying
     // IORING_CQE_F_MORE, then a separate IORING_CQE_F_NOTIF once the kernel releases the slab).
     private void OnSendCompletion(int fd, ushort gen, int res, uint cqeFlags)
@@ -67,11 +67,11 @@ public sealed unsafe partial class Reactor
             conn.CompleteFlush();
         }
     }
-    
+
 #endregion
-    
+
 #region Wake
-    
+
     private void OnWakeCompletion(bool more)
     {
         // Drain the eventfd counter so the next write re-triggers POLLIN; queues
@@ -83,11 +83,11 @@ public sealed unsafe partial class Reactor
             ArmWakePoll();
         }
     }
-    
+
 #endregion
-    
+
 #region Timer
-    
+
     private void OnTimerTick()
     {
         for (int i = 0; i < _tickers.Count; i++)
@@ -103,7 +103,7 @@ public sealed unsafe partial class Reactor
         }
         ArmTimer();   // single-shot timer; re-arm for the next interval
     }
-    
+
 #endregion
 
 #region Client

@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>Ioxide.Tests</RootNamespace>
+    <AssemblyName>Ioxide.Tests.Harness</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/ioxide/ioxide.csproj" />
+    <ProjectReference Include="../../src/protocols/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
+    <ProjectReference Include="../../src/protocols/ioxide.nghttp3/ioxide.nghttp3.csproj" />
+    <ProjectReference Include="../../src/protocols/ioxide.tls/ioxide.tls.csproj" />
+    <ProjectReference Include="../../src/clients/ioxide.file/ioxide.file.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -93,7 +93,7 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource
         // Guard against a double completion. During teardown MarkClosed() may have already disarmed and
         // completed this flush (e.g. a TcpConnection: close response whose SEND CQE lands after the close),
         // which Resets/invalidates the value-task source. Only the call that actually disarms the flush
-        // signals — mirroring MarkClosed and the recv path's _armed check. Without this, the late CQE's
+        // signals - mirroring MarkClosed and the recv path's _armed check. Without this, the late CQE's
         // SetResult throws InvalidOperationException on the reactor thread and crashes the process.
         if (Interlocked.Exchange(ref _flushArmed, 0) == 1)
         {

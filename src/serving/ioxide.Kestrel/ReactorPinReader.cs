@@ -8,7 +8,7 @@ namespace ioxide.Kestrel;
 /// Wraps the inbound <see cref="PipeReader"/> so the FIRST read of a connection resumes on the connection's
 /// reactor thread. Kestrel dispatches each new connection to the ThreadPool, and the first read usually
 /// completes synchronously (the recv pump pre-buffered the request), which would run the whole first
-/// request — application code included — off the reactor. Hopping once here pins Kestrel's parse + request
+/// request - application code included - off the reactor. Hopping once here pins Kestrel's parse + request
 /// loop to the reactor from request one, so endpoints can use ring-native services (ioxide.pg, ioxide.file)
 /// reliably on every request. Warm requests (read parks, resumes via the reactor scheduler) are already
 /// on-reactor, so this only costs one hop per connection.

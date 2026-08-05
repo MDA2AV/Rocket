@@ -11,7 +11,7 @@ public sealed unsafe partial class Reactor
     private __kernel_timespec* _timerTs;
     private const long TimerIntervalNs = 250_000_000;   // 250 ms
     private readonly List<Action> _tickers = [];
-    
+
     /// <summary>
     /// Register a callback invoked on the reactor thread every timer interval (~250 ms). Call from
     /// <c>OnStart</c>. Pools use it to sweep per-command timeouts and replenish connections.

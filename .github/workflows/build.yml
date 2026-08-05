@@ -62,34 +62,33 @@ jobs:
           sudo modprobe tls 2>/dev/null || true
           sudo sysctl -w kernel.io_uring_disabled=0 2>/dev/null || true
 
-      # E2E suite (already compiled as part of ioxide.slnx). Drives real reactors over real sockets;
-      # pg/redis tests use the sidecars above. Non-zero exit fails the job before any pack/publish.
-      - name: Run E2E tests
+      # Every suite, each its own project (see tests/README.md). Unit needs nothing; the rest
+      # drive real reactors over real sockets and skip cleanly when a sidecar is absent. Any
+      # non-zero exit fails the job before pack or publish.
+      - name: Run tests
         env:
-          EXAMPLES_PG_HOST: 127.0.0.1
-          EXAMPLES_PG_PORT: 5432
-          EXAMPLES_PG_USER: bench
-          EXAMPLES_PG_DB: bench
-          EXAMPLES_REDIS_HOST: 127.0.0.1
-          EXAMPLES_REDIS_PORT: 6379
+          IOXIDE_PG_HOST: 127.0.0.1
+          IOXIDE_PG_PORT: 5432
+          IOXIDE_REDIS_HOST: 127.0.0.1
+          IOXIDE_REDIS_PORT: 6379
         run: |
-          # ioxide rings (RingEntries=8192) pin memory; the e2e starts many reactors, so the
+          # ioxide rings (RingEntries=8192) pin memory and the suites start many reactors, so the
           # default 8 MB RLIMIT_MEMLOCK is exhausted. Raise it before the run.
           sudo prlimit --pid $$ --memlock=-1:-1 2>/dev/null || ulimit -l unlimited 2>/dev/null || true
-          echo "memlock for e2e: $(ulimit -Sl) KB"
-          dotnet run --project Tests/ioxide.e2e.csproj --configuration Release --no-build
+          echo "memlock: $(ulimit -Sl) KB"
+          for suite in Unit E2E Http Pg Redis Tls File; do
+            echo "::group::$suite"
+            dotnet run --project tests/Ioxide.Tests.$suite/Ioxide.Tests.$suite.csproj \
+              --configuration Release --no-build
+            echo "::endgroup::"
+          done
 
       # Paths mirror the src/ grouping in ioxide.slnx (core, protocols/, clients/, serving/).
-      # Every project carrying a PackageId is packed: ioxide.httpclient project-references
-      # http11/nghttp2/ngtcp2/nghttp3, so those ship as its NuGet dependencies.
+      # Every project carrying a PackageId is packed. ioxide.httpclient is the whole client -
+      # h1, h2c (nghttp2 bundled inside it) and h3 - and project-references ngtcp2/nghttp3,
+      # so those ship as its NuGet dependencies.
       - name: Pack ioxide
         run: dotnet pack src/ioxide/ioxide.csproj --configuration Release --no-build --output ./artifacts
-
-      - name: Pack ioxide.http11
-        run: dotnet pack src/protocols/ioxide.http11/ioxide.http11.csproj --configuration Release --no-build --output ./artifacts
-
-      - name: Pack ioxide.nghttp2
-        run: dotnet pack src/protocols/ioxide.nghttp2/ioxide.nghttp2.csproj --configuration Release --no-build --output ./artifacts
 
       - name: Pack ioxide.http3
         run: dotnet pack src/protocols/ioxide.http3/ioxide.http3.csproj --configuration Release --no-build --output ./artifacts

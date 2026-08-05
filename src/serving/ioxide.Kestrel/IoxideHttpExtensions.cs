@@ -13,12 +13,12 @@ public static class IoxideHttpExtensions
     public static Reactor GetReactor(this HttpContext context)
         => (context.Features.Get<IReactorFeature>()
             ?? throw new InvalidOperationException(
-                "No ioxide reactor on this connection — is the app running on the ioxide transport (UseIoxide())?"))
+                "No ioxide reactor on this connection - is the app running on the ioxide transport (UseIoxide())?"))
             .Reactor;
 
     /// <summary>
     /// Runs <paramref name="work"/> on this connection's reactor and returns its result. When the endpoint is
-    /// already on that reactor (the common keep-alive case) it runs inline — ioxide's inline resume is
+    /// already on that reactor (the common keep-alive case) it runs inline - ioxide's inline resume is
     /// preserved. Otherwise (e.g. the first request of a connection, which Kestrel may dispatch to the
     /// ThreadPool) the work is marshaled onto the reactor. Either way the ring I/O runs on the reactor.
     /// Materialize ring-native results (PgRow, file buffers) into your own objects inside <paramref name="work"/>.
@@ -29,7 +29,7 @@ public static class IoxideHttpExtensions
 
         if (IoxideReactor.TryCurrent() == reactor)
         {
-            return work(reactor);   // already on the reactor — run inline
+            return work(reactor);   // already on the reactor - run inline
         }
 
         var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -39,7 +39,13 @@ public static class IoxideHttpExtensions
 
     private static async Task RunAsync<T>(Reactor reactor, Func<Reactor, Task<T>> work, TaskCompletionSource<T> tcs)
     {
-        try { tcs.SetResult(await work(reactor)); }
-        catch (Exception e) { tcs.SetException(e); }
+        try
+        {
+            tcs.SetResult(await work(reactor));
+        }
+        catch (Exception e)
+        {
+            tcs.SetException(e);
+        }
     }
 }

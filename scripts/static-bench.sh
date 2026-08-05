@@ -5,7 +5,7 @@
 # Uses the same fixtures and wrk rotation script as HttpArena
 # (https://github.com/MDA2AV/HttpArena, data/static + requests/static-rotate.lua):
 # it serves Examples/wwwroot and rotates GETs across the 20 /static/* assets with
-# `Accept-Encoding: br;q=1, gzip;q=0.8` — HttpArena's `static` profile, which runs
+# `Accept-Encoding: br;q=1, gzip;q=0.8` - HttpArena's `static` profile, which runs
 #     wrk -t<threads> -c<conns> -d<dur> -s static-rotate.lua http://localhost:8080
 # (pipeline 1; HttpArena sweeps conns 1024,4096,6800 pinned to a dedicated cpuset).
 #
@@ -30,7 +30,7 @@ DURATION="${DURATION:-10s}"
 THREADS="${THREADS:-8}"
 CONNS="${CONNS:-512}"
 
-command -v wrk    >/dev/null 2>&1 || { echo "error: wrk not installed — https://github.com/wg/wrk"; exit 1; }
+command -v wrk    >/dev/null 2>&1 || { echo "error: wrk not installed - https://github.com/wg/wrk"; exit 1; }
 command -v dotnet >/dev/null 2>&1 || { echo "error: dotnet not found on PATH"; exit 1; }
 [ -f "$LUA" ]        || { echo "error: missing $LUA"; exit 1; }
 [ -d "$WWW/static" ] || { echo "error: missing $WWW/static (the HttpArena static set)"; exit 1; }
@@ -43,7 +43,7 @@ EXAMPLES_MODE=file EXAMPLES_FILE_DIR="$WWW" "$BIN" &
 SRV=$!
 trap 'kill "$SRV" 2>/dev/null || true; wait "$SRV" 2>/dev/null || true' EXIT
 
-# wait for the listener (curl spaces its own retries — no foreground sleep)
+# wait for the listener (curl spaces its own retries - no foreground sleep)
 curl --retry 30 --retry-delay 1 --retry-connrefused -fsS -o /dev/null "http://localhost:$PORT/static/reset.css" 2>/dev/null \
     || { echo "error: server never became ready on :$PORT"; exit 1; }
 

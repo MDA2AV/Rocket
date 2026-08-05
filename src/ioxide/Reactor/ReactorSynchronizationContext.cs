@@ -46,13 +46,13 @@ public sealed class ReactorSynchronizationContext : SynchronizationContext
             }
             finally
             {
-                done.Set(); 
-                
+                done.Set();
+
             }
         }, null);
-        
+
         done.Wait();
-        
+
         if (ex is not null)
         {
             System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex).Throw();

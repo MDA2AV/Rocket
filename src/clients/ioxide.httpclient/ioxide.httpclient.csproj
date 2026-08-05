@@ -10,7 +10,7 @@
     <PackageId>ioxide.httpclient</PackageId>
     <Version>0.3.100</Version>
     <Authors>MDA2AV</Authors>
-    <Description>Ring-native HTTP client for the ioxide io_uring runtime: HTTP/1.1, HTTP/2 (h2c) and HTTP/3 behind one API, with the protocol chosen per origin via Alt-Svc. Requests and responses are the same types whichever protocol serves them, and every response resumes the awaiting handler inline on its own reactor thread.</Description>
+    <Description>The ring-native HTTP client for the ioxide io_uring runtime: HTTP/1.1, HTTP/2 (h2c) and HTTP/3 behind one API, with the protocol chosen per origin via Alt-Svc. One package - the h1 parser, the nghttp2 and nghttp3 bridges, and the negotiating client - sharing one set of message types. Every response resumes the awaiting handler inline on its own reactor thread.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://mda2av.github.io/ioxide/</PackageProjectUrl>
     <RepositoryUrl>https://github.com/MDA2AV/ioxide</RepositoryUrl>
@@ -22,10 +22,17 @@
   <ItemGroup>
     <None Include="../../../README.md" Pack="true" PackagePath="/" />
     <ProjectReference Include="../../ioxide/ioxide.csproj" />
-    <ProjectReference Include="../../protocols/ioxide.http11/ioxide.http11.csproj" />
-    <ProjectReference Include="../../protocols/ioxide.nghttp2/ioxide.nghttp2.csproj" />
     <ProjectReference Include="../../protocols/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
     <ProjectReference Include="../../protocols/ioxide.nghttp3/ioxide.nghttp3.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The self-contained nghttp2 bundle (built by scripts/build-nghttp2-native.sh): packed into
+         the nupkg's runtimes/ so consumers get it with no prerequisites, and copied next to the
+         output for ProjectReference/dev runs so DllImport probing finds it. -->
+    <None Include="runtimes/linux-x64/native/libioxide_nghttp2.so"
+          Pack="true" PackagePath="runtimes/linux-x64/native/"
+          CopyToOutputDirectory="PreserveNewest" Link="libioxide_nghttp2.so" />
   </ItemGroup>
 
 </Project>

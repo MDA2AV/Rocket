@@ -2,7 +2,7 @@ using System.Buffers;
 using System.Buffers.Text;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks.Sources;
-using ioxide.http11;
+using ioxide.httpclient;
 using ioxide.nghttp3;
 using ioxide.ngtcp2;
 

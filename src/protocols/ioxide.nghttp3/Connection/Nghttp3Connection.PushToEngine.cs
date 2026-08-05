@@ -39,7 +39,7 @@ public sealed partial class Nghttp3Connection
                 Console.Error.WriteLine($"[ioxide.nghttp3] stream {item.Kind} handling failed: {Nghttp3.StrError(eventResult)}");
                 _protocolFailed = true;
             }
-            
+
             return;
         }
 
@@ -54,7 +54,7 @@ public sealed partial class Nghttp3Connection
         {
             Console.Error.WriteLine($"[ioxide.nghttp3] read_stream failed: {Nghttp3.StrError((int)readResult)}");
             _protocolFailed = true;
-            
+
             return;
         }
 

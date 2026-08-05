@@ -16,5 +16,5 @@ public sealed unsafe partial class Reactor
         sqe->addr      = targetUserData;
         sqe->user_data = Tag(KindCancel, 0, 0);
     }
-    
+
 }

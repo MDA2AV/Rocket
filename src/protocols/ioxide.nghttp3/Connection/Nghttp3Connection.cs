@@ -116,7 +116,7 @@ public sealed partial class Nghttp3Connection : IDisposable
         {
             request.Pooled = false;
             request.StreamId = streamId;
-            
+
             return request;
         }
         return new Nghttp3Request { StreamId = streamId };

@@ -20,7 +20,7 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
     private readonly TlsSession? _tls;   // non-null on a kTLS-terminated connection: inbound is decrypted here
     private readonly Pipe _inbound;    // recv pump writes; Kestrel reads (Transport.Input)
     private readonly Pipe _outbound;   // Kestrel writes (Transport.Output); send pump reads
-    private readonly PipeReader _input; // Kestrel's Input — pins the first read onto the reactor thread
+    private readonly PipeReader _input; // Kestrel's Input - pins the first read onto the reactor thread
 
     private Task _recvPump = Task.CompletedTask;
     private Task _sendPump = Task.CompletedTask;
@@ -127,8 +127,15 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
                 }
             }
         }
-        catch { /* swallow client/protocol faults; teardown in finally */ }
-        finally { await writer.CompleteAsync(); }
+        catch
+        {
+            /* swallow client/protocol faults;
+            teardown in finally */;
+        }
+        finally
+        {
+            await writer.CompleteAsync();
+        }
     }
 
     private static unsafe void CopySlice(in SpscRecvRing.Item item, PipeWriter writer)
@@ -178,38 +185,54 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
                 }
             }
         }
-        catch { /* swallow; teardown in finally */ }
-        finally { await reader.CompleteAsync(); }
+        catch
+        {
+            /* swallow;
+            teardown in finally */;
+        }
+        finally
+        {
+            await reader.CompleteAsync();
+        }
     }
 
     public async ValueTask DisposeAsync()
     {
         // Quiesce the send side BEFORE closing. Wake the send pump if it's parked on the output reader and
         // await it, so any in-flight SEND completes normally and the full response is flushed. Draining here
-        // — rather than concurrently with MarkClosed — is what makes the response reliably reach the client
+        // - rather than concurrently with MarkClosed - is what makes the response reliably reach the client
         // and avoids completing a live flush twice (MarkClosed racing the SEND CQE's CompleteFlush).
         _outbound.Reader.CancelPendingRead();
-        try { await _sendPump.ConfigureAwait(false); } catch { }
+        try
+        {
+            await _sendPump.ConfigureAwait(false);
+        } catch { }
 
         if (_tls is null)
         {
             // Plaintext: half-close the write side so EOF-delimited clients (TcpConnection: close / upgrade)
-            // see the end of the response — ioxide's refcounted teardown does not FIN a server-initiated
+            // see the end of the response - ioxide's refcounted teardown does not FIN a server-initiated
             // close on its own. Then wake and unwind the recv side (MarkClosed wakes a recv parked in
-            // conn.ReadAsync — schedule it on the reactor so the continuation runs there, not the dispose thread).
+            // conn.ReadAsync - schedule it on the reactor so the continuation runs there, not the dispose thread).
             Shutdown(_conn.ClientFd, ShutWr);
             _reactor.ScheduleOnReactor(static c => ((TcpConnection)c!).MarkClosed(), _conn);
             _inbound.Writer.CancelPendingFlush();
-            try { await _recvPump.ConfigureAwait(false); } catch { }
+            try
+            {
+                await _recvPump.ConfigureAwait(false);
+            } catch { }
         }
         else
         {
             // TLS: unwind the recv side FIRST so the recv pump stops touching the session, then dispose it
-            // — that sends close_notify (a raw kTLS control send, which must precede the FIN while the write
-            // side is still open) and frees the SSL — then FIN.
+            // - that sends close_notify (a raw kTLS control send, which must precede the FIN while the write
+            // side is still open) and frees the SSL - then FIN.
             _reactor.ScheduleOnReactor(static c => ((TcpConnection)c!).MarkClosed(), _conn);
             _inbound.Writer.CancelPendingFlush();
-            try { await _recvPump.ConfigureAwait(false); } catch { }
+            try
+            {
+                await _recvPump.ConfigureAwait(false);
+            } catch { }
             _tls.Dispose();
             Shutdown(_conn.ClientFd, ShutWr);
         }

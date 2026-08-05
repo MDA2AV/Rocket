@@ -90,7 +90,10 @@ internal sealed class IoxideConnectionContext : ConnectionContext,
     {
         // Forced close: signal the lifetime token. The pumps are unwound (reactor-safely) in DisposeAsync,
         // which Kestrel calls during connection cleanup after Abort.
-        try { _connectionClosedCts.Cancel(); } catch { /* ignore */ }
+        try
+        {
+            _connectionClosedCts.Cancel();
+        } catch { /* ignore */ }
     }
 
     public override async ValueTask DisposeAsync()
@@ -100,7 +103,10 @@ internal sealed class IoxideConnectionContext : ConnectionContext,
             return;
         }
 
-        try { _connectionClosedCts.Cancel(); } catch { /* ignore */ }
+        try
+        {
+            _connectionClosedCts.Cancel();
+        } catch { /* ignore */ }
 
         // Unwind the recv/send pumps (returns held recv buffers, stops the send loop).
         await _pipe.DisposeAsync().ConfigureAwait(false);

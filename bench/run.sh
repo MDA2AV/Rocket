@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+#
+# The regression bench: every workload the repo can serve or drive, one number each.
+#
+#     dotnet build -c Release ioxide.slnx     # once
+#     bash bench/run.sh                       # ~4 minutes
+#
+# Servers run 4 reactors (BENCH_REACTORS to override); the tcp-raw/tcp-pipe pair repeats at 12
+# reactors as the io_uring baseline. Loads: wrk for everything TCP (fixed -c 64 -t 4,
+# time-bounded), h3x for the HTTP/3 server (H3X to point at the binary), Bench.Clients for the
+# ring-native clients. Sidecars (redis, postgres, an h2c nginx) start via docker when available;
+# anything missing skips with a note instead of failing the run.
+#
+# Numbers are hardware-specific: compare runs on one machine, never across machines.
+set -u
+cd "$(dirname "$0")/.."
+
+R=${BENCH_REACTORS:-4}
+DUR=${BENCH_SECONDS:-8}
+H3X=${H3X:-/home/diogo/h3x/build/h3x}
+BIN=bench/.work
+mkdir -p $BIN
+RESULTS=()
+
+say()  { printf '%s\n' "$*" >&2; }
+note() { RESULTS+=("$(printf '%-16s %3s  %s' "$1" "$2" "$3")"); }
+
+play() { # $1 subdir, rest env; starts a playground binary detached
+  local dir=$1; shift
+  local exe
+  exe=$(ls Playground/$dir/bin/Release/net11.0/Playground.* 2>/dev/null | grep -vE '\.(dll|pdb|json|so)$' | head -1)
+  [ -z "$exe" ] && { say "missing binary for $dir"; return 1; }
+  env "$@" setsid "$exe" > $BIN/server.log 2>&1 < /dev/null &
+  sleep 3
+}
+
+stop_play() { pkill -f 'Playground[.]' 2>/dev/null; sleep 1; }
+
+wait_http() { # $1 url: poll until it answers (up to ~8s) so a slow start reads as fail-with-log
+  for _ in $(seq 16); do
+    curl -s -o /dev/null --max-time 1 "$1" && return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+wrk_h1() { # $1 url, $2 threads (default 4), $3 conns (default 64) -> req/s
+  # wrk has no warm-up flag: a short throwaway run heats the server, then the measured one.
+  wrk -t${2:-4} -c${3:-64} -d2s "$1" >/dev/null 2>&1
+  wrk -t${2:-4} -c${3:-64} -d${DUR}s "$1" 2>/dev/null \
+    | grep -oE 'Requests/sec: +[0-9.]+' | grep -oE '[0-9.]+' | cut -d. -f1
+}
+
+# ── tcp raw + pipes, 4 reactors and the 12-reactor baseline ─────────────────────────────────
+# The classic plaintext workload: default 2-byte "ok" body, matching how this repo's numbers
+# have always been quoted. The baseline rows scale the DRIVER too (-t18 -c512): an undersized
+# wrk saturates itself before a 12-reactor server and the row measures the client instead.
+for rc in $R 12; do
+  T=4; C=64
+  [ "$rc" = "12" ] && { T=18; C=512; }
+  play Tcp/Raw PLAYGROUND_REACTORS=$rc PLAYGROUND_PORT=18080 \
+    && note "tcp-raw" "${rc}r" "$(wrk_h1 http://127.0.0.1:18080/ $T $C) req/s"
+  stop_play
+  play Tcp/Pipe PLAYGROUND_REACTORS=$rc PLAYGROUND_PORT=18080 \
+    && note "tcp-pipe" "${rc}r" "$(wrk_h1 http://127.0.0.1:18080/ $T $C) req/s"
+  stop_play
+done
+
+# ── tls ─────────────────────────────────────────────────────────────────────────────────────
+play Tls/SslStream PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18443 \
+  && note "tls-sslstream" "${R}r" "$(wrk_h1 https://127.0.0.1:18443/) req/s"
+stop_play
+if [ -d /sys/module/tls ]; then
+  play Tls/Ktls PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18443 \
+    && note "tls-ktls" "${R}r" "$(wrk_h1 https://127.0.0.1:18443/) req/s"
+  stop_play
+else
+  note "tls-ktls" "${R}r" "SKIP (no 'tls' kernel module - sudo modprobe tls)"
+fi
+
+# ── h3 server ───────────────────────────────────────────────────────────────────────────────
+play Nghttp3 PLAYGROUND_REACTORS=$R PLAYGROUND_QUIC_PORT=18444 PLAYGROUND_PORT=18090
+if [ -x "$H3X" ]; then
+  N=$("$H3X" -k -t 4 --connections 64 -m 8 -d $DUR --send-batch 8 https://127.0.0.1:18444/ 2>&1 \
+      | grep -oE 'throughput:  [0-9]+' | grep -oE '[0-9]+')
+  note "h3-server" "${R}r" "${N:-fail} req/s"
+else
+  note "h3-server" "${R}r" "SKIP (h3x not found - set H3X=/path/to/h3x)"
+fi
+# the h3 server stays up: the h3 client bench below dials it
+
+# ── ring-native clients (Bench.Clients also runs $R reactors) ───────────────────────────────
+CLI=bench/Bench.Clients/bin/Release/net11.0/Bench.Clients
+note "client-h3" "${R}r" "$(BENCH_REACTORS=$R $CLI h3 127.0.0.1 18444 $DUR 2>$BIN/client-h3.log | grep -oE '[0-9]+ req/s' || echo fail)"
+stop_play
+
+play Tcp/Raw PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18081 PLAYGROUND_BODY=1024
+note "client-h1" "${R}r" "$(BENCH_REACTORS=$R $CLI h1 127.0.0.1 18081 $DUR 2>$BIN/client-h1.log | grep -oE '[0-9]+ req/s' || echo fail)"
+stop_play
+
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  cat > $BIN/h2c.conf <<'NGINX'
+worker_processes 4;
+events { worker_connections 4096; }
+http { access_log off; server { listen 18464; http2 on;
+  location / { return 200 "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; } } }
+NGINX
+  docker rm -f bench-h2c >/dev/null 2>&1
+  docker run -d --name bench-h2c --network host -v "$PWD/$BIN/h2c.conf":/etc/nginx/nginx.conf:ro nginx >/dev/null 2>&1
+  wait_http http://127.0.0.1:18464/ || say "h2c upstream slow to start"
+  note "client-h2" "${R}r" "$(BENCH_REACTORS=$R $CLI h2 127.0.0.1 18464 $DUR 2>$BIN/client-h2.log | grep -oE '[0-9]+ req/s' || echo fail)"
+  docker rm -f bench-h2c >/dev/null 2>&1
+else
+  note "client-h2" "${R}r" "SKIP (docker unavailable for the h2c upstream)"
+fi
+
+# ── redis / pg / file ───────────────────────────────────────────────────────────────────────
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  docker rm -f bench-redis >/dev/null 2>&1
+  docker run -d --name bench-redis --network host redis:7-alpine >/dev/null 2>&1
+  sleep 2
+  play Redis PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18085 \
+    && note "redis" "${R}r" "$(wrk_h1 http://127.0.0.1:18085/) req/s"
+  stop_play
+  docker rm -f bench-redis >/dev/null 2>&1
+
+  docker rm -f bench-pg >/dev/null 2>&1
+  docker run -d --name bench-pg --network host \
+    -e POSTGRES_USER=bench -e POSTGRES_PASSWORD=bench -e POSTGRES_DB=bench \
+    -e POSTGRES_HOST_AUTH_METHOD=trust postgres:18 >/dev/null 2>&1
+  sleep 6
+  play Pg PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18086 \
+    && note "pg" "${R}r" "$(wrk_h1 http://127.0.0.1:18086/) req/s"
+  stop_play
+  docker rm -f bench-pg >/dev/null 2>&1
+else
+  note "redis" "${R}r" "SKIP (docker unavailable)"
+  note "pg" "${R}r" "SKIP (docker unavailable)"
+fi
+
+play File PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18087 \
+  && note "file" "${R}r" "$(wrk_h1 http://127.0.0.1:18087/index.html) req/s"
+stop_play
+
+# ── report ──────────────────────────────────────────────────────────────────────────────────
+echo
+echo "ioxide bench - $(date -u +%F) $(uname -r) - servers ${R}r (baseline 12r driven -t18 -c512), wrk -c64 -t4, ${DUR}s"
+echo "────────────────────────────────────────────────────────"
+for line in "${RESULTS[@]}"; do echo "$line"; done

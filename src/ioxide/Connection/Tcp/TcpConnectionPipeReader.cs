@@ -223,7 +223,7 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
 
         // GetOffset measures from the start *segment*, not the sequence's logical
         // start. When the held sequence begins mid-segment (the head recv slice is
-        // partially consumed — e.g. a request whose header and body arrive in one
+        // partially consumed - e.g. a request whose header and body arrive in one
         // recv: the body read advances after the header was already skipped),
         // GetOffset over-counts by _headConsumed. Rebase by the sequence start so
         // consumed/examined stay consistent with the relative _heldBytes/_examined
