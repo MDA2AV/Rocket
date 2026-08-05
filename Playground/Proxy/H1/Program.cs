@@ -1,6 +1,6 @@
 using System.Text;
 using ioxide;
-using ioxide.http11;
+using ioxide.httpclient;
 using ioxide.utils;
 using Playground.Shared;
 
@@ -16,7 +16,7 @@ using Playground.Shared;
 //      dotnet run -c Release --project Playground/Proxy/H1
 //      curl http://127.0.0.1:8080/
 //
-//  Needs: ioxide, ioxide.http11
+//  Needs: ioxide.httpclient
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 var config = new ServerConfig

@@ -23,9 +23,7 @@
     <ProjectReference Include="../src/protocols/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
     <ProjectReference Include="../src/protocols/ioxide.nghttp3/ioxide.nghttp3.csproj" />
     <ProjectReference Include="../src/protocols/ioxide.http3/ioxide.http3.csproj" />
-    <ProjectReference Include="../src/protocols/ioxide.http11/ioxide.http11.csproj" />
     <ProjectReference Include="../src/clients/ioxide.httpclient/ioxide.httpclient.csproj" />
-    <ProjectReference Include="../src/protocols/ioxide.nghttp2/ioxide.nghttp2.csproj" />
     <ProjectReference Include="../src/clients/ioxide.pg/ioxide.pg.csproj" />
     <ProjectReference Include="../src/clients/ioxide.redis/ioxide.redis.csproj" />
     <ProjectReference Include="../src/protocols/ioxide.tls/ioxide.tls.csproj" />

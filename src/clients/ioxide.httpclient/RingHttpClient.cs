@@ -1,5 +1,4 @@
-using ioxide.http11;
-using ioxide.nghttp2;
+using ioxide.httpclient;
 
 namespace ioxide.httpclient;
 

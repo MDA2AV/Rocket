@@ -1,5 +1,5 @@
 using ioxide;
-using ioxide.http11;
+using ioxide.httpclient;
 using ioxide.nghttp3;
 using ioxide.ngtcp2;
 using Playground.Shared;
@@ -14,7 +14,7 @@ using Playground.Shared;
 //      dotnet run -c Release --project Playground/Proxy/H3ToH1
 //      curl --http3-only -ks https://127.0.0.1:8443/anything
 //
-//  Needs: ioxide.ngtcp2, ioxide.nghttp3, ioxide.http11
+//  Needs: ioxide.ngtcp2, ioxide.nghttp3, ioxide.httpclient
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 (string certPath, string keyPath) = QuicCert.Ensure(

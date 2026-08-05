@@ -1,9 +1,9 @@
 using System.Buffers;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks.Sources;
-using ioxide.http11;
+using ioxide.httpclient;
 
-namespace ioxide.nghttp2;
+namespace ioxide.httpclient;
 
 /// <summary>
 /// One HTTP/2 connection over a ring socket: many requests in flight at once, multiplexed by

@@ -14,7 +14,7 @@ cd "$(dirname "$0")/.."
 
 NGHTTP2_REF=${NGHTTP2_REF:-master}
 WORK=${WORK:-/tmp/ioxide-h2-native}
-OUT=src/bindings/ioxide.nghttp2/runtimes/linux-x64/native
+OUT=src/clients/ioxide.httpclient/runtimes/linux-x64/native
 
 rm -rf "$WORK" && mkdir -p "$WORK" "$OUT"
 cd "$WORK"
@@ -31,7 +31,7 @@ cmake -S nghttp2 -B nghttp2/build -DCMAKE_BUILD_TYPE=Release \
 cmake --build nghttp2/build -j"$(nproc)" >/dev/null
 
 echo "==> compiling the C# facade shim"
-SHIM="$OLDPWD/src/bindings/ioxide.nghttp2/native/ioxide_nghttp2_shim.c"
+SHIM="$OLDPWD/src/clients/ioxide.httpclient/native/ioxide_nghttp2_shim.c"
 gcc -c -O2 -fPIC -o shim.o "$SHIM" \
     -Inghttp2/lib/includes -Inghttp2/build/lib/includes
 

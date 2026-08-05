@@ -1,6 +1,6 @@
-using ioxide.http11;
+using ioxide.httpclient;
 
-namespace ioxide.nghttp2;
+namespace ioxide.httpclient;
 
 /// <summary>Origin and connection settings for <see cref="Http2ClientPool"/>.</summary>
 public sealed record Http2ClientOptions

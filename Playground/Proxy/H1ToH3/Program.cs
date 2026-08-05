@@ -1,6 +1,5 @@
 using System.Text;
 using ioxide;
-using ioxide.http11;
 using ioxide.httpclient;
 using ioxide.utils;
 using Playground.Shared;

@@ -4,8 +4,6 @@
 
   <!-- Protocol layers, native-bundled or pure C#. -->
   <Folder Name="/protocols/">
-    <Project Path="src/protocols/ioxide.http11/ioxide.http11.csproj" />
-    <Project Path="src/protocols/ioxide.nghttp2/ioxide.nghttp2.csproj" />
     <Project Path="src/protocols/ioxide.nghttp3/ioxide.nghttp3.csproj" />
     <Project Path="src/protocols/ioxide.http3/ioxide.http3.csproj" />
     <Project Path="src/protocols/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />

@@ -58,13 +58,11 @@ with Kestrel's request loop pinned to the reactor thread, and your endpoints unc
 | Package | What it does |
 | --- | --- |
 | `ioxide` | The runtime: reactors, TCP/UDP transports, connections, the ring-native client seam. |
-| `ioxide.http11` | HTTP message types and the ring-native HTTP/1.1 client. No native dependencies. |
-| `ioxide.nghttp2` | HTTP/2 + HPACK (nghttp2), bundled native. Sans-I/O - bytes ride any ioxide connection. |
+| `ioxide.httpclient` | The ring-native HTTP client: HTTP/1.1, HTTP/2 (h2c) and HTTP/3 behind one API, Alt-Svc negotiation, one set of message types. Bundles the nghttp2 native. |
 | `ioxide.ngtcp2` | QUIC engine: ngtcp2 + picotls bundled native. Only system dependency is OpenSSL 3. |
 | `ioxide.nghttp3` | HTTP/3 + QPACK (nghttp3), bundled native. Rides any QUIC connection. |
 | `ioxide.http3` | Pure-C# HTTP/3: frames, QPACK, Huffman. Zero native code, drop-in for `ioxide.nghttp3`. |
 | `ioxide.tls` | TLS. OpenSSL handshake over the ring, then kTLS - handlers keep writing plaintext. |
-| `ioxide.httpclient` | One HTTP client per origin over 1.1 / h2c / h3, chosen per origin via Alt-Svc. |
 | `ioxide.pg` | Postgres driver. A pool per reactor; connect, query and stream rows on the owning ring. |
 | `ioxide.redis` | Redis client. RESP2, pipelining, pub/sub - pooled per reactor. |
 | `ioxide.file` | Static assets. Immutable snapshots, baked responses, positional ring reads. |
