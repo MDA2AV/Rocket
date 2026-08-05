@@ -38,6 +38,9 @@ public static class FdCount
             previous = current;
         }
 
+        // Never settled. Say so: an fd assertion measured against a moving baseline is worth
+        // knowing about when it fails, and silence here makes that impossible to diagnose.
+        Console.Error.WriteLine($"[fdcount] never settled within {timeoutMs} ms; using {previous}");
         return previous;
     }
 }

@@ -50,7 +50,7 @@ public sealed class Runner
     private static void RunWithWatchdog(string name, Action body, int timeoutMs)
     {
         Exception? failure = null;
-        var finished = new ManualResetEventSlim(false);
+        using var finished = new ManualResetEventSlim(false);
 
         var worker = new Thread(() =>
         {
@@ -81,12 +81,25 @@ public sealed class Runner
 
         if (failure is not null)
         {
-            throw failure;
+            // Capture/Throw, not `throw failure` - the latter resets the stack to this line, which
+            // discards where the test actually broke.
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
         }
     }
 
     public int Summary()
     {
+        // A reactor can die after the test that started it has already passed - in a ticker, a
+        // sweep, a later handler - and every assertion still succeeds. Reporting green in that case
+        // is worse than the unhandled-exception crash this harness replaced, so any death nobody
+        // consumed fails the run here.
+        IReadOnlyList<string> unreported = TestServer.DrainUnreportedFailures();
+        foreach (string failure in unreported)
+        {
+            Console.WriteLine($"FAIL  a test reactor died and no test observed it: {failure}");
+            _failed++;
+        }
+
         Console.WriteLine($"\n{_passed} passed, {_failed} failed, {_skipped} skipped");
         return _failed == 0 ? 0 : 1;
     }

@@ -308,14 +308,41 @@ public static class TestServer
         catch (Exception e)
         {
             StartupFailures[port] = e;
+
+            // ALWAYS print, even though WaitForListen may also report it. Only failures that happen
+            // before the listener is up are ever consumed there, and Run opens the listener before
+            // InitSharedRingBuffer, OpenWakeFd and OnStart - so a reactor that dies in any of those
+            // loses the race, WaitForListen's probe succeeds against the backlog, and the real
+            // cause is never seen. Worse, a reactor dying AFTER its own test has passed would leave
+            // the suite green, where before this guard existed it was a loud process kill. Catching
+            // the exception must not make it quieter than not catching it.
+            Console.Error.WriteLine($"[test-reactor:{port}] died: {e}");
         }
     };
+
+    /// <summary>
+    /// Reactor deaths that no WaitForListen consumed, cleared as they are read. A reactor can die
+    /// long after its own test passed - in a ticker, a sweep, a later handler - and nothing else in
+    /// the harness would ever notice, so the runner checks this before reporting success.
+    /// </summary>
+    public static IReadOnlyList<string> DrainUnreportedFailures()
+    {
+        var drained = new List<string>();
+        foreach (int port in StartupFailures.Keys)
+        {
+            if (StartupFailures.TryRemove(port, out Exception? failure))
+            {
+                drained.Add($":{port} - {failure.Message}");
+            }
+        }
+        return drained;
+    }
 
     private static void WaitForListen(int port)
     {
         for (int attempt = 0; attempt < 100; attempt++)
         {
-            if (StartupFailures.TryGetValue(port, out Exception? failure))
+            if (StartupFailures.TryRemove(port, out Exception? failure))
             {
                 throw new Exception($"server on :{port} failed to start: {failure.Message}", failure);
             }
