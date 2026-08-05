@@ -19,7 +19,9 @@ Run any of them with `dotnet run -c Release --project Playground/<Name>`, then h
 | [`Tcp.Big`](Tcp/Big/Program.cs) | 101 | The write path under a 100 KB body: `SEND_ZC`, slab overflow (`grow` vs `seg`), checksum-able output. | `ioxide` |
 | [`Pg`](Pg/Program.cs) | 181 | A `PgPool` per reactor: scalar queries, prepared params (`/add`, `/upper`), row streaming (`/rows`), errors and timeouts. | `ioxide.pg` |
 | [`File`](File/Program.cs) | 253 | Static files: baked responses, ring reads, disk revalidation, `SIGHUP` reload. | `ioxide.file` |
-| [`Proxy`](Proxy/Program.cs) | 131 | A reverse proxy where both hops stay on one reactor thread. | `ioxide.http11` |
+| [`Proxy.H1`](Proxy/H1/Program.cs) | 131 | A reverse proxy where both hops stay on one reactor thread. | `ioxide.http11` |
+| [`Proxy.H3ToH1`](Proxy/H3ToH1/Program.cs) | 106 | HTTP/3 front door, HTTP/1.1 upstream — QUIC-only frontend, keep-alive h1 pool behind. | `ioxide.ngtcp2`, `ioxide.nghttp3`, `ioxide.http11` |
+| [`Proxy.H3ToH2`](Proxy/H3ToH2/Program.cs) | 104 | The same proxy with the pool swapped: requests multiplex onto one h2c upstream connection. | `ioxide.ngtcp2`, `ioxide.nghttp3`, `ioxide.nghttp2` |
 | [`Nghttp3`](Nghttp3/Program.cs) | 169 | HTTP/3 with **streamed** dispatch, and a `SIGTERM` GOAWAY drain. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
 | [`Nghttp3Buffered`](Nghttp3Buffered/Program.cs) | 146 | The same server with **buffered** dispatch — one method call is the whole difference. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
 | [`Quic.Alpn`](Quic/Alpn/Program.cs) | 111 | One QUIC listener, two protocols by ALPN: h3, or raw stream echo over the dual pipe. QUIC-only — `Tcp = null`. | `ioxide.ngtcp2`, `ioxide.nghttp3` |

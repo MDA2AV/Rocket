@@ -13,7 +13,7 @@ using Playground.Shared;
 //      # terminal 1: an origin to forward to
 //      PLAYGROUND_PORT=8081 dotnet run -c Release --project Playground/Tcp/Raw
 //      # terminal 2: the proxy
-//      dotnet run -c Release --project Playground/Proxy
+//      dotnet run -c Release --project Playground/Proxy/H1
 //      curl http://127.0.0.1:8080/
 //
 //  Needs: ioxide, ioxide.http11

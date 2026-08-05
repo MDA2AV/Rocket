@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net11.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>Playground.Proxy.H3ToH2</RootNamespace>
+    <AssemblyName>Playground.Proxy.H3ToH2</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../Shared/Playground.Shared.csproj" />
+    <ProjectReference Include="../../../src/ioxide/ioxide.csproj" />
+    <ProjectReference Include="../../../src/protocols/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
+    <ProjectReference Include="../../../src/protocols/ioxide.nghttp3/ioxide.nghttp3.csproj" />
+    <ProjectReference Include="../../../src/protocols/ioxide.nghttp2/ioxide.nghttp2.csproj" />
+  </ItemGroup>
+
+</Project>
