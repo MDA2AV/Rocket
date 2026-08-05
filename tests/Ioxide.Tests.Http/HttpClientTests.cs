@@ -8,7 +8,7 @@ namespace Ioxide.Tests;
 /// <summary>
 /// The ring-native HTTP/1.1 client, exercised the way it is meant to be used: a PROXY. One ioxide
 /// server is the origin, a second one handles inbound requests by calling the origin through
-/// ioxide.http11 from inside its handler, and the test drives the proxy with a plain socket.
+/// ioxide.httpclient from inside its handler, and the test drives the proxy with a plain socket.
 /// That covers the whole chain - pool on the reactor, connect/send/recv on the ring, response
 /// parsing - and proves the client is usable from where handlers actually live.
 ///

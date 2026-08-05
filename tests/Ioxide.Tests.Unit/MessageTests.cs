@@ -82,8 +82,10 @@ internal static class MessageTests
             Assert.Equal("content-type", Text(response.Headers[0].Key));
         });
 
-        runner.Test("response: header lookup is case-insensitive on the wire name", () =>
+        runner.Test("response: LowercaseArena makes a wire name matchable", () =>
         {
+            // TryGetHeader compares exactly. Wire names arrive in any case, so the h1 parser
+            // lowercases them in the arena first - this is that step, not a lenient lookup.
             using var response = new HttpClientResponse();
 
             (int Offset, int Length) name = response.Append("Content-Type"u8);
@@ -102,8 +104,8 @@ internal static class MessageTests
 
         runner.Test("response: ResetForInterim drops a 1xx and reuses the arena", () =>
         {
-            // 103 Early Hints arrives, then the real response. Everything from the interim
-            // section has to go, or its headers would be returned as the final body.
+            // 103 Early Hints arrives, then the real response on the same connection. Everything
+            // from the interim section has to go, or its headers are returned as the final body.
             using var response = new HttpClientResponse();
 
             (int Offset, int Length) hint = response.Append("link"u8);
@@ -112,9 +114,22 @@ internal static class MessageTests
 
             response.ResetForInterim();
 
-            Assert.Equal(0, response.Headers.Count);
             Assert.Equal(0, response.ArenaLength);
             Assert.Equal(0, response.Status);
+
+            // Write the real response into the reused arena and materialize. Freeze is what turns
+            // recorded ranges into Headers, so asserting the count BEFORE it would pass even if
+            // ResetForInterim had kept every interim range - the test could not fail.
+            (int Offset, int Length) name = response.Append("content-type"u8);
+            (int Offset, int Length) value = response.Append("text/plain"u8);
+            response.AddHeaderRange(name, value);
+            response.SetBodyRange((0, 0));
+            response.Status = 200;
+            response.Freeze();
+
+            Assert.Equal(1, response.Headers.Count);
+            Assert.Equal("content-type", Text(response.Headers[0].Key));
+            Assert.Equal("text/plain", Text(response.Headers[0].Value));
         });
     }
 
