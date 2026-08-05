@@ -89,6 +89,7 @@ public sealed class RingHttpClient : IDisposable
     private Http2ClientPool? _http2;      // h2c, opened only under Http2Only
     private ushort _http3Port;            // pinned by options, or learned from Alt-Svc
     private long _http3BlockedUntilMs;    // set by a failed h3 attempt (cooldown)
+    private long _http3ExpiresAtMs;       // Alt-Svc ma= deadline for a LEARNED port; 0 = no expiry
     private bool _disposed;
 
     private RingHttpClient(Reactor reactor, RingHttpClientOptions options, HttpClientPool http1)
@@ -176,23 +177,18 @@ public sealed class RingHttpClient : IDisposable
             return true;
         }
 
-        // Negotiate: only once an h3 endpoint is known, and only outside a post-failure cooldown.
-        return _http3Port != 0 && Environment.TickCount64 >= _http3BlockedUntilMs;
+        // Negotiate: only once an h3 endpoint is known, only outside a post-failure cooldown, and
+        // only while the advertisement that taught us the port is still within its ma= lifetime.
+        // An expired one falls back to HTTP/1.1, where the next response can re-advertise it.
+        return _http3Port != 0 &&
+               Environment.TickCount64 >= _http3BlockedUntilMs &&
+               (_http3ExpiresAtMs == 0 || Environment.TickCount64 < _http3ExpiresAtMs);
     }
 
     private async ValueTask<HttpClientResponse> SendOverHttp1Async(HttpClientRequest request)
     {
         HttpClientResponse response = await _http1.SendAsync(request);
-
-        // Promote the origin if it advertises h3. Only in Negotiate mode: the other policies are
-        // the caller's explicit choice and must not be overridden by a header.
-        if (_options.Policy == HttpProtocolPolicy.Negotiate && _http3Port == 0 &&
-            response.TryGetHeader("alt-svc"u8, out ReadOnlyMemory<byte> altSvc) &&
-            TryParseH3Port(altSvc.Span, out ushort advertised))
-        {
-            _http3Port = advertised;
-        }
-
+        ApplyAltSvc(response);
         return response;
     }
 
@@ -227,6 +223,74 @@ public sealed class RingHttpClient : IDisposable
             }
             return await SendOverHttp1Async(request);
         }
+    }
+
+    /// <summary>
+    /// Track what the origin currently advertises. Consulted on EVERY HTTP/1.1 response, not only
+    /// while no port is known: an origin that moves or retires its h3 endpoint says so in the
+    /// header, and a client that stops listening after the first advertisement retries a dead port
+    /// for its whole life.
+    ///
+    /// Only in Negotiate mode with an unpinned port. A configured Http3Port and the Http3Only and
+    /// Http1Only policies are the caller's explicit choice and must not be overridden by a header.
+    /// </summary>
+    private void ApplyAltSvc(HttpClientResponse response)
+    {
+        if (_options.Policy != HttpProtocolPolicy.Negotiate || _options.Http3Port != 0 ||
+            !response.TryGetHeader("alt-svc"u8, out ReadOnlyMemory<byte> header))
+        {
+            return;
+        }
+
+        AltSvc advertisement = ParseAltSvc(header.Span);
+
+        if (advertisement.Clear)
+        {
+            RetireHttp3("the origin sent Alt-Svc: clear");
+            return;
+        }
+
+        if (!advertisement.Advertises)
+        {
+            return;   // nothing about h3 in this header - leave what is in effect alone
+        }
+
+        // A moved endpoint: the pool holds the old port, so it has to go with it.
+        if (_http3Port != 0 && advertisement.Port != _http3Port)
+        {
+            RetireHttp3($"the origin moved h3 to port {advertisement.Port}");
+        }
+
+        _http3Port = advertisement.Port;
+        _http3ExpiresAtMs = Environment.TickCount64 + (advertisement.MaxAgeSeconds * 1000);
+    }
+
+    /// <summary>
+    /// Drop the learned endpoint and the pool built around it. In-flight h3 requests on that pool
+    /// fail; being h3 failures they demote and, when the method allows it, replay over HTTP/1.1.
+    /// </summary>
+    private void RetireHttp3(string reason)
+    {
+        if (_http3Port == 0 && _http3 is null)
+        {
+            return;
+        }
+
+        Console.Error.WriteLine($"[ringhttpclient] {_options.Host}: dropping h3 on :{_http3Port} - {reason}");
+
+        // DETACH FIRST, dispose second. Disposing the pool closes its connections, and those
+        // completions resume the waiting requests INLINE - so arbitrary caller code runs inside
+        // the Dispose call below. Nulling afterwards would let that code observe a half-torn-down
+        // client: with Http3CooldownMs at 0 a resumed caller re-entering SendAsync still passes
+        // UseHttp3, EnsureHttp3Pool hands back the pool currently being disposed, and picking a
+        // connection from it mutates the very list Dispose is enumerating - or opens a fresh QUIC
+        // connection against an engine that is freed a moment later.
+        Http3ClientPool? retiring = _http3;
+        _http3 = null;
+        _http3Port = 0;
+        _http3ExpiresAtMs = 0;
+
+        retiring?.Dispose();
     }
 
     // A UDP path that is blocked, or an origin that stopped serving h3: stay on HTTP/1.1 for the
@@ -272,18 +336,50 @@ public sealed class RingHttpClient : IDisposable
     // --- Alt-Svc -------------------------------------------------------------------------------
 
     /// <summary>
+    /// What an Alt-Svc value says about this origin's h3 endpoint: an advertisement with a
+    /// lifetime, an explicit retraction, or nothing we can use.
+    /// </summary>
+    internal readonly record struct AltSvc(bool Clear, ushort Port, long MaxAgeSeconds)
+    {
+        /// <summary>No h3 advertisement and no retraction - leave whatever is in effect alone.</summary>
+        internal static AltSvc None => new(false, 0, DefaultMaxAgeSeconds);
+
+        internal bool Advertises => !Clear && Port != 0;
+    }
+
+    /// <summary>RFC 7838 section 3.1: ma is optional and defaults to 24 hours.</summary>
+    private const long DefaultMaxAgeSeconds = 86_400;
+
+    /// <summary>
+    /// Ceiling on an advertised lifetime, ~68 years. Far past any real ma=, and small enough that
+    /// TickCount64 + seconds * 1000 cannot wrap - which would turn "cache this for a very long
+    /// time" into an expiry in the past and disable h3 permanently.
+    /// </summary>
+    private const long MaxAgeSecondsLimit = int.MaxValue;
+
+    /// <summary>
     /// Pull the h3 port out of an Alt-Svc value, e.g. <c>h3=":8443"; ma=86400, h3-29=":8443"</c>.
-    /// Only <c>h3</c> on the same host is honoured - an alternative host would need its own pool and
-    /// its own certificate check, so it is ignored rather than followed.
+    /// Kept as the "is there a port we can use" question; <see cref="ParseAltSvc"/> is the full
+    /// answer, including retraction and lifetime.
     /// </summary>
     internal static bool TryParseH3Port(ReadOnlySpan<byte> value, out ushort port)
     {
-        port = 0;
+        AltSvc parsed = ParseAltSvc(value);
+        port = parsed.Port;
+        return parsed.Advertises;
+    }
 
-        // "clear" retracts every advertisement for the origin.
+    /// <summary>
+    /// Parse an Alt-Svc value. Only <c>h3</c> on the same host is honoured - an alternative host
+    /// would need its own pool and its own certificate check, so it is ignored rather than
+    /// followed.
+    /// </summary>
+    internal static AltSvc ParseAltSvc(ReadOnlySpan<byte> value)
+    {
+        // "clear" retracts every advertisement for the origin (RFC 7838 section 3).
         if (value.Trim((byte)' ').SequenceEqual("clear"u8))
         {
-            return false;
+            return new AltSvc(Clear: true, Port: 0, MaxAgeSeconds: 0);
         }
 
         while (!value.IsEmpty)
@@ -304,10 +400,12 @@ public sealed class RingHttpClient : IDisposable
             }
 
             ReadOnlySpan<byte> authority = entry[(equals + 1)..];
+            long maxAge = DefaultMaxAgeSeconds;
             int semicolon = authority.IndexOf((byte)';');
             if (semicolon >= 0)
             {
-                authority = authority[..semicolon];   // drop ma=/persist= parameters
+                maxAge = ParseMaxAge(authority[(semicolon + 1)..]);
+                authority = authority[..semicolon];
             }
             authority = authority.Trim((byte)' ').Trim((byte)'"');
 
@@ -325,12 +423,41 @@ public sealed class RingHttpClient : IDisposable
 
             if (ushort.TryParse(authority[(colon + 1)..], out ushort parsed) && parsed != 0)
             {
-                port = parsed;
-                return true;
+                return new AltSvc(Clear: false, parsed, maxAge);
             }
         }
 
-        return false;
+        return AltSvc.None;
+    }
+
+    // "ma=86400; persist=1" - the parameters after an alternative's authority. Anything we cannot
+    // read leaves the RFC default in place rather than expiring the advertisement early.
+    private static long ParseMaxAge(ReadOnlySpan<byte> parameters)
+    {
+        while (!parameters.IsEmpty)
+        {
+            int semicolon = parameters.IndexOf((byte)';');
+            ReadOnlySpan<byte> parameter = semicolon < 0 ? parameters : parameters[..semicolon];
+            parameters = semicolon < 0 ? default : parameters[(semicolon + 1)..];
+
+            int equals = parameter.IndexOf((byte)'=');
+            if (equals < 0 || !parameter[..equals].Trim((byte)' ').SequenceEqual("ma"u8))
+            {
+                continue;
+            }
+
+            ReadOnlySpan<byte> raw = parameter[(equals + 1)..].Trim((byte)' ').Trim((byte)'"');
+            if (long.TryParse(raw, out long seconds) && seconds >= 0)
+            {
+                // Saturate. The value is whatever the origin typed, and the caller turns it into
+                // TickCount64 + seconds * 1000 - so a big enough one overflows and lands in the
+                // PAST, which reads as "expired" and disables h3 for the life of the client. An
+                // origin asking for a very long lifetime must not get the opposite of one.
+                return Math.Min(seconds, MaxAgeSecondsLimit);
+            }
+        }
+
+        return DefaultMaxAgeSeconds;
     }
 
     public void Dispose()

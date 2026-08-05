@@ -70,6 +70,138 @@ internal static class RingHttpClientTests
             Assert.Equal("http/1.1", protocol);   // advertisement seen and deliberately not followed
         });
 
+        runner.Test("ringclient: Alt-Svc: clear retracts a learned h3 endpoint", () =>
+        {
+            // Nothing listens on the advertised port, so the h3 attempt fails and the request falls
+            // back to HTTP/1.1 - which is the only place a retraction is observable at all, since a
+            // promoted origin stops producing h1 responses.
+            var origin = new SwitchableOrigin("h3=\":9998\"; ma=86400");
+            int h1Port = TestServer.Start(origin.Handler);
+
+            int driver = TestServer.Start(DriverHandler, onStart: reactor => RingHttpClient.Start(reactor,
+                new RingHttpClientOptions
+                {
+                    Host = "127.0.0.1",
+                    Port = (ushort)h1Port,
+                    ServerName = "localhost",
+                    AcquireTimeoutMs = 2000,
+                    Http3CooldownMs = 500,
+                }));
+
+            Client.Get(driver, "/fetch");
+            (_, string learned) = Client.Get(driver, "/h3port");
+            Assert.Equal("9998", learned);
+
+            // The origin retires h3 before the next attempt.
+            origin.Advertise("clear");
+
+            (int status, string body) = Client.Get(driver, "/fetch", timeoutMs: 20_000);
+            Assert.Equal(200, status);
+            Assert.Equal("200|served by h1", body);
+
+            // Previously the learned port was cached forever, so this stayed 9998 and the client
+            // retried a dead endpoint once per cooldown for the rest of its life.
+            (_, string afterClear) = Client.Get(driver, "/h3port");
+            Assert.Equal("0", afterClear);
+
+            // Past the cooldown, with no endpoint left, it stays on HTTP/1.1.
+            Thread.Sleep(800);
+            (_, string protocol) = Client.Get(driver, "/protocol");
+            Assert.Equal("http/1.1", protocol);
+        });
+
+        runner.Test("ringclient: a moved h3 endpoint is followed to its new port", () =>
+        {
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+
+            (_, int realH3Port) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: static (_, connection) => new Nghttp3Connection(connection).RunBufferedAsync(
+                    static _ => Nghttp3Response.Text("served by h3")));
+
+            // Advertise a dead port first, so the client learns one and then has to replace it.
+            var origin = new SwitchableOrigin("h3=\":9998\"; ma=86400");
+            int h1Port = TestServer.Start(origin.Handler);
+
+            int driver = TestServer.Start(DriverHandler, onStart: reactor => RingHttpClient.Start(reactor,
+                new RingHttpClientOptions
+                {
+                    Host = "127.0.0.1",
+                    Port = (ushort)h1Port,
+                    ServerName = "localhost",
+                    AcquireTimeoutMs = 2000,
+                    Http3CooldownMs = 500,
+                }));
+
+            Client.Get(driver, "/fetch");
+            (_, string stale) = Client.Get(driver, "/h3port");
+            Assert.Equal("9998", stale);
+
+            origin.Advertise($"h3=\":{realH3Port}\"; ma=86400");
+
+            // Tries the dead port, fails, falls back to h1 - and that h1 response carries the move.
+            Client.Get(driver, "/fetch", timeoutMs: 20_000);
+
+            (_, string moved) = Client.Get(driver, "/h3port");
+            Assert.Equal(realH3Port.ToString(), moved);
+
+            // Past the cooldown the client uses the new endpoint, and the h3 origin answers.
+            Thread.Sleep(800);
+            (int status, string body) = Client.Get(driver, "/fetch", timeoutMs: 20_000);
+            Assert.Equal(200, status);
+            Assert.Equal("200|served by h3", body);
+        });
+
+        runner.Test("ringclient: retiring a LIVE h3 pool leaves the client working", () =>
+        {
+            // Every other retirement test disposes a pool whose only connection had already failed
+            // itself, so the interesting case - tearing down a healthy pool with real QUIC state -
+            // went unexercised. A short ma= is what makes it reachable: h3 expires, the client
+            // drops back to h1, and that h1 response is where a retraction can finally be seen,
+            // while the pool underneath is still perfectly alive.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+
+            (_, int h3Port) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: static (_, connection) => new Nghttp3Connection(connection).RunBufferedAsync(
+                    static _ => Nghttp3Response.Text("served by h3")));
+
+            var origin = new SwitchableOrigin($"h3=\":{h3Port}\"; ma=1");
+            int h1Port = TestServer.Start(origin.Handler);
+
+            int driver = TestServer.Start(DriverHandler, onStart: reactor => RingHttpClient.Start(reactor,
+                new RingHttpClientOptions
+                {
+                    Host = "127.0.0.1",
+                    Port = (ushort)h1Port,
+                    ServerName = "localhost",
+                    AcquireTimeoutMs = 3000,
+                }));
+
+            Client.Get(driver, "/fetch");                       // learns the endpoint over h1
+            (_, string overH3) = Client.Get(driver, "/fetch", timeoutMs: 20_000);
+            Assert.Equal("200|served by h3", overH3);           // pool is open and healthy
+
+            // Let the one-second advertisement lapse, then retract it.
+            Thread.Sleep(1500);
+            origin.Advertise("clear");
+
+            (int status, string body) = Client.Get(driver, "/fetch", timeoutMs: 20_000);
+            Assert.Equal(200, status);
+            Assert.Equal("200|served by h1", body);
+
+            (_, string port) = Client.Get(driver, "/h3port");
+            Assert.Equal("0", port);
+
+            // The client survived disposing a live pool, which is the point.
+            (_, string after) = Client.Get(driver, "/fetch", timeoutMs: 20_000);
+            Assert.Equal("200|served by h1", after);
+        });
+
         runner.Test("ringclient: a dead h3 endpoint falls back to h1 instead of failing", () =>
         {
             int h1Port = TestServer.Start(AdvertisingOriginHandler(9999));
@@ -96,6 +228,40 @@ internal static class RingHttpClientTests
             (_, string afterFailure) = Client.Get(driver, "/protocol");
             Assert.Equal("http/1.1", afterFailure);
         });
+    }
+
+    // An HTTP/1.1 origin whose Alt-Svc header the test can change between requests, so an origin
+    // that moves or retires its h3 endpoint can actually be exercised.
+    private sealed class SwitchableOrigin(string altSvc)
+    {
+        private volatile string _altSvc = altSvc;
+
+        public void Advertise(string value) => _altSvc = value;
+
+        public Func<Reactor, TcpConnection, Task> Handler => async (_, connection) =>
+        {
+            try
+            {
+                while (true)
+                {
+                    RecvSnapshot snapshot = await connection.ReadAsync();
+                    Wire.ReadPath(connection, snapshot);
+
+                    const string body = "served by h1";
+                    connection.Write(Encoding.ASCII.GetBytes(
+                        $"HTTP/1.1 200 OK\r\nAlt-Svc: {_altSvc}\r\n" +
+                        $"Content-Length: {body.Length}\r\n\r\n{body}"));
+                    await connection.FlushAsync();
+
+                    if (snapshot.IsClosed) return;
+                    connection.ResetRead();
+                }
+            }
+            finally
+            {
+                connection.DecRef();
+            }
+        };
     }
 
     // An HTTP/1.1 origin that advertises an h3 endpoint on the same host.
@@ -150,6 +316,10 @@ internal static class RingHttpClientTests
                 if (path == "/protocol")
                 {
                     Wire.Write(connection, 200, upstream.NextProtocol);
+                }
+                else if (path == "/h3port")
+                {
+                    Wire.Write(connection, 200, upstream.NegotiatedHttp3Port.ToString());
                 }
                 else
                 {
