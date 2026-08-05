@@ -13,7 +13,6 @@
     <ProjectReference Include="../../src/ioxide/ioxide.csproj" />
     <ProjectReference Include="../../src/protocols/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
     <ProjectReference Include="../../src/protocols/ioxide.nghttp3/ioxide.nghttp3.csproj" />
-    <ProjectReference Include="../../src/protocols/ioxide.tls/ioxide.tls.csproj" />
     <ProjectReference Include="../../src/clients/ioxide.file/ioxide.file.csproj" />
   </ItemGroup>
 

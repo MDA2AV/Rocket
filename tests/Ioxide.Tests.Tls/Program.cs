@@ -19,6 +19,7 @@ internal static class Program
 
         TlsTests.Register(runner, ktls);
         DecryptFaultTests.Register(runner, ktls);
+        TlsPipeTests.Register(runner, ktls);
 
         return runner.Summary();
     }

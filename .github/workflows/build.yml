@@ -99,9 +99,6 @@ jobs:
       - name: Pack ioxide.ngtcp2
         run: dotnet pack src/protocols/ioxide.ngtcp2/ioxide.ngtcp2.csproj --configuration Release --no-build --output ./artifacts
 
-      - name: Pack ioxide.tls
-        run: dotnet pack src/protocols/ioxide.tls/ioxide.tls.csproj --configuration Release --no-build --output ./artifacts
-
       - name: Pack ioxide.httpclient
         run: dotnet pack src/clients/ioxide.httpclient/ioxide.httpclient.csproj --configuration Release --no-build --output ./artifacts
 

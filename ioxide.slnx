@@ -7,7 +7,6 @@
     <Project Path="src/protocols/ioxide.nghttp3/ioxide.nghttp3.csproj" />
     <Project Path="src/protocols/ioxide.http3/ioxide.http3.csproj" />
     <Project Path="src/protocols/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
-    <Project Path="src/protocols/ioxide.tls/ioxide.tls.csproj" />
   </Folder>
 
   <!-- Outbound: what an app calls out to. -->

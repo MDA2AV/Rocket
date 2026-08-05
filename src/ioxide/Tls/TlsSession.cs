@@ -1,3 +1,4 @@
+using System.IO.Pipelines;
 using System.Runtime.InteropServices;
 
 namespace ioxide.tls;
@@ -57,6 +58,53 @@ public sealed unsafe class TlsSession : IDisposable
 
     /// <summary>Plaintext decrypted during the handshake's final flight, if any.</summary>
     public ReadOnlySpan<byte> DrainPlaintext() => _plain.AsSpan(0, _plainLen);
+
+    /// <summary>
+    /// Feed one ciphertext slice and decrypt straight into <paramref name="writer"/>, returning the
+    /// plaintext byte count. Same contract as <see cref="Decrypt"/> otherwise: an empty result is
+    /// normal for a partial record, and <see cref="Closed"/> reports a clean close_notify.
+    /// </summary>
+    /// <remarks>
+    /// The point of this over <see cref="Decrypt"/> is one fewer copy. <see cref="Decrypt"/> has to
+    /// land the plaintext in <c>_plain</c> and hand back a span, so a caller feeding a pipe copies
+    /// it a second time; here OpenSSL writes into the pipe's own memory and there is no
+    /// intermediate. Callers with nowhere better to put the bytes still want <see cref="Decrypt"/>.
+    /// </remarks>
+    public int DecryptInto(byte* ciphertext, int length, PipeWriter writer)
+    {
+        OpenSsl.BIO_write(_rbio, ciphertext, length);
+
+        int total = 0;
+        while (true)
+        {
+            // A TLS record carries at most 2^14 bytes of plaintext (RFC 8446 section 5.1), so a
+            // larger request cannot be filled by one record and a smaller one only costs extra
+            // SSL_read calls. This is the protocol's own bound, not a tuning knob.
+            Span<byte> destination = writer.GetSpan(MaxRecordPlaintext);
+
+            int n;
+            fixed (byte* p = destination)
+            {
+                // Synchronous, so the pin lasts only for the call.
+                n = OpenSsl.SSL_read(_ssl, p, destination.Length);
+            }
+
+            if (n > 0)
+            {
+                writer.Advance(n);
+                total += n;
+                continue;
+            }
+
+            if (!ShouldKeepReading(n))
+            {
+                return total;
+            }
+        }
+    }
+
+    /// <summary>Maximum plaintext in one TLS record, RFC 8446 section 5.1.</summary>
+    private const int MaxRecordPlaintext = 16 * 1024;
 
     /// <summary>
     /// Classify a non-positive SSL_read. False means stop and wait for more ciphertext; a genuine
