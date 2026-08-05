@@ -52,7 +52,7 @@ internal static class RingHttpClientTests
 
         runner.Test("ringclient: Http1Only ignores an Alt-Svc advertisement", () =>
         {
-            int h1Port = TestServer.Start(AdvertisingOriginHandler(9999));
+            int h1Port = TestServer.Start(AdvertisingOriginHandler(TestServer.DeadUdpPort()));
 
             int driver = TestServer.Start(DriverHandler, onStart: reactor => RingHttpClient.Start(reactor,
                 new RingHttpClientOptions
@@ -204,7 +204,10 @@ internal static class RingHttpClientTests
 
         runner.Test("ringclient: a dead h3 endpoint falls back to h1 instead of failing", () =>
         {
-            int h1Port = TestServer.Start(AdvertisingOriginHandler(9999));
+            // A UDP port with nothing bound: derived rather than hardcoded, because a literal that
+            // turns out to be live does not fail this test - it inverts it.
+            int deadUdpPort = TestServer.DeadUdpPort();
+            int h1Port = TestServer.Start(AdvertisingOriginHandler(deadUdpPort));
 
             // Http3Port is pinned at a port nothing listens on, so the h3 attempt cannot succeed.
             int driver = TestServer.Start(DriverHandler, onStart: reactor => RingHttpClient.Start(reactor,
@@ -212,7 +215,7 @@ internal static class RingHttpClientTests
                 {
                     Host = "127.0.0.1",
                     Port = (ushort)h1Port,
-                    Http3Port = 9999,
+                    Http3Port = (ushort)deadUdpPort,
                     ServerName = "localhost",
                     AcquireTimeoutMs = 2000,
                 }));

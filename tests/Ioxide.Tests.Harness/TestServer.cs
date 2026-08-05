@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
@@ -55,6 +56,32 @@ public static class TestServer
     /// <summary>Reserve a unique port (e.g. for TcpOptions.ExtraPorts).</summary>
     public static int NextPort() => Interlocked.Increment(ref _nextPort);
 
+    /// <summary>
+    /// A port with nothing listening on it, for the tests that need a connect to be refused - dead
+    /// backends, connect-storm budgets, black-holed h3 endpoints.
+    /// </summary>
+    /// <remarks>
+    /// Derived rather than hardcoded. A literal like 5599 or 9099 is a standing bet that no other
+    /// process on the machine listens there, and losing that bet does not fail the test loudly - it
+    /// inverts it, because the connect succeeds and the refusal being asserted never happens.
+    /// Binding port 0 has the kernel pick one that was free a moment ago, and closing it
+    /// immediately leaves it free.
+    /// </remarks>
+    public static int DeadPort()
+    {
+        using var probe = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        probe.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        return ((IPEndPoint)probe.LocalEndPoint!).Port;
+    }
+
+    /// <summary>The UDP flavour: nothing bound, so datagrams to it go nowhere.</summary>
+    public static int DeadUdpPort()
+    {
+        using var probe = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        probe.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        return ((IPEndPoint)probe.LocalEndPoint!).Port;
+    }
+
     public static int Start(Func<Reactor, TcpConnection, Task> handle, Action<Reactor>? onStart = null)
         => StartConfigured(handle, DefaultConfig(), onStart).Port;
 
@@ -74,7 +101,7 @@ public static class TestServer
             TcpHandle = handle,
         };
 
-        var thread = new Thread(reactor.Run)
+        var thread = new Thread(RunGuarded(reactor, port))
         {
             IsBackground = true,
             Name = $"test-reactor-{port}",
@@ -160,7 +187,7 @@ public static class TestServer
             OnDatagram = onDatagram,
         };
 
-        var thread = new Thread(reactor.Run)
+        var thread = new Thread(RunGuarded(reactor, tcpPort))
         {
             IsBackground = true,
             Name = $"test-reactor-udp-{udpPort}",
@@ -202,7 +229,7 @@ public static class TestServer
             OnStart = onStart,
         };
 
-        var thread = new Thread(reactor.Run)
+        var thread = new Thread(RunGuarded(reactor, tcpPort))
         {
             IsBackground = true,
             Name = $"test-reactor-h3client-{tcpPort}",
@@ -251,7 +278,7 @@ public static class TestServer
             OnStart = onStart,
         };
 
-        var thread = new Thread(reactor.Run)
+        var thread = new Thread(RunGuarded(reactor, tcpPort))
         {
             IsBackground = true,
             Name = $"test-reactor-h3proxy-{tcpPort}",
@@ -262,10 +289,64 @@ public static class TestServer
         return tcpPort;
     }
 
+    // Startup failures recorded by RunGuarded, keyed by the port that failed, so WaitForListen can
+    // report the real reason instead of "never started listening".
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, Exception> StartupFailures = new();
+
+    /// <summary>
+    /// Reactor.Run as a thread body, with the exception caught. Without this a bind or listen
+    /// failure is unhandled on a background thread and .NET terminates the process - so a single
+    /// unlucky port produces ZERO test results rather than one FAIL, which is the worst possible
+    /// way to learn about it in CI.
+    /// </summary>
+    private static ThreadStart RunGuarded(Reactor reactor, int port) => () =>
+    {
+        try
+        {
+            reactor.Run();
+        }
+        catch (Exception e)
+        {
+            StartupFailures[port] = e;
+
+            // ALWAYS print, even though WaitForListen may also report it. Only failures that happen
+            // before the listener is up are ever consumed there, and Run opens the listener before
+            // InitSharedRingBuffer, OpenWakeFd and OnStart - so a reactor that dies in any of those
+            // loses the race, WaitForListen's probe succeeds against the backlog, and the real
+            // cause is never seen. Worse, a reactor dying AFTER its own test has passed would leave
+            // the suite green, where before this guard existed it was a loud process kill. Catching
+            // the exception must not make it quieter than not catching it.
+            Console.Error.WriteLine($"[test-reactor:{port}] died: {e}");
+        }
+    };
+
+    /// <summary>
+    /// Reactor deaths that no WaitForListen consumed, cleared as they are read. A reactor can die
+    /// long after its own test passed - in a ticker, a sweep, a later handler - and nothing else in
+    /// the harness would ever notice, so the runner checks this before reporting success.
+    /// </summary>
+    public static IReadOnlyList<string> DrainUnreportedFailures()
+    {
+        var drained = new List<string>();
+        foreach (int port in StartupFailures.Keys)
+        {
+            if (StartupFailures.TryRemove(port, out Exception? failure))
+            {
+                drained.Add($":{port} - {failure.Message}");
+            }
+        }
+        return drained;
+    }
+
     private static void WaitForListen(int port)
     {
         for (int attempt = 0; attempt < 100; attempt++)
         {
+            if (StartupFailures.TryRemove(port, out Exception? failure))
+            {
+                throw new Exception($"server on :{port} failed to start: {failure.Message}", failure);
+            }
+
             try
             {
                 using var probe = new TcpClient();

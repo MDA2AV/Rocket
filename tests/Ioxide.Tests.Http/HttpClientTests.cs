@@ -36,7 +36,7 @@ internal static class HttpClientTests
             // the deadline never arrived: the pool reopened at syscall speed (~94k connects in 6 s
             // on one reactor), the caller never saw an error, and the request hung forever.
             // The call must now fail within the acquire budget, and the handler must see it.
-            int proxy = StartProxy(originPort: 9099, poolSize: 1, acquireTimeoutMs: 1000);
+            int proxy = StartProxy(originPort: TestServer.DeadPort(), poolSize: 1, acquireTimeoutMs: 1000);
 
             long start = Environment.TickCount64;
             (int status, string body) = Client.Get(proxy, "/plain", timeoutMs: 15_000);
