@@ -479,25 +479,7 @@ public sealed class Http2ClientConnection : IDisposable
             return;
         }
 
-        // 1xx is INTERIM (103 Early Hints, 100 Continue): the real response follows in another
-        // HEADERS section on the same stream. Keeping this section's bytes would leave BodyStart
-        // pointing at the interim headers, so the final response's headers would be returned as
-        // the body. Drop it and wait for the real one.
-        if (response.Status is >= 100 and < 200)
-        {
-            response.ResetForInterim();
-            pending.HeadersDone = false;
-            pending.BodyStart = 0;
-            pending.BodyLength = 0;
-            return;
-        }
-
-        if (!pending.HeadersDone)
-        {
-            pending.HeadersDone = true;
-            pending.BodyStart = response.ArenaLength;   // body bytes follow the header bytes
-        }
-        // A later section is TRAILERS: leaving BodyStart alone keeps the body range valid.
+        pending.Assembly.EndFieldSection(response);
     }
 
     [UnmanagedCallersOnly]
@@ -508,7 +490,7 @@ public sealed class Http2ClientConnection : IDisposable
             pending.Response is { } response)
         {
             response.Append(new ReadOnlySpan<byte>(data, (int)dataLen));
-            pending.BodyLength += (int)dataLen;
+            pending.Assembly.BodyLength += (int)dataLen;
         }
     }
 
@@ -522,7 +504,7 @@ public sealed class Http2ClientConnection : IDisposable
         }
 
         HttpClientResponse response = pending.Response ?? new HttpClientResponse();
-        response.SetBodyRange((pending.BodyStart, pending.BodyLength));
+        response.SetBodyRange(pending.Assembly.BodyRange);
         response.Freeze();
 
         // Record only - resumed by CompleteFinishedRequests once nghttp2 unwinds.
@@ -590,9 +572,7 @@ public sealed class Http2ClientConnection : IDisposable
         };
 
         public HttpClientResponse? Response;
-        public bool HeadersDone;
-        public int BodyStart;
-        public int BodyLength;
+        public ResponseAssembly Assembly;
 
         public ValueTask<HttpClientResponse> Task => new(this, _core.Version);
 
