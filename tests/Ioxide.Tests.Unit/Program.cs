@@ -14,6 +14,7 @@ internal static class Program
         DemuxParseTests.Register(runner);
         AltSvcTests.Register(runner);
         MessageTests.Register(runner);
+        ResponseAssemblyTests.Register(runner);
 
         return runner.Summary();
     }
