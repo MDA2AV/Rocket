@@ -394,6 +394,37 @@ public static class Client
         return ReadResponse(ssl);
     }
 
+    /// <summary>
+    /// Complete a TLS handshake, then write bytes that are not a valid TLS record. The server's
+    /// decrypt must surface that as a FAULT rather than as "the record is incomplete, wait for
+    /// more" - a corrupted stream that looks like a quiet connection leaves the reader hanging on
+    /// one that is never going to recover.
+    /// </summary>
+    public static void SendTlsGarbageAfterHandshake(int port, int timeoutMs = 6000)
+    {
+        using var client = new TcpClient();
+        client.Connect("127.0.0.1", port);
+        client.ReceiveTimeout = timeoutMs;
+
+        using var ssl = new SslStream(client.GetStream(), leaveInnerStreamOpen: false, (_, _, _, _) => true);
+        ssl.AuthenticateAsClient(new SslClientAuthenticationOptions
+        {
+            TargetHost = "localhost",
+            EnabledSslProtocols = SslProtocols.Tls13,
+        });
+
+        // Underneath the SslStream, straight onto the socket: a record header claiming a content
+        // type and version no TLS 1.3 peer will accept, followed by noise.
+        NetworkStream raw = client.GetStream();
+        byte[] bogus = [0x17, 0x03, 0x03, 0x00, 0x10, .. Enumerable.Repeat((byte)0xAB, 16)];
+        raw.Write(bogus);
+        raw.Flush();
+
+        // Let the server read and fault before the socket closes under it, so what it reports is
+        // the bad record rather than the disconnect.
+        Thread.Sleep(500);
+    }
+
     // Several requests over one connection (lock-step), to exercise the handler's keep-alive loop.
     public static List<(int Status, string Body)> GetKeepAlive(int port, string path, int count, int timeoutMs = 6000)
     {

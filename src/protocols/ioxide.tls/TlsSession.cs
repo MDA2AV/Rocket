@@ -58,6 +58,35 @@ public sealed unsafe class TlsSession : IDisposable
     /// <summary>Plaintext decrypted during the handshake's final flight, if any.</summary>
     public ReadOnlySpan<byte> DrainPlaintext() => _plain.AsSpan(0, _plainLen);
 
+    /// <summary>
+    /// Classify a non-positive SSL_read. False means stop and wait for more ciphertext; a genuine
+    /// protocol failure throws.
+    /// </summary>
+    /// <remarks>
+    /// The distinction this draws used to be missing: every error except ZERO_RETURN was treated as
+    /// "record incomplete", so a bad MAC or a malformed record was indistinguishable from needing
+    /// more bytes. A corrupted stream then looked like a connection that had simply gone quiet, and
+    /// a caller pumping a pipe would wait on it forever.
+    /// </remarks>
+    private bool ShouldKeepReading(int result)
+    {
+        int err = OpenSsl.SSL_get_error(_ssl, result);
+
+        switch (err)
+        {
+            case OpenSsl.SSL_ERROR_WANT_READ:
+            case OpenSsl.SSL_ERROR_WANT_WRITE:
+                return false;   // normal: the record is not complete yet
+
+            case OpenSsl.SSL_ERROR_ZERO_RETURN:
+                Closed = true;  // clean close_notify
+                return false;
+
+            default:
+                throw new IOException($"TLS decrypt failed (error {err}): {OpenSsl.LastError()}");
+        }
+    }
+
     internal void DrainPending()
     {
         while (true)
@@ -83,12 +112,10 @@ public sealed unsafe class TlsSession : IDisposable
                 continue;
             }
 
-            int err = OpenSsl.SSL_get_error(_ssl, n);
-            if (err == OpenSsl.SSL_ERROR_ZERO_RETURN)
+            if (!ShouldKeepReading(n))
             {
-                Closed = true;   // clean close_notify
+                return;
             }
-            return;              // WANT_READ: record incomplete, wait for more bytes
         }
     }
 
