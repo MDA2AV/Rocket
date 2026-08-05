@@ -194,6 +194,9 @@ nav.top .links a.gh svg { display: block; }
 }
 
 .ex-menu label:not(.ex-home) {
+  /* Blockified explicitly: a <label> is inline by default, and inside <details> it is no longer a
+     flex item of .ex-menu, so without this the entries flow side by side instead of stacking. */
+  display: block;
   font-size: 0.88rem;
   line-height: 1.35;
   color: var(--text-dim);
@@ -321,15 +324,14 @@ nav.top .links a.gh svg { display: block; }
     padding: 0 0 0.5rem;
     margin-bottom: 1.1rem;
   }
+  /* Kept as a block: display:flex on <details> is where the "closed content still renders" bug
+     lives. The entries flow horizontally by being inline-block instead. */
   .ex-sect {
     width: 100%;
     border-top: none;
     margin-top: 0;
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.15rem;
   }
+  .ex-menu label:not(.ex-home) { display: inline-block; }
   .ex-sect summary { padding: 0.45rem 0.7rem 0.45rem 0; }
   .ex-sect summary::after { margin-left: 0.4rem; }
   .ex-home { padding: 0.45rem 0.7rem 0.45rem 0 !important; }
