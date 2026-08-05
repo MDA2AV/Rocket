@@ -213,7 +213,6 @@ nav.top .links a.gh svg { display: block; }
 #tab-qpipe:checked ~ .ex-menu label[for="tab-qpipe"],
 #tab-qraw:checked ~ .ex-menu label[for="tab-qraw"],
 #tab-h3:checked ~ .ex-menu label[for="tab-h3"],
-#tab-h3pure:checked ~ .ex-menu label[for="tab-h3pure"],
 #tab-http:checked ~ .ex-menu label[for="tab-http"],
 #tab-pg:checked ~ .ex-menu label[for="tab-pg"],
 #tab-redis:checked ~ .ex-menu label[for="tab-redis"],
@@ -299,7 +298,6 @@ nav.top .links a.gh svg { display: block; }
 #tab-qpipe:checked ~ .pane-qpipe { display: block; }
 #tab-qraw:checked ~ .pane-qraw { display: block; }
 #tab-h3:checked ~ .pane-h3 { display: block; }
-#tab-h3pure:checked ~ .pane-h3pure { display: block; }
 #tab-http:checked ~ .pane-http { display: block; }
 #tab-pg:checked ~ .pane-pg { display: block; }
 #tab-redis:checked ~ .pane-redis { display: block; }
@@ -373,7 +371,6 @@ nav.top .links a.gh svg { display: block; }
   #tab-qpipe:checked ~ .ex-menu label[for="tab-qpipe"],
   #tab-qraw:checked ~ .ex-menu label[for="tab-qraw"],
   #tab-h3:checked ~ .ex-menu label[for="tab-h3"],
-  #tab-h3pure:checked ~ .ex-menu label[for="tab-h3pure"],
   #tab-http:checked ~ .ex-menu label[for="tab-http"],
   #tab-pg:checked ~ .ex-menu label[for="tab-pg"],
   #tab-redis:checked ~ .ex-menu label[for="tab-redis"],

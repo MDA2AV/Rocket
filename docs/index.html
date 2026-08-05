@@ -29,7 +29,6 @@
   <input type="radio" name="mode-tabs" id="tab-qpipe">
   <input type="radio" name="mode-tabs" id="tab-qraw">
   <input type="radio" name="mode-tabs" id="tab-h3">
-  <input type="radio" name="mode-tabs" id="tab-h3pure">
   <input type="radio" name="mode-tabs" id="tab-http">
   <input type="radio" name="mode-tabs" id="tab-pg">
   <input type="radio" name="mode-tabs" id="tab-redis">
@@ -56,7 +55,6 @@
     <details class="ex-sect">
       <summary>http/3</summary>
       <label for="tab-h3">nghttp3</label>
-      <label for="tab-h3pure">pure C#</label>
     </details>
 
     <details class="ex-sect">
@@ -633,72 +631,7 @@ foreach (Thread thread in threads)
     thread.Join();
 }</code></pre>
   </div>
-  <div class="pane pane-h3pure">
-    <div class="pane-head">
-      <h3>HTTP/3 · pure C#</h3>
-      <span class="pane-pkg">ioxide + ioxide.ngtcp2 + ioxide.http3</span>
-    </div>
-<pre><code class="language-csharp">// A complete HTTP/3 server with NO native h3 code. Paste into a console app&#x27;s Program.cs.
-//   dotnet add package ioxide
-//   dotnet add package ioxide.ngtcp2      (QUIC transport)
-//   dotnet add package ioxide.http3       (pure-C# HTTP/3)
-// Needs cert.pem / key.pem next to the binary.
-//   curl --http3-only -k https://127.0.0.1:8443/
-using System.Text;
-using ioxide;
-using ioxide.http3;
-using ioxide.ngtcp2;
-
-using var engine = new QuicEngine(&quot;cert.pem&quot;, &quot;key.pem&quot;, cidLength: 8, alpn: [&quot;h3&quot;]);
-
-var config = new ServerConfig
-{
-    ReactorCount = Environment.ProcessorCount,
-    Udp = new UdpOptions { RecvSlots = 16 },
-    Quic = new QuicOptions
-    {
-        Port              = 8443,
-        LocalCidLength    = 8,
-        ConnectionFactory = engine.CreateFactory(),
-    },
-};
-
-var threads = new Thread[config.ReactorCount];
-
-for (int id = 0; id &lt; threads.Length; id++)
-{
-    var reactor = new Reactor(id, config);
-
-    // ioxide.http3 is frame parsing, QPACK (static table + Huffman) and request dispatch, all
-    // managed. ngtcp2 still provides the QUIC transport, but nothing above it is native - and it
-    // rides any QuicConnection via the stream read surface, so it is engine-agnostic.
-    reactor.QuicHandle = (r, conn) =&gt; new Http3Connection(conn).RunAsync(async request =&gt;
-    {
-        // Same streaming surface as the nghttp3 flavour: the body arrives under flow-control
-        // pacing, so memory is bound by one window rather than the size of the upload.
-        long total = 0;
-        while (true)
-        {
-            ReadOnlyMemory&lt;byte&gt; chunk = await request.BodyReader!.ReadAsync();
-            if (chunk.IsEmpty) break;
-            total += chunk.Length;
-        }
-
-        return Http3Response.Text(
-            $&quot;hello {Encoding.ASCII.GetString(request.Path.Span)} - {total} body bytes, pure-C# HTTP/3\n&quot;);
-    });
-
-    threads[id] = new Thread(reactor.Run) { Name = $&quot;reactor-{id}&quot; };
-    threads[id].Start();
-}
-
-Console.WriteLine($&quot;pure-C# HTTP/3 on udp :8443 across {config.ReactorCount} reactors&quot;);
-
-foreach (Thread thread in threads)
-{
-    thread.Join();
-}</code></pre>
-  </div>
+  
   <div class="pane pane-http">
     <div class="pane-head">
       <h3>HTTP client · reverse proxy</h3>
