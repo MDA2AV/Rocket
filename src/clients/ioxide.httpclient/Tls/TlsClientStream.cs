@@ -1,6 +1,6 @@
 using System.Runtime.InteropServices;
 
-namespace ioxide.tls;
+namespace ioxide.httpclient;
 
 /// <summary>
 /// A TLS connection to an origin, over a ring socket. Send and receive take the same

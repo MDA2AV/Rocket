@@ -12,7 +12,6 @@
 
   <ItemGroup>
     <ProjectReference Include="../Ioxide.Tests.Harness/Ioxide.Tests.Harness.csproj" />
-    <ProjectReference Include="../../src/clients/ioxide.httpclient/ioxide.httpclient.csproj" />
   </ItemGroup>
 
 </Project>

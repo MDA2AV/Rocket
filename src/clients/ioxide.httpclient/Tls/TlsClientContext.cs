@@ -1,6 +1,6 @@
 using System.Runtime.InteropServices;
 
-namespace ioxide.tls;
+namespace ioxide.httpclient;
 
 /// <summary>
 /// A configured client SSL_CTX: trust anchors, protocol floor and the ALPN list to offer. One per

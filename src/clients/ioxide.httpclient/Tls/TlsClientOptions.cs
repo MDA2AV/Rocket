@@ -1,4 +1,4 @@
-namespace ioxide.tls;
+namespace ioxide.httpclient;
 
 /// <summary>
 /// How a client should negotiate TLS with an origin. The defaults are the safe ones: verify the

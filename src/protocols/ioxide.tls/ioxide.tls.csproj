@@ -10,12 +10,12 @@
     <PackageId>ioxide.tls</PackageId>
     <Version>0.3.100</Version>
     <Authors>MDA2AV</Authors>
-    <Description>TLS for the ioxide io_uring runtime, both directions: terminate it as a server with the OpenSSL handshake driven over the ring and kernel TLS (kTLS) transmit offload, or speak it as a client to reach an https:// origin with SNI, ALPN and certificate verification. Requires OpenSSL 3; the server half also needs Linux kTLS (tls module).</Description>
+    <Description>TLS for the ioxide io_uring runtime: OpenSSL handshake driven over the ring, then kernel TLS (kTLS) transmit offload - handlers keep writing plaintext through the same connection API. Requires Linux kTLS (tls module) and OpenSSL 3.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://mda2av.github.io/ioxide/</PackageProjectUrl>
     <RepositoryUrl>https://github.com/MDA2AV/ioxide</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <PackageTags>io_uring;tls;ktls;openssl;https;alpn;linux;ioxide</PackageTags>
+    <PackageTags>io_uring;tls;ktls;openssl;linux;ioxide</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 

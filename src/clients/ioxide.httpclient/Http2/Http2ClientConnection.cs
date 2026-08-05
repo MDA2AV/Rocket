@@ -2,7 +2,6 @@ using System.Buffers;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks.Sources;
 using ioxide.httpclient;
-using ioxide.tls;
 
 namespace ioxide.httpclient;
 
