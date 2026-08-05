@@ -52,15 +52,16 @@ wrk_h1() { # $1 url, $2 threads (default 4), $3 conns (default 64) -> req/s
 }
 
 # ── tcp raw + pipes, 4 reactors and the 12-reactor baseline ─────────────────────────────────
-# The baseline rows scale the DRIVER too (-t12 -c128): a 4-thread h2load saturates itself
-# before a 12-reactor server, and the row would measure the client.
+# The classic plaintext workload: default 2-byte "ok" body, matching how this repo's numbers
+# have always been quoted. The baseline rows scale the DRIVER too (-t18 -c512): an undersized
+# wrk saturates itself before a 12-reactor server and the row measures the client instead.
 for rc in $R 12; do
   T=4; C=64
-  [ "$rc" = "12" ] && { T=12; C=128; }
-  play Tcp/Raw PLAYGROUND_REACTORS=$rc PLAYGROUND_PORT=18080 PLAYGROUND_BODY=1024 \
+  [ "$rc" = "12" ] && { T=18; C=512; }
+  play Tcp/Raw PLAYGROUND_REACTORS=$rc PLAYGROUND_PORT=18080 \
     && note "tcp-raw" "${rc}r" "$(wrk_h1 http://127.0.0.1:18080/ $T $C) req/s"
   stop_play
-  play Tcp/Pipe PLAYGROUND_REACTORS=$rc PLAYGROUND_PORT=18080 PLAYGROUND_BODY=1024 \
+  play Tcp/Pipe PLAYGROUND_REACTORS=$rc PLAYGROUND_PORT=18080 \
     && note "tcp-pipe" "${rc}r" "$(wrk_h1 http://127.0.0.1:18080/ $T $C) req/s"
   stop_play
 done
@@ -143,6 +144,6 @@ stop_play
 
 # ── report ──────────────────────────────────────────────────────────────────────────────────
 echo
-echo "ioxide bench - $(date -u +%F) $(uname -r) - servers ${R}r (baseline 12r driven -t12 -c128), wrk -c64 -t4, ${DUR}s"
+echo "ioxide bench - $(date -u +%F) $(uname -r) - servers ${R}r (baseline 12r driven -t18 -c512), wrk -c64 -t4, ${DUR}s"
 echo "────────────────────────────────────────────────────────"
 for line in "${RESULTS[@]}"; do echo "$line"; done

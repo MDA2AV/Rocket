@@ -9,12 +9,12 @@ bash bench/run.sh
 ```
 
 Servers run **4 reactors** (`BENCH_REACTORS` overrides); `tcp-raw`/`tcp-pipe` repeat at
-**12 reactors** as the io_uring baseline (driven harder: `-t12 -c128`, so the load generator
+**12 reactors** as the io_uring baseline (driven harder: `-t18 -c512`, so the load generator
 is not the ceiling). `BENCH_SECONDS` sets the measurement window (default 8).
 
 | workload | server | load |
 | --- | --- | --- |
-| tcp-raw, tcp-pipe (4r + 12r) | `Playground.Tcp.Raw` / `.Pipe`, 1024 B body | `wrk -t4 -c64` |
+| tcp-raw, tcp-pipe (4r + 12r) | `Playground.Tcp.Raw` / `.Pipe`, 2 B plaintext body | `wrk -t4 -c64` |
 | tls-sslstream, tls-ktls | `Playground.Tls.*`, 8 KB body | `wrk` over TLS |
 | h3-server | `Playground.Nghttp3` | `h3x -t4 -c64 -m8` |
 | client-h1 / h2 / h3 | `Bench.Clients` (4 reactors) against Tcp.Raw / nginx-h2c / Nghttp3 | itself |
