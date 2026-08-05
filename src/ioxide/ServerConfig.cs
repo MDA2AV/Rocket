@@ -42,8 +42,13 @@ public sealed record ServerConfig
     /// </summary>
     public TcpOptions? Tcp { get; init; } = new();
 
-    /// <summary>Raw UDP sockets (datagrams reach <see cref="Reactor.OnDatagram"/>).</summary>
-    public UdpOptions Udp { get; init; } = new();
+    /// <summary>
+    /// Raw UDP sockets (datagrams reach <see cref="Reactor.OnDatagram"/>). Null opens none, which
+    /// is what a TCP-only server wants. QUIC binds its own port either way and falls back to the
+    /// default <see cref="UdpOptions.RecvSlots"/> / <see cref="UdpOptions.Gro"/> when this is null -
+    /// the same values it would get from an unset <see cref="UdpOptions"/>.
+    /// </summary>
+    public UdpOptions? Udp { get; init; } = new();
 
     /// <summary>
     /// Enable the QUIC transport (Reactor.Quic.cs). Its port is bound as a UDP socket

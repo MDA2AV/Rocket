@@ -51,10 +51,14 @@ public sealed unsafe partial class Reactor
     private uint   _bufRingMask;
     private ushort _bufRingTail;
 
-    // TCP settings resolved once: _tcp is always non-null so the sizing knobs stay readable,
-    // while _tcpEnabled records whether ServerConfig.Tcp was actually set. False = no listener.
+    // Transport settings resolved once. _tcp / _udp are always non-null so the sizing knobs stay
+    // readable; the _enabled flags record whether the config actually asked for that transport.
+    // TCP off = no listener. UDP off = no raw datagram sockets, though QUIC still binds its own
+    // port and uses the resolved defaults.
     private readonly TcpOptions _tcp;
     private readonly bool _tcpEnabled;
+    private readonly UdpOptions _udp;
+    private readonly bool _udpEnabled;
 
     // TcpConnection pool, reactor-thread-only. PoolMax × WriteSlabSize × ReactorCount bounds
     // the reserved native memory.
@@ -100,6 +104,8 @@ public sealed unsafe partial class Reactor
         // instance so the pools below stay valid; they simply go unused when TCP is off.
         _tcpEnabled = config.Tcp is not null;
         _tcp = config.Tcp ?? new TcpOptions();
+        _udpEnabled = config.Udp is not null;
+        _udp = config.Udp ?? new UdpOptions();
 
         _port = _tcp.Port;
         _ringEntries = config.RingEntries;
