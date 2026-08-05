@@ -17,7 +17,7 @@ namespace ioxide.httpclient;
 /// Not thread-safe by design: every member runs on the owning reactor thread - requests come from
 /// reactor-thread handlers and every completion resumes there too.
 /// </remarks>
-public sealed class HttpClientPool
+public sealed class HttpClientPool : IDisposable
 {
     private readonly IRingHost _host;
     private readonly HttpClientOptions _options;
@@ -28,6 +28,7 @@ public sealed class HttpClientPool
     private int _live;        // connected + connecting
     private int _opening;
     private long _reopenAtMs; // jittered backoff gate after a failed connect
+    private bool _disposed;
 
     private HttpClientPool(IRingHost host, HttpClientOptions options)
     {
@@ -98,6 +99,12 @@ public sealed class HttpClientPool
 
         while (true)
         {
+            if (_disposed)
+            {
+                throw new HttpClientException(
+                    $"pool for {_options.Host}:{_options.Port} is disposed");
+            }
+
             // Newest first: a recently used connection is the one most likely still warm at the
             // peer, and it keeps the idle set from cycling through every socket.
             while (_idle.Count > 0)
@@ -173,7 +180,9 @@ public sealed class HttpClientPool
 
     private void Release(HttpClientConnection connection)
     {
-        if (connection.IsBroken)
+        // A disposed pool takes nothing back: this is how connections still checked out at Dispose
+        // are closed - whenever their request finishes.
+        if (connection.IsBroken || _disposed)
         {
             Discard(connection);
             return;
@@ -201,6 +210,11 @@ public sealed class HttpClientPool
 
     private void StartOpen()
     {
+        if (_disposed)
+        {
+            return;
+        }
+
         _live++;
         _opening++;
         _ = OpenOneAsync();
@@ -240,6 +254,13 @@ public sealed class HttpClientPool
     // Ticker: replenish toward PoolSize behind a jittered backoff, and drop idle corpses.
     private void Sweep()
     {
+        if (_disposed)
+        {
+            return;   // AddTicker has no removal API, so a disposed pool must no-op: replenishing
+                      // here would reopen the connections Dispose just closed, for the rest of the
+                      // reactor's life.
+        }
+
         for (int i = _idle.Count - 1; i >= 0; i--)
         {
             if (_idle[i].IsBroken)
@@ -257,4 +278,29 @@ public sealed class HttpClientPool
     }
 
     private static int BackoffMs() => 200 + Random.Shared.Next(200);
+
+    /// <summary>
+    /// Close the idle connections and stop replenishing. Connections currently checked out by an
+    /// in-flight request are not touched - the request owns them, and they are dropped by
+    /// <see cref="Release"/> when it finishes, because a disposed pool takes nothing back.
+    /// </summary>
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+        _disposed = true;
+
+        foreach (HttpClientConnection connection in _idle)
+        {
+            connection.Dispose();
+        }
+        _live -= _idle.Count;
+        _idle.Clear();
+
+        // Queued callers would otherwise sit until their acquire deadline for connections that are
+        // never coming. Null wakes them to re-check, where the disposed guard fails them at once.
+        WakeWaiters();
+    }
 }

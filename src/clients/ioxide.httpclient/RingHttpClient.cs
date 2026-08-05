@@ -342,5 +342,6 @@ public sealed class RingHttpClient : IDisposable
         _disposed = true;
         _http3?.Dispose();
         _http2?.Dispose();
+        _http1.Dispose();
     }
 }
