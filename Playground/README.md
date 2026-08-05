@@ -15,13 +15,19 @@ Run any of them with `dotnet run -c Release --project Playground/<Name>`, then h
 | [`Tcp.Pipe`](Tcp/Pipe/Program.cs) | 77 | The same server through `PipeReader`/`PipeWriter`, if your code already speaks Pipelines. | `ioxide` |
 | [`Tcp.Hop`](Tcp/Hop/Program.cs) | 76 | Leaving the reactor on purpose (`Task.Yield`) and coming back — what it costs. | `ioxide` |
 | [`Tcp.TaskRun`](Tcp/TaskRun/Program.cs) | 84 | Awaiting ordinary thread-pool work and still resuming on the reactor. | `ioxide` |
-| [`Pg`](Pg/Program.cs) | 148 | A `PgPool` per reactor, queried on the same ring that accepted the request. | `ioxide.pg` |
+| [`Tcp.Incremental`](Tcp/Incremental/Program.cs) | 95 | `Tcp.Raw` with the per-connection buffer-ring mode — one config block is the whole diff. Kernel 6.12+. | `ioxide` |
+| [`Tcp.Big`](Tcp/Big/Program.cs) | 101 | The write path under a 100 KB body: `SEND_ZC`, slab overflow (`grow` vs `seg`), checksum-able output. | `ioxide` |
+| [`Pg`](Pg/Program.cs) | 181 | A `PgPool` per reactor: scalar queries, prepared params (`/add`, `/upper`), row streaming (`/rows`), errors and timeouts. | `ioxide.pg` |
 | [`File`](File/Program.cs) | 253 | Static files: baked responses, ring reads, disk revalidation, `SIGHUP` reload. | `ioxide.file` |
 | [`Proxy`](Proxy/Program.cs) | 131 | A reverse proxy where both hops stay on one reactor thread. | `ioxide.http11` |
 | [`Nghttp3`](Nghttp3/Program.cs) | 169 | HTTP/3 with **streamed** dispatch, and a `SIGTERM` GOAWAY drain. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
 | [`Nghttp3Buffered`](Nghttp3Buffered/Program.cs) | 146 | The same server with **buffered** dispatch — one method call is the whole difference. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
+| [`Quic.Alpn`](Quic/Alpn/Program.cs) | 111 | One QUIC listener, two protocols by ALPN: h3, or raw stream echo over the dual pipe. QUIC-only — `Tcp = null`. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
+| [`Redis`](Redis/Program.cs) | 194 | A `RedisPool` per reactor: GET hot path, cache-aside, RESP types, explicit pipelining. | `ioxide.redis` |
+| [`Tls.Ktls`](Tls/Ktls/Program.cs) | 133 | OpenSSL handshake on the ring, then **kernel TLS** transmit — the handler writes plaintext. | `ioxide.tls` |
+| [`Tls.SslStream`](Tls/SslStream/Program.cs) | 100 | The BCL `SslStream` over `TcpConnectionStream` — portable userspace TLS, the kTLS comparison point. | `ioxide` |
 
-Read `Tcp.Raw` first — the other eight are that same skeleton with one thing changed.
+Read `Tcp.Raw` first — every other sample is that same skeleton with one thing changed.
 
 Each project references only the packages it demonstrates: `Tcp.Raw` publishes three assemblies and
 no native libraries at all, while `Nghttp3` pulls in the ngtcp2 and nghttp3 bundles. So the build

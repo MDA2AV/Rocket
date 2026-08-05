@@ -26,7 +26,6 @@
   </Folder>
 
   <Folder Name="/apps/">
-    <Project Path="Examples/Examples.csproj" />
     <Project Path="Examples.AspNet/Examples.AspNet.csproj" />
   </Folder>
 
@@ -38,6 +37,12 @@
     <Project Path="Playground/Tcp/Pipe/Playground.Tcp.Pipe.csproj" />
     <Project Path="Playground/Tcp/Hop/Playground.Tcp.Hop.csproj" />
     <Project Path="Playground/Tcp/TaskRun/Playground.Tcp.TaskRun.csproj" />
+    <Project Path="Playground/Tcp/Incremental/Playground.Tcp.Incremental.csproj" />
+    <Project Path="Playground/Tcp/Big/Playground.Tcp.Big.csproj" />
+    <Project Path="Playground/Redis/Playground.Redis.csproj" />
+    <Project Path="Playground/Tls/Ktls/Playground.Tls.Ktls.csproj" />
+    <Project Path="Playground/Tls/SslStream/Playground.Tls.SslStream.csproj" />
+    <Project Path="Playground/Quic/Alpn/Playground.Quic.Alpn.csproj" />
     <Project Path="Playground/Pg/Playground.Pg.csproj" />
     <Project Path="Playground/File/Playground.File.csproj" />
     <Project Path="Playground/Proxy/Playground.Proxy.csproj" />
@@ -45,7 +50,7 @@
     <Project Path="Playground/Nghttp3Buffered/Playground.Nghttp3Buffered.csproj" />
   </Folder>
 
-  <!-- Nested so it does not collide with /apps/Examples - same project name, different project. -->
+  <!-- Research scratch - kept out of the main apps listing. -->
   <Folder Name="/apps/research/">
     <Project Path="Research/Examples/Examples.csproj" />
   </Folder>

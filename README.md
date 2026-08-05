@@ -78,5 +78,4 @@ Nothing here is pseudocode. Every pattern above exists as something you can run:
 | --- | --- |
 | **[Documentation](https://mda2av.github.io/ioxide/)** | The examples browser - TCP, QUIC, HTTP/3, every client, and the ASP.NET drop-in, side by side. |
 | **[Playground](Playground/)** | One project per workload. Each `Program.cs` is a **complete** server - config, reactors, threads, handler - so you can copy the file out and run it. |
-| **[Examples](Examples/)** | The raw, pg, redis, file and tls variants plus a `quic-h3` mode, with [benchmark results](Examples/RESULTS.md). |
 | **[Examples.AspNet](Examples.AspNet/)** | `UseIoxide()` measured against a stock Kestrel baseline. |
