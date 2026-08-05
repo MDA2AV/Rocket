@@ -17,9 +17,17 @@ internal static class Http2ClientTests
     private const string SidecarHost = "127.0.0.1";
     private const ushort SidecarPort = 14464;
 
+    // A second sidecar serving the same shape of object WITH trailers (nginx add_trailer), because
+    // a trailer section is an extra HEADERS frame the plain sidecar never emits.
+    //
+    //   docker run -d --name nginx-trailer --network host \
+    //     -v .../nginx-trailer.conf:/etc/nginx/nginx.conf:ro -v .../trailer_root:/doc_root:ro nginx
+    private const ushort TrailerSidecarPort = 14466;
+
     public static void Register(Runner runner)
     {
         bool noSidecar = !Sidecars.Reachable(SidecarHost, SidecarPort);
+        bool noTrailerSidecar = !Sidecars.Reachable(SidecarHost, TrailerSidecarPort);
 
         runner.Test("httpclient h2: GET over h2c", () =>
         {
@@ -62,6 +70,30 @@ internal static class Http2ClientTests
             (_, string stats) = Client.Get(driver, "/connstats");
             Assert.Equal("conns=1", stats);
         }, skip: noSidecar);
+
+        runner.Test("httpclient h2: a trailered response survives and keeps its body", () =>
+        {
+            // nghttp2 reports TRAILERS as HCAT_HEADERS - the same category as the real response
+            // after a 1xx - so begin_headers fires a SECOND time at the end of a trailered stream.
+            // While that callback replaced the response, the assembled one was discarded with
+            // BodyStart/BodyLength still describing its arena, and end_stream then sliced those
+            // offsets out of the fresh, near-empty one: a large body threw
+            // ArgumentOutOfRangeException from inside [UnmanagedCallersOnly] and killed the
+            // process, a small one came back as silent garbage with status 0.
+            //
+            // The 20 KB object is deliberate. It cannot fit the trailer section's arena, so a
+            // regression here is a dead process rather than a merely wrong-looking string.
+            int driver = TestServer.Start(DriverHandler, onStart: reactor =>
+                Http2ClientPool.Start(reactor, TrailerOptions()));
+
+            (int status, string body) = Client.Get(driver, "/big.html", timeoutMs: 20_000);
+            Assert.Equal(200, status);
+            Assert.Equal("200|20000", body);
+
+            // Still serving afterwards - the half that a crash would take with it.
+            (_, string second) = Client.Get(driver, "/big.html", timeoutMs: 20_000);
+            Assert.Equal("200|20000", second);
+        }, skip: noTrailerSidecar);
     }
 
     // Sends a POST with a 4 KiB body and reports the status, so a dropped body shows up as a
@@ -112,6 +144,8 @@ internal static class Http2ClientTests
         Port = SidecarPort,
         PoolSize = 1,
     };
+
+    private static Http2ClientOptions TrailerOptions() => Options() with { Port = TrailerSidecarPort };
 
     private static async Task DriverHandler(Reactor reactor, TcpConnection connection)
     {
