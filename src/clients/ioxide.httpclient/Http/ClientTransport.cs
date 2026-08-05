@@ -20,12 +20,17 @@ internal interface IClientTransport : IDisposable
 
     /// <summary>The ALPN protocol the origin selected, or null for cleartext or no ALPN.</summary>
     string? NegotiatedAlpn { get; }
+
+    /// <summary>True when this pipe is wrapped in TLS. Decides h2's :scheme pseudo-header.</summary>
+    bool IsSecure { get; }
 }
 
 /// <summary>Cleartext: the ring socket, unwrapped.</summary>
 internal sealed class RingSocketTransport(RingSocket socket) : IClientTransport
 {
     public string? NegotiatedAlpn => null;
+
+    public bool IsSecure => false;
 
     public ValueTask<int> SendAsync(nint buffer, int length) => socket.SendAsync(buffer, length);
 
@@ -38,6 +43,8 @@ internal sealed class RingSocketTransport(RingSocket socket) : IClientTransport
 internal sealed class TlsClientTransport(TlsClientStream stream) : IClientTransport
 {
     public string? NegotiatedAlpn => stream.NegotiatedAlpn;
+
+    public bool IsSecure => true;
 
     public ValueTask<int> SendAsync(nint buffer, int length) => stream.SendAsync(buffer, length);
 

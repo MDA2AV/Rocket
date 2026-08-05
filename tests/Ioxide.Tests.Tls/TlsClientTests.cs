@@ -74,6 +74,13 @@ internal static class TlsClientTests
             (int status, string body) = Client.Get(proxy, "/untrusted", timeoutMs: 20_000);
             Assert.Equal(200, status);   // the proxy handler answers; the upstream call is what failed
             Assert.True(body.StartsWith("599|"), $"the handshake should have been refused, got: {body}");
+
+            // Assert on the REASON, not just on failure. A bare 599 cannot tell a rejected
+            // certificate from a refused connect or a timeout, so it would pass for all the wrong
+            // reasons - which is exactly what it used to do before the pool carried the cause
+            // through the acquire timeout.
+            Assert.True(body.Contains("certificate verify failed"),
+                $"should name the verification failure, got: {body}");
         });
 
         runner.Test("tls client: a certificate for another name is refused", () =>
@@ -93,6 +100,8 @@ internal static class TlsClientTests
             (int status, string body) = Client.Get(proxy, "/wrong-name", timeoutMs: 20_000);
             Assert.Equal(200, status);
             Assert.True(body.StartsWith("599|"), $"the name mismatch should have been refused, got: {body}");
+            Assert.True(body.Contains("certificate verify failed"),
+                $"should name the verification failure, got: {body}");
         });
 
         runner.Test("tls client: verification can be turned off deliberately", () =>
@@ -159,10 +168,13 @@ internal static class TlsClientTests
             using TlsTestOrigin origin = TlsTestOrigin.Start("http/1.1");
             (string certPath, _) = TestCert.Ensure();
 
+            // Offer BOTH. Offering only "h2" to an http/1.1-only origin fails the HANDSHAKE with
+            // no_application_protocol, which never reaches the guard being tested - the connection
+            // has to succeed and negotiate http/1.1 for the post-handshake check to fire.
             using TlsClientContext tls = TlsClientContext.Create(new TlsClientOptions
             {
                 ServerName = "localhost",
-                AlpnProtocols = ["h2"],   // offered, but this origin does not speak it
+                AlpnProtocols = ["h2", "http/1.1"],
                 CaFile = certPath,
             });
 
@@ -179,6 +191,8 @@ internal static class TlsClientTests
             (int status, string body) = Client.Get(proxy, "/h2-mismatch", timeoutMs: 20_000);
             Assert.Equal(200, status);
             Assert.True(body.StartsWith("599|"), $"the h2 connect should have failed, got: {body}");
+            Assert.True(body.Contains("ALPN") || body.Contains("alpn"),
+                $"should be the ALPN guard rather than a handshake failure, got: {body}");
         });
 
         runner.Test("tls client: ServerName is required", () =>

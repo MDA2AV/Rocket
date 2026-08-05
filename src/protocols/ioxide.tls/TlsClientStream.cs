@@ -28,7 +28,16 @@ public sealed class TlsClientStream : IDisposable
     private readonly nint _ssl;
     private readonly nint _rbio;   // ciphertext IN: socket -> OpenSSL
     private readonly nint _wbio;   // ciphertext OUT: OpenSSL -> socket
-    private readonly nint _ciphertext;
+
+    // One staging buffer PER DIRECTION, which is not an optimisation - it is required. RingSocket
+    // deliberately allows one send and one recv to be in flight at once (separate completion
+    // sources), and HTTP/2 uses exactly that: its pump sits parked in RecvAsync while a request
+    // submitted from elsewhere drains egress. With a single shared buffer those two hand the
+    // kernel the same address for a recv and a send simultaneously, so inbound record bytes land
+    // in the middle of an outbound record. The corruption only appears under concurrent
+    // multiplexed load, which is the one workload h2 exists for.
+    private readonly nint _inbound;
+    private readonly nint _outbound;
 
     private bool _disposed;
     private bool _peerClosed;
@@ -45,26 +54,57 @@ public sealed class TlsClientStream : IDisposable
         _ssl = ssl;
         _rbio = rbio;
         _wbio = wbio;
-        _ciphertext = AllocateCiphertextBuffer();
+        _inbound = AllocateCiphertextBuffer();
+        _outbound = AllocateCiphertextBuffer();
     }
 
     internal static async ValueTask<TlsClientStream> HandshakeAsync(RingSocket socket, TlsClientContext context)
     {
+        TlsClientOptions options = context.Options;
+
+        // Everything from here to the constructor is unowned: the stream that would free it does
+        // not exist yet, and ClientTransport hands the socket over on the understanding that the
+        // stream closes it on failure. So each step that can throw unwinds explicitly.
         nint ssl = OpenSsl.SSL_new(context.Handle);
         if (ssl == 0)
         {
+            socket.Dispose();
             throw new IOException($"SSL_new: {OpenSsl.LastError()}");
         }
 
-        nint rbio = OpenSsl.BIO_new(OpenSsl.BIO_s_mem());
-        nint wbio = OpenSsl.BIO_new(OpenSsl.BIO_s_mem());
-        OpenSsl.SSL_set_bio(ssl, rbio, wbio);   // ssl owns both BIOs from here
-        OpenSsl.SSL_set_connect_state(ssl);
+        TlsClientStream stream;
+        try
+        {
+            nint rbio = OpenSsl.BIO_new(OpenSsl.BIO_s_mem());
+            nint wbio = OpenSsl.BIO_new(OpenSsl.BIO_s_mem());
+            if (rbio == 0 || wbio == 0)
+            {
+                // Free whichever one succeeded; SSL_set_bio never ran, so neither is owned yet.
+                if (rbio != 0)
+                {
+                    OpenSsl.BIO_free(rbio);
+                }
+                if (wbio != 0)
+                {
+                    OpenSsl.BIO_free(wbio);
+                }
+                throw new IOException($"BIO_new: {OpenSsl.LastError()}");
+            }
 
-        TlsClientOptions options = context.Options;
-        ConfigureNames(ssl, options);
+            OpenSsl.SSL_set_bio(ssl, rbio, wbio);   // ssl owns both BIOs from here
+            OpenSsl.SSL_set_connect_state(ssl);
 
-        var stream = new TlsClientStream(socket, ssl, rbio, wbio);
+            ConfigureNames(ssl, options);   // throws when SSL_set1_host rejects the name
+
+            stream = new TlsClientStream(socket, ssl, rbio, wbio);
+        }
+        catch
+        {
+            OpenSsl.SSL_free(ssl);   // frees the BIOs too, once set_bio has run
+            socket.Dispose();
+            throw;
+        }
+
         try
         {
             await stream.RunHandshakeAsync(options);
@@ -72,7 +112,7 @@ public sealed class TlsClientStream : IDisposable
         }
         catch
         {
-            stream.Dispose();
+            stream.Dispose();   // owns the SSL, both BIOs, both buffers and the socket
             throw;
         }
     }
@@ -131,7 +171,7 @@ public sealed class TlsClientStream : IDisposable
                     $"TLS handshake to '{options.ServerName}' did not complete within {options.HandshakeTimeoutMs} ms");
             }
 
-            int n = await _socket.RecvAsync(_ciphertext, CiphertextBufferSize);
+            int n = await _socket.RecvAsync(_inbound, CiphertextBufferSize);
             if (n <= 0)
             {
                 throw new IOException(n == 0
@@ -167,6 +207,21 @@ public sealed class TlsClientStream : IDisposable
         if (written <= 0)
         {
             int err = OpenSsl.SSL_get_error(_ssl, written);
+
+            // WANT_READ on a WRITE means TLS 1.3 post-handshake traffic (a KeyUpdate, a session
+            // ticket) has to be read before the write can proceed. Deliberately not handled by
+            // reading here: RingSocket has ONE receive completion source, and in a full-duplex
+            // client the read side belongs to someone else - h2's pump sits parked on it. Issuing
+            // a recv from the send path would alias that source, which is the same class of bug as
+            // sharing a staging buffer. Whoever owns the read side feeds the BIO; the caller
+            // retries.
+            if (err == OpenSsl.SSL_ERROR_WANT_READ)
+            {
+                throw new IOException(
+                    "SSL_write needs inbound data first (post-handshake message); retry once the "
+                    + "read side has been pumped");
+            }
+
             throw new IOException($"SSL_write failed (error {err}): {OpenSsl.LastError()}");
         }
 
@@ -211,7 +266,7 @@ public sealed class TlsClientStream : IDisposable
             }
 
             // Incomplete record: pull more ciphertext.
-            int received = await _socket.RecvAsync(_ciphertext, CiphertextBufferSize);
+            int received = await _socket.RecvAsync(_inbound, CiphertextBufferSize);
             if (received <= 0)
             {
                 // A peer that vanished without close_notify is a truncation, but callers already
@@ -239,7 +294,7 @@ public sealed class TlsClientStream : IDisposable
             int sent = 0;
             while (sent < chunk)
             {
-                int n = await _socket.SendAsync(_ciphertext + sent, chunk - sent);
+                int n = await _socket.SendAsync(_outbound + sent, chunk - sent);
                 if (n <= 0)
                 {
                     throw new IOException(n == 0
@@ -256,10 +311,10 @@ public sealed class TlsClientStream : IDisposable
     private static unsafe nint AllocateCiphertextBuffer() => (nint)NativeMemory.Alloc(CiphertextBufferSize);
 
     private unsafe void FeedCiphertext(int length)
-        => OpenSsl.BIO_write(_rbio, (byte*)_ciphertext, length);
+        => OpenSsl.BIO_write(_rbio, (byte*)_inbound, length);
 
     private unsafe int TakeCiphertext()
-        => OpenSsl.BIO_read(_wbio, (byte*)_ciphertext, CiphertextBufferSize);
+        => OpenSsl.BIO_read(_wbio, (byte*)_outbound, CiphertextBufferSize);
 
     private unsafe nuint PendingCiphertext() => OpenSsl.BIO_ctrl_pending(_wbio);
 
@@ -297,7 +352,8 @@ public sealed class TlsClientStream : IDisposable
         }
 
         OpenSsl.SSL_free(_ssl);   // frees both BIOs
-        FreeCiphertextBuffer(_ciphertext);
+        FreeCiphertextBuffer(_inbound);
+        FreeCiphertextBuffer(_outbound);
         _socket.Dispose();
     }
 }

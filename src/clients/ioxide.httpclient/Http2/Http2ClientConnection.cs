@@ -204,7 +204,10 @@ public sealed class Http2ClientConnection : IDisposable
         }
 
         Write(buffer, ref cursor, ":method"u8, request.Method.Span);
-        Write(buffer, ref cursor, ":scheme"u8, "http"u8);
+        // Must match the transport. An origin reached over TLS sees ":scheme http" as a
+        // mismatch, and the strict ones reject the stream for it - harmless while this client was
+        // h2c-only, reachable the moment h2-over-TLS works.
+        Write(buffer, ref cursor, ":scheme"u8, _transport.IsSecure ? "https"u8 : "http"u8);
         Write(buffer, ref cursor, ":authority"u8, _authority);
         Write(buffer, ref cursor, ":path"u8, request.Path.Span);
 

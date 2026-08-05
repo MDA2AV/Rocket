@@ -48,6 +48,11 @@ public sealed class Http2ClientPool : IDisposable
     private int _opening;
     private bool _disposed;
 
+    // Why the most recent connect failed, so an acquire timeout can say more than that it waited.
+    // Over TLS the distinction that matters most - a rejected certificate, or an origin that did
+    // not negotiate h2 - is otherwise visible only on stderr.
+    private string? _lastOpenFailure;
+
     private Http2ClientPool(IRingHost host, Http2ClientOptions options)
     {
         _host = host;
@@ -137,8 +142,10 @@ public sealed class Http2ClientPool : IDisposable
             int remaining = (int)(deadline - Environment.TickCount64);
             if (remaining <= 0)
             {
+                string basic =
+                    $"no HTTP/2 connection to {_options.Host}:{_options.Port} within {_options.AcquireTimeoutMs} ms";
                 throw new Http2ClientException(
-                    $"no HTTP/2 connection to {_options.Host}:{_options.Port} within {_options.AcquireTimeoutMs} ms");
+                    _lastOpenFailure is { } reason ? $"{basic}: {reason}" : basic);
             }
 
             if (_connections.Count + _opening == 0)
@@ -199,10 +206,12 @@ public sealed class Http2ClientPool : IDisposable
                 return;
             }
             _connections.Add(connection);
+            _lastOpenFailure = null;
             WakeWaiters();
         }
         catch (Exception e)
         {
+            _lastOpenFailure = e.Message;
             Console.Error.WriteLine($"[nghttp2] connect to {_options.Host}:{_options.Port} failed: {e.Message}");
             WakeWaiters();   // fail fast: waiters re-check and time out rather than hang
         }

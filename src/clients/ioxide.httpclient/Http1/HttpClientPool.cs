@@ -29,6 +29,10 @@ public sealed class HttpClientPool
     private int _opening;
     private long _reopenAtMs; // jittered backoff gate after a failed connect
 
+    // Why the most recent connect failed, so an acquire timeout can say something more useful than
+    // that it waited. Cleared on success.
+    private string? _lastOpenFailure;
+
     private HttpClientPool(IRingHost host, HttpClientOptions options)
     {
         _host = host;
@@ -122,8 +126,7 @@ public sealed class HttpClientPool
             int remainingMs = (int)(deadlineMs - Environment.TickCount64);
             if (remainingMs <= 0)
             {
-                throw new HttpClientException(
-                    $"no connection to {_options.Host}:{_options.Port} within {_options.AcquireTimeoutMs} ms");
+                throw new HttpClientException(AcquireTimeoutMessage());
             }
 
             var waiter = new TaskCompletionSource<HttpClientConnection?>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -154,8 +157,7 @@ public sealed class HttpClientPool
                     }
                 }
 
-                throw new HttpClientException(
-                    $"no connection to {_options.Host}:{_options.Port} within {_options.AcquireTimeoutMs} ms");
+                throw new HttpClientException(AcquireTimeoutMessage());
             }
 
             HttpClientConnection? handed = await pending;
@@ -212,12 +214,19 @@ public sealed class HttpClientPool
         {
             HttpClientConnection connection = await HttpClientConnection.ConnectAsync(_host, _options);
             _reopenAtMs = 0;   // healthy - allow immediate replenishment
+            _lastOpenFailure = null;
             Release(connection);
         }
         catch (Exception e)
         {
             _live--;
             _reopenAtMs = Environment.TickCount64 + BackoffMs();
+
+            // Keep the reason, not just the log line. A caller that times out acquiring otherwise
+            // sees only "no connection within N ms", which cannot tell a rejected certificate from
+            // a refused connect - the two failures a TLS origin most needs distinguished.
+            _lastOpenFailure = e.Message;
+
             Console.Error.WriteLine($"[httpclient] connect to {_options.Host}:{_options.Port} failed: {e.Message}");
             WakeWaiters();   // fail fast instead of parking requests forever
         }
@@ -254,6 +263,14 @@ public sealed class HttpClientPool
         {
             StartOpen();
         }
+    }
+
+    // The acquire deadline, plus why connecting kept failing when we know. Without the reason a
+    // rejected certificate and a refused connect are indistinguishable to the caller.
+    private string AcquireTimeoutMessage()
+    {
+        string basic = $"no connection to {_options.Host}:{_options.Port} within {_options.AcquireTimeoutMs} ms";
+        return _lastOpenFailure is { } reason ? $"{basic}: {reason}" : basic;
     }
 
     private static int BackoffMs() => 200 + Random.Shared.Next(200);

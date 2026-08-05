@@ -90,6 +90,7 @@ internal static unsafe partial class OpenSsl
     [LibraryImport(Crypto)] public static partial int CRYPTO_get_ex_new_index(int classIndex, long argl, nint argp, nint newFunc, nint dupFunc, nint freeFunc);
 
     [LibraryImport(Crypto)] public static partial nint BIO_new(nint type);
+    [LibraryImport(Crypto)] public static partial int BIO_free(nint bio);
     [LibraryImport(Crypto)] public static partial nint BIO_s_mem();
     [LibraryImport(Crypto)] public static partial int BIO_write(nint bio, byte* data, int dlen);
     [LibraryImport(Crypto)] public static partial int BIO_read(nint bio, byte* data, int dlen);
