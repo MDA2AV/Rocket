@@ -17,6 +17,10 @@ public sealed record Http2ClientOptions
     public int PoolSize { get; init; } = 1;
 
     public int AcquireTimeoutMs { get; init; } = 10_000;
+
+    /// <summary>Per-request ceiling for headers + body; a bigger response fails the request
+    /// instead of growing the arena without bound.</summary>
+    public int MaxResponseBytes { get; init; } = 8 * 1024 * 1024;
 }
 
 /// <summary>
@@ -183,7 +187,7 @@ public sealed class Http2ClientPool : IDisposable
         try
         {
             Http2ClientConnection connection = await Http2ClientConnection.ConnectAsync(
-                _host, _options.Host, _options.Port, _authority);
+                _host, _options.Host, _options.Port, _authority, _options.MaxResponseBytes);
 
             if (_disposed)
             {

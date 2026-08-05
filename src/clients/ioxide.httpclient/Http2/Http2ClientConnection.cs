@@ -58,10 +58,16 @@ public sealed class Http2ClientConnection : IDisposable
 
     private readonly TaskCompletionSource<bool> _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    private Http2ClientConnection(RingSocket socket, string authority)
+    // Ceiling on headers + body per response. nghttp2 streams a response in through callbacks with
+    // no length known up front, so without this a single origin can grow the arena until the
+    // process dies.
+    private readonly int _maxResponseBytes;
+
+    private Http2ClientConnection(RingSocket socket, string authority, int maxResponseBytes)
     {
         _socket = socket;
         _authority = System.Text.Encoding.ASCII.GetBytes(authority);
+        _maxResponseBytes = maxResponseBytes;
     }
 
     public bool IsBroken => _failed || _disposed || _retiring;
@@ -74,7 +80,7 @@ public sealed class Http2ClientConnection : IDisposable
     public int InFlight => _pending.Count;
 
     public static async Task<Http2ClientConnection> ConnectAsync(IRingHost host, string ip, ushort port,
-        string authority)
+        string authority, int maxResponseBytes = 8 * 1024 * 1024)
     {
         RingSocket socket = RingSocket.CreateTcp(host);
         try
@@ -91,7 +97,7 @@ public sealed class Http2ClientConnection : IDisposable
             throw;
         }
 
-        var connection = new Http2ClientConnection(socket, authority);
+        var connection = new Http2ClientConnection(socket, authority, maxResponseBytes);
         connection.Setup();
         _ = connection.PumpLoopAsync();
         await connection._ready.Task;   // preface + SETTINGS on the wire before the first request
@@ -386,14 +392,24 @@ public sealed class Http2ClientConnection : IDisposable
 
         foreach ((PendingRequest pending, HttpClientResponse? response, Exception? error) in finished)
         {
-            if (error is null)
-            {
-                pending.Complete(response!);
-            }
-            else
+            if (error is not null)
             {
                 pending.Fail(error);
+                continue;
             }
+
+            // The arena refused bytes for exceeding MaxResponseBytes. The callbacks could only
+            // record that; failing the caller happens here, where a throw no longer crosses
+            // nghttp2's frames.
+            if (response!.Overflowed)
+            {
+                response.Dispose();
+                pending.Fail(new Http2ClientException(
+                    $"response exceeds MaxResponseBytes ({_maxResponseBytes})"));
+                continue;
+            }
+
+            pending.Complete(response);
         }
     }
 
@@ -507,8 +523,10 @@ public sealed class Http2ClientConnection : IDisposable
         if (connection._pending.TryGetValue(streamId, out PendingRequest? pending) &&
             pending.Response is { } response)
         {
-            response.Append(new ReadOnlySpan<byte>(data, (int)dataLen));
-            pending.BodyLength += (int)dataLen;
+            // Count what the arena ACCEPTED, not what arrived: past MaxResponseBytes the append is
+            // refused and returns a zero-length range, and a body length that outran the arena
+            // would make Freeze slice out of bounds - inside this callback, which is fatal.
+            pending.BodyLength += response.Append(new ReadOnlySpan<byte>(data, (int)dataLen)).Length;
         }
     }
 

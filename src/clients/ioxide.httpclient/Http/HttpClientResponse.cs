@@ -45,16 +45,48 @@ public sealed class HttpClientResponse : IDisposable
     /// <summary>Current arena fill - the offset the next Append will land at.</summary>
     internal int ArenaLength => _arenaUsed;
 
+    // Ceiling on headers + body for this response. h2 and h3 stream a response in through native
+    // callbacks with no Content-Length to check up front, so this is the only thing bounding what
+    // a hostile or broken origin can make us allocate.
+    private int _maxArenaBytes = DefaultMaxArenaBytes;
+
+    // Matches HttpClientOptions.MaxResponseBytes, so all three protocols default alike.
+    private const int DefaultMaxArenaBytes = 8 * 1024 * 1024;
+
+    /// <summary>
+    /// True once an Append was refused for exceeding the cap. Appends are driven from
+    /// <c>[UnmanagedCallersOnly]</c> callbacks, where a throw would cross native frames and take
+    /// the process down, so the overflow is RECORDED here and the owning connection turns it into
+    /// a failed request once the native call has unwound.
+    /// </summary>
+    internal bool Overflowed { get; private set; }
+
+    internal void SetMaxArenaBytes(int max) => _maxArenaBytes = Math.Max(1, max);
+
     internal (int Offset, int Length) Append(ReadOnlySpan<byte> data)
     {
+        // Past the cap: drop the bytes and record it. Growing to serve an origin that has already
+        // overrun its budget is the thing being prevented, and the request is going to fail
+        // anyway, so nothing is gained by keeping the data.
+        if (Overflowed || data.Length > _maxArenaBytes - _arenaUsed)
+        {
+            Overflowed = true;
+            return (_arenaUsed, 0);
+        }
+
         if (_arena.Length - _arenaUsed < data.Length)
         {
-            int size = Math.Max(4096, _arena.Length * 2);
-            while (size - _arenaUsed < data.Length)
+            // In long, because the doubling overflows int once the arena reaches 1 GiB: size went
+            // negative, Math.Max picked 4096, and the loop then doubled its way to int.MinValue
+            // for ArrayPool.Rent to throw on - inside a native callback.
+            long size = Math.Max(4096, (long)_arena.Length * 2);
+            long needed = (long)_arenaUsed + data.Length;
+            while (size < needed)
             {
                 size *= 2;
             }
-            byte[] grown = ArrayPool<byte>.Shared.Rent(size);
+
+            byte[] grown = ArrayPool<byte>.Shared.Rent((int)Math.Min(size, _maxArenaBytes));
             _arena.AsSpan(0, _arenaUsed).CopyTo(grown);
             if (_arena.Length > 0)
             {
@@ -96,10 +128,21 @@ public sealed class HttpClientResponse : IDisposable
         _bodyRange = (0, -1);
         Status = 0;
         ConnectionClose = false;
+        Overflowed = false;
     }
 
     internal void Freeze()
     {
+        // Freeze runs inside the same native callbacks Append does, so it must not throw either.
+        // An overflowed response is about to be discarded and its recorded ranges describe bytes
+        // the arena refused, so materializing them would be both pointless and out of bounds.
+        if (Overflowed)
+        {
+            _ranges.Clear();
+            Body = default;
+            return;
+        }
+
         foreach ((int nameOffset, int nameLength, int valueOffset, int valueLength) in _ranges)
         {
             Headers.Add(_arena.AsMemory(nameOffset, nameLength), _arena.AsMemory(valueOffset, valueLength));
@@ -130,6 +173,7 @@ public sealed class HttpClientResponse : IDisposable
         Body = default;
         _bodyRange = (0, -1);
         _arenaUsed = 0;
+        Overflowed = false;
         if (_arena.Length > 0)
         {
             ArrayPool<byte>.Shared.Return(_arena);
