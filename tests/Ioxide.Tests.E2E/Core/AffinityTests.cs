@@ -116,8 +116,11 @@ internal static class AffinityTests
             (_, string queued) = Client.Get(port, "/boom");
             Assert.Equal("queued", queued);
 
-            // Give the posted continuation time to run and throw on the reactor thread.
-            Thread.Sleep(200);
+            // Wait for proof the continuation actually RAN. Without this the test asserts only that
+            // the reactor is alive, which it would also be if the continuation had been silently
+            // dropped or never resumed - passing for the opposite of the reason intended.
+            Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref _explodeReached) == 1, 5_000),
+                "the async void continuation never reached its throw");
 
             // The reactor is still serving, which is the whole assertion.
             for (int i = 0; i < 3; i++)
@@ -167,11 +170,16 @@ internal static class AffinityTests
         Assert.Equal("on-reactor", body);
     }
 
+    // Set immediately before the throw, so the test can tell "the guard handled it" from "the
+    // continuation never ran at all" - which look identical from the outside.
+    private static int _explodeReached;
+
     // async void on purpose: this is the shape whose exception has nowhere to go but the thread
     // that resumes it.
     private static async void Explode(Reactor reactor)
     {
         await Task.Delay(1);   // resumes on the reactor, via the context
+        Volatile.Write(ref _explodeReached, 1);
         throw new InvalidOperationException("async void continuation blew up on the reactor thread");
     }
 }
