@@ -46,6 +46,37 @@ internal static class AltSvcTests
                 "port above 65535");
         });
 
+        runner.Test("alt-svc: 'clear' is a retraction, not merely an absent advertisement", () =>
+        {
+            // The distinction that matters: "no h3 here" leaves an already-learned port in place,
+            // while "clear" has to take it away. Collapsing both to false meant a retired endpoint
+            // was retried for the life of the client.
+            RingHttpClient.AltSvc cleared = RingHttpClient.ParseAltSvc("clear"u8);
+            Assert.True(cleared.Clear, "'clear' must report as a retraction");
+            Assert.True(!cleared.Advertises, "and it advertises nothing");
+
+            RingHttpClient.AltSvc unrelated = RingHttpClient.ParseAltSvc("h2=\":443\""u8);
+            Assert.True(!unrelated.Clear, "an h2-only header retracts nothing");
+            Assert.True(!unrelated.Advertises, "but offers no h3 either");
+        });
+
+        runner.Test("alt-svc: ma= sets the lifetime, and its absence takes the RFC default", () =>
+        {
+            Assert.Equal(3600, RingHttpClient.ParseAltSvc("h3=\":8443\"; ma=3600"u8).MaxAgeSeconds);
+            Assert.Equal(0, RingHttpClient.ParseAltSvc("h3=\":8443\"; ma=0"u8).MaxAgeSeconds);
+
+            // RFC 7838 section 3.1: ma is optional and defaults to 24 hours.
+            Assert.Equal(86_400, RingHttpClient.ParseAltSvc("h3=\":8443\""u8).MaxAgeSeconds);
+
+            // Other parameters must not be mistaken for it, in either order.
+            Assert.Equal(600, RingHttpClient.ParseAltSvc("h3=\":8443\"; persist=1; ma=600"u8).MaxAgeSeconds);
+            Assert.Equal(86_400, RingHttpClient.ParseAltSvc("h3=\":8443\"; persist=1"u8).MaxAgeSeconds);
+
+            // Unreadable lifetimes keep the default rather than expiring the advertisement early.
+            Assert.Equal(86_400, RingHttpClient.ParseAltSvc("h3=\":8443\"; ma=abc"u8).MaxAgeSeconds);
+            Assert.Equal(86_400, RingHttpClient.ParseAltSvc("h3=\":8443\"; ma=-5"u8).MaxAgeSeconds);
+        });
+
         runner.Test("alt-svc: malformed input terminates instead of hanging", () =>
         {
             // The value arrives from the network, so every shape has to reach a decision. A parse
