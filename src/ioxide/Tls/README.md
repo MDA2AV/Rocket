@@ -1,7 +1,7 @@
-# ioxide.tls
+# TLS
 
-TLS for the [ioxide](https://github.com/MDA2AV/ioxide) io_uring runtime, via **kernel TLS
-(kTLS)**. The handshake runs through OpenSSL over the reactor's ring; the negotiated keys are
+TLS termination for [ioxide](https://github.com/MDA2AV/ioxide), via **kernel TLS (kTLS)**. Part of
+the `ioxide` package - there is nothing extra to install, and none of it loads unless you call it. The handshake runs through OpenSSL over the reactor's ring; the negotiated keys are
 handed to the kernel, which then encrypts everything the server sends. Handlers keep writing
 plaintext through the normal `conn.Write`/`FlushAsync` API - the encryption is invisible to them.
 
@@ -46,4 +46,4 @@ the first.
 - TLS 1.3 with `TLS_AES_128_GCM_SHA256`; ALPN selectable (default `http/1.1`); session tickets
   disabled (they would desync the kTLS record sequence).
 
-Requires `ioxide`. MIT.
+Ships in `ioxide`. MIT.

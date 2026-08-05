@@ -28,7 +28,7 @@ Run any of them with `dotnet run -c Release --project Playground/<Name>`, then h
 | [`Nghttp3Buffered`](Nghttp3Buffered/Program.cs) | 146 | The same server with **buffered** dispatch - one method call is the whole difference. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
 | [`Quic.Alpn`](Quic/Alpn/Program.cs) | 111 | One QUIC listener, two protocols by ALPN: h3, or raw stream echo over the dual pipe. QUIC-only - `Tcp = null`. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
 | [`Redis`](Redis/Program.cs) | 194 | A `RedisPool` per reactor: GET hot path, cache-aside, RESP types, explicit pipelining. | `ioxide.redis` |
-| [`Tls.Ktls`](Tls/Ktls/Program.cs) | 133 | OpenSSL handshake on the ring, then **kernel TLS** transmit - the handler writes plaintext. | `ioxide.tls` |
+| [`Tls.Ktls`](Tls/Ktls/Program.cs) | 133 | OpenSSL handshake on the ring, then **kernel TLS** transmit - the handler writes plaintext. | `ioxide` |
 | [`Tls.SslStream`](Tls/SslStream/Program.cs) | 100 | The BCL `SslStream` over `TcpConnectionStream` - portable userspace TLS, the kTLS comparison point. | `ioxide` |
 
 Read `Tcp.Raw` first - every other sample is that same skeleton with one thing changed.

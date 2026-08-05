@@ -3,7 +3,6 @@
 [![ioxide.pg](https://img.shields.io/nuget/v/ioxide.pg?label=ioxide.pg)](https://www.nuget.org/packages/ioxide.pg/)
 [![ioxide.redis](https://img.shields.io/nuget/v/ioxide.redis?label=ioxide.redis)](https://www.nuget.org/packages/ioxide.redis/)
 [![ioxide.file](https://img.shields.io/nuget/v/ioxide.file?label=ioxide.file)](https://www.nuget.org/packages/ioxide.file/)
-[![ioxide.tls](https://img.shields.io/nuget/v/ioxide.tls?label=ioxide.tls)](https://www.nuget.org/packages/ioxide.tls/)
 [![ioxide.Kestrel](https://img.shields.io/nuget/v/ioxide.Kestrel?label=ioxide.Kestrel)](https://www.nuget.org/packages/ioxide.Kestrel/)
 [![ioxide.ngtcp2](https://img.shields.io/nuget/v/ioxide.ngtcp2?label=ioxide.ngtcp2)](https://www.nuget.org/packages/ioxide.ngtcp2/)
 [![ioxide.nghttp3](https://img.shields.io/nuget/v/ioxide.nghttp3?label=ioxide.nghttp3)](https://www.nuget.org/packages/ioxide.nghttp3/)
@@ -57,12 +56,11 @@ with Kestrel's request loop pinned to the reactor thread, and your endpoints unc
 
 | Package | What it does |
 | --- | --- |
-| `ioxide` | The runtime: reactors, TCP/UDP transports, connections, the ring-native client seam. |
+| `ioxide` | The runtime: reactors, TCP/UDP transports, connections, the ring-native client seam, and TLS termination (OpenSSL handshake over the ring, then kTLS - handlers keep writing plaintext). |
 | `ioxide.httpclient` | The ring-native HTTP client: HTTP/1.1, HTTP/2 (h2c) and HTTP/3 behind one API, Alt-Svc negotiation, one set of message types. Bundles the nghttp2 native. |
 | `ioxide.ngtcp2` | QUIC engine: ngtcp2 + picotls bundled native. Only system dependency is OpenSSL 3. |
 | `ioxide.nghttp3` | HTTP/3 + QPACK (nghttp3), bundled native. Rides any QUIC connection. |
 | `ioxide.http3` | Pure-C# HTTP/3: frames, QPACK, Huffman. Zero native code, drop-in for `ioxide.nghttp3`. |
-| `ioxide.tls` | TLS. OpenSSL handshake over the ring, then kTLS - handlers keep writing plaintext. |
 | `ioxide.pg` | Postgres driver. A pool per reactor; connect, query and stream rows on the owning ring. |
 | `ioxide.redis` | Redis client. RESP2, pipelining, pub/sub - pooled per reactor. |
 | `ioxide.file` | Static assets. Immutable snapshots, baked responses, positional ring reads. |
