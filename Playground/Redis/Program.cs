@@ -119,7 +119,10 @@ foreach (Thread thread in threads)
 
 static async Task SeedAsync(RedisPool pool)
 {
-    try { await pool.ExecuteAsync("SET", "play:bench", "42"); }
+    try
+    {
+        await pool.ExecuteAsync("SET", "play:bench", "42");
+    }
     catch (Exception e) { Console.Error.WriteLine($"[redis] seed failed: {e.Message}"); }
 }
 
@@ -186,6 +189,7 @@ static string ReadPath(TcpConnection conn, RecvSnapshot snapshot)
             conn.ReturnBuffer(in item);
         }
     }
+
     return path;
 }
 

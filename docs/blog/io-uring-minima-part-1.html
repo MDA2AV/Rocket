@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>io_uring from scratch in C# &mdash; Part 1 &mdash; zerg</title>
+    <title>io_uring from scratch in C# &middot; Part 1 &middot; zerg</title>
     <link rel="stylesheet" href="../assets/style.css">
     <link rel="stylesheet" href="../assets/highlight-dark.min.css">
     <link rel="stylesheet" href="blog.css">
@@ -39,7 +39,7 @@
             <img src="images/part-1-hero.png" alt="" class="post-hero">
 
             <header class="post-header">
-                <h1>io_uring from scratch in C# &mdash; Part 1</h1>
+                <h1>io_uring from scratch in C# &middot; Part 1</h1>
                 <div class="post-meta">2026-04-29 &middot; Part 1</div>
             </header>
 
@@ -51,7 +51,7 @@
             </div>
 
             <div class="post-body">
-                <p>This post is the first part in a deep dive series on io_uring, it describes a basic example on how to bypass every abstraction and directly use the kernel interface for highest possible efficiency TCP networking using C# on Linux with io_uring. The source code used in this post can be found at <a href="https://github.com/MDA2AV/zerg/tree/main/Minima">zerg</a>, project Minima &mdash; a simplified lightweight single threaded, lower performance version of zerg for learning purposes, do not use it for benchmarking purposes. The second and third parts will dive into more complex high performance cases and leveraging C# async I/O via <code>IValueTaskSource</code>.</p>
+                <p>This post is the first part in a deep dive series on io_uring, it describes a basic example on how to bypass every abstraction and directly use the kernel interface for highest possible efficiency TCP networking using C# on Linux with io_uring. The source code used in this post can be found at <a href="https://github.com/MDA2AV/zerg/tree/main/Minima">zerg</a>, project Minima &middot; a simplified lightweight single threaded, lower performance version of zerg for learning purposes, do not use it for benchmarking purposes. The second and third parts will dive into more complex high performance cases and leveraging C# async I/O via <code>IValueTaskSource</code>.</p>
 
                 <p>io_uring is a modern Linux asynchronous I/O interface, the current traditional path is <code>epoll_wait</code> (to find out which sockets are ready) plus a separate <code>read</code>/<code>write</code>/<code>accept</code> syscall to actually move bytes. Each of those crosses from user to kernel mode and back, this round trip is expensive. io_uring's novelty is to skip the syscalls on the hot path entirely. At startup we allocate two ring buffers in shared memory between our process and the kernel, a submission queue SQ to write descriptions of the work we want done and a completion queue CQ where the kernel posts the results, simple enough.</p>
 
@@ -221,9 +221,9 @@ public void CqeSeen() =&gt; Volatile.Write(ref *_cqHead, *_cqHead + 1);</code></
                 <p>Going through what the dispatch branches do is not very important for this part 1 but:</p>
 
                 <ul>
-                    <li><strong>KindAccept</strong> &mdash; accepts new connections</li>
-                    <li><strong>KindRecv</strong> &mdash; receive data</li>
-                    <li><strong>KindSend</strong> &mdash; kernel notifies about data we tried to send</li>
+                    <li><strong>KindAccept</strong> &middot; accepts new connections</li>
+                    <li><strong>KindRecv</strong> &middot; receive data</li>
+                    <li><strong>KindSend</strong> &middot; kernel notifies about data we tried to send</li>
                 </ul>
 
                 <p>In this example we are not really doing anything with the received data, this will be covered in the following parts: how to avoid allocations by directly reading from kernel shared memory, use modern io_uring features for zero-allocation send and incremental buffers to reuse rings on small data reads.</p>

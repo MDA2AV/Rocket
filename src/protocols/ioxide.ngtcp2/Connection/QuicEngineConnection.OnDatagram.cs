@@ -25,7 +25,7 @@ public unsafe partial class QuicEngineConnection
     {
         // One call = one wire datagram: the transport pre-splits GRO trains before demux.
         int rv;
-        
+
         // TODO: can we get the byte* without a fixed
         fixed (byte* p = payload)
         {
@@ -41,11 +41,11 @@ public unsafe partial class QuicEngineConnection
         {
             // Deferred from OnStreamData: tear down now that the engine call has unwound.
             Console.Error.WriteLine("[ioxide.ngtcp2] recv queue overflow; closing connection.");
-            
+
             _closed = true;
             _reactor.QuicRemoveConnection(this);
             Destroy();
-            
+
             return;
         }
 

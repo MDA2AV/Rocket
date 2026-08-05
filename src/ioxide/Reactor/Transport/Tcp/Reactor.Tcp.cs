@@ -81,7 +81,7 @@ public sealed unsafe partial class Reactor
             SubmitAcceptMultishot(listenFd);
         }
     }
-    
+
     // Recv completions, one method per loop mode - the single operation the two modes genuinely
     // differ on (where buffers come from and who returns them). The skeleton both share - stale
     // guard, EOF teardown, overflow teardown, re-arm - lives here and in the CloseFromRecv helpers,
@@ -323,7 +323,7 @@ public sealed unsafe partial class Reactor
         }
         return _port;
     }
-    
+
     // Per accepted socket - TCP_NODELAY doesn't reliably inherit from the listener.
     private static void SetNoDelay(int fd)
     {

@@ -47,7 +47,7 @@ public sealed unsafe partial class Reactor
 
         if (_incremental) LoopIncremental();
         else LoopSharedRing();
-        
+
         Teardown();
     }
 

@@ -9,13 +9,13 @@ public sealed unsafe partial class Reactor
 {
     private readonly Mpsc<ushort> _returnQ = new(1 << 14);
     private readonly Mpsc<ulong>  _flushQ  = new(1 << 12);   // (gen << 32) | fd
-    
+
     // Recycle must run on the reactor (buf_ring + pool are reactor-owned). TcpConnection is a
     // ref type, so this queue is a ConcurrentQueue rather than the unmanaged Mpsc<T>.
     private readonly ConcurrentQueue<TcpConnection> _recycleQ = new();
-    
+
 #region Wake
-    
+
     private void WakeFdWrite()
     {
         ulong v = 1;
@@ -32,11 +32,11 @@ public sealed unsafe partial class Reactor
         sqe->len       = IORING_POLL_ADD_MULTI;
         sqe->user_data = Tag(KindWake, 0, _wakeFd);
     }
-    
+
 #endregion
-    
+
 #region Return
-    
+
     public void EnqueueReturnQ(ushort bid)
     {
         if (Environment.CurrentManagedThreadId == _reactorThreadId)
@@ -53,7 +53,7 @@ public sealed unsafe partial class Reactor
         // drains meanwhile, recvs fail with ENOBUFS.
         WakeFdWrite();
     }
-    
+
     private void DrainReturnQ()
     {
         bool any = false;
@@ -67,11 +67,11 @@ public sealed unsafe partial class Reactor
             PublishBufRingTail();
         }
     }
-    
+
 #endregion
-    
+
 #region Recycle
-    
+
     // Called by TcpConnection.DecRef at refcount 0.
     internal void EnqueueRecycle(TcpConnection conn)
     {
@@ -91,7 +91,7 @@ public sealed unsafe partial class Reactor
             Recycle(conn, conn.ClientFd);
         }
     }
-    
+
     private void Recycle(TcpConnection conn, int fd)
     {
         conn.MarkClosed();
@@ -117,11 +117,11 @@ public sealed unsafe partial class Reactor
             conn.Dispose();
         }
     }
-    
+
 #endregion
-    
+
 #region Flush
-    
+
     internal void EnqueueFlush(int fd, int gen)
     {
         if (Environment.CurrentManagedThreadId == _reactorThreadId)
@@ -140,7 +140,7 @@ public sealed unsafe partial class Reactor
             sw.SpinOnce();
         }
         WakeFdWrite();
-        
+
     }
     private void DrainFlushQ()
     {
@@ -158,7 +158,7 @@ public sealed unsafe partial class Reactor
             SubmitFlush(conn, fd, gen);
         }
     }
-    
+
     // Submits the right send for a pending flush: a vectored SENDMSG for a segmented (multi-segment)
     // response, or the plain contiguous SEND for everything else (incl. the fast path and Grow mode).
     private void SubmitFlush(TcpConnection conn, int fd, ushort gen)
@@ -172,6 +172,6 @@ public sealed unsafe partial class Reactor
             SubmitSend(conn, fd, gen, conn.WriteBuffer, (uint)conn.WriteInFlight, conn.SendOpFlags);
         }
     }
-    
+
 #endregion
 }

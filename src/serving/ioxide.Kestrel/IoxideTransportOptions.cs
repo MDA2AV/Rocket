@@ -19,7 +19,7 @@ public sealed class IoxideTransportOptions
     public Func<ServerConfig, ServerConfig>? ConfigureServer { get; set; }
 
     /// <summary>
-    /// Per-reactor startup hook, run on each reactor's own thread before its loop starts — open ring-native
+    /// Per-reactor startup hook, run on each reactor's own thread before its loop starts - open ring-native
     /// clients here (e.g. <c>PgPool.Start(r, pgOptions)</c>, <c>AssetReader.CreatePool(r, ...)</c>) so DB and
     /// file I/O ride that reactor's ring. Endpoints resolve them via <c>IoxideReactor.Current.GetService&lt;T&gt;()</c>.
     /// </summary>
@@ -28,7 +28,7 @@ public sealed class IoxideTransportOptions
     /// <summary>
     /// TLS termination via kTLS (kernel TLS), done in the transport on the listed ports. When set, the
     /// reactor runs the TLS 1.3 handshake on accept, installs kTLS TX, and hands Kestrel a plaintext
-    /// connection with the TLS connection features set — so the endpoint must NOT use <c>UseHttps()</c>.
+    /// connection with the TLS connection features set - so the endpoint must NOT use <c>UseHttps()</c>.
     /// Null = no TLS (every port is plaintext). Currently HTTP/1.1 only (see <see cref="IoxideTlsOptions.Alpn"/>).
     /// </summary>
     public IoxideTlsOptions? Tls { get; set; }

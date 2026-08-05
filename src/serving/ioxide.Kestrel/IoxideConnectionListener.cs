@@ -12,7 +12,7 @@ namespace ioxide.Kestrel;
 /// bridges ioxide's push model (per-connection <c>Handle</c> callback on the reactor thread) to Kestrel's
 /// pull model (<see cref="AcceptAsync"/>). The Handle callback wraps each connection, pushes it onto a
 /// channel for Kestrel to dequeue, starts the transport pumps, and then parks until Kestrel disposes the
-/// connection — keeping the connection's handler-side ref alive for its whole Kestrel lifetime.
+/// connection - keeping the connection's handler-side ref alive for its whole Kestrel lifetime.
 /// </summary>
 internal sealed class IoxideConnectionListener : IConnectionListener
 {
@@ -100,7 +100,7 @@ internal sealed class IoxideConnectionListener : IConnectionListener
 
         // kTLS handshake (TLS endpoints only) runs here on the reactor thread, before Kestrel sees the
         // connection. It awaits the ring recv/send and resumes inline. On success the kernel does TX
-        // encryption from here on; the returned session decrypts inbound records — Kestrel gets plaintext.
+        // encryption from here on; the returned session decrypts inbound records - Kestrel gets plaintext.
         TlsSession? session = null;
         if (_tlsOptions is not null)
         {

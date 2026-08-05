@@ -2,7 +2,7 @@
 
 An ASP.NET Core **Kestrel transport** backed by the [ioxide](https://github.com/MDA2AV/ioxide) io_uring
 runtime. One reactor (io_uring ring) per core, SO_REUSEPORT load-balanced, with Kestrel's entire request
-loop pinned to the reactor thread — no ThreadPool hop on the hot path.
+loop pinned to the reactor thread - no ThreadPool hop on the hot path.
 
 ## Usage
 
@@ -39,4 +39,4 @@ the inbound pipe and a send pump drains Kestrel's response into the connection's
 - .NET 11.
 
 > Inline execution note: like any thread-per-core transport, application middleware runs on the reactor
-> thread. Blocking work in a handler stalls every connection on that reactor — keep handlers async.
+> thread. Blocking work in a handler stalls every connection on that reactor - keep handlers async.

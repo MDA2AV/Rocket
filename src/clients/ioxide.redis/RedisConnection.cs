@@ -65,6 +65,7 @@ public sealed partial class RedisConnection : IDisposable
                     ? await connection.ExecuteAsync("AUTH", user, options.Password)
                     : await connection.ExecuteAsync("AUTH", options.Password);
             }
+
             if (options.Database != 0)
             {
                 await connection.ExecuteAsync("SELECT", options.Database);
@@ -94,6 +95,7 @@ public sealed partial class RedisConnection : IDisposable
         {
             throw new RedisException(reply.AsString() ?? "redis error");
         }
+
         return reply;
     }
 
@@ -104,6 +106,7 @@ public sealed partial class RedisConnection : IDisposable
         {
             return ValueTask.FromException<RespValue>(new RedisException("connection is broken"));
         }
+
         try
         {
             AppendCommand(nameToken, args);
@@ -116,8 +119,17 @@ public sealed partial class RedisConnection : IDisposable
         var pending = new Pending { EnqueuedAtMs = Environment.TickCount64 };
         _inflight.Enqueue(pending);
 
-        if (!_sending) { _sending = true; _ = SenderLoopAsync(); }
-        if (!_reading) { _reading = true; _ = ReaderLoopAsync(); }
+        if (!_sending)
+        {
+            _sending = true;
+            _ = SenderLoopAsync();
+        }
+
+        if (!_reading)
+        {
+            _reading = true;
+            _ = ReaderLoopAsync();
+        }
 
         return new ValueTask<RespValue>(pending, pending.Version);
     }
@@ -145,6 +157,7 @@ public sealed partial class RedisConnection : IDisposable
         {
             replies[i] = await pending[i];
         }
+
         return replies;
     }
 
@@ -159,10 +172,12 @@ public sealed partial class RedisConnection : IDisposable
         {
             throw new RedisException($"command exceeds send buffer ({_sendCapacity} bytes)");
         }
+
         if (_sendEnd + size > _sendCapacity)
         {
             throw new RedisException("pipelined send buffer full");
         }
+
         int written = RespProtocol.WriteCommand(new Span<byte>((void*)(_send + _sendEnd), _sendCapacity - _sendEnd), nameToken, args);
         _sendEnd += written;
     }
@@ -235,6 +250,7 @@ public sealed partial class RedisConnection : IDisposable
         {
             return false;
         }
+
         long age = nowMs - _inflight.Peek().EnqueuedAtMs;
         if (age <= timeoutMs)
         {
@@ -310,6 +326,7 @@ public sealed partial class RedisConnection : IDisposable
             _scan += consumed;
             return true;
         }
+
         return false;
     }
 
@@ -319,6 +336,7 @@ public sealed partial class RedisConnection : IDisposable
         {
             return;
         }
+
         if (_scan > 0)
         {
             Buffer.MemoryCopy((void*)(_recv + _scan), (void*)_recv, _recvCapacity, _received - _scan);
@@ -326,6 +344,7 @@ public sealed partial class RedisConnection : IDisposable
             _scan = 0;
             return;
         }
+
         if (_recvCapacity >= MaxBufferSize)
         {
             IsBroken = true;
@@ -338,8 +357,17 @@ public sealed partial class RedisConnection : IDisposable
     public unsafe void Dispose()
     {
         _socket.Dispose();
-        if (_send != 0) { NativeMemory.Free((void*)_send); _send = 0; }
-        if (_recv != 0) { NativeMemory.Free((void*)_recv); _recv = 0; }
+        if (_send != 0)
+        {
+            NativeMemory.Free((void*)_send);
+            _send = 0;
+        }
+
+        if (_recv != 0)
+        {
+            NativeMemory.Free((void*)_recv);
+            _recv = 0;
+        }
     }
 }
 

@@ -43,7 +43,7 @@ public sealed unsafe partial class Reactor
 
         PublishBufRingTail();
     }
-    
+
     private void LoopSharedRing()
     {
         while (!_stopRequested)
@@ -71,7 +71,7 @@ public sealed unsafe partial class Reactor
             _ring.CqAdvance(ready);
         }
     }
-    
+
     private void DispatchSharedRing(in IoUringCqe cqe)
     {
         byte   kind = (byte)(cqe.user_data >> KindShift);
@@ -85,7 +85,7 @@ public sealed unsafe partial class Reactor
             case KindTcpAccept:
                 OnTcpAcceptCompletion(fd, cqe.res, more);
                 return;
-            
+
             case KindTcpRecv:
                 OnTcpRecvCompletionShared(fd, gen, cqe.res, cqe.flags);
                 return;
@@ -102,7 +102,7 @@ public sealed unsafe partial class Reactor
             case KindUdpSend:
                 OnUdpSendCompletion(fd, cqe.res);
                 return;
-            
+
             // OTHER
             case KindClient:
                 OnClientCompletion(fd, cqe.res);

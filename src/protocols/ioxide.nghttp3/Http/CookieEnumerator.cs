@@ -79,4 +79,3 @@ public ref struct CookieEnumerator
         }
     }
 }
-

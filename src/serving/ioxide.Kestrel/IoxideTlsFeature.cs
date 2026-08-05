@@ -21,16 +21,16 @@ internal sealed class IoxideTlsFeature : ITlsConnectionFeature, ITlsHandshakeFea
         ApplicationProtocol = applicationProtocol;
     }
 
-    // ITlsApplicationProtocolFeature — the negotiated ALPN (HTTP/1.1 in Phase 1).
+    // ITlsApplicationProtocolFeature - the negotiated ALPN (HTTP/1.1 in Phase 1).
     public ReadOnlyMemory<byte> ApplicationProtocol { get; }
 
-    // ITlsConnectionFeature — ioxide.tls never requests a client certificate.
+    // ITlsConnectionFeature - ioxide.tls never requests a client certificate.
     public X509Certificate2? ClientCertificate { get; set; }
 
     public Task<X509Certificate2?> GetClientCertificateAsync(CancellationToken cancellationToken)
         => Task.FromResult(ClientCertificate);
 
-    // ITlsHandshakeFeature — fixed by ioxide.tls's single TLS 1.3 ciphersuite. NegotiatedCipherSuite is the
+    // ITlsHandshakeFeature - fixed by ioxide.tls's single TLS 1.3 ciphersuite. NegotiatedCipherSuite is the
     // modern accessor; the legacy CipherAlgorithm/HashAlgorithm/KeyExchangeAlgorithm (+ *Strength) properties
     // are obsolete (SYSLIB0058) but still required interface members, so implement and suppress the warning.
     public SslProtocols Protocol => SslProtocols.Tls13;

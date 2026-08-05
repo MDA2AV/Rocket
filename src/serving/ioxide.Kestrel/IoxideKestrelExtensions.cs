@@ -11,7 +11,7 @@ public static class IoxideKestrelExtensions
     /// <summary>
     /// Replaces Kestrel's default sockets transport with the ioxide io_uring transport. Call after
     /// <c>UseKestrel</c> (or rely on the implicit Kestrel registration that <c>WebApplication.CreateBuilder</c>
-    /// performs) — this evicts any previously-registered <see cref="IConnectionListenerFactory"/>.
+    /// performs) - this evicts any previously-registered <see cref="IConnectionListenerFactory"/>.
     /// </summary>
     public static IWebHostBuilder UseIoxide(this IWebHostBuilder builder, Action<IoxideTransportOptions>? configure = null)
     {

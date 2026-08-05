@@ -107,6 +107,7 @@ public sealed class PgConnection : IDisposable
                     {
                         break;   // AuthenticationOk
                     }
+
                     if (code == 10)
                     {
                         // SASL: the server lists mechanisms; we speak SCRAM-SHA-256.
@@ -119,6 +120,7 @@ public sealed class PgConnection : IDisposable
                         await SendAllAsync(WriteSaslInitial(scram.ClientFirst()));
                         break;
                     }
+
                     if (code == 11)
                     {
                         // SASLContinue: server-first in, client-final (with proof) out.
@@ -129,6 +131,7 @@ public sealed class PgConnection : IDisposable
                         await SendAllAsync(WriteSaslFinal(scram.ClientFinal(ReadAuthData(message))));
                         break;
                     }
+
                     if (code == 12)
                     {
                         // SASLFinal: verify the server signature.
@@ -182,6 +185,7 @@ public sealed class PgConnection : IDisposable
         {
             return ValueTask.FromException<PgResult>(new PgException("connection is broken"));
         }
+
         if (args.Length > short.MaxValue)
         {
             return ValueTask.FromException<PgResult>(
@@ -214,8 +218,17 @@ public sealed class PgConnection : IDisposable
         var pending = new Pending(onRow) { PreparedSql = cached ? sql : null, Sql = sql, EnqueuedAtMs = Environment.TickCount64 };
         _inflight.Enqueue(pending);
 
-        if (!_sending) { _sending = true; _ = SenderLoopAsync(); }
-        if (!_reading) { _reading = true; _ = ReaderLoopAsync(); }
+        if (!_sending)
+        {
+            _sending = true;
+            _ = SenderLoopAsync();
+        }
+
+        if (!_reading)
+        {
+            _reading = true;
+            _ = ReaderLoopAsync();
+        }
 
         return new ValueTask<PgResult>(pending, pending.Version);
     }
@@ -240,8 +253,17 @@ public sealed class PgConnection : IDisposable
         var pending = new Pending(onRow) { EnqueuedAtMs = Environment.TickCount64 };
         _inflight.Enqueue(pending);
 
-        if (!_sending) { _sending = true; _ = SenderLoopAsync(); }
-        if (!_reading) { _reading = true; _ = ReaderLoopAsync(); }
+        if (!_sending)
+        {
+            _sending = true;
+            _ = SenderLoopAsync();
+        }
+
+        if (!_reading)
+        {
+            _reading = true;
+            _ = ReaderLoopAsync();
+        }
 
         return new ValueTask<PgResult>(pending, pending.Version);
     }
@@ -388,6 +410,7 @@ public sealed class PgConnection : IDisposable
         {
             return false;
         }
+
         long age = nowMs - _inflight.Peek().EnqueuedAtMs;
         if (age <= timeoutMs)
         {
@@ -593,10 +616,12 @@ public sealed class PgConnection : IDisposable
         {
             throw new PgException($"query exceeds send buffer ({_sendCapacity} bytes)");
         }
+
         if (_sendEnd + needed > _sendCapacity)
         {
             throw new PgException("pipelined send buffer full");
         }
+
         int written = PgProtocol.WriteQuery(new Span<byte>((void*)(_send + _sendEnd), _sendCapacity - _sendEnd), sql);
         _sendEnd += written;
     }
@@ -611,10 +636,12 @@ public sealed class PgConnection : IDisposable
         {
             throw new PgException($"query exceeds send buffer ({_sendCapacity} bytes)");
         }
+
         if (_sendEnd + needed > _sendCapacity)
         {
             throw new PgException("pipelined send buffer full");
         }
+
         int written = PgProtocol.WriteExtended(
             new Span<byte>((void*)(_send + _sendEnd), _sendCapacity - _sendEnd), parse, statementName, sql, args);
         _sendEnd += written;
@@ -632,6 +659,7 @@ public sealed class PgConnection : IDisposable
         {
             return null;   // no fields, or SQL NULL
         }
+
         return Encoding.UTF8.GetString(body.Slice(offset, length));
     }
 
@@ -660,6 +688,7 @@ public sealed class PgConnection : IDisposable
             NativeMemory.Free((void*)_send);
             _send = 0;
         }
+
         if (_recv != 0)
         {
             NativeMemory.Free((void*)_recv);

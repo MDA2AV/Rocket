@@ -71,8 +71,14 @@ async Task LoopAsync(Func<ValueTask<HttpClientResponse>> send)
         try
         {
             using HttpClientResponse response = await send();
-            if (response.Status == 200) { Interlocked.Increment(ref completed); }
-            else { Interlocked.Increment(ref failed); }
+            if (response.Status == 200)
+            {
+                Interlocked.Increment(ref completed);
+            }
+            else
+            {
+                Interlocked.Increment(ref failed);
+            }
         }
         catch (Exception e)
         {

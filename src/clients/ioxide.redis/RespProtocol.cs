@@ -17,6 +17,7 @@ internal static class RespProtocol
         {
             size += BulkSize(arg.Bytes.Length);
         }
+
         return size;
     }
 
@@ -36,6 +37,7 @@ internal static class RespProtocol
         {
             p += WriteBulk(dst[p..], arg.Bytes);
         }
+
         return p;
     }
 
@@ -75,7 +77,11 @@ internal static class RespProtocol
     private static int IntLen(int value)
     {
         int len = value < 0 ? 1 : 0;
-        do { len++; value /= 10; } while (value != 0);
+        do
+        {
+            len++;
+            value /= 10;
+        } while (value != 0);
         return len;
     }
 
@@ -141,10 +147,12 @@ internal static class RespProtocol
                     pos = afterLine;
                     return true;
                 }
+
                 if (len < -1)
                 {
                     throw new RedisException($"invalid bulk length {len}");
                 }
+
                 if (afterLine + len + 2 > buffer.Length)
                 {
                     // Body not fully buffered: report how many bytes are needed so the reader can
@@ -166,10 +174,12 @@ internal static class RespProtocol
                     pos = afterLine;
                     return true;
                 }
+
                 if (count < -1 || count > int.MaxValue)
                 {
                     throw new RedisException($"invalid array length {count}");
                 }
+
                 var items = new RespValue[count];
                 int p = afterLine;
                 for (int i = 0; i < count; i++)
@@ -206,6 +216,7 @@ internal static class RespProtocol
         {
             throw new RedisException("malformed RESP integer");
         }
+
         long n = 0;
         foreach (byte c in s)
         {
@@ -215,6 +226,7 @@ internal static class RespProtocol
             }
             n = checked(n * 10 + (c - '0'));
         }
+
         return neg ? -n : n;
     }
 }

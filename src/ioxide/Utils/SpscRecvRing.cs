@@ -30,7 +30,7 @@ public sealed unsafe class SpscRecvRing
         {
             throw new ArgumentException("capacity must be a power of two", nameof(capacityPow2));
         }
-        
+
         _items = new Item[capacityPow2];
         _mask  = capacityPow2 - 1;
     }
@@ -40,15 +40,15 @@ public sealed unsafe class SpscRecvRing
     {
         long head = Volatile.Read(ref _head);
         long tail = _tail;
-        
+
         if ((ulong)(tail - head) >= (ulong)_items.Length)
         {
             return false;
         }
-        
+
         _items[(int)(tail & _mask)] = item;
         Volatile.Write(ref _tail, tail + 1);
-        
+
         return true;
     }
 
@@ -57,16 +57,16 @@ public sealed unsafe class SpscRecvRing
     {
         long head = _head;
         long tail = Volatile.Read(ref _tail);
-        
+
         if (head >= tail)
         {
-            item = default; 
+            item = default;
             return false;
         }
-        
+
         item = _items[(int)(head & _mask)];
         Volatile.Write(ref _head, head + 1);
-        
+
         return true;
     }
 
@@ -81,16 +81,16 @@ public sealed unsafe class SpscRecvRing
     public bool TryDequeueUntil(long tailSnapshot, out Item item)
     {
         long head = _head;
-        
+
         if (head >= tailSnapshot)
         {
-            item = default; 
-            return false; 
+            item = default;
+            return false;
         }
-        
+
         item = _items[(int)(head & _mask)];
         Volatile.Write(ref _head, head + 1);
-        
+
         return true;
     }
 

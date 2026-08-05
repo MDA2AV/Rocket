@@ -7,31 +7,31 @@ using static ioxide.Native;
 
 namespace ioxide;
 
-public sealed unsafe class Ring : IDisposable 
+public sealed unsafe class Ring : IDisposable
 {
     private int _fd;
 
     public int Fd => _fd;
-    
-    private uint*       _sqHead;   
-    private uint*       _sqTail;    
-    private uint*       _sqArray;    
+
+    private uint*       _sqHead;
+    private uint*       _sqTail;
+    private uint*       _sqArray;
     private uint        _sqMask;
     private uint        _sqEntries;
-    private IoUringSqe* _sqes;       
-    
-    private uint*       _cqHead;    
-    private uint*       _cqTail;    
+    private IoUringSqe* _sqes;
+
+    private uint*       _cqHead;
+    private uint*       _cqTail;
     private IoUringCqe* _cqes;
     private uint        _cqMask;
 
     private uint _sqeTail;
-    
+
     private byte* _ringPtr;
     private nuint _ringSize;
     private byte* _sqePtr;
     private nuint _sqeSize;
-    
+
     private bool _hasSqArray;
 
     public static Ring Create(uint entries)
@@ -62,7 +62,7 @@ public sealed unsafe class Ring : IDisposable
             _sqEntries = ioUringParams.sq_entries,
             _hasSqArray = hasSqArray
         };
-        
+
         nuint sqRingBytes = ioUringParams.sq_off.array + ioUringParams.sq_entries * sizeof(uint);
         nuint cqRingBytes = ioUringParams.cq_off.cqes  + ioUringParams.cq_entries * (nuint)sizeof(IoUringCqe);
         nuint ringBytes   = sqRingBytes > cqRingBytes ? sqRingBytes : cqRingBytes;
@@ -70,26 +70,26 @@ public sealed unsafe class Ring : IDisposable
         void* ringMem = mmap(null, ringBytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, IORING_OFF_SQ_RING);
         if (ringMem == (void*)-1)
         {
-            close(fd); 
-            
-            throw new InvalidOperationException("mmap(SQ_RING) failed"); 
+            close(fd);
+
+            throw new InvalidOperationException("mmap(SQ_RING) failed");
         }
         ring._ringPtr  = (byte*)ringMem;
         ring._ringSize = ringBytes;
-        
+
         nuint sqeBytes = ioUringParams.sq_entries * (nuint)sizeof(IoUringSqe);
         void* sqeMem = mmap(null, sqeBytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, IORING_OFF_SQES);
         if (sqeMem == (void*)-1)
         {
-            munmap(ringMem, ringBytes); 
-            close(fd); 
-            
-            throw new InvalidOperationException("mmap(SQES) failed"); 
+            munmap(ringMem, ringBytes);
+            close(fd);
+
+            throw new InvalidOperationException("mmap(SQES) failed");
         }
         ring._sqes    = (IoUringSqe*)sqeMem;
         ring._sqePtr  = (byte*)sqeMem;
-        ring._sqeSize = sqeBytes; 
-        
+        ring._sqeSize = sqeBytes;
+
         byte* ringPointer = (byte*)ringMem;
         ring._sqHead  = (uint*)(ringPointer + ioUringParams.sq_off.head);
         ring._sqTail  = (uint*)(ringPointer + ioUringParams.sq_off.tail);
@@ -103,7 +103,7 @@ public sealed unsafe class Ring : IDisposable
 
         return ring;
     }
-    
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public IoUringSqe* GetSqe()
     {
@@ -123,7 +123,7 @@ public sealed unsafe class Ring : IDisposable
 
         return &_sqes[slot];
     }
-    
+
     public int SubmitAndWait(uint waitFor)
     {
         // liburing-style accounting: derive the submit count from the kernel-consumed head, so
@@ -140,28 +140,28 @@ public sealed unsafe class Ring : IDisposable
         if (toSubmit == 0 && waitFor == 0) return 0;
 
         uint flags = waitFor > 0 ? IORING_ENTER_GETEVENTS : 0;
-        
+
         return io_uring_enter(_fd, toSubmit, waitFor, flags);
     }
-    
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool TryGetCqe(out IoUringCqe cqe) 
+    public bool TryGetCqe(out IoUringCqe cqe)
     {
         uint head = *_cqHead;
         uint tail = Volatile.Read(ref *_cqTail);
 
         if (head == tail)
         {
-            cqe = default; 
-            
-            return false; 
+            cqe = default;
+
+            return false;
         }
 
         cqe = _cqes[head & _cqMask];
-        
+
         return true;
     }
-    
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void CqeSeen() => Volatile.Write(ref *_cqHead, *_cqHead + 1);
 
@@ -182,17 +182,17 @@ public sealed unsafe class Ring : IDisposable
     {
         if (_ringPtr != null)
         {
-            munmap(_ringPtr, _ringSize); _ringPtr = null; 
+            munmap(_ringPtr, _ringSize); _ringPtr = null;
         }
 
         if (_sqePtr != null)
         {
-            munmap(_sqePtr,  _sqeSize);  _sqePtr  = null; 
+            munmap(_sqePtr,  _sqeSize);  _sqePtr  = null;
         }
 
         if (_fd > 0)
         {
-            close(_fd); _fd = 0; 
+            close(_fd); _fd = 0;
         }
     }
 }
