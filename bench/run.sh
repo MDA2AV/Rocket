@@ -34,7 +34,9 @@ play() { # $1 subdir, rest env; starts a playground binary detached
   sleep 3
 }
 
-stop_play() { pkill -f 'Playground[.]' 2>/dev/null; sleep 1; }
+# Scoped to this run's own children, not every Playground process on the machine - a developer
+# with a sample running should not have it killed by a bench.
+stop_play() { pkill -P $$ -f 'Playground[.]' 2>/dev/null; pkill -f "$BIN/" 2>/dev/null; sleep 1; }
 
 wait_http() { # $1 url: poll until it answers (up to ~8s) so a slow start reads as fail-with-log
   for _ in $(seq 16); do
