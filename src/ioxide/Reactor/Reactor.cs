@@ -51,6 +51,15 @@ public sealed unsafe partial class Reactor
     private uint   _bufRingMask;
     private ushort _bufRingTail;
 
+    // Transport settings resolved once. _tcp / _udp are always non-null so the sizing knobs stay
+    // readable; the _enabled flags record whether the config actually asked for that transport.
+    // TCP off = no listener. UDP off = no raw datagram sockets, though QUIC still binds its own
+    // port and uses the resolved defaults.
+    private readonly TcpOptions _tcp;
+    private readonly bool _tcpEnabled;
+    private readonly UdpOptions _udp;
+    private readonly bool _udpEnabled;
+
     // TcpConnection pool, reactor-thread-only. PoolMax × WriteSlabSize × ReactorCount bounds
     // the reserved native memory.
     private readonly int _poolMax;
@@ -62,7 +71,7 @@ public sealed unsafe partial class Reactor
     private const int WriteSlabPoolMax = 4096;
 
     internal nint RentWriteSlab()
-        => _writeSlabPool.TryPop(out nint p) ? p : (nint)NativeMemory.AlignedAlloc((nuint)_config.Tcp.WriteSlabSize, 64);
+        => _writeSlabPool.TryPop(out nint p) ? p : (nint)NativeMemory.AlignedAlloc((nuint)_tcp.WriteSlabSize, 64);
 
     internal void ReturnWriteSlab(nint p)
     {
@@ -90,18 +99,26 @@ public sealed unsafe partial class Reactor
     {
         _id = id;
         _config = config;
-        _port = config.Tcp.Port;
+
+        // Tcp == null means "no TCP listener". The sizing knobs are still resolved from a default
+        // instance so the pools below stay valid; they simply go unused when TCP is off.
+        _tcpEnabled = config.Tcp is not null;
+        _tcp = config.Tcp ?? new TcpOptions();
+        _udpEnabled = config.Udp is not null;
+        _udp = config.Udp ?? new UdpOptions();
+
+        _port = _tcp.Port;
         _ringEntries = config.RingEntries;
         _incremental = config.Incremental is not null;
         _recvBufferSize = (uint)config.RecvBufferSize;
         _bufferRingEntries = (uint)config.RecvSlots;
-        _poolMax = config.Tcp.PoolMax;
+        _poolMax = _tcp.PoolMax;
         IncrementalOptions inc = config.Incremental ?? new IncrementalOptions();
         _maxConnections = inc.MaxConnections;
         _connBufRingEntries = inc.RecvSlots;
         _incRecvBufferSize = (uint)inc.RecvBufferSize;
-        _pool = new Stack<TcpConnection>(config.Tcp.PoolMax);
-        _zeroCopySend = config.Tcp.ZeroCopySend;
+        _pool = new Stack<TcpConnection>(_tcp.PoolMax);
+        _zeroCopySend = _tcp.ZeroCopySend;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

@@ -31,7 +31,7 @@ internal static class TestServer
         Func<Reactor, TcpConnection, Task> handle, ServerConfig config, Action<Reactor>? onStart = null)
     {
         int port = Interlocked.Increment(ref _nextPort);
-        config = config with { Tcp = config.Tcp with { Port = (ushort)port }, ReactorCount = 1 };
+        config = config with { Tcp = (config.Tcp ?? new TcpOptions()) with { Port = (ushort)port }, ReactorCount = 1 };
 
         var reactor = new Reactor(0, config)
         {

@@ -74,13 +74,17 @@ public sealed unsafe partial class Reactor
 
     private void OpenUdpSockets()
     {
-        if (_config.Udp.Ports.Length == 0 && _config.Quic == null)
+        // Udp == null means no RAW datagram sockets; QUIC still binds its own port below and
+        // uses the resolved _udp defaults for Gro / RecvSlots.
+        ushort[] rawPorts = _udpEnabled ? _udp.Ports : [];
+
+        if (rawPorts.Length == 0 && _config.Quic == null)
         {
             return;   // no datagram transport configured
         }
 
         // The QUIC port is a UDP socket like any other; only completion routing differs.
-        ushort[] udpPorts = _config.Udp.Ports;
+        ushort[] udpPorts = rawPorts;
         if (_config.Quic is { } quic && Array.IndexOf(udpPorts, quic.Port) < 0)
         {
             udpPorts = [.. udpPorts, quic.Port];
@@ -95,7 +99,7 @@ public sealed unsafe partial class Reactor
         for (int i = 0; i < ports; i++)
         {
             ushort port = udpPorts[i];
-            _udpFds[i]     = OpenUdpSocket(port, _config.DualStack, _config.Udp.Gro);
+            _udpFds[i]     = OpenUdpSocket(port, _config.DualStack, _udp.Gro);
             _udpFdPorts[i] = port;
             ArmUdpRecv(i);   // one multishot per socket, all sharing the ring
         }
@@ -113,7 +117,7 @@ public sealed unsafe partial class Reactor
             InitUdpBufRing();   // no UDP/QUIC in config, so startup skipped it
         }
 
-        int fd = OpenUdpSocket(0, _config.DualStack, _config.Udp.Gro);   // port 0: the kernel picks
+        int fd = OpenUdpSocket(0, _config.DualStack, _udp.Gro);   // port 0: the kernel picks
 
         // Append. Indices stay stable (recv completions carry theirs in user_data), so growing the
         // tables cannot disturb the multishot recvs already armed on the existing sockets.
@@ -154,7 +158,7 @@ public sealed unsafe partial class Reactor
     // offset 14, so the fill writes only addr/len/bid and publishes the tail afterwards.
     private void InitUdpBufRing()
     {
-        int depth = RoundUpPow2(_config.Udp.RecvSlots);
+        int depth = RoundUpPow2(_udp.RecvSlots);
         _udpRingDepth   = depth;
         _udpBufRingMask = (uint)(depth - 1);
 

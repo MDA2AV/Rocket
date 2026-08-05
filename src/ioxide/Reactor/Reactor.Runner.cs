@@ -71,7 +71,8 @@ public sealed unsafe partial class Reactor
 
     private void AnnounceListening()
     {
-        Console.WriteLine($"[r{_id}] listening on 0.0.0.0:{string.Join(",", _listenPorts)}" +
+        Console.WriteLine($"[r{_id}] listening on " +
+                          (_listenPorts.Length > 0 ? $"0.0.0.0:{string.Join(",", _listenPorts)}" : "(no tcp)") +
                           (_udpFds.Length > 0 ? $" udp:{string.Join(",", _udpFdPorts)}" : "") +
                           $" (incremental={_incremental})");
     }
