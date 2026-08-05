@@ -1,4 +1,5 @@
 using ioxide.httpclient;
+using ioxide.tls;
 
 namespace ioxide.httpclient;
 
@@ -17,6 +18,13 @@ public sealed record Http2ClientOptions
     public int PoolSize { get; init; } = 1;
 
     public int AcquireTimeoutMs { get; init; } = 10_000;
+
+    /// <summary>
+    /// TLS context for an <c>https://</c> origin, or null for h2c (cleartext, prior knowledge).
+    /// With TLS the origin must select <c>h2</c> over ALPN or the connection is refused - that is
+    /// the only way HTTP/2 is negotiated.
+    /// </summary>
+    public TlsClientContext? Tls { get; init; }
 }
 
 /// <summary>
@@ -183,7 +191,7 @@ public sealed class Http2ClientPool : IDisposable
         try
         {
             Http2ClientConnection connection = await Http2ClientConnection.ConnectAsync(
-                _host, _options.Host, _options.Port, _authority);
+                _host, _options.Host, _options.Port, _authority, _options.Tls);
 
             if (_disposed)
             {

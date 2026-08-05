@@ -18,6 +18,10 @@ internal static class Program
         Console.WriteLine($"kTLS {(ktls ? "available" : "absent - sudo modprobe tls")}\n");
 
         TlsTests.Register(runner, ktls);
+
+        // Client-side TLS needs no kTLS: nothing is offloaded, so these always run.
+        TlsClientTests.Register(runner);
+
         return runner.Summary();
     }
 }

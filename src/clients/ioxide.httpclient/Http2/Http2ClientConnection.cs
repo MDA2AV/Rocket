@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks.Sources;
 using ioxide.httpclient;
+using ioxide.tls;
 
 namespace ioxide.httpclient;
 
@@ -29,7 +30,7 @@ public sealed class Http2ClientConnection : IDisposable
     private const int EgressBufferSize = 64 * 1024;
     private const int IngressBufferSize = 64 * 1024;
 
-    private readonly RingSocket _socket;
+    private readonly IClientTransport _transport;
     private readonly byte[] _authority;
     private readonly byte[] _egress = new byte[EgressBufferSize];
 
@@ -58,9 +59,9 @@ public sealed class Http2ClientConnection : IDisposable
 
     private readonly TaskCompletionSource<bool> _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    private Http2ClientConnection(RingSocket socket, string authority)
+    private Http2ClientConnection(IClientTransport transport, string authority)
     {
-        _socket = socket;
+        _transport = transport;
         _authority = System.Text.Encoding.ASCII.GetBytes(authority);
     }
 
@@ -74,24 +75,22 @@ public sealed class Http2ClientConnection : IDisposable
     public int InFlight => _pending.Count;
 
     public static async Task<Http2ClientConnection> ConnectAsync(IRingHost host, string ip, ushort port,
-        string authority)
+        string authority, TlsClientContext? tls = null)
     {
-        RingSocket socket = RingSocket.CreateTcp(host);
-        try
+        IClientTransport transport = await ClientTransport.ConnectAsync(host, ip, port, tls);
+
+        // Over TLS, h2 is chosen by ALPN and nothing else. An origin that selected http/1.1 (or
+        // offered no ALPN at all) is not going to understand the HTTP/2 preface, and sending it
+        // anyway produces a connection that hangs rather than an error worth reading.
+        if (tls is not null && transport.NegotiatedAlpn != "h2")
         {
-            int result = await socket.ConnectAsync(ip, port);
-            if (result < 0)
-            {
-                throw new Http2ClientException($"connect to {ip}:{port} failed: errno {-result}");
-            }
-        }
-        catch
-        {
-            socket.Dispose();
-            throw;
+            string selected = transport.NegotiatedAlpn ?? "none";
+            transport.Dispose();
+            throw new Http2ClientException(
+                $"{ip}:{port} did not negotiate h2 over ALPN (selected: {selected})");
         }
 
-        var connection = new Http2ClientConnection(socket, authority);
+        var connection = new Http2ClientConnection(transport, authority);
         connection.Setup();
         _ = connection.PumpLoopAsync();
         await connection._ready.Task;   // preface + SETTINGS on the wire before the first request
@@ -230,7 +229,7 @@ public sealed class Http2ClientConnection : IDisposable
 
             while (!_failed && !_disposed)
             {
-                int n = await _socket.RecvAsync(receive, IngressBufferSize);
+                int n = await _transport.RecvAsync(receive, IngressBufferSize);
                 if (n <= 0)
                 {
                     throw new Http2ClientException(n == 0 ? "peer closed the connection" : $"recv failed: errno {-n}");
@@ -345,7 +344,7 @@ public sealed class Http2ClientConnection : IDisposable
         int sent = 0;
         while (sent < length)
         {
-            int n = await _socket.SendAsync(basePointer + sent, length - sent);
+            int n = await _transport.SendAsync(basePointer + sent, length - sent);
             if (n <= 0)
             {
                 _failed = true;
@@ -577,7 +576,7 @@ public sealed class Http2ClientConnection : IDisposable
         {
             _self.Free();
         }
-        _socket.Dispose();
+        _transport.Dispose();
     }
 
     /// <summary>One in-flight request. IValueTaskSource with asynchronous continuations OFF, so the

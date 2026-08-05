@@ -24,6 +24,7 @@
     <ProjectReference Include="../../ioxide/ioxide.csproj" />
     <ProjectReference Include="../../protocols/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
     <ProjectReference Include="../../protocols/ioxide.nghttp3/ioxide.nghttp3.csproj" />
+    <ProjectReference Include="../../protocols/ioxide.tls/ioxide.tls.csproj" />
   </ItemGroup>
 
   <ItemGroup>
