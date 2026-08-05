@@ -304,7 +304,11 @@ nav.top .links a.gh svg { display: block; }
 #tab-files:checked ~ .pane-files { display: block; }
 #tab-tls:checked ~ .pane-tls { display: block; }
 #tab-kestrel:checked ~ .pane-kestrel { display: block; }
-.pane pre { margin: 0; }
+.pane pre {
+  margin: 0;
+  font-size: 0.82rem;   /* smaller than body code: these are whole programs, not fragments */
+  line-height: 1.55;
+}
 
 /* Title bar sitting on top of each code block, sharing its border so the two read as one panel. */
 .pane-head {

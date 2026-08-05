@@ -128,8 +128,32 @@ using ioxide.utils;
 
 var config = new ServerConfig
 {
-    ReactorCount = Environment.ProcessorCount,
-    Tcp = new TcpOptions { Port = 8080 },
+    ReactorCount = Environment.ProcessorCount,   // one ring per reactor, one reactor per core
+    RingEntries  = 8192,                         // io_uring SQ/CQ depth
+    DualStack    = false,                        // true = one AF_INET6 socket takes v6 + v4-mapped
+
+    // Shared recv ring - the default mode, used while Incremental is null.
+    RecvBufferSize = 32 * 1024,
+    RecvSlots      = 4096,
+
+    Tcp = new TcpOptions
+    {
+        Port             = 8080,
+        ExtraPorts       = [],                   // more listeners; conn.ListenerPort says which
+        ListenBacklog    = 1024,                 // accept queue per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,            // per-connection write buffer
+        PoolMax          = 1024,                 // connection objects recycled per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,   // Segmented = chained slabs, one SENDMSG
+        ZeroCopySend     = false,                // SEND_ZC; only pays off on large responses
+        RecvQueueEntries = 64,                   // per-connection SPSC queue, power of two
+    },
+
+    Udp = new UdpOptions
+    {
+        Ports     = [],                          // raw datagram sockets -&gt; Reactor.OnDatagram
+        RecvSlots = 16,                          // shared UDP buffer ring depth
+        Gro       = true,                        // coalesce a peer&#x27;s burst into one completion
+    },
 };
 
 ReadOnlyMemory&lt;byte&gt; ok = &quot;HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok&quot;u8.ToArray();
@@ -208,16 +232,31 @@ using ioxide.utils;
 
 var config = new ServerConfig
 {
-    ReactorCount = Environment.ProcessorCount,
-    RingEntries  = 8192,          // io_uring queue depth
-    RecvBufferSize = 32 * 1024,   // shared recv ring: one buffer pool per reactor
+    ReactorCount = Environment.ProcessorCount,   // one ring per reactor, one reactor per core
+    RingEntries  = 8192,                         // io_uring SQ/CQ depth
+    DualStack    = false,                        // true = one AF_INET6 socket takes v6 + v4-mapped
+
+    // Shared recv ring - the default mode, used while Incremental is null.
+    RecvBufferSize = 32 * 1024,
     RecvSlots      = 4096,
+
     Tcp = new TcpOptions
     {
         Port             = 8080,
-        WriteSlabSize    = 16 * 1024,
-        PoolMax          = 1024,   // connection objects recycled per reactor
-        RecvQueueEntries = 64,
+        ExtraPorts       = [],                   // more listeners; conn.ListenerPort says which
+        ListenBacklog    = 1024,                 // accept queue per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,            // per-connection write buffer
+        PoolMax          = 1024,                 // connection objects recycled per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,   // Segmented = chained slabs, one SENDMSG
+        ZeroCopySend     = false,                // SEND_ZC; only pays off on large responses
+        RecvQueueEntries = 64,                   // per-connection SPSC queue, power of two
+    },
+
+    Udp = new UdpOptions
+    {
+        Ports     = [],                          // raw datagram sockets -&gt; Reactor.OnDatagram
+        RecvSlots = 16,                          // shared UDP buffer ring depth
+        Gro       = true,                        // coalesce a peer&#x27;s burst into one completion
     },
 };
 
@@ -278,9 +317,12 @@ using ioxide.utils;
 var config = new ServerConfig
 {
     ReactorCount = Environment.ProcessorCount,
+    RingEntries  = 8192,
+    DualStack    = false,
 
     // A buffer ring PER CONNECTION, appended into across successive recvs, so a request spanning
-    // several reads stays contiguous instead of scattering across the shared pool.
+    // several reads stays contiguous. Setting this IS enabling the mode - the shared-ring knobs
+    // above go unused. Reserved memory = MaxConnections x RecvSlots x RecvBufferSize x reactors.
     Incremental = new IncrementalOptions
     {
         MaxConnections = 4096,   // one buffer-group id each; accepts past this are shed
@@ -288,7 +330,17 @@ var config = new ServerConfig
         RecvBufferSize = 4096,
     },
 
-    Tcp = new TcpOptions { Port = 8080, WriteSlabSize = 16 * 1024 },
+    Tcp = new TcpOptions
+    {
+        Port             = 8080,
+        ExtraPorts       = [],
+        ListenBacklog    = 1024,
+        WriteSlabSize    = 16 * 1024,
+        PoolMax          = 1024,
+        WriteOverflow    = WriteOverflowStrategy.Grow,
+        ZeroCopySend     = false,
+        RecvQueueEntries = 64,
+    },
 };
 
 ReadOnlyMemory&lt;byte&gt; ok = &quot;HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok&quot;u8.ToArray();
@@ -373,6 +425,7 @@ foreach (Thread t in threads) t.Join();</code></pre>
 using System.Buffers;
 using System.IO.Pipelines;
 using ioxide;
+using ioxide.utils;
 using ioxide.ngtcp2;
 
 // ngtcp2 + picotls, bundled native - TLS 1.3 lives inside the transport.
@@ -381,12 +434,37 @@ using var engine = new QuicEngine(&quot;cert.pem&quot;, &quot;key.pem&quot;, cid
 var config = new ServerConfig
 {
     ReactorCount = Environment.ProcessorCount,
-    Udp = new UdpOptions { RecvSlots = 16 },
+    RingEntries  = 8192,
+    DualStack    = false,
+
+    RecvBufferSize = 32 * 1024,
+    RecvSlots      = 4096,
+
+    Tcp = new TcpOptions                         // the TCP listener still runs alongside QUIC
+    {
+        Port             = 8080,
+        ExtraPorts       = [],                   // more listeners; conn.ListenerPort says which
+        ListenBacklog    = 1024,                 // accept queue per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,            // per-connection write buffer
+        PoolMax          = 1024,                 // connection objects recycled per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,   // Segmented = chained slabs, one SENDMSG
+        ZeroCopySend     = false,                // SEND_ZC; only pays off on large responses
+        RecvQueueEntries = 64,                   // per-connection SPSC queue, power of two
+    },
+
+    Udp = new UdpOptions
+    {
+        Ports     = [],                          // QUIC binds its own port; these are extra
+        RecvSlots = 16,                          // each slot pins ~64 KiB (a full GRO train)
+        Gro       = true,
+    },
+
     Quic = new QuicOptions
     {
-        Port              = 8443,   // every reactor binds it via SO_REUSEPORT
-        LocalCidLength    = 8,
+        Port              = 8443,                // every reactor binds it via SO_REUSEPORT
+        LocalCidLength    = 8,                   // short headers carry no CID length on the wire
         ConnectionFactory = engine.CreateFactory(),
+        IdleTimeoutMs     = 60_000,              // transport backstop; 0 disables the sweep
     },
 };
 
@@ -418,6 +496,32 @@ for (int id = 0; id &lt; threads.Length; id++)
         }
     };
 
+    // The reactor binds Tcp.Port regardless, so give it a handler rather than leaving it null.
+    reactor.TcpHandle = async (r, conn) =&gt;
+    {
+        try
+        {
+            while (true)
+            {
+                RecvSnapshot snapshot = await conn.ReadAsync();
+                while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                {
+                    if (item.HasBuffer) conn.ReturnBuffer(in item);
+                }
+
+                conn.Write(&quot;HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok&quot;u8);
+                await conn.FlushAsync();
+
+                if (snapshot.IsClosed) return;
+                conn.ResetRead();
+            }
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    };
+
     threads[id] = new Thread(reactor.Run) { Name = $&quot;reactor-{id}&quot; };
     threads[id].Start();
 }
@@ -432,6 +536,7 @@ foreach (Thread t in threads) t.Join();</code></pre>
     </div>
 <pre><code class="language-csharp">// dotnet add package ioxide ioxide.ngtcp2      (needs cert.pem / key.pem)
 using ioxide;
+using ioxide.utils;
 using ioxide.ngtcp2;
 
 using var engine = new QuicEngine(&quot;cert.pem&quot;, &quot;key.pem&quot;, cidLength: 8, alpn: [&quot;echo&quot;]);
@@ -439,12 +544,37 @@ using var engine = new QuicEngine(&quot;cert.pem&quot;, &quot;key.pem&quot;, cid
 var config = new ServerConfig
 {
     ReactorCount = Environment.ProcessorCount,
-    Udp = new UdpOptions { RecvSlots = 16 },
+    RingEntries  = 8192,
+    DualStack    = false,
+
+    RecvBufferSize = 32 * 1024,
+    RecvSlots      = 4096,
+
+    Tcp = new TcpOptions                         // the TCP listener still runs alongside QUIC
+    {
+        Port             = 8080,
+        ExtraPorts       = [],                   // more listeners; conn.ListenerPort says which
+        ListenBacklog    = 1024,                 // accept queue per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,            // per-connection write buffer
+        PoolMax          = 1024,                 // connection objects recycled per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,   // Segmented = chained slabs, one SENDMSG
+        ZeroCopySend     = false,                // SEND_ZC; only pays off on large responses
+        RecvQueueEntries = 64,                   // per-connection SPSC queue, power of two
+    },
+
+    Udp = new UdpOptions
+    {
+        Ports     = [],                          // QUIC binds its own port; these are extra
+        RecvSlots = 16,                          // each slot pins ~64 KiB (a full GRO train)
+        Gro       = true,
+    },
+
     Quic = new QuicOptions
     {
-        Port              = 8443,
-        LocalCidLength    = 8,
+        Port              = 8443,                // every reactor binds it via SO_REUSEPORT
+        LocalCidLength    = 8,                   // short headers carry no CID length on the wire
         ConnectionFactory = engine.CreateFactory(),
+        IdleTimeoutMs     = 60_000,              // transport backstop; 0 disables the sweep
     },
 };
 
@@ -473,6 +603,32 @@ for (int id = 0; id &lt; threads.Length; id++)
         }
     };
 
+    // The reactor binds Tcp.Port regardless, so give it a handler rather than leaving it null.
+    reactor.TcpHandle = async (r, conn) =&gt;
+    {
+        try
+        {
+            while (true)
+            {
+                RecvSnapshot snapshot = await conn.ReadAsync();
+                while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                {
+                    if (item.HasBuffer) conn.ReturnBuffer(in item);
+                }
+
+                conn.Write(&quot;HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok&quot;u8);
+                await conn.FlushAsync();
+
+                if (snapshot.IsClosed) return;
+                conn.ResetRead();
+            }
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    };
+
     threads[id] = new Thread(reactor.Run) { Name = $&quot;reactor-{id}&quot; };
     threads[id].Start();
 }
@@ -488,6 +644,7 @@ foreach (Thread t in threads) t.Join();</code></pre>
 <pre><code class="language-csharp">// dotnet add package ioxide ioxide.ngtcp2 ioxide.nghttp3      (needs cert.pem / key.pem)
 //   curl --http3-only -k https://127.0.0.1:8443/
 using ioxide;
+using ioxide.utils;
 using ioxide.nghttp3;
 using ioxide.ngtcp2;
 
@@ -496,12 +653,37 @@ using var engine = new QuicEngine(&quot;cert.pem&quot;, &quot;key.pem&quot;, cid
 var config = new ServerConfig
 {
     ReactorCount = Environment.ProcessorCount,
-    Udp = new UdpOptions { RecvSlots = 16 },
+    RingEntries  = 8192,
+    DualStack    = false,
+
+    RecvBufferSize = 32 * 1024,
+    RecvSlots      = 4096,
+
+    Tcp = new TcpOptions                         // the TCP listener still runs alongside QUIC
+    {
+        Port             = 8080,
+        ExtraPorts       = [],                   // more listeners; conn.ListenerPort says which
+        ListenBacklog    = 1024,                 // accept queue per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,            // per-connection write buffer
+        PoolMax          = 1024,                 // connection objects recycled per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,   // Segmented = chained slabs, one SENDMSG
+        ZeroCopySend     = false,                // SEND_ZC; only pays off on large responses
+        RecvQueueEntries = 64,                   // per-connection SPSC queue, power of two
+    },
+
+    Udp = new UdpOptions
+    {
+        Ports     = [],                          // QUIC binds its own port; these are extra
+        RecvSlots = 16,                          // each slot pins ~64 KiB (a full GRO train)
+        Gro       = true,
+    },
+
     Quic = new QuicOptions
     {
-        Port              = 8443,
-        LocalCidLength    = 8,
+        Port              = 8443,                // every reactor binds it via SO_REUSEPORT
+        LocalCidLength    = 8,                   // short headers carry no CID length on the wire
         ConnectionFactory = engine.CreateFactory(),
+        IdleTimeoutMs     = 60_000,              // transport backstop; 0 disables the sweep
     },
 };
 
@@ -533,6 +715,32 @@ for (int id = 0; id &lt; threads.Length; id++)
             return response;
         });
 
+    // The reactor binds Tcp.Port regardless, so give it a handler rather than leaving it null.
+    reactor.TcpHandle = async (r, conn) =&gt;
+    {
+        try
+        {
+            while (true)
+            {
+                RecvSnapshot snapshot = await conn.ReadAsync();
+                while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                {
+                    if (item.HasBuffer) conn.ReturnBuffer(in item);
+                }
+
+                conn.Write(&quot;HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok&quot;u8);
+                await conn.FlushAsync();
+
+                if (snapshot.IsClosed) return;
+                conn.ResetRead();
+            }
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    };
+
     threads[id] = new Thread(reactor.Run) { Name = $&quot;reactor-{id}&quot; };
     threads[id].Start();
 }
@@ -557,8 +765,32 @@ using ioxide.utils;
 
 var config = new ServerConfig
 {
-    ReactorCount = Environment.ProcessorCount,
-    Tcp = new TcpOptions { Port = 8080 },
+    ReactorCount = Environment.ProcessorCount,   // one ring per reactor, one reactor per core
+    RingEntries  = 8192,                         // io_uring SQ/CQ depth
+    DualStack    = false,                        // true = one AF_INET6 socket takes v6 + v4-mapped
+
+    // Shared recv ring - the default mode, used while Incremental is null.
+    RecvBufferSize = 32 * 1024,
+    RecvSlots      = 4096,
+
+    Tcp = new TcpOptions
+    {
+        Port             = 8080,
+        ExtraPorts       = [],                   // more listeners; conn.ListenerPort says which
+        ListenBacklog    = 1024,                 // accept queue per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,            // per-connection write buffer
+        PoolMax          = 1024,                 // connection objects recycled per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,   // Segmented = chained slabs, one SENDMSG
+        ZeroCopySend     = false,                // SEND_ZC; only pays off on large responses
+        RecvQueueEntries = 64,                   // per-connection SPSC queue, power of two
+    },
+
+    Udp = new UdpOptions
+    {
+        Ports     = [],                          // raw datagram sockets -&gt; Reactor.OnDatagram
+        RecvSlots = 16,                          // shared UDP buffer ring depth
+        Gro       = true,                        // coalesce a peer&#x27;s burst into one completion
+    },
 };
 
 var upstream = new RingHttpClientOptions
@@ -647,8 +879,32 @@ using ioxide.utils;
 
 var config = new ServerConfig
 {
-    ReactorCount = Environment.ProcessorCount,
-    Tcp = new TcpOptions { Port = 8080 },
+    ReactorCount = Environment.ProcessorCount,   // one ring per reactor, one reactor per core
+    RingEntries  = 8192,                         // io_uring SQ/CQ depth
+    DualStack    = false,                        // true = one AF_INET6 socket takes v6 + v4-mapped
+
+    // Shared recv ring - the default mode, used while Incremental is null.
+    RecvBufferSize = 32 * 1024,
+    RecvSlots      = 4096,
+
+    Tcp = new TcpOptions
+    {
+        Port             = 8080,
+        ExtraPorts       = [],                   // more listeners; conn.ListenerPort says which
+        ListenBacklog    = 1024,                 // accept queue per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,            // per-connection write buffer
+        PoolMax          = 1024,                 // connection objects recycled per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,   // Segmented = chained slabs, one SENDMSG
+        ZeroCopySend     = false,                // SEND_ZC; only pays off on large responses
+        RecvQueueEntries = 64,                   // per-connection SPSC queue, power of two
+    },
+
+    Udp = new UdpOptions
+    {
+        Ports     = [],                          // raw datagram sockets -&gt; Reactor.OnDatagram
+        RecvSlots = 16,                          // shared UDP buffer ring depth
+        Gro       = true,                        // coalesce a peer&#x27;s burst into one completion
+    },
 };
 
 var pgOptions = new PgOptions
@@ -736,8 +992,32 @@ using ioxide.utils;
 
 var config = new ServerConfig
 {
-    ReactorCount = Environment.ProcessorCount,
-    Tcp = new TcpOptions { Port = 8080 },
+    ReactorCount = Environment.ProcessorCount,   // one ring per reactor, one reactor per core
+    RingEntries  = 8192,                         // io_uring SQ/CQ depth
+    DualStack    = false,                        // true = one AF_INET6 socket takes v6 + v4-mapped
+
+    // Shared recv ring - the default mode, used while Incremental is null.
+    RecvBufferSize = 32 * 1024,
+    RecvSlots      = 4096,
+
+    Tcp = new TcpOptions
+    {
+        Port             = 8080,
+        ExtraPorts       = [],                   // more listeners; conn.ListenerPort says which
+        ListenBacklog    = 1024,                 // accept queue per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,            // per-connection write buffer
+        PoolMax          = 1024,                 // connection objects recycled per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,   // Segmented = chained slabs, one SENDMSG
+        ZeroCopySend     = false,                // SEND_ZC; only pays off on large responses
+        RecvQueueEntries = 64,                   // per-connection SPSC queue, power of two
+    },
+
+    Udp = new UdpOptions
+    {
+        Ports     = [],                          // raw datagram sockets -&gt; Reactor.OnDatagram
+        RecvSlots = 16,                          // shared UDP buffer ring depth
+        Gro       = true,                        // coalesce a peer&#x27;s burst into one completion
+    },
 };
 
 var redisOptions = new RedisOptions
@@ -819,8 +1099,32 @@ var assets = new StaticAssets(&quot;/srv/www&quot;, maxCachedFileBytes: 256 * 10
 
 var config = new ServerConfig
 {
-    ReactorCount = Environment.ProcessorCount,
-    Tcp = new TcpOptions { Port = 8080 },
+    ReactorCount = Environment.ProcessorCount,   // one ring per reactor, one reactor per core
+    RingEntries  = 8192,                         // io_uring SQ/CQ depth
+    DualStack    = false,                        // true = one AF_INET6 socket takes v6 + v4-mapped
+
+    // Shared recv ring - the default mode, used while Incremental is null.
+    RecvBufferSize = 32 * 1024,
+    RecvSlots      = 4096,
+
+    Tcp = new TcpOptions
+    {
+        Port             = 8080,
+        ExtraPorts       = [],                   // more listeners; conn.ListenerPort says which
+        ListenBacklog    = 1024,                 // accept queue per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,            // per-connection write buffer
+        PoolMax          = 1024,                 // connection objects recycled per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,   // Segmented = chained slabs, one SENDMSG
+        ZeroCopySend     = false,                // SEND_ZC; only pays off on large responses
+        RecvQueueEntries = 64,                   // per-connection SPSC queue, power of two
+    },
+
+    Udp = new UdpOptions
+    {
+        Ports     = [],                          // raw datagram sockets -&gt; Reactor.OnDatagram
+        RecvSlots = 16,                          // shared UDP buffer ring depth
+        Gro       = true,                        // coalesce a peer&#x27;s burst into one completion
+    },
 };
 
 var threads = new Thread[config.ReactorCount];
@@ -972,8 +1276,32 @@ using ioxide.utils;
 
 var config = new ServerConfig
 {
-    ReactorCount = Environment.ProcessorCount,
-    Tcp = new TcpOptions { Port = 8443 },
+    ReactorCount = Environment.ProcessorCount,   // one ring per reactor, one reactor per core
+    RingEntries  = 8192,                         // io_uring SQ/CQ depth
+    DualStack    = false,                        // true = one AF_INET6 socket takes v6 + v4-mapped
+
+    // Shared recv ring - the default mode, used while Incremental is null.
+    RecvBufferSize = 32 * 1024,
+    RecvSlots      = 4096,
+
+    Tcp = new TcpOptions
+    {
+        Port             = 8443,
+        ExtraPorts       = [],                   // more listeners; conn.ListenerPort says which
+        ListenBacklog    = 1024,                 // accept queue per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,            // per-connection write buffer
+        PoolMax          = 1024,                 // connection objects recycled per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,   // Segmented = chained slabs, one SENDMSG
+        ZeroCopySend     = false,                // SEND_ZC; only pays off on large responses
+        RecvQueueEntries = 64,                   // per-connection SPSC queue, power of two
+    },
+
+    Udp = new UdpOptions
+    {
+        Ports     = [],                          // raw datagram sockets -&gt; Reactor.OnDatagram
+        RecvSlots = 16,                          // shared UDP buffer ring depth
+        Gro       = true,                        // coalesce a peer&#x27;s burst into one completion
+    },
 };
 
 ReadOnlyMemory&lt;byte&gt; ok = &quot;HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok&quot;u8.ToArray();
