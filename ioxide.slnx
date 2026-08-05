@@ -58,7 +58,14 @@
   </Folder>
 
   <Folder Name="/tests/">
-    <Project Path="Tests/ioxide.e2e.csproj" />
+    <Project Path="tests/Ioxide.Tests.Harness/Ioxide.Tests.Harness.csproj" />
+    <Project Path="tests/Ioxide.Tests.Unit/Ioxide.Tests.Unit.csproj" />
+    <Project Path="tests/Ioxide.Tests.E2E/Ioxide.Tests.E2E.csproj" />
+    <Project Path="tests/Ioxide.Tests.Http/Ioxide.Tests.Http.csproj" />
+    <Project Path="tests/Ioxide.Tests.Pg/Ioxide.Tests.Pg.csproj" />
+    <Project Path="tests/Ioxide.Tests.Redis/Ioxide.Tests.Redis.csproj" />
+    <Project Path="tests/Ioxide.Tests.Tls/Ioxide.Tests.Tls.csproj" />
+    <Project Path="tests/Ioxide.Tests.File/Ioxide.Tests.File.csproj" />
   </Folder>
 
   <Folder Name="/bench/">

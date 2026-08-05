@@ -1,4 +1,9 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+
+// TryExtractDcid is the demux's packet parse: pure, and the first thing a hostile datagram meets.
+// The unit suite exercises it directly rather than through a live connection.
+[assembly: InternalsVisibleTo("Ioxide.Tests.Unit")]
 
 namespace ioxide;
 

@@ -1,7 +1,8 @@
 using System.Runtime.CompilerServices;
 
 // The Alt-Svc parser is internal but security-relevant, so the e2e suite tests it directly.
-[assembly: InternalsVisibleTo("ioxide.e2e")]
+[assembly: InternalsVisibleTo("Ioxide.Tests.Http")]
+[assembly: InternalsVisibleTo("Ioxide.Tests.Unit")]
 
 namespace ioxide.httpclient;
 

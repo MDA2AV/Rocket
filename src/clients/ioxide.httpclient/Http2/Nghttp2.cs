@@ -1,7 +1,8 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
-[assembly: InternalsVisibleTo("ioxide.e2e")]
+[assembly: InternalsVisibleTo("Ioxide.Tests.Http")]
+[assembly: InternalsVisibleTo("Ioxide.Tests.Unit")]
 
 namespace ioxide.httpclient;
 
