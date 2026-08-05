@@ -17,6 +17,7 @@ internal static class Program
         Http3ClientTests.Register(runner);
         Http2ClientTests.Register(runner);
         RingHttpClientTests.Register(runner);
+        TlsClientTests.Register(runner);
 
         return runner.Summary();
     }

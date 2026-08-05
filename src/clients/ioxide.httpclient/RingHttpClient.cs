@@ -51,6 +51,13 @@ public sealed record RingHttpClientOptions
 
     /// <summary>How long to stay on HTTP/1.1 after an HTTP/3 attempt fails, before retrying h3.</summary>
     public int Http3CooldownMs { get; init; } = 30_000;
+
+    /// <summary>
+    /// TLS context for an <c>https://</c> origin, or null for cleartext. It applies to the TCP
+    /// protocols only - h1 and h2 - because HTTP/3 carries its own QUIC-native TLS through ngtcp2
+    /// and never sees this. The caller owns its disposal.
+    /// </summary>
+    public TlsClientContext? Tls { get; init; }
 }
 
 /// <summary>
@@ -116,6 +123,7 @@ public sealed class RingHttpClient : IDisposable
             Port = options.Port,
             PoolSize = options.PoolSize,
             AcquireTimeoutMs = options.AcquireTimeoutMs,
+            Tls = options.Tls,
         });
 
         var client = new RingHttpClient(reactor, options, http1);
@@ -162,6 +170,7 @@ public sealed class RingHttpClient : IDisposable
             Port = _options.Port,
             PoolSize = _options.PoolSize,
             AcquireTimeoutMs = _options.AcquireTimeoutMs,
+            Tls = _options.Tls,
         });
 
     // --- protocol selection --------------------------------------------------------------------

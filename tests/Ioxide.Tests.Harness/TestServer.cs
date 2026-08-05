@@ -504,6 +504,16 @@ public static class TestCert
         {
             using var rsa = RSA.Create(2048);
             var request = new CertificateRequest("CN=localhost", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+
+            // A subjectAltName, because client-side hostname verification checks that and only
+            // falls back to the CN when no dNSName is present at all. Without it the certificate
+            // is fine for a server that never gets verified and useless for testing a client that
+            // does.
+            var names = new SubjectAlternativeNameBuilder();
+            names.AddDnsName("localhost");
+            names.AddIpAddress(System.Net.IPAddress.Loopback);
+            request.CertificateExtensions.Add(names.Build());
+
             using X509Certificate2 cert = request.CreateSelfSigned(
                 DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
 
