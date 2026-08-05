@@ -34,6 +34,7 @@
   <input type="radio" name="mode-tabs" id="tab-redis">
   <input type="radio" name="mode-tabs" id="tab-files">
   <input type="radio" name="mode-tabs" id="tab-tls">
+  <input type="radio" name="mode-tabs" id="tab-tlspipe">
   <input type="radio" name="mode-tabs" id="tab-kestrel">
   <nav class="ex-menu" aria-label="Examples">
     <label class="ex-home" for="tab-none">overview</label>
@@ -67,7 +68,8 @@
 
     <details class="ex-sect">
       <summary>serving</summary>
-      <label for="tab-tls">ktls</label>
+      <label for="tab-tls">ktls &middot; raw</label>
+      <label for="tab-tlspipe">ktls &middot; pipes</label>
       <label for="tab-kestrel">asp.net</label>
     </details>
   </nav>
@@ -1239,6 +1241,115 @@ static unsafe int Decrypt(TlsSession tls, in SpscRecvRing.Item item)
         return tls.Decrypt(cipher, item.AsSpan().Length).Length;
     }
 }</code></pre>
+  </div>
+
+  <div class="pane pane-tlspipe">
+    <div class="pane-head">
+      <h3>kTLS &middot; pipes</h3>
+      <span class="pane-pkg">ioxide + ioxide.tls</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide ioxide.tls
+// Needs the Linux &#x27;tls&#x27; module (sudo modprobe tls), OpenSSL 3, and cert.pem / key.pem.
+using System.IO.Pipelines;
+using ioxide;
+using ioxide.tls;
+
+var config = new ServerConfig
+{
+    ReactorCount = Environment.ProcessorCount,
+    RecvBufferSize = 32 * 1024,
+    RecvSlots      = 4096,
+    Tcp = new TcpOptions { Port = 8443 },
+};
+
+ReadOnlyMemory&lt;byte&gt; ok = &quot;HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok&quot;u8.ToArray();
+var threads = new Thread[config.ReactorCount];
+
+for (int id = 0; id &lt; threads.Length; id++)
+{
+    var reactor = new Reactor(id, config);
+
+    reactor.OnStart = r =&gt; TlsService.Start(r, new TlsOptions
+    {
+        CertificatePath = &quot;cert.pem&quot;,
+        KeyPath         = &quot;key.pem&quot;,
+        Alpn            = &quot;http/1.1&quot;,
+    });
+
+    reactor.TcpHandle = async (r, conn) =&gt;
+    {
+        TlsSession? tls = null;
+
+        try
+        {
+            // The handshake first - it drives the connection directly, before the pipes attach.
+            tls = await r.GetService&lt;TlsService&gt;().AcceptAsync(conn);
+
+            // Pipes attach AFTER the handshake. From here the connection is just bytes again:
+            // ciphertext arriving, plaintext leaving (kernel TLS produces the records on send).
+            var reader = new TcpConnectionPipeReader(conn);
+            var writer = new TcpConnectionPipeWriter(conn);
+
+            // A request can ride in with the handshake&#x27;s final flight - answer it first.
+            if (tls.DrainPlaintext().Length &gt; 0)
+            {
+                ok.Span.CopyTo(writer.GetSpan(ok.Length));
+                writer.Advance(ok.Length);
+                await writer.FlushAsync();
+            }
+
+            while (true)
+            {
+                ReadResult result = await reader.ReadAsync();
+
+                // The pipe hands CIPHERTEXT - only transmit is offloaded - so decrypt each
+                // segment as it is consumed.
+                int got = 0;
+                foreach (ReadOnlyMemory&lt;byte&gt; segment in result.Buffer)
+                {
+                    got += Decrypt(tls, segment.Span);
+                }
+                reader.AdvanceTo(result.Buffer.End);
+
+                if (got &gt; 0)
+                {
+                    // The write side is the plain pipes path, untouched: plaintext into the
+                    // slab, one flush - the kernel encrypts on send.
+                    ok.Span.CopyTo(writer.GetSpan(ok.Length));
+                    writer.Advance(ok.Length);
+                    await writer.FlushAsync();
+                }
+
+                if (result.IsCompleted || tls.Closed) return;
+            }
+        }
+        catch (Exception e)
+        {
+            // Handlers run fire-and-forget, so a missing &#x27;tls&#x27; module would vanish silently.
+            Console.Error.WriteLine($&quot;tls: {e.Message}&quot;);
+        }
+        finally
+        {
+            tls?.Dispose();
+            conn.DecRef();
+        }
+    };
+
+    threads[id] = new Thread(reactor.Run) { Name = $&quot;reactor-{id}&quot; };
+    threads[id].Start();
+}
+
+Console.WriteLine($&quot;TLS on :{config.Tcp.Port} (kTLS transmit offload, pipes surface)&quot;);
+foreach (Thread t in threads) t.Join();
+
+static unsafe int Decrypt(TlsSession tls, ReadOnlySpan&lt;byte&gt; ciphertext)
+{
+    fixed (byte* cipher = ciphertext)
+    {
+        return tls.Decrypt(cipher, ciphertext.Length).Length;
+    }
+}
+</code></pre>
   </div>
   <div class="pane pane-kestrel">
     <div class="pane-head">
