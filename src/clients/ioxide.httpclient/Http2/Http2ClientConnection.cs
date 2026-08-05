@@ -432,9 +432,16 @@ public sealed class Http2ClientConnection : IDisposable
     private static unsafe void CallbackBeginHeaders(void* user, int streamId)
     {
         Http2ClientConnection connection = FromUser(user);
+
+        // One response per request, created on the FIRST field section and kept. nghttp2 reports
+        // trailers as HCAT_HEADERS, the same category as the real response after a 1xx, so this
+        // callback fires again at the end of a trailered stream. Replacing the response there
+        // would throw away the assembled one while BodyStart/BodyLength still describe its arena,
+        // and CallbackEndStream would then slice those offsets out of the fresh, near-empty one.
+        // Interim (1xx) heads are cleared by ResetForInterim instead, which reuses this object.
         if (connection._pending.TryGetValue(streamId, out PendingRequest? pending))
         {
-            pending.Response = new HttpClientResponse();
+            pending.Response ??= new HttpClientResponse();
         }
     }
 
