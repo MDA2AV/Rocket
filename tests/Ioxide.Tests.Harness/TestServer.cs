@@ -313,6 +313,36 @@ public static class Client
         return ReadResponse(ssl);
     }
 
+    /// <summary>
+    /// Complete a TLS handshake, then write bytes that are not a valid TLS record. The server's
+    /// decrypt must surface that as a FAULT rather than an end of stream - a corrupted or truncated
+    /// stream looking like a polite hangup is precisely what a truncation attack wants.
+    /// </summary>
+    public static void SendTlsGarbageAfterHandshake(int port, int timeoutMs = 6000)
+    {
+        using var client = new TcpClient();
+        client.Connect("127.0.0.1", port);
+        client.ReceiveTimeout = timeoutMs;
+
+        using var ssl = new SslStream(client.GetStream(), leaveInnerStreamOpen: false, (_, _, _, _) => true);
+        ssl.AuthenticateAsClient(new SslClientAuthenticationOptions
+        {
+            TargetHost = "localhost",
+            EnabledSslProtocols = SslProtocols.Tls13,
+        });
+
+        // Underneath the SslStream, straight onto the socket: a record header claiming a content
+        // type and version that no TLS 1.3 peer will accept, followed by noise.
+        NetworkStream raw = client.GetStream();
+        byte[] bogus = [0x17, 0x03, 0x03, 0x00, 0x10, .. Enumerable.Repeat((byte)0xAB, 16)];
+        raw.Write(bogus);
+        raw.Flush();
+
+        // Give the server a moment to read and fault before the socket closes under it, so the
+        // failure it reports is the bad record rather than the disconnect.
+        Thread.Sleep(500);
+    }
+
     // Several requests over one connection (lock-step), to exercise the handler's keep-alive loop.
     public static List<(int Status, string Body)> GetKeepAlive(int port, string path, int count, int timeoutMs = 6000)
     {

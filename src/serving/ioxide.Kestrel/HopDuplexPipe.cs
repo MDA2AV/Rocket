@@ -146,14 +146,10 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
     }
 
     // kTLS RX stays in userspace: feed the ciphertext slice through OpenSSL and write the plaintext.
+    // DecryptInto rather than Decrypt so OpenSSL writes into the pipe's own memory - Decrypt lands
+    // the plaintext in the session's buffer first and we would copy it again on the way here.
     private static unsafe void DecryptSlice(in SpscRecvRing.Item item, PipeWriter writer, TlsSession tls)
-    {
-        ReadOnlySpan<byte> plain = tls.Decrypt(item.Ptr, item.Len);
-        if (!plain.IsEmpty)
-        {
-            writer.Write(plain);
-        }
-    }
+        => tls.DecryptInto(item.Ptr, item.Len, writer);
 
     // Outbound pipe → connection send. Drains Kestrel's response into the slab and submits one SEND.
     private async Task SendPumpAsync()

@@ -1,3 +1,4 @@
+using System.IO.Pipelines;
 using System.Runtime.InteropServices;
 
 namespace ioxide.tls;
@@ -58,6 +59,82 @@ public sealed unsafe class TlsSession : IDisposable
     /// <summary>Plaintext decrypted during the handshake's final flight, if any.</summary>
     public ReadOnlySpan<byte> DrainPlaintext() => _plain.AsSpan(0, _plainLen);
 
+    /// <summary>
+    /// Feed one ciphertext slice and decrypt straight into <paramref name="writer"/>, returning the
+    /// plaintext byte count. Same contract as <see cref="Decrypt"/> otherwise: an empty result is
+    /// normal for a partial record, and <see cref="Closed"/> reports a clean close_notify.
+    /// </summary>
+    /// <remarks>
+    /// The point of this over <see cref="Decrypt"/> is one fewer copy. <see cref="Decrypt"/> has to
+    /// land the plaintext in <c>_plain</c> and hand back a span, so a caller feeding a pipe copies
+    /// it a second time; here OpenSSL writes into the pipe's own memory and there is no
+    /// intermediate. Callers with nowhere better to put the bytes still want <see cref="Decrypt"/>.
+    /// </remarks>
+    public int DecryptInto(byte* ciphertext, int length, PipeWriter writer)
+    {
+        OpenSsl.BIO_write(_rbio, ciphertext, length);
+
+        int total = 0;
+        while (true)
+        {
+            // A TLS record carries at most 2^14 bytes of plaintext (RFC 8446 section 5.1), so a
+            // larger request cannot be filled by one record and a smaller one only costs extra
+            // SSL_read calls. This is the protocol's own bound, not a tuning knob.
+            Span<byte> destination = writer.GetSpan(MaxRecordPlaintext);
+
+            int n;
+            fixed (byte* p = destination)
+            {
+                // Synchronous, so the pin lasts only for the call.
+                n = OpenSsl.SSL_read(_ssl, p, destination.Length);
+            }
+
+            if (n > 0)
+            {
+                writer.Advance(n);
+                total += n;
+                continue;
+            }
+
+            if (!ShouldKeepReading(n))
+            {
+                return total;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Classify a non-positive SSL_read. False means stop and wait for more ciphertext; a genuine
+    /// protocol failure throws.
+    /// </summary>
+    /// <remarks>
+    /// The distinction this draws used to be missing: every error except ZERO_RETURN was treated as
+    /// "record incomplete", so a bad MAC or a malformed record was indistinguishable from needing
+    /// more bytes. A corrupted stream then looked like a connection that had simply gone quiet, and
+    /// a caller pumping a pipe would wait on it forever.
+    /// </remarks>
+    private bool ShouldKeepReading(int result)
+    {
+        int err = OpenSsl.SSL_get_error(_ssl, result);
+
+        switch (err)
+        {
+            case OpenSsl.SSL_ERROR_WANT_READ:
+            case OpenSsl.SSL_ERROR_WANT_WRITE:
+                return false;   // normal: the record is not complete yet
+
+            case OpenSsl.SSL_ERROR_ZERO_RETURN:
+                Closed = true;  // clean close_notify
+                return false;
+
+            default:
+                throw new IOException($"TLS decrypt failed (error {err}): {OpenSsl.LastError()}");
+        }
+    }
+
+    /// <summary>Maximum plaintext in one TLS record, RFC 8446 section 5.1.</summary>
+    private const int MaxRecordPlaintext = 16 * 1024;
+
     internal void DrainPending()
     {
         while (true)
@@ -83,12 +160,10 @@ public sealed unsafe class TlsSession : IDisposable
                 continue;
             }
 
-            int err = OpenSsl.SSL_get_error(_ssl, n);
-            if (err == OpenSsl.SSL_ERROR_ZERO_RETURN)
+            if (!ShouldKeepReading(n))
             {
-                Closed = true;   // clean close_notify
+                return;
             }
-            return;              // WANT_READ: record incomplete, wait for more bytes
         }
     }
 

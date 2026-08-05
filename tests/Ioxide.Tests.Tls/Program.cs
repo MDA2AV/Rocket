@@ -18,6 +18,7 @@ internal static class Program
         Console.WriteLine($"kTLS {(ktls ? "available" : "absent - sudo modprobe tls")}\n");
 
         TlsTests.Register(runner, ktls);
+        TlsPipeTests.Register(runner, ktls);
         return runner.Summary();
     }
 }
