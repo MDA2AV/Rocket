@@ -3,11 +3,18 @@ namespace Ioxide.Tests;
 /// <summary>Tiny test runner: PASS / FAIL / SKIP per test, a summary line, and a non-zero exit on failure.</summary>
 public sealed class Runner
 {
+    /// <summary>
+    /// How long any one test may run before it is called hung. Generous, because several tests
+    /// wait out acquire budgets and cooldowns on purpose - this is a backstop against a wedged
+    /// read, not a performance bar.
+    /// </summary>
+    private const int DefaultTimeoutMs = 120_000;
+
     private int _passed;
     private int _failed;
     private int _skipped;
 
-    public void Test(string name, Action body, bool skip = false)
+    public void Test(string name, Action body, bool skip = false, int timeoutMs = DefaultTimeoutMs)
     {
         if (skip)
         {
@@ -18,7 +25,7 @@ public sealed class Runner
 
         try
         {
-            body();
+            RunWithWatchdog(name, body, timeoutMs);
             Console.WriteLine($"PASS  {name}");
             _passed++;
         }
@@ -26,6 +33,55 @@ public sealed class Runner
         {
             Console.WriteLine($"FAIL  {name}: {e.Message}");
             _failed++;
+        }
+    }
+
+    /// <summary>
+    /// Run the body on a worker and give up on it after <paramref name="timeoutMs"/>. Test bodies
+    /// are synchronous, so one that wedges - a read that never completes, an acquire that never
+    /// resolves - would otherwise hang the whole suite behind the CI job timeout and report
+    /// nothing at all. A hung test is now one FAIL and the rest still run.
+    /// </summary>
+    /// <remarks>
+    /// The worker is abandoned rather than aborted, because .NET cannot abort a thread and killing
+    /// a reactor mid-operation would corrupt every later test anyway. It is a background thread, so
+    /// it cannot keep the process alive past the summary.
+    /// </remarks>
+    private static void RunWithWatchdog(string name, Action body, int timeoutMs)
+    {
+        Exception? failure = null;
+        var finished = new ManualResetEventSlim(false);
+
+        var worker = new Thread(() =>
+        {
+            try
+            {
+                body();
+            }
+            catch (Exception e)
+            {
+                failure = e;
+            }
+            finally
+            {
+                finished.Set();
+            }
+        })
+        {
+            IsBackground = true,
+            Name = $"test-{name}",
+        };
+        worker.Start();
+
+        if (!finished.Wait(timeoutMs))
+        {
+            throw new TimeoutException(
+                $"timed out after {timeoutMs} ms (the test is wedged; later tests still ran)");
+        }
+
+        if (failure is not null)
+        {
+            throw failure;
         }
     }
 
