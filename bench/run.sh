@@ -6,7 +6,7 @@
 #     bash bench/run.sh                       # ~4 minutes
 #
 # Servers run 4 reactors (BENCH_REACTORS to override); the tcp-raw/tcp-pipe pair repeats at 12
-# reactors as the io_uring baseline. Loads: h2load for everything TCP (fixed -c 64 -t 4,
+# reactors as the io_uring baseline. Loads: wrk for everything TCP (fixed -c 64 -t 4,
 # time-bounded), h3x for the HTTP/3 server (H3X to point at the binary), Bench.Clients for the
 # ring-native clients. Sidecars (redis, postgres, an h2c nginx) start via docker when available;
 # anything missing skips with a note instead of failing the run.
@@ -36,9 +36,19 @@ play() { # $1 subdir, rest env; starts a playground binary detached
 
 stop_play() { pkill -f 'Playground[.]' 2>/dev/null; sleep 1; }
 
-h2load_h1() { # $1 url, $2 threads (default 4), $3 conns (default 64) -> req/s
-  h2load --h1 --warm-up-time=2 -D $DUR -c ${3:-64} -t ${2:-4} "$1" 2>/dev/null \
-    | grep -oE ', [0-9.]+ req/s' | head -1 | grep -oE '[0-9.]+' | cut -d. -f1
+wait_http() { # $1 url: poll until it answers (up to ~8s) so a slow start reads as fail-with-log
+  for _ in $(seq 16); do
+    curl -s -o /dev/null --max-time 1 "$1" && return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+wrk_h1() { # $1 url, $2 threads (default 4), $3 conns (default 64) -> req/s
+  # wrk has no warm-up flag: a short throwaway run heats the server, then the measured one.
+  wrk -t${2:-4} -c${3:-64} -d2s "$1" >/dev/null 2>&1
+  wrk -t${2:-4} -c${3:-64} -d${DUR}s "$1" 2>/dev/null \
+    | grep -oE 'Requests/sec: +[0-9.]+' | grep -oE '[0-9.]+' | cut -d. -f1
 }
 
 # ── tcp raw + pipes, 4 reactors and the 12-reactor baseline ─────────────────────────────────
@@ -48,20 +58,20 @@ for rc in $R 12; do
   T=4; C=64
   [ "$rc" = "12" ] && { T=12; C=128; }
   play Tcp/Raw PLAYGROUND_REACTORS=$rc PLAYGROUND_PORT=18080 PLAYGROUND_BODY=1024 \
-    && note "tcp-raw" "${rc}r" "$(h2load_h1 http://127.0.0.1:18080/ $T $C) req/s"
+    && note "tcp-raw" "${rc}r" "$(wrk_h1 http://127.0.0.1:18080/ $T $C) req/s"
   stop_play
   play Tcp/Pipe PLAYGROUND_REACTORS=$rc PLAYGROUND_PORT=18080 PLAYGROUND_BODY=1024 \
-    && note "tcp-pipe" "${rc}r" "$(h2load_h1 http://127.0.0.1:18080/ $T $C) req/s"
+    && note "tcp-pipe" "${rc}r" "$(wrk_h1 http://127.0.0.1:18080/ $T $C) req/s"
   stop_play
 done
 
 # ── tls ─────────────────────────────────────────────────────────────────────────────────────
 play Tls/SslStream PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18443 \
-  && note "tls-sslstream" "${R}r" "$(h2load_h1 https://127.0.0.1:18443/) req/s"
+  && note "tls-sslstream" "${R}r" "$(wrk_h1 https://127.0.0.1:18443/) req/s"
 stop_play
 if [ -d /sys/module/tls ]; then
   play Tls/Ktls PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18443 \
-    && note "tls-ktls" "${R}r" "$(h2load_h1 https://127.0.0.1:18443/) req/s"
+    && note "tls-ktls" "${R}r" "$(wrk_h1 https://127.0.0.1:18443/) req/s"
   stop_play
 else
   note "tls-ktls" "${R}r" "SKIP (no 'tls' kernel module - sudo modprobe tls)"
@@ -80,11 +90,11 @@ fi
 
 # ── ring-native clients (Bench.Clients also runs $R reactors) ───────────────────────────────
 CLI=bench/Bench.Clients/bin/Release/net11.0/Bench.Clients
-note "client-h3" "${R}r" "$(BENCH_REACTORS=$R $CLI h3 127.0.0.1 18444 $DUR 2>/dev/null | grep -oE '[0-9]+ req/s' || echo fail)"
+note "client-h3" "${R}r" "$(BENCH_REACTORS=$R $CLI h3 127.0.0.1 18444 $DUR 2>$BIN/client-h3.log | grep -oE '[0-9]+ req/s' || echo fail)"
 stop_play
 
 play Tcp/Raw PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18081 PLAYGROUND_BODY=1024
-note "client-h1" "${R}r" "$(BENCH_REACTORS=$R $CLI h1 127.0.0.1 18081 $DUR 2>/dev/null | grep -oE '[0-9]+ req/s' || echo fail)"
+note "client-h1" "${R}r" "$(BENCH_REACTORS=$R $CLI h1 127.0.0.1 18081 $DUR 2>$BIN/client-h1.log | grep -oE '[0-9]+ req/s' || echo fail)"
 stop_play
 
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
@@ -96,8 +106,8 @@ http { access_log off; server { listen 18464; http2 on;
 NGINX
   docker rm -f bench-h2c >/dev/null 2>&1
   docker run -d --name bench-h2c --network host -v "$PWD/$BIN/h2c.conf":/etc/nginx/nginx.conf:ro nginx >/dev/null 2>&1
-  sleep 3
-  note "client-h2" "${R}r" "$(BENCH_REACTORS=$R $CLI h2 127.0.0.1 18464 $DUR 2>/dev/null | grep -oE '[0-9]+ req/s' || echo fail)"
+  wait_http http://127.0.0.1:18464/ || say "h2c upstream slow to start"
+  note "client-h2" "${R}r" "$(BENCH_REACTORS=$R $CLI h2 127.0.0.1 18464 $DUR 2>$BIN/client-h2.log | grep -oE '[0-9]+ req/s' || echo fail)"
   docker rm -f bench-h2c >/dev/null 2>&1
 else
   note "client-h2" "${R}r" "SKIP (docker unavailable for the h2c upstream)"
@@ -109,7 +119,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   docker run -d --name bench-redis --network host redis:7-alpine >/dev/null 2>&1
   sleep 2
   play Redis PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18085 \
-    && note "redis" "${R}r" "$(h2load_h1 http://127.0.0.1:18085/) req/s"
+    && note "redis" "${R}r" "$(wrk_h1 http://127.0.0.1:18085/) req/s"
   stop_play
   docker rm -f bench-redis >/dev/null 2>&1
 
@@ -119,7 +129,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     -e POSTGRES_HOST_AUTH_METHOD=trust postgres:18 >/dev/null 2>&1
   sleep 6
   play Pg PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18086 \
-    && note "pg" "${R}r" "$(h2load_h1 http://127.0.0.1:18086/) req/s"
+    && note "pg" "${R}r" "$(wrk_h1 http://127.0.0.1:18086/) req/s"
   stop_play
   docker rm -f bench-pg >/dev/null 2>&1
 else
@@ -128,11 +138,11 @@ else
 fi
 
 play File PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18087 \
-  && note "file" "${R}r" "$(h2load_h1 http://127.0.0.1:18087/index.html) req/s"
+  && note "file" "${R}r" "$(wrk_h1 http://127.0.0.1:18087/index.html) req/s"
 stop_play
 
 # ── report ──────────────────────────────────────────────────────────────────────────────────
 echo
-echo "ioxide bench - $(date -u +%F) $(uname -r) - servers ${R}r (baseline 12r driven -t12 -c128), h2load -c64 -t4, ${DUR}s"
+echo "ioxide bench - $(date -u +%F) $(uname -r) - servers ${R}r (baseline 12r driven -t12 -c128), wrk -c64 -t4, ${DUR}s"
 echo "────────────────────────────────────────────────────────"
 for line in "${RESULTS[@]}"; do echo "$line"; done
