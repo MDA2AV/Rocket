@@ -148,12 +148,6 @@ var config = new ServerConfig
         RecvQueueEntries = 64,                   // per-connection SPSC queue, power of two
     },
 
-    Udp = new UdpOptions
-    {
-        Ports     = [],                          // raw datagram sockets -&gt; Reactor.OnDatagram
-        RecvSlots = 16,                          // shared UDP buffer ring depth
-        Gro       = true,                        // coalesce a peer&#x27;s burst into one completion
-    },
 };
 
 ReadOnlyMemory&lt;byte&gt; ok = &quot;HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok&quot;u8.ToArray();
@@ -252,12 +246,6 @@ var config = new ServerConfig
         RecvQueueEntries = 64,                   // per-connection SPSC queue, power of two
     },
 
-    Udp = new UdpOptions
-    {
-        Ports     = [],                          // raw datagram sockets -&gt; Reactor.OnDatagram
-        RecvSlots = 16,                          // shared UDP buffer ring depth
-        Gro       = true,                        // coalesce a peer&#x27;s burst into one completion
-    },
 };
 
 ReadOnlyMemory&lt;byte&gt; ok = &quot;HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok&quot;u8.ToArray();
@@ -441,9 +429,11 @@ var config = new ServerConfig
 
     Tcp = null,                                  // QUIC only: no TCP listener is opened
 
+    // QUIC rides UDP, so these are its socket tunables. Ports is for RAW datagram sockets
+    // (Reactor.OnDatagram) - QUIC binds its own port and needs none listed here.
     Udp = new UdpOptions
     {
-        Ports     = [],                          // QUIC binds its own port; these are extra
+        Ports     = [],
         RecvSlots = 16,                          // each slot pins ~64 KiB (a full GRO train)
         Gro       = true,
     },
@@ -515,9 +505,11 @@ var config = new ServerConfig
 
     Tcp = null,                                  // QUIC only: no TCP listener is opened
 
+    // QUIC rides UDP, so these are its socket tunables. Ports is for RAW datagram sockets
+    // (Reactor.OnDatagram) - QUIC binds its own port and needs none listed here.
     Udp = new UdpOptions
     {
-        Ports     = [],                          // QUIC binds its own port; these are extra
+        Ports     = [],
         RecvSlots = 16,                          // each slot pins ~64 KiB (a full GRO train)
         Gro       = true,
     },
@@ -588,9 +580,11 @@ var config = new ServerConfig
 
     Tcp = null,                                  // QUIC only: no TCP listener is opened
 
+    // QUIC rides UDP, so these are its socket tunables. Ports is for RAW datagram sockets
+    // (Reactor.OnDatagram) - QUIC binds its own port and needs none listed here.
     Udp = new UdpOptions
     {
-        Ports     = [],                          // QUIC binds its own port; these are extra
+        Ports     = [],
         RecvSlots = 16,                          // each slot pins ~64 KiB (a full GRO train)
         Gro       = true,
     },
@@ -677,12 +671,6 @@ var config = new ServerConfig
         RecvQueueEntries = 64,                   // per-connection SPSC queue, power of two
     },
 
-    Udp = new UdpOptions
-    {
-        Ports     = [],                          // raw datagram sockets -&gt; Reactor.OnDatagram
-        RecvSlots = 16,                          // shared UDP buffer ring depth
-        Gro       = true,                        // coalesce a peer&#x27;s burst into one completion
-    },
 };
 
 var upstream = new RingHttpClientOptions
@@ -791,12 +779,6 @@ var config = new ServerConfig
         RecvQueueEntries = 64,                   // per-connection SPSC queue, power of two
     },
 
-    Udp = new UdpOptions
-    {
-        Ports     = [],                          // raw datagram sockets -&gt; Reactor.OnDatagram
-        RecvSlots = 16,                          // shared UDP buffer ring depth
-        Gro       = true,                        // coalesce a peer&#x27;s burst into one completion
-    },
 };
 
 var pgOptions = new PgOptions
@@ -904,12 +886,6 @@ var config = new ServerConfig
         RecvQueueEntries = 64,                   // per-connection SPSC queue, power of two
     },
 
-    Udp = new UdpOptions
-    {
-        Ports     = [],                          // raw datagram sockets -&gt; Reactor.OnDatagram
-        RecvSlots = 16,                          // shared UDP buffer ring depth
-        Gro       = true,                        // coalesce a peer&#x27;s burst into one completion
-    },
 };
 
 var redisOptions = new RedisOptions
@@ -1011,12 +987,6 @@ var config = new ServerConfig
         RecvQueueEntries = 64,                   // per-connection SPSC queue, power of two
     },
 
-    Udp = new UdpOptions
-    {
-        Ports     = [],                          // raw datagram sockets -&gt; Reactor.OnDatagram
-        RecvSlots = 16,                          // shared UDP buffer ring depth
-        Gro       = true,                        // coalesce a peer&#x27;s burst into one completion
-    },
 };
 
 var threads = new Thread[config.ReactorCount];
@@ -1188,12 +1158,6 @@ var config = new ServerConfig
         RecvQueueEntries = 64,                   // per-connection SPSC queue, power of two
     },
 
-    Udp = new UdpOptions
-    {
-        Ports     = [],                          // raw datagram sockets -&gt; Reactor.OnDatagram
-        RecvSlots = 16,                          // shared UDP buffer ring depth
-        Gro       = true,                        // coalesce a peer&#x27;s burst into one completion
-    },
 };
 
 ReadOnlyMemory&lt;byte&gt; ok = &quot;HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok&quot;u8.ToArray();
