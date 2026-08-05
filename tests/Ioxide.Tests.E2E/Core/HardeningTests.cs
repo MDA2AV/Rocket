@@ -69,8 +69,8 @@ internal static class HardeningTests
                     },
                 });
 
-            Thread.Sleep(200);   // let WaitForListen's probe connection recycle before the baseline
-            int before = Fds();
+            // Stable() already waits out WaitForListen's probe connection recycling.
+            int before = FdCount.Stable();
 
             for (int i = 0; i < 10; i++)
             {
@@ -80,8 +80,7 @@ internal static class HardeningTests
                 Thread.Sleep(20);
             }   // dispose closes the client; the server must observe EOF and recycle
 
-            Thread.Sleep(500);
-            int leaked = Fds() - before;
+            int leaked = FdCount.Stable() - before;
             Assert.True(leaked <= 3, $"{leaked} fds leaked by 10 faulted handlers (CLOSE_WAIT sockets)");
         });
 
@@ -140,8 +139,6 @@ internal static class HardeningTests
             }
         }, skip: !TestServer.KernelAtLeast(6, 12));
     }
-
-    private static int Fds() => Directory.EnumerateFileSystemEntries("/proc/self/fd").Count();
 
     /// <summary>
     /// Connect and keep trying until the server answers, up to a deadline. Capacity in these tests

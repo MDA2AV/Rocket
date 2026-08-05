@@ -1,3 +1,4 @@
+
 namespace ioxide.httpclient;
 
 /// <summary>
@@ -27,6 +28,12 @@ public sealed record HttpClientOptions
     /// <summary>Per-connection receive buffer; grows (up to MaxResponseBytes) when a response
     /// needs more.</summary>
     public int ReceiveBufferSize { get; init; } = 16 * 1024;
+
+    /// <summary>
+    /// TLS context for an <c>https://</c> origin, or null for cleartext. Shared across this pool's
+    /// connections - it holds no per-connection state, and the caller owns its disposal.
+    /// </summary>
+    public TlsClientContext? Tls { get; init; }
 
     /// <summary>How long a request may wait for a free connection when every one is busy.</summary>
     public int AcquireTimeoutMs { get; init; } = 10_000;

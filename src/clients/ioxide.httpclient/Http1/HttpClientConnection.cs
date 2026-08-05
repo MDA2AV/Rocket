@@ -20,7 +20,7 @@ namespace ioxide.httpclient;
 internal sealed class HttpClientConnection : IDisposable
 {
     private readonly HttpClientOptions _options;
-    private readonly RingSocket _socket;
+    private readonly IClientTransport _transport;
     private readonly byte[] _hostHeaderLine;
 
     private nint _send;
@@ -41,10 +41,10 @@ internal sealed class HttpClientConnection : IDisposable
     /// or the server asked to close). The pool drops these and opens replacements.</summary>
     public bool IsBroken => _broken;
 
-    private unsafe HttpClientConnection(HttpClientOptions options, RingSocket socket, byte[] hostHeaderLine)
+    private unsafe HttpClientConnection(HttpClientOptions options, IClientTransport transport, byte[] hostHeaderLine)
     {
         _options = options;
-        _socket = socket;
+        _transport = transport;
         _hostHeaderLine = hostHeaderLine;
 
         _sendCapacity = options.SendBufferSize;
@@ -60,22 +60,10 @@ internal sealed class HttpClientConnection : IDisposable
         string authority = options.Port is 80 or 443 ? options.Host : $"{options.Host}:{options.Port}";
         byte[] hostHeaderLine = System.Text.Encoding.ASCII.GetBytes($"host: {authority}\r\n");
 
-        RingSocket socket = RingSocket.CreateTcp(host);
-        try
-        {
-            int result = await socket.ConnectAsync(options.Host, options.Port);
-            if (result < 0)
-            {
-                throw new HttpClientException($"connect to {options.Host}:{options.Port} failed: errno {-result}");
-            }
-        }
-        catch
-        {
-            socket.Dispose();
-            throw;
-        }
+        IClientTransport transport = await ClientTransport.ConnectAsync(
+            host, options.Host, options.Port, options.Tls);
 
-        return new HttpClientConnection(options, socket, hostHeaderLine);
+        return new HttpClientConnection(options, transport, hostHeaderLine);
     }
 
     /// <summary>Send one request and read its response. The response owns its bytes.</summary>
@@ -127,7 +115,7 @@ internal sealed class HttpClientConnection : IDisposable
         int sent = 0;
         while (sent < length)
         {
-            int n = await _socket.SendAsync(buffer + sent, length - sent);
+            int n = await _transport.SendAsync(buffer + sent, length - sent);
             if (n <= 0)
             {
                 throw new HttpClientException(n == 0 ? "peer closed while sending" : $"send failed: errno {-n}");
@@ -344,7 +332,7 @@ internal sealed class HttpClientConnection : IDisposable
     {
         EnsureReceiveSpace();
 
-        int n = await _socket.RecvAsync(_receive + _received, _receiveCapacity - _received);
+        int n = await _transport.RecvAsync(_receive + _received, _receiveCapacity - _received);
         if (n <= 0)
         {
             throw new HttpClientException(n == 0 ? "peer closed mid-response" : $"recv failed: errno {-n}");
@@ -618,7 +606,7 @@ internal sealed class HttpClientConnection : IDisposable
     public unsafe void Dispose()
     {
         _broken = true;
-        _socket.Dispose();
+        _transport.Dispose();
         if (_send != 0)
         {
             NativeMemory.Free((void*)_send);

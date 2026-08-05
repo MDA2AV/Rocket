@@ -63,11 +63,18 @@ public sealed class Http3ClientConnection : IDisposable
     // RFC 9114 H3_NO_ERROR - what a clean application-level close carries.
     private const ulong H3NoError = 0x100;
 
-    internal Http3ClientConnection(QuicEngineConnection quic, string authority, int readyTimeoutMs)
+    // Ceiling on headers + body per response. h3 streams a response in through callbacks with no
+    // length known up front, so without this a single origin can grow the arena until the process
+    // dies.
+    private readonly int _maxResponseBytes;
+
+    internal Http3ClientConnection(QuicEngineConnection quic, string authority, int readyTimeoutMs,
+        int maxResponseBytes)
     {
         _quic = quic;
         _authority = System.Text.Encoding.ASCII.GetBytes(authority);
         _readyTimeoutMs = readyTimeoutMs;
+        _maxResponseBytes = maxResponseBytes;
 
         // Nothing else wakes a client connection until the peer sends stream data, and the peer
         // has nothing to send until we ask - so the handshake signal is what starts h3 setup.
@@ -446,6 +453,18 @@ public sealed class Http3ClientConnection : IDisposable
             {
                 Nghttp3.ih3_close_stream(_nghttp3Handle, pending.StreamId, 0);
             }
+
+            // The arena refused bytes for exceeding MaxResponseBytes. The callbacks could only
+            // record that; failing the caller happens here, where a throw no longer crosses
+            // nghttp3's frames.
+            if (response.Overflowed)
+            {
+                response.Dispose();
+                pending.Fail(new Http3ClientException(
+                    $"response exceeds MaxResponseBytes ({_maxResponseBytes})"));
+                continue;
+            }
+
             pending.Complete(response);
         }
     }
@@ -520,9 +539,12 @@ public sealed class Http3ClientConnection : IDisposable
     private static unsafe void CallbackBeginHeaders(void* user, long streamId)
     {
         Http3ClientConnection connection = From(user);
-        if (connection._pending.TryGetValue(streamId, out PendingRequest? pending))
+        if (connection._pending.TryGetValue(streamId, out PendingRequest? pending) &&
+            pending.Response is null)
         {
-            pending.Response ??= new HttpClientResponse();
+            var response = new HttpClientResponse();
+            response.SetMaxArenaBytes(connection._maxResponseBytes);
+            pending.Response = response;
         }
     }
 
@@ -563,14 +585,13 @@ public sealed class Http3ClientConnection : IDisposable
     private static unsafe void CallbackEndHeaders(void* user, long streamId, int fin)
     {
         Http3ClientConnection connection = From(user);
-        if (connection._pending.TryGetValue(streamId, out PendingRequest? pending) &&
-            pending.Response is { } response && !pending.HeadersDone)
+        if (!connection._pending.TryGetValue(streamId, out PendingRequest? pending) ||
+            pending.Response is not { } response)
         {
-            pending.HeadersDone = true;
-            pending.BodyStart = response.ArenaLength;   // body bytes follow the header bytes
+            return;
         }
-        // A second field section is TRAILERS: leaving BodyStart alone keeps the body range valid
-        // (moving it here would slice past the body into the trailer bytes).
+
+        pending.Assembly.EndFieldSection(response);
     }
 
     [UnmanagedCallersOnly]
@@ -580,8 +601,10 @@ public sealed class Http3ClientConnection : IDisposable
         if (connection._pending.TryGetValue(streamId, out PendingRequest? pending) &&
             pending.Response is { } response)
         {
-            response.Append(new ReadOnlySpan<byte>(data, (int)dataLength));
-            pending.BodyLength += (int)dataLength;
+            // Count what the arena ACCEPTED, not what arrived: past MaxResponseBytes the append is
+            // refused and returns a zero-length range, and a body length that outran the arena
+            // would make Freeze slice out of bounds - inside this callback, which is fatal.
+            pending.Assembly.BodyLength += response.Append(new ReadOnlySpan<byte>(data, (int)dataLength)).Length;
         }
     }
 
@@ -595,7 +618,7 @@ public sealed class Http3ClientConnection : IDisposable
         }
 
         HttpClientResponse response = pending.Response ?? new HttpClientResponse();
-        response.SetBodyRange((pending.BodyStart, pending.BodyLength));
+        response.SetBodyRange(pending.Assembly.BodyRange);
         response.Freeze();
 
         // Record only - the waiter is resumed by CompleteFinishedRequests once nghttp3 unwinds,
@@ -621,9 +644,7 @@ public sealed class Http3ClientConnection : IDisposable
 
         public HttpClientResponse? Response;
         public long StreamId;
-        public bool HeadersDone;   // first field section seen; a later one is trailers
-        public int BodyStart;
-        public int BodyLength;
+        public ResponseAssembly Assembly;
 
         public ValueTask<HttpClientResponse> Task => new(this, _core.Version);
 

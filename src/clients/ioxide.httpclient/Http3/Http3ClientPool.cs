@@ -20,6 +20,10 @@ public sealed record Http3ClientOptions
 
     /// <summary>How long a request waits for a usable connection (handshake included).</summary>
     public int AcquireTimeoutMs { get; init; } = 10_000;
+
+    /// <summary>Per-request ceiling for headers + body; a bigger response fails the request
+    /// instead of growing the arena without bound.</summary>
+    public int MaxResponseBytes { get; init; } = 8 * 1024 * 1024;
 }
 
 /// <summary>
@@ -122,7 +126,8 @@ public sealed class Http3ClientPool : IDisposable
         try
         {
             QuicEngineConnection quic = _engine.Connect(_reactor, _options.Host, _options.Port, _options.ServerName);
-            _connections.Add(new Http3ClientConnection(quic, $"{_options.ServerName}:{_options.Port}", _options.AcquireTimeoutMs));
+            _connections.Add(new Http3ClientConnection(quic, $"{_options.ServerName}:{_options.Port}",
+                _options.AcquireTimeoutMs, _options.MaxResponseBytes));
         }
         catch (Exception e)
         {

@@ -10,7 +10,7 @@ internal static class PgTests
         // ---- pg pool fails fast on a dead backend (#1) - needs NO live pg ----
         runner.Test("pg: dead backend fails fast, no hang (#1)", () =>
         {
-            PgOptions dead = PgOpts(pg) with { Port = 5599 };
+            PgOptions dead = PgOpts(pg) with { Port = (ushort)TestServer.DeadPort() };
             int port = TestServer.Start(PgHandlers.Pg, r => PgPool.Start(r, dead));
             (int status, _) = Client.Get(port, "/", timeoutMs: 8000);
             Assert.Equal(500, status);   // PgException surfaced quickly, not a hang

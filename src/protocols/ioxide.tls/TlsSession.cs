@@ -103,6 +103,9 @@ public sealed unsafe class TlsSession : IDisposable
         }
     }
 
+    /// <summary>Maximum plaintext in one TLS record, RFC 8446 section 5.1.</summary>
+    private const int MaxRecordPlaintext = 16 * 1024;
+
     /// <summary>
     /// Classify a non-positive SSL_read. False means stop and wait for more ciphertext; a genuine
     /// protocol failure throws.
@@ -131,9 +134,6 @@ public sealed unsafe class TlsSession : IDisposable
                 throw new IOException($"TLS decrypt failed (error {err}): {OpenSsl.LastError()}");
         }
     }
-
-    /// <summary>Maximum plaintext in one TLS record, RFC 8446 section 5.1.</summary>
-    private const int MaxRecordPlaintext = 16 * 1024;
 
     internal void DrainPending()
     {

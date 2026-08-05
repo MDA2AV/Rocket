@@ -279,8 +279,7 @@ internal static class CoreTests
                     },
                 });
 
-            Thread.Sleep(200);
-            int before = Fds();
+            int before = FdCount.Stable();
 
             for (int i = 0; i < 10; i++)
             {
@@ -299,15 +298,14 @@ internal static class CoreTests
                 Assert.True(closed, $"connection {i} not closed after the faulting handler released it");
             }
 
-            Thread.Sleep(300);
-            int leaked = Fds() - before;
+            int leaked = FdCount.Stable() - before;
             Assert.True(leaked <= 3, $"{leaked} fds leaked across 10 DecRef-then-throw handlers");
         });
 
         runner.Test("core: Stop() tears down cleanly (thread exits, fds released)", () =>
         {
-            Thread.Sleep(200);   // let earlier tests' recycles settle before the fd baseline
-            int before = Fds();
+            // Waits for the count to stop moving, which is what the old fixed sleep approximated.
+            int before = FdCount.Stable();
 
             (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(Handlers.Raw,
                 new ServerConfig
@@ -330,9 +328,8 @@ internal static class CoreTests
             Assert.True(thread.Join(3000), "reactor thread did not exit after Stop()");
 
             open.Close();
-            Thread.Sleep(200);
 
-            int leaked = Fds() - before;
+            int leaked = FdCount.Stable() - before;
             Assert.True(leaked <= 2, $"teardown leaked {leaked} fds (ring/listener/wake/conn not closed?)");
 
             bool refused = false;
@@ -348,8 +345,6 @@ internal static class CoreTests
             Assert.True(refused, "listener still accepting after Stop()");
         });
     }
-
-    private static int Fds() => Directory.EnumerateFileSystemEntries("/proc/self/fd").Count();
 
     // Accumulates bytes and answers once per complete request ("\r\n\r\n"-terminated), so pipelined
     // and fragmented requests both get exactly one response each.
