@@ -48,10 +48,19 @@ public sealed class HttpClientResponse : IDisposable
     // Ceiling on headers + body for this response. h2 and h3 stream a response in through native
     // callbacks with no Content-Length to check up front, so this is the only thing bounding what
     // a hostile or broken origin can make us allocate.
-    private int _maxArenaBytes = DefaultMaxArenaBytes;
+    //
+    // Unbounded by default, and deliberately so. This type is shared by all three protocols, and
+    // HTTP/1.1 bounds its responses a different way - it reads Content-Length and rejects an
+    // oversize body before allocating (HttpClientConnection), never consulting Overflowed. A
+    // default ceiling here therefore did not protect h1, it silently TRUNCATED it: parsing
+    // completed while the arena dropped bytes, and the caller got status 200 with empty headers
+    // and an empty body. The protocols that need a ceiling ask for one.
+    private int _maxArenaBytes = MaxArenaBytesLimit;
 
-    // Matches HttpClientOptions.MaxResponseBytes, so all three protocols default alike.
-    private const int DefaultMaxArenaBytes = 8 * 1024 * 1024;
+    // ArrayPool.Rent throws above this regardless of free memory, and Rent is reached from inside
+    // [UnmanagedCallersOnly] callbacks - so this is a hard ceiling on what any caller may ask for,
+    // not merely a default.
+    private static readonly int MaxArenaBytesLimit = Array.MaxLength;
 
     /// <summary>
     /// True once an Append was refused for exceeding the cap. Appends are driven from
@@ -61,7 +70,12 @@ public sealed class HttpClientResponse : IDisposable
     /// </summary>
     internal bool Overflowed { get; private set; }
 
-    internal void SetMaxArenaBytes(int max) => _maxArenaBytes = Math.Max(1, max);
+    /// <summary>
+    /// Bound this response's arena. Clamped at both ends: a caller asking for more than
+    /// <see cref="Array.MaxLength"/> would otherwise turn a large response into a Rent failure
+    /// inside a native callback, which is the crash this ceiling exists to prevent.
+    /// </summary>
+    internal void SetMaxArenaBytes(int max) => _maxArenaBytes = Math.Clamp(max, 1, MaxArenaBytesLimit);
 
     internal (int Offset, int Length) Append(ReadOnlySpan<byte> data)
     {

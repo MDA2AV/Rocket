@@ -62,6 +62,21 @@ internal static class Http2ClientTests
             (_, string stats) = Client.Get(driver, "/connstats");
             Assert.Equal("conns=1", stats);
         }, skip: noSidecar);
+
+        runner.Test("httpclient h2: MaxResponseBytes is enforced, not merely configured", () =>
+        {
+            // The option was plumbed all the way to the connection and then used only in the
+            // exception TEXT - nothing ever applied it to the response arena, so h2 silently kept
+            // whatever the shared default happened to be and the error message named a limit it
+            // was not enforcing. The sidecar's 1 KiB object against a 16-byte ceiling settles it.
+            int driver = TestServer.Start(DriverHandler, onStart: reactor =>
+                Http2ClientPool.Start(reactor, Options() with { MaxResponseBytes = 16 }));
+
+            (int status, string body) = Client.Get(driver, "/index.html", timeoutMs: 20_000);
+            Assert.Equal(200, status);
+            Assert.True(body.StartsWith("599|"), $"expected the request to fail, got: {body}");
+            Assert.True(body.Contains("MaxResponseBytes"), $"should name the limit, got: {body}");
+        }, skip: noSidecar);
     }
 
     // Sends a POST with a 4 KiB body and reports the status, so a dropped body shows up as a
