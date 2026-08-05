@@ -308,6 +308,31 @@ nav.top .links a.gh svg { display: block; }
 #tab-kestrel:checked ~ .pane-kestrel { display: block; }
 .pane pre { margin: 0; }
 
+/* Title bar sitting on top of each code block, sharing its border so the two read as one panel. */
+.pane-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  border-bottom: none;
+  padding: 0.6rem 1.35rem;
+}
+.pane-head h3 {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+.pane-pkg {
+  font-family: ui-monospace, "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+  font-size: 0.72rem;
+  color: var(--accent-soft);
+  opacity: 0.85;
+}
+
 /* Below the menu's width budget it stops being fixed and stacks above the code. */
 @media (max-width: 1400px) {
   .ex-menu {

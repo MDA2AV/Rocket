@@ -118,93 +118,122 @@
     <p class="ex-hint">Pick an example to see the code</p>
   </div>
   <div class="pane pane-pipe">
-<pre><code class="language-csharp">var config = new ServerConfig
+    <div class="pane-head">
+      <h3>TCP · pipes</h3>
+      <span class="pane-pkg">ioxide</span>
+    </div>
+<pre><code class="language-csharp">// A complete ioxide server. Paste into a console app&#x27;s Program.cs and run it.
+//   dotnet add package ioxide
+using System.Buffers;
+using System.IO.Pipelines;
+using ioxide;
+using ioxide.utils;
+
+var config = new ServerConfig
 {
     ReactorCount = Environment.ProcessorCount,
-    RingEntries  = 8192,                   // io_uring submission/completion queue depth
-
-    // reactor recv machinery: io_uring provided-buffer rings
-    RecvBufferSize = 32 * 1024,            // size of each receive buffer
-    RecvSlots      = 4096,                 // buffers in the shared recv ring
-    // (or set Incremental = new IncrementalOptions { ... } - kernel 6.12+ - for
-    //  per-connection buffer rings; the shared-ring knobs then go unused)
-
-    Tcp = new TcpOptions
-    {
-        Port             = 8080,
-        WriteSlabSize    = 16 * 1024,      // per-connection write buffer
-        PoolMax          = 1024,           // connection objects recycled per reactor
-        RecvQueueEntries = 64,             // per-connection queue of received slices
-    },
+    Tcp = new TcpOptions { Port = 8080 },
 };
 
-var reactor = new Reactor(id, config);
+ReadOnlyMemory&lt;byte&gt; ok = &quot;HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok&quot;u8.ToArray();
 
-// Clients opened here ride this reactor's ring.
-reactor.OnStart = r =&gt; PgPool.Start(r, pgOptions);
+var threads = new Thread[config.ReactorCount];
 
-reactor.TcpHandle = async (r, conn) =&gt;
+for (int id = 0; id &lt; threads.Length; id++)
 {
-    var pool = r.GetService&lt;PgPool&gt;();
+    var reactor = new Reactor(id, config);
 
-    // Zero-copy pipes over the ring. The reader owns the carry: unconsumed
-    // bytes are held across reads (no copy, no slab) and buffers return to
-    // the ring automatically once fully consumed. The writer stages into the
-    // connection's write slab.
-    var reader = new TcpConnectionPipeReader(conn);
-    var writer = new TcpConnectionPipeWriter(conn);
-
-    while (true)
+    reactor.TcpHandle = async (r, conn) =&gt;
     {
-        // io_uring recv - resumes inline on the reactor.
-        var result = await reader.ReadAsync();
-        var buffer = result.Buffer;   // every unconsumed byte received so far
+        // Zero-copy pipes over the ring. The reader owns the carry: unconsumed bytes are held
+        // across reads (no copy, no slab) and buffers return to the ring automatically once
+        // fully consumed. The writer stages into the connection&#x27;s write slab.
+        var reader = new TcpConnectionPipeReader(conn);
+        var writer = new TcpConnectionPipeWriter(conn);
 
-        // Walk every complete request; a partial one stays buffered for the
-        // next read. TryParseRequest, Request, and SqlFor are YOUR code -
-        // ioxide hands you raw bytes and stays out of HTTP.
-        bool respond = false;
-        while (TryParseRequest(ref buffer, out Request request))
+        try
         {
-            // io_uring send + recv to Postgres, on the same ring.
-            var rows = await pool.QueryAsync(SqlFor(request.Path));
+            while (true)
+            {
+                // io_uring recv behind the PipeReader surface - still resumes inline.
+                ReadResult result = await reader.ReadAsync();
+                ReadOnlySequence&lt;byte&gt; buffer = result.Buffer;   // every unconsumed byte so far
 
-            // ioxide doesn't speak HTTP for you - you write the bytes.
-            string body = $"db={rows.Value}";
-            writer.Write(Encoding.ASCII.GetBytes(
-                $"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {body.Length}\r\n\r\n{body}"));
-            respond = true;
+                // Walk every complete request; a partial one stays buffered for the next read.
+                // Framing is your code - ioxide hands you bytes and stays out of HTTP.
+                SequencePosition consumed = buffer.Start;
+                bool respond = false;
+
+                while (TryParseRequest(ref buffer, out _))
+                {
+                    consumed = buffer.Start;
+                    respond = true;
+                }
+
+                if (respond)
+                {
+                    ok.Span.CopyTo(writer.GetSpan(ok.Length));
+                    writer.Advance(ok.Length);
+                    await writer.FlushAsync();
+                }
+
+                // Consumed bytes release their buffers; the partial tail is kept.
+                reader.AdvanceTo(consumed, buffer.End);
+
+                if (result.IsCompleted) return;
+            }
         }
-
-        // Consumed bytes release their buffers; the partial tail is kept.
-        reader.AdvanceTo(buffer.Start, buffer.End);
-
-        if (respond) await writer.FlushAsync();   // io_uring send, once per batch
-
-        if (result.IsCompleted)
+        finally
         {
             reader.Complete();
-            writer.Complete();
             conn.DecRef();
-            return;
         }
-    }
-};
+    };
 
-// One reactor per core.
-new Thread(reactor.Run).Start();</code></pre>
+    threads[id] = new Thread(reactor.Run) { Name = $&quot;reactor-{id}&quot; };
+    threads[id].Start();
+}
+
+Console.WriteLine($&quot;listening on :{config.Tcp.Port} across {config.ReactorCount} reactors&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}
+
+// Slice one complete request (terminated by a blank line) off the front of the buffer.
+static bool TryParseRequest(ref ReadOnlySequence&lt;byte&gt; buffer, out ReadOnlySequence&lt;byte&gt; request)
+{
+    var reader = new SequenceReader&lt;byte&gt;(buffer);
+
+    if (!reader.TryReadTo(out request, &quot;\r\n\r\n&quot;u8))
+    {
+        return false;
+    }
+
+    buffer = buffer.Slice(reader.Position);
+    return true;
+}</code></pre>
   </div>
   <div class="pane pane-shared">
-<pre><code class="language-csharp">var config = new ServerConfig
+    <div class="pane-head">
+      <h3>TCP · raw, shared recv ring</h3>
+      <span class="pane-pkg">ioxide</span>
+    </div>
+<pre><code class="language-csharp">// A complete ioxide server. Paste into a console app&#x27;s Program.cs and run it.
+//   dotnet add package ioxide
+using System.Buffers;
+using ioxide;
+using ioxide.utils;
+
+var config = new ServerConfig
 {
     ReactorCount = Environment.ProcessorCount,
     RingEntries  = 8192,                   // io_uring submission/completion queue depth
 
-    // reactor recv machinery: io_uring provided-buffer rings
+    // The shared recv ring: one pool of fixed buffers per reactor, handed out by the kernel.
     RecvBufferSize = 32 * 1024,            // size of each receive buffer
     RecvSlots      = 4096,                 // buffers in the shared recv ring
-    // (or set Incremental = new IncrementalOptions { ... } - kernel 6.12+ - for
-    //  per-connection buffer rings; the shared-ring knobs then go unused)
 
     Tcp = new TcpOptions
     {
@@ -215,207 +244,154 @@ new Thread(reactor.Run).Start();</code></pre>
     },
 };
 
-var reactor = new Reactor(id, config);
+ReadOnlyMemory&lt;byte&gt; ok = &quot;HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok&quot;u8.ToArray();
 
-// Clients opened here ride this reactor's ring.
-reactor.OnStart = r =&gt; PgPool.Start(r, pgOptions);
+var threads = new Thread[config.ReactorCount];
 
-reactor.TcpHandle = async (r, conn) =&gt;
+for (int id = 0; id &lt; threads.Length; id++)
 {
-    var pool = r.GetService&lt;PgPool&gt;();
+    // Each reactor owns its ring, its SO_REUSEPORT listener and its connections outright.
+    var reactor = new Reactor(id, config);
 
-    // Carry for bytes a read leaves behind - the head of a split request.
-    var inflight = new byte[16 * 1024];
-    int inflightTail = 0;
-
-    while (true)
+    reactor.TcpHandle = async (r, conn) =&gt;
     {
-        // io_uring recv - resumes inline on the reactor.
-        var snapshot = await conn.ReadAsync();
-
-        var rings = conn.GetSnapshotMemories(snapshot);
-        if (rings.Length &gt; 0)
+        try
         {
-            ReadOnlySequence&lt;byte&gt; data;
-            if (inflightTail == 0 && rings.Length == 1)
+            while (true)
             {
-                // Hot path: one ring, no carry - a single zero-copy segment.
-                data = new ReadOnlySequence&lt;byte&gt;(rings[0].Memory);
+                // io_uring recv. Resumes inline on this reactor thread - no thread pool hop.
+                RecvSnapshot snapshot = await conn.ReadAsync();
+
+                // A snapshot can carry several buffers. Each one is a slice of the shared ring:
+                // read what you need, then hand it straight back so the kernel can reuse it.
+                while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                {
+                    if (item.HasBuffer)
+                    {
+                        ReadOnlySpan&lt;byte&gt; received = item.AsSpan();   // your bytes, still in the ring
+                        _ = received.Length;                           // parse here - ioxide stays out of HTTP
+
+                        conn.ReturnBuffer(in item);
+                    }
+                }
+
+                conn.Write(ok.Span);
+                await conn.FlushAsync();
+
+                if (snapshot.IsClosed) return;   // peer went away
+                conn.ResetRead();                // arm the next read
             }
-            else if (inflightTail == 0)
-            {
-                // Several rings, no carry - chain them, still zero-copy.
-                data = rings.ToReadOnlySequence();
-            }
-            else
-            {
-                // Cold path: the carry goes first so a split request reads whole.
-                var first = new RingSegment(inflight.AsMemory(0, inflightTail), 0);
-                var last  = first;
-                for (int i = 0; i &lt; rings.Length; i++)
-                    last = last.Append(rings[i].Memory, rings[i].BufferId);
-                data = new ReadOnlySequence&lt;byte&gt;(first, 0, last, last.Memory.Length);
-            }
-
-            // Walk every complete request; stop at the first partial one.
-            // TryParseRequest, Request, and SqlFor are YOUR code - ioxide
-            // hands you raw bytes and stays out of HTTP.
-            long consumed = 0;
-            bool respond  = false;
-            while (TryParseRequest(data.Slice(consumed), out Request request, out long length))
-            {
-                consumed += length;
-
-                // io_uring send + recv to Postgres, on the same ring.
-                var rows = await pool.QueryAsync(SqlFor(request.Path));
-
-                // ioxide doesn't speak HTTP for you - you write the bytes.
-                string body = $"db={rows.Value}";
-                conn.Write(Encoding.ASCII.GetBytes(
-                    $"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {body.Length}\r\n\r\n{body}"));
-                respond = true;
-            }
-
-            // Whatever wasn't consumed (a partial request, or everything when
-            // nothing completed) moves to the front of the carry - only then
-            // do the buffers go back to the ring.
-            ReadOnlySequence&lt;byte&gt; rest = data.Slice(consumed);
-            rest.CopyTo(inflight);
-            inflightTail = (int)rest.Length;
-
-            conn.ReturnBuffers(rings);
-
-            if (respond) await conn.FlushAsync();   // io_uring send, once per batch
         }
-
-        if (snapshot.IsClosed)
+        finally
         {
-            conn.DecRef();
-            return;
+            conn.DecRef();   // hand the connection object back to the reactor&#x27;s pool
         }
+    };
 
-        conn.ResetRead();
-    }
-};
+    threads[id] = new Thread(reactor.Run) { Name = $&quot;reactor-{id}&quot; };
+    threads[id].Start();
+}
 
-// One reactor per core.
-new Thread(reactor.Run).Start();</code></pre>
+Console.WriteLine($&quot;listening on :{config.Tcp.Port} across {config.ReactorCount} reactors&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}</code></pre>
   </div>
   <div class="pane pane-inc">
-<pre><code class="language-csharp">var config = new ServerConfig
+    <div class="pane-head">
+      <h3>TCP · raw, incremental ring</h3>
+      <span class="pane-pkg">ioxide</span>
+    </div>
+<pre><code class="language-csharp">// A complete ioxide server. Paste into a console app&#x27;s Program.cs and run it.
+//   dotnet add package ioxide
+//   Needs Linux 6.12+ for incremental buffer rings.
+using ioxide;
+using ioxide.utils;
+
+var config = new ServerConfig
 {
     ReactorCount = Environment.ProcessorCount,
-    RingEntries  = 8192,                   // io_uring submission/completion queue depth
+    RingEntries  = 8192,
 
-    // per-connection buffer rings (kernel 6.12+): setting this IS enabling the
-    // mode - the shared-ring knobs (RecvBufferSize / RecvSlots) go unused
+    // Incremental (kernel 6.12+): a buffer ring PER CONNECTION, which the kernel appends into
+    // across successive recvs. A large request lands contiguously instead of arriving as a chain
+    // of shared-ring slices you have to stitch together. The shared-ring knobs go unused.
     Incremental = new IncrementalOptions
     {
-        MaxConnections = 4096,             // one buffer group per live connection
-        RecvSlots      = 16,               // buffers per connection ring
-        RecvBufferSize = 4096,             // bytes per buffer - the kernel appends into it
+        MaxConnections = 4096,   // one buffer-group id each; accepts past this are shed
+        RecvSlots      = 16,     // buffers per connection ring
+        RecvBufferSize = 4096,   // bytes per buffer - the kernel appends into it across recvs
     },
 
     Tcp = new TcpOptions
     {
         Port             = 8080,
-        WriteSlabSize    = 16 * 1024,      // per-connection write buffer
-        PoolMax          = 1024,           // connection objects recycled per reactor
-        RecvQueueEntries = 64,             // per-connection queue of received slices
+        WriteSlabSize    = 16 * 1024,
+        PoolMax          = 1024,
+        RecvQueueEntries = 64,
     },
 };
 
-var reactor = new Reactor(id, config);
+ReadOnlyMemory&lt;byte&gt; ok = &quot;HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok&quot;u8.ToArray();
 
-// Clients opened here ride this reactor's ring.
-reactor.OnStart = r =&gt; PgPool.Start(r, pgOptions);
+var threads = new Thread[config.ReactorCount];
 
-reactor.TcpHandle = async (r, conn) =&gt;
+for (int id = 0; id &lt; threads.Length; id++)
 {
-    var pool = r.GetService&lt;PgPool&gt;();
+    var reactor = new Reactor(id, config);
 
-    // Carry for bytes a read leaves behind - the head of a split request.
-    var inflight = new byte[16 * 1024];
-    int inflightTail = 0;
-
-    while (true)
+    reactor.TcpHandle = async (r, conn) =&gt;
     {
-        // io_uring recv - resumes inline on the reactor.
-        var snapshot = await conn.ReadAsync();
-
-        // Incremental: slices often share one buffer - the kernel keeps
-        // appending successive recvs into it until it fills.
-        var rings = conn.GetSnapshotMemories(snapshot);
-        if (rings.Length &gt; 0)
+        try
         {
-            ReadOnlySequence&lt;byte&gt; data;
-            if (inflightTail == 0 && rings.Length == 1)
+            while (true)
             {
-                // Hot path: one ring, no carry - a single zero-copy segment.
-                data = new ReadOnlySequence&lt;byte&gt;(rings[0].Memory);
+                RecvSnapshot snapshot = await conn.ReadAsync();
+
+                // Same drain loop as the shared-ring flavour - the difference is that consecutive
+                // recvs for THIS connection land in its own buffers, so a request that spans
+                // several reads stays contiguous rather than scattering across the shared pool.
+                while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                {
+                    if (item.HasBuffer)
+                    {
+                        ReadOnlySpan&lt;byte&gt; received = item.AsSpan();
+                        _ = received.Length;   // parse here
+
+                        conn.ReturnBuffer(in item);
+                    }
+                }
+
+                conn.Write(ok.Span);
+                await conn.FlushAsync();
+
+                if (snapshot.IsClosed) return;
+                conn.ResetRead();
             }
-            else if (inflightTail == 0)
-            {
-                // Several rings, no carry - chain them, still zero-copy.
-                data = rings.ToReadOnlySequence();
-            }
-            else
-            {
-                // Cold path: the carry goes first so a split request reads whole.
-                var first = new RingSegment(inflight.AsMemory(0, inflightTail), 0);
-                var last  = first;
-                for (int i = 0; i &lt; rings.Length; i++)
-                    last = last.Append(rings[i].Memory, rings[i].BufferId);
-                data = new ReadOnlySequence&lt;byte&gt;(first, 0, last, last.Memory.Length);
-            }
-
-            // Walk every complete request; stop at the first partial one.
-            // TryParseRequest, Request, and SqlFor are YOUR code - ioxide
-            // hands you raw bytes and stays out of HTTP.
-            long consumed = 0;
-            bool respond  = false;
-            while (TryParseRequest(data.Slice(consumed), out Request request, out long length))
-            {
-                consumed += length;
-
-                // io_uring send + recv to Postgres, on the same ring.
-                var rows = await pool.QueryAsync(SqlFor(request.Path));
-
-                // ioxide doesn't speak HTTP for you - you write the bytes.
-                string body = $"db={rows.Value}";
-                conn.Write(Encoding.ASCII.GetBytes(
-                    $"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {body.Length}\r\n\r\n{body}"));
-                respond = true;
-            }
-
-            // Whatever wasn't consumed (a partial request, or everything when
-            // nothing completed) moves to the front of the carry - only then
-            // do the buffers go back to the ring.
-            ReadOnlySequence&lt;byte&gt; rest = data.Slice(consumed);
-            rest.CopyTo(inflight);
-            inflightTail = (int)rest.Length;
-
-            // Refcounted return: a buffer recycles once you AND the kernel
-            // are both done with it.
-            conn.ReturnBuffers(rings);
-
-            if (respond) await conn.FlushAsync();   // io_uring send, once per batch
         }
-
-        if (snapshot.IsClosed)
+        finally
         {
             conn.DecRef();
-            return;
         }
+    };
 
-        conn.ResetRead();
-    }
-};
+    threads[id] = new Thread(reactor.Run) { Name = $&quot;reactor-{id}&quot; };
+    threads[id].Start();
+}
 
-// One reactor per core.
-new Thread(reactor.Run).Start();</code></pre>
+Console.WriteLine($&quot;listening on :{config.Tcp.Port} across {config.ReactorCount} reactors (incremental)&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}</code></pre>
   </div>
   <div class="pane pane-vs">
+    <div class="pane-head">
+      <h3>Shared ring vs incremental</h3>
+    </div>
     <div class="vs">
       <p><b>Shared buffer ring</b> (default, kernel 6.1+): one pool of buffers per reactor,
       drawn on by every connection. One recv consumes one whole buffer no matter how few bytes
@@ -442,9 +418,23 @@ new Thread(reactor.Run).Start();</code></pre>
     </div>
   </div>
   <div class="pane pane-qpipe">
-<pre><code class="language-csharp">// One engine for the whole server: ngtcp2 + picotls, compiled into the package.
-var engine = new QuicEngine("cert.pem", "key.pem", cidLength: 8,
-                            alpn: ["echo"]);   // TLS ALPN allowlist - ["h3"] when serving HTTP/3
+    <div class="pane-head">
+      <h3>QUIC · pipes</h3>
+      <span class="pane-pkg">ioxide + ioxide.ngtcp2</span>
+    </div>
+<pre><code class="language-csharp">// A complete ioxide QUIC server. Paste into a console app&#x27;s Program.cs and run it.
+//   dotnet add package ioxide
+//   dotnet add package ioxide.ngtcp2
+// Needs cert.pem / key.pem next to the binary.
+using System.Buffers;
+using System.IO.Pipelines;
+using ioxide;
+using ioxide.ngtcp2;
+
+// One engine for the whole server: ngtcp2 + picotls, compiled into the package. TLS 1.3 lives
+// inside the transport, so there is no separate TLS layer to wire up.
+using var engine = new QuicEngine(&quot;cert.pem&quot;, &quot;key.pem&quot;, cidLength: 8,
+                                  alpn: [&quot;echo&quot;]);   // ALPN allowlist - [&quot;h3&quot;] when serving HTTP/3
 
 var config = new ServerConfig
 {
@@ -458,371 +448,855 @@ var config = new ServerConfig
     },
 };
 
-var reactor = new Reactor(id, config);
+var threads = new Thread[config.ReactorCount];
 
-reactor.QuicHandle = async (r, conn) =&gt;
+for (int id = 0; id &lt; threads.Length; id++)
 {
-    // One QUIC stream as a duplex pipe. QUIC multiplexes streams and a
-    // PipeReader is one byte stream, so the pipe binds to a single stream:
-    // the first one the peer opens (auto-bind), or an explicit id.
-    // Multi-stream protocols use the raw surface - that's what ioxide.nghttp3 does.
-    var pipe = new QuicConnectionDualPipe(conn);
+    var reactor = new Reactor(id, config);
 
-    while (true)
+    reactor.QuicHandle = async (r, conn) =&gt;
     {
-        // Decrypted stream bytes - resumed inline on the reactor.
-        var result = await pipe.Input.ReadAsync();
-        var buffer = result.Buffer;
+        // One QUIC stream as a duplex pipe. QUIC multiplexes streams and a PipeReader is one byte
+        // stream, so the pipe binds to a single stream: the first one the peer opens (auto-bind),
+        // or an explicit id. Multi-stream protocols use the raw surface - that is what
+        // ioxide.nghttp3 does.
+        var pipe = new QuicConnectionDualPipe(conn);
 
-        // Same shape as TCP: walk every complete request, keep the partial
-        // tail buffered. TryParseRequest and Respond are YOUR code - ioxide
-        // hands you the stream's bytes and stays out of your protocol.
-        while (TryParseRequest(ref buffer, out Request request))
-            pipe.Output.Write(Respond(request));
-
-        // No parked flush: framing, encryption, pacing and retransmission
-        // are the engine's job - FlushAsync hands the bytes over and returns.
-        await pipe.Output.FlushAsync();
-
-        pipe.Input.AdvanceTo(buffer.Start, buffer.End);
-
-        if (result.IsCompleted)   // peer's fin, stream reset, or connection close
-            break;
-    }
-
-    pipe.Output.Complete();   // half-close: our fin rides out
-    pipe.Input.Complete();
-    conn.DecRef();
-};
-
-// One reactor per core.
-new Thread(reactor.Run).Start();</code></pre>
-  </div>
-  <div class="pane pane-qraw">
-<pre><code class="language-csharp">// One engine for the whole server: ngtcp2 + picotls, compiled into the package.
-var engine = new QuicEngine("cert.pem", "key.pem", cidLength: 8,
-                            alpn: ["echo"]);   // TLS ALPN allowlist - ["h3"] when serving HTTP/3
-
-var config = new ServerConfig
-{
-    ReactorCount = Environment.ProcessorCount,
-    Udp = new UdpOptions { RecvSlots = 16 },   // multishot UDP recv slots per reactor
-    Quic = new QuicOptions
-    {
-        Port              = 8443,              // every reactor binds it via SO_REUSEPORT
-        LocalCidLength    = 8,
-        ConnectionFactory = engine.CreateFactory(),
-    },
-};
-
-var reactor = new Reactor(id, config);
-
-reactor.QuicHandle = async (r, conn) =&gt;
-{
-    try
-    {
         while (true)
         {
-            // Decrypted stream events - resumed inline on the reactor.
-            QuicRecvSnapshot snap = await conn.ReadAsync();
+            // Decrypted stream bytes - resumed inline on the reactor.
+            ReadResult result = await pipe.Input.ReadAsync();
+            ReadOnlySequence&lt;byte&gt; buffer = result.Buffer;
 
-            // Drain the queue: each item carries stream id + fin, so this one
-            // loop serves every stream the peer multiplexes - here, an echo.
-            // Replies queue on the engine; framing, encryption, pacing and
-            // retransmission are its job (no flush to await).
-            while (conn.TryGetDelivery(in snap, out QuicRecvRing.Delivery item))
+            foreach (ReadOnlyMemory&lt;byte&gt; segment in buffer)
             {
-                conn.SendStream(item.StreamId, item.AsSpan(), item.Fin);
-                conn.ReturnBuffer(in item);
+                await pipe.Output.WriteAsync(segment);   // echo it straight back
             }
 
-            if (snap.IsClosed)
-                break;
-            conn.ResetRead();
-        }
-    }
-    finally
-    {
-        conn.DecRef();
-    }
-};
+            pipe.Input.AdvanceTo(buffer.End);
 
-// One reactor per core.
-new Thread(reactor.Run).Start();</code></pre>
+            if (result.IsCompleted) return;
+        }
+    };
+
+    threads[id] = new Thread(reactor.Run) { Name = $&quot;reactor-{id}&quot; };
+    threads[id].Start();
+}
+
+Console.WriteLine($&quot;QUIC on udp :8443 across {config.ReactorCount} reactors (ngtcp2 {QuicEngine.NativeVersion()})&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}</code></pre>
   </div>
-  <div class="pane pane-h3">
-<pre><code class="language-csharp">// ioxide.nghttp3: nghttp3 over the QUIC surface - real HTTP/3, ALPN-pinned.
-var engine = new QuicEngine("cert.pem", "key.pem", cidLength: 8, alpn: ["h3"]);
+  <div class="pane pane-qraw">
+    <div class="pane-head">
+      <h3>QUIC · raw streams</h3>
+      <span class="pane-pkg">ioxide + ioxide.ngtcp2</span>
+    </div>
+<pre><code class="language-csharp">// A complete ioxide QUIC server. Paste into a console app&#x27;s Program.cs and run it.
+//   dotnet add package ioxide
+//   dotnet add package ioxide.ngtcp2
+// Needs cert.pem / key.pem next to the binary.
+using ioxide;
+using ioxide.ngtcp2;
+
+using var engine = new QuicEngine(&quot;cert.pem&quot;, &quot;key.pem&quot;, cidLength: 8, alpn: [&quot;echo&quot;]);
 
 var config = new ServerConfig
 {
     ReactorCount = Environment.ProcessorCount,
-    Udp = new UdpOptions { RecvSlots = 16 },   // multishot UDP recv slots per reactor
+    Udp = new UdpOptions { RecvSlots = 16 },
     Quic = new QuicOptions
     {
-        Port              = 8443,              // every reactor binds it via SO_REUSEPORT
+        Port              = 8443,
         LocalCidLength    = 8,
         ConnectionFactory = engine.CreateFactory(),
     },
 };
 
-var reactor = new Reactor(id, config);
+var threads = new Thread[config.ReactorCount];
 
-// Nghttp3Connection owns the connection's read loop: it feeds stream items into
-// nghttp3, assembles each request - headers, body and all - and calls your
-// function once per request. QPACK, control streams, fin and stream teardown
-// are its problem, not yours. The request is post-QPACK BYTES throughout
-// (ReadOnlyMemory&lt;byte&gt;) - route by byte compare, decode only at the edge.
-reactor.QuicHandle = (r, conn) =&gt;
-    new Nghttp3Connection(conn).RunBufferedAsync(static req =&gt;
-        req.Path.Span.SequenceEqual("/"u8)          ? Nghttp3Response.Text("hello from HTTP/3 over io_uring\n")
-      : req.Path.Span.SequenceEqual("/plaintext"u8) ? Nghttp3Response.Text("Hello, World!")
-      : Nghttp3Response.Text("not found\n", status: 404));
+for (int id = 0; id &lt; threads.Length; id++)
+{
+    var reactor = new Reactor(id, config);
 
-// One reactor per core.
-new Thread(reactor.Run).Start();
-
-// curl --http3-only -k https://localhost:8443/</code></pre>
-  </div>
-  <div class="pane pane-h3pure">
-<pre><code class="language-csharp">// ioxide.http3: the same HTTP/3 surface implemented in pure C# - frames, QPACK
-// (static table + Huffman), request dispatch. No native h3 code at all. It rides
-// any QuicConnection via its stream read surface, so it is engine-agnostic and a
-// drop-in alternative to ioxide.nghttp3.
-using ioxide.http3;
-
-// Same QUIC setup as the nghttp3 tab - ngtcp2 still provides the transport.
-reactor.QuicHandle = (r, conn) =&gt;
-    new Http3Connection(conn).RunAsync(static async req =&gt;
+    reactor.QuicHandle = async (r, conn) =&gt;
     {
-        if (req.Path.Span.SequenceEqual("/upload"u8))
+        // The raw surface: every stream on the connection, not just one. A delivery carries the
+        // stream id alongside the bytes, so a multi-stream protocol can demux here - which is
+        // exactly what ioxide.nghttp3 does on top of this.
+        while (true)
         {
-            // Streamed body: the handler runs while bytes are still arriving, and
-            // each read credits the peer's flow-control window - so memory is bound
-            // by one window, not by the size of the upload.
-            long total = 0;
+            QuicRecvSnapshot snapshot = await conn.ReadAsync();
+
+            while (conn.TryGetDelivery(in snapshot, out QuicRecvRing.Delivery delivery))
+            {
+                ReadOnlySpan&lt;byte&gt; data = delivery.AsSpan();   // decrypted stream bytes
+
+                // Echo on the same stream. fin: false keeps it open for more.
+                conn.SendStream(delivery.StreamId, data, fin: false);
+
+                conn.ReturnBuffer(in delivery);   // back to the ring
+            }
+
+            if (snapshot.IsClosed) return;
+            conn.ResetRead();
+        }
+    };
+
+    threads[id] = new Thread(reactor.Run) { Name = $&quot;reactor-{id}&quot; };
+    threads[id].Start();
+}
+
+Console.WriteLine($&quot;QUIC on udp :8443 across {config.ReactorCount} reactors (ngtcp2 {QuicEngine.NativeVersion()})&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}</code></pre>
+  </div>
+  <div class="pane pane-h3">
+    <div class="pane-head">
+      <h3>HTTP/3 · nghttp3</h3>
+      <span class="pane-pkg">ioxide + ioxide.ngtcp2 + ioxide.nghttp3</span>
+    </div>
+<pre><code class="language-csharp">// A complete HTTP/3 server. Paste into a console app&#x27;s Program.cs and run it.
+//   dotnet add package ioxide
+//   dotnet add package ioxide.ngtcp2
+//   dotnet add package ioxide.nghttp3
+// Needs cert.pem / key.pem next to the binary.
+//   curl --http3-only -k https://127.0.0.1:8443/
+using ioxide;
+using ioxide.nghttp3;
+using ioxide.ngtcp2;
+
+// ngtcp2 + picotls, bundled native. ALPN pinned to h3, so nothing else negotiates.
+using var engine = new QuicEngine(&quot;cert.pem&quot;, &quot;key.pem&quot;, cidLength: 8, alpn: [&quot;h3&quot;]);
+
+var config = new ServerConfig
+{
+    ReactorCount = Environment.ProcessorCount,
+    Udp = new UdpOptions { RecvSlots = 16 },
+    Quic = new QuicOptions
+    {
+        Port              = 8443,          // every reactor binds it via SO_REUSEPORT
+        LocalCidLength    = 8,
+        ConnectionFactory = engine.CreateFactory(),
+    },
+};
+
+// Build the response ONCE and reuse the instance. The h3 layer copies status, headers and body
+// into nghttp3 synchronously at submit and never retains the object, so this costs zero
+// allocations per request - unlike Nghttp3Response.Text($&quot;...&quot;), which encodes a fresh string
+// every time.
+var response = new Nghttp3Response { Body = &quot;Hello, World!&quot;u8.ToArray() };
+response.Headers.Add(&quot;content-type&quot;u8.ToArray(), &quot;text/plain&quot;u8.ToArray());
+response.Headers.Add(&quot;server&quot;u8.ToArray(), &quot;ioxide&quot;u8.ToArray());
+
+var threads = new Thread[config.ReactorCount];
+
+for (int id = 0; id &lt; threads.Length; id++)
+{
+    var reactor = new Reactor(id, config);
+
+    // Nghttp3Connection owns the connection&#x27;s read loop: it feeds stream data into nghttp3,
+    // assembles each request - headers, body and all - and calls your function once per request.
+    // QPACK, control streams, fin and stream teardown are its problem, not yours.
+    reactor.QuicHandle = (r, conn) =&gt;
+        new Nghttp3Connection(conn).RunStreamingAsync(async request =&gt;
+        {
+            // Streamed dispatch: you are running while the body is still on the wire. Every read
+            // credits the peer&#x27;s flow-control window, which is what throttles a fast sender
+            // instead of buffering it - memory is bound by one window, not the upload size.
             while (true)
             {
-                ReadOnlyMemory&lt;byte&gt; chunk = await req.BodyReader!.ReadAsync();
+                ReadOnlyMemory&lt;byte&gt; chunk = await request.BodyReader!.ReadAsync();
                 if (chunk.IsEmpty) break;
-                total += chunk.Length;
+                // a real app parses or stores the chunk here
             }
-            return Http3Response.Text($"received {total} bytes\n");
+
+            // request.Path is post-QPACK BYTES. Route with SequenceEqual against a u8 literal
+            // rather than decoding it to a string.
+            return response;
+        });
+
+    threads[id] = new Thread(reactor.Run) { Name = $&quot;reactor-{id}&quot; };
+    threads[id].Start();
+}
+
+Console.WriteLine($&quot;HTTP/3 on udp :8443 across {config.ReactorCount} reactors (ngtcp2 {QuicEngine.NativeVersion()})&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}</code></pre>
+  </div>
+  <div class="pane pane-h3pure">
+    <div class="pane-head">
+      <h3>HTTP/3 · pure C#</h3>
+      <span class="pane-pkg">ioxide + ioxide.ngtcp2 + ioxide.http3</span>
+    </div>
+<pre><code class="language-csharp">// A complete HTTP/3 server with NO native h3 code. Paste into a console app&#x27;s Program.cs.
+//   dotnet add package ioxide
+//   dotnet add package ioxide.ngtcp2      (QUIC transport)
+//   dotnet add package ioxide.http3       (pure-C# HTTP/3)
+// Needs cert.pem / key.pem next to the binary.
+//   curl --http3-only -k https://127.0.0.1:8443/
+using System.Text;
+using ioxide;
+using ioxide.http3;
+using ioxide.ngtcp2;
+
+using var engine = new QuicEngine(&quot;cert.pem&quot;, &quot;key.pem&quot;, cidLength: 8, alpn: [&quot;h3&quot;]);
+
+var config = new ServerConfig
+{
+    ReactorCount = Environment.ProcessorCount,
+    Udp = new UdpOptions { RecvSlots = 16 },
+    Quic = new QuicOptions
+    {
+        Port              = 8443,
+        LocalCidLength    = 8,
+        ConnectionFactory = engine.CreateFactory(),
+    },
+};
+
+var threads = new Thread[config.ReactorCount];
+
+for (int id = 0; id &lt; threads.Length; id++)
+{
+    var reactor = new Reactor(id, config);
+
+    // ioxide.http3 is frame parsing, QPACK (static table + Huffman) and request dispatch, all
+    // managed. ngtcp2 still provides the QUIC transport, but nothing above it is native - and it
+    // rides any QuicConnection via the stream read surface, so it is engine-agnostic.
+    reactor.QuicHandle = (r, conn) =&gt; new Http3Connection(conn).RunAsync(async request =&gt;
+    {
+        // Same streaming surface as the nghttp3 flavour: the body arrives under flow-control
+        // pacing, so memory is bound by one window rather than the size of the upload.
+        long total = 0;
+        while (true)
+        {
+            ReadOnlyMemory&lt;byte&gt; chunk = await request.BodyReader!.ReadAsync();
+            if (chunk.IsEmpty) break;
+            total += chunk.Length;
         }
 
-        return Http3Response.Text("hello from pure-C# HTTP/3\n");
-    });</code></pre>
+        return Http3Response.Text(
+            $&quot;hello {Encoding.ASCII.GetString(request.Path.Span)} - {total} body bytes, pure-C# HTTP/3\n&quot;);
+    });
+
+    threads[id] = new Thread(reactor.Run) { Name = $&quot;reactor-{id}&quot; };
+    threads[id].Start();
+}
+
+Console.WriteLine($&quot;pure-C# HTTP/3 on udp :8443 across {config.ReactorCount} reactors&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}</code></pre>
   </div>
   <div class="pane pane-http">
-<pre><code class="language-csharp">// ioxide.httpclient: one client per origin, over HTTP/1.1, HTTP/2 (h2c) or HTTP/3.
-// Requests and responses are the same types whichever protocol serves them, so the
-// protocol is a configuration decision rather than an API one.
-using ioxide.http11;      // HttpClientRequest / HttpClientResponse live here
+    <div class="pane-head">
+      <h3>HTTP client · reverse proxy</h3>
+      <span class="pane-pkg">ioxide + ioxide.httpclient</span>
+    </div>
+<pre><code class="language-csharp">// A complete reverse proxy. Paste into a console app&#x27;s Program.cs and run it.
+//   dotnet add package ioxide
+//   dotnet add package ioxide.httpclient
+// Both hops - the inbound connection and the outbound call - run on this reactor&#x27;s ring and
+// resume inline, so a proxied request never leaves the thread it arrived on.
+using System.Text;
+using ioxide;
+using ioxide.http11;        // HttpClientResponse lives here
 using ioxide.httpclient;
+using ioxide.utils;
 
-// Opened on the reactor thread, so the outbound connections ride THIS reactor's ring.
-reactor.OnStart = r =&gt; RingHttpClient.Start(r, new RingHttpClientOptions
+var config = new ServerConfig
 {
-    Host     = "127.0.0.1",
-    Port     = 8081,
-    PoolSize = 8,                            // connections per protocol pool, per reactor
+    ReactorCount = Environment.ProcessorCount,
+    Tcp = new TcpOptions { Port = 8080 },
+};
 
-    // Negotiate: start on HTTP/1.1, switch to HTTP/3 once the origin advertises it
-    // via Alt-Svc. Http1Only / Http2Only (h2c, prior knowledge) / Http3Only pin it.
+var upstream = new RingHttpClientOptions
+{
+    Host = &quot;127.0.0.1&quot;,        // IPv4 literal: a DNS lookup would block the reactor
+    Port = 8081,
+    PoolSize = 8,              // connections per protocol pool, per reactor
+
+    // Negotiate: start on HTTP/1.1 and switch to HTTP/3 once the origin advertises it via
+    // Alt-Svc. Http1Only / Http2Only (h2c, prior knowledge) / Http3Only pin it instead.
     Policy = HttpProtocolPolicy.Negotiate,
-});
+};
 
-// A reverse proxy: both hops - the inbound connection and the outbound call - run on
-// this reactor's ring and resume inline, so a proxied request never leaves the thread
-// it arrived on. No thread pool, no cross-core handoff, no lock.
-reactor.TcpHandle = async (r, conn) =&gt;
+var threads = new Thread[config.ReactorCount];
+
+for (int id = 0; id &lt; threads.Length; id++)
 {
-    RingHttpClient http = r.GetService&lt;RingHttpClient&gt;();
+    var reactor = new Reactor(id, config);
 
-    using HttpClientResponse upstream = await http.GetAsync("/api/thing");
+    // Opened on the reactor thread, so the outbound sockets ride this reactor&#x27;s ring too.
+    reactor.OnStart = r =&gt; RingHttpClient.Start(r, upstream);
 
-    // upstream.Body is ReadOnlyMemory&lt;byte&gt; - relay the bytes, decode only if you must.
-    conn.Write(Encoding.ASCII.GetBytes(
-        $"HTTP/1.1 {upstream.Status} OK\r\nContent-Length: {upstream.Body.Length}\r\n\r\n"));
-    conn.Write(upstream.Body.Span);
-    await conn.FlushAsync();
-};</code></pre>
+    reactor.TcpHandle = async (r, conn) =&gt;
+    {
+        RingHttpClient http = r.GetService&lt;RingHttpClient&gt;();
+
+        try
+        {
+            while (true)
+            {
+                RecvSnapshot snapshot = await conn.ReadAsync();
+
+                while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                {
+                    if (item.HasBuffer) conn.ReturnBuffer(in item);
+                }
+
+                try
+                {
+                    // The outbound call. Same ring, same thread - this await resumes inline.
+                    // The response owns its bytes, so dispose it when you are done with them.
+                    using HttpClientResponse response = await http.GetAsync(&quot;/api/thing&quot;);
+
+                    conn.Write(Encoding.ASCII.GetBytes(
+                        $&quot;HTTP/1.1 {response.Status} OK\r\nContent-Length: {response.Body.Length}\r\n\r\n&quot;));
+                    conn.Write(response.Body.Span);   // bytes straight through, no decode
+                }
+                catch (Exception e)
+                {
+                    // A dead origin surfaces here rather than hanging: the pool bounds the whole
+                    // acquire, so you get an exception and can answer with a 502.
+                    byte[] message = Encoding.ASCII.GetBytes($&quot;upstream: {e.Message}&quot;);
+                    conn.Write(Encoding.ASCII.GetBytes(
+                        $&quot;HTTP/1.1 502 Bad Gateway\r\nContent-Length: {message.Length}\r\n\r\n&quot;));
+                    conn.Write(message);
+                }
+
+                await conn.FlushAsync();
+
+                if (snapshot.IsClosed) return;
+                conn.ResetRead();
+            }
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    };
+
+    threads[id] = new Thread(reactor.Run) { Name = $&quot;reactor-{id}&quot; };
+    threads[id].Start();
+}
+
+Console.WriteLine($&quot;proxy on :{config.Tcp.Port} -&gt; {upstream.Host}:{upstream.Port}&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}</code></pre>
   </div>
   <div class="pane pane-pg">
-<pre><code class="language-csharp">// ioxide.pg: a Postgres pool per reactor. Connect, handshake, query and row
-// streaming are all ring operations - nothing touches the thread pool.
+    <div class="pane-head">
+      <h3>Postgres</h3>
+      <span class="pane-pkg">ioxide + ioxide.pg</span>
+    </div>
+<pre><code class="language-csharp">// A complete Postgres-backed ioxide server. Paste into a console app&#x27;s Program.cs and run it.
+//   dotnet add package ioxide
+//   dotnet add package ioxide.pg
+//   docker run --rm -d -p 5432:5432 -e POSTGRES_USER=bench -e POSTGRES_DB=bench \
+//     -e POSTGRES_HOST_AUTH_METHOD=trust postgres:18
+using System.Text;
+using ioxide;
 using ioxide.pg;
+using ioxide.utils;
 
-// OnStart runs ON the reactor thread, so every connection the pool opens belongs
-// to this reactor's ring. There is no sharing between reactors and no lock.
-reactor.OnStart = r =&gt; PgPool.Start(r, new PgOptions
+var config = new ServerConfig
 {
-    Host     = "127.0.0.1",
-    Port     = 5432,
-    User     = "bench",
-    Database = "bench",
-    PoolSize = 4,                     // per reactor - 12 reactors x 4 = 48 backends
+    ReactorCount = Environment.ProcessorCount,
+    Tcp = new TcpOptions { Port = 8080 },
+};
+
+var pgOptions = new PgOptions
+{
+    Host = &quot;127.0.0.1&quot;,        // IPv4 literal: a DNS lookup would block the reactor
+    Port = 5432,
+    User = &quot;bench&quot;,
+    Database = &quot;bench&quot;,
+    PoolSize = 4,              // per reactor, not global - 12 reactors x 4 = 48 backends
     CommandTimeoutMs = 30_000,
-});
+};
 
-reactor.TcpHandle = async (r, conn) =&gt;
+var threads = new Thread[config.ReactorCount];
+
+for (int id = 0; id &lt; threads.Length; id++)
 {
-    PgPool pg = r.GetService&lt;PgPool&gt;();
+    var reactor = new Reactor(id, config);
 
-    try
+    // OnStart runs ON the reactor thread, so every connection the pool opens belongs to THIS
+    // reactor&#x27;s ring. Start registers the pool as a reactor service; the handler fetches it back
+    // with GetService. One pool per reactor, no sharing, no lock.
+    reactor.OnStart = r =&gt; PgPool.Start(r, pgOptions);
+
+    reactor.TcpHandle = async (r, conn) =&gt;
     {
-        // io_uring send + recv to Postgres. The continuation resumes inline, on this
-        // same thread, the moment the completion lands.
-        PgResult result = await pg.QueryAsync("SELECT 42");
+        PgPool pg = r.GetService&lt;PgPool&gt;();
 
-        string body = $"db={result.Value}";
-        conn.Write(Encoding.ASCII.GetBytes(
-            $"HTTP/1.1 200 OK\r\nContent-Length: {body.Length}\r\n\r\n{body}"));
-    }
-    catch (PgException e)
-    {
-        // A server error is just an exception; the connection stays usable.
-        Console.Error.WriteLine($"[pg] {e.Message}");
-        conn.Write("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n"u8);
-    }
+        try
+        {
+            while (true)
+            {
+                RecvSnapshot snapshot = await conn.ReadAsync();
 
-    await conn.FlushAsync();
-};</code></pre>
+                while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                {
+                    if (item.HasBuffer) conn.ReturnBuffer(in item);
+                }
+
+                try
+                {
+                    // io_uring send + recv to Postgres, on the same ring that accepted the
+                    // request. The continuation resumes inline, on this thread.
+                    PgResult result = await pg.QueryAsync(&quot;SELECT 42&quot;);
+
+                    string body = $&quot;db={result.Value}&quot;;
+                    conn.Write(Encoding.ASCII.GetBytes(
+                        $&quot;HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {body.Length}\r\n\r\n{body}&quot;));
+                }
+                catch (PgException e)
+                {
+                    // A server error is just an exception. The connection goes back to the pool
+                    // usable - Postgres rejected a query, it did not break the socket.
+                    Console.Error.WriteLine($&quot;pg: {e.Message}&quot;);
+                    conn.Write(&quot;HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n&quot;u8);
+                }
+
+                await conn.FlushAsync();
+
+                if (snapshot.IsClosed) return;
+                conn.ResetRead();
+            }
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    };
+
+    threads[id] = new Thread(reactor.Run) { Name = $&quot;reactor-{id}&quot; };
+    threads[id].Start();
+}
+
+Console.WriteLine($&quot;listening on :{config.Tcp.Port} -&gt; pg {pgOptions.Host}:{pgOptions.Port}&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}</code></pre>
   </div>
   <div class="pane pane-redis">
-<pre><code class="language-csharp">// ioxide.redis: RESP2 over the ring - pooled per reactor, with pipelining, pub/sub,
-// transactions and scripting. Typed helpers for the common commands, plus a generic
-// command surface that reaches anything RESP2 speaks.
+    <div class="pane-head">
+      <h3>Redis</h3>
+      <span class="pane-pkg">ioxide + ioxide.redis</span>
+    </div>
+<pre><code class="language-csharp">// A complete Redis-backed ioxide server. Paste into a console app&#x27;s Program.cs and run it.
+//   dotnet add package ioxide
+//   dotnet add package ioxide.redis
+//   docker run --rm -d -p 6379:6379 redis:7-alpine
+using System.Text;
+using ioxide;
 using ioxide.redis;
+using ioxide.utils;
 
-reactor.OnStart = r =&gt; RedisPool.Start(r, new RedisOptions
+var config = new ServerConfig
 {
-    Host     = "127.0.0.1",
-    Port     = 6379,
-    PoolSize = 8,                     // per reactor
-});
+    ReactorCount = Environment.ProcessorCount,
+    Tcp = new TcpOptions { Port = 8080 },
+};
 
-reactor.TcpHandle = async (r, conn) =&gt;
+var redisOptions = new RedisOptions
 {
-    RedisPool redis = r.GetService&lt;RedisPool&gt;();
+    Host = &quot;127.0.0.1&quot;,
+    Port = 6379,
+    PoolSize = 8,              // per reactor
+    CommandTimeoutMs = 30_000,
+};
 
-    // Typed helper for the hot path.
-    string? cached = await redis.GetAsync("user:1");
+var threads = new Thread[config.ReactorCount];
 
-    if (cached is null)
+for (int id = 0; id &lt; threads.Length; id++)
+{
+    var reactor = new Reactor(id, config);
+
+    // Opened on the reactor thread, so the pool&#x27;s sockets ride this reactor&#x27;s ring.
+    reactor.OnStart = r =&gt; RedisPool.Start(r, redisOptions);
+
+    reactor.TcpHandle = async (r, conn) =&gt;
     {
-        // Generic surface: any command, any argument shape.
-        await redis.ExecuteAsync("SET", "user:1", "ada");
-        cached = "ada";
-    }
+        RedisPool redis = r.GetService&lt;RedisPool&gt;();
 
-    RespValue hits = await redis.ExecuteAsync("INCR", "hits");
+        try
+        {
+            while (true)
+            {
+                RecvSnapshot snapshot = await conn.ReadAsync();
 
-    conn.Write(Encoding.ASCII.GetBytes(
-        $"HTTP/1.1 200 OK\r\nContent-Length: {cached.Length}\r\n\r\n{cached}"));
-    await conn.FlushAsync();
-};</code></pre>
+                while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                {
+                    if (item.HasBuffer) conn.ReturnBuffer(in item);
+                }
+
+                // Cache-aside, both halves on this reactor&#x27;s ring. Typed helper for the hot path.
+                string? cached = await redis.GetAsync(&quot;user:1&quot;);
+
+                if (cached is null)
+                {
+                    // Generic command surface: anything RESP2 speaks, any argument shape.
+                    await redis.ExecuteAsync(&quot;SET&quot;, &quot;user:1&quot;, &quot;ada&quot;);
+                    cached = &quot;ada&quot;;
+                }
+
+                RespValue hits = await redis.ExecuteAsync(&quot;INCR&quot;, &quot;hits&quot;);
+
+                string body = $&quot;{cached} ({hits.Integer} hits)&quot;;
+                conn.Write(Encoding.ASCII.GetBytes(
+                    $&quot;HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {body.Length}\r\n\r\n{body}&quot;));
+                await conn.FlushAsync();
+
+                if (snapshot.IsClosed) return;
+                conn.ResetRead();
+            }
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    };
+
+    threads[id] = new Thread(reactor.Run) { Name = $&quot;reactor-{id}&quot; };
+    threads[id].Start();
+}
+
+Console.WriteLine($&quot;listening on :{config.Tcp.Port} -&gt; redis {redisOptions.Host}:{redisOptions.Port}&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}</code></pre>
   </div>
   <div class="pane pane-files">
-<pre><code class="language-csharp">// ioxide.file: the asset cache opens every file ONCE and shares the descriptors
-// across all reactors - they are stable and read positionally, so nothing is locked.
-// Small files are served from a pre-baked HTTP response with no I/O at all; larger
-// ones stream off the ring through a rented reader.
+    <div class="pane-head">
+      <h3>Static files</h3>
+      <span class="pane-pkg">ioxide + ioxide.file</span>
+    </div>
+<pre><code class="language-csharp">// A complete static file server. Paste into a console app&#x27;s Program.cs and run it.
+//   dotnet add package ioxide
+//   dotnet add package ioxide.file
+using System.Text;
+using ioxide;
 using ioxide.file;
+using ioxide.utils;
 
-// Built once for the whole process, before the reactors start.
-var assets = new StaticAssets("/srv/www", maxCachedFileBytes: 256 * 1024);
+// The asset cache opens every file ONCE and shares the descriptors across all reactors: they are
+// stable and read positionally, so nothing is locked. Built before the reactors start.
+var assets = new StaticAssets(&quot;/srv/www&quot;, maxCachedFileBytes: 256 * 1024);
 
-reactor.OnStart = r =&gt;
+var config = new ServerConfig
 {
-    r.AddService(assets);
-    AssetReader.CreatePool(r, readers: 4, bufferBytes: 1 &lt;&lt; 20);
+    ReactorCount = Environment.ProcessorCount,
+    Tcp = new TcpOptions { Port = 8080 },
 };
 
-reactor.TcpHandle = async (r, conn) =&gt;
+var threads = new Thread[config.ReactorCount];
+
+for (int id = 0; id &lt; threads.Length; id++)
 {
-    StaticAssets snapshot = r.GetService&lt;StaticAssets&gt;();
+    var reactor = new Reactor(id, config);
 
-    // The lease pins the snapshot for the whole request, so a concurrent reload
-    // cannot free the fd or the baked response out from under an in-flight send.
-    using StaticAssets.Lease lease = snapshot.Acquire();
-
-    if (!lease.TryGet("/index.html", out AssetCache.Asset asset))
+    reactor.OnStart = r =&gt;
     {
-        conn.Write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"u8);
-        await conn.FlushAsync();
-        return;
-    }
+        r.AddService(assets);                                          // the shared snapshot
+        AssetReader.CreatePool(r, readers: 4, bufferBytes: 1 &lt;&lt; 20);   // per-reactor ring readers
+    };
 
-    // Revalidated against disk (size + mtime + inode): the baked response is the hot
-    // path only while the file is unchanged. An edit or an atomic rename is served
-    // live from the new inode instead, so RAM never goes stale.
-    bool fresh = AssetCache.IsFresh(asset, out bool exists, out long size);
-    // ... serve asset.Response when fresh, else stream asset.Fd off the ring ...
-};
-
-// After a deploy: swap in a fresh snapshot atomically. In-flight requests finish on
-// the bytes they started with; the old descriptors close after a grace period.
-assets.Reload();</code></pre>
-  </div>
-  <div class="pane pane-tls">
-<pre><code class="language-csharp">// ioxide.tls: the OpenSSL handshake is driven over the ring, then kernel TLS (kTLS)
-// takes over transmit. After that your handler writes PLAINTEXT through the same
-// connection API and the kernel produces the records - no user-space encrypt on the
-// send path. Needs the Linux 'tls' module (modprobe tls) and OpenSSL 3.
-using ioxide.tls;
-
-reactor.OnStart = r =&gt; TlsService.Start(r, new TlsOptions
-{
-    CertificatePath = "cert.pem",
-    KeyPath         = "key.pem",
-    Alpn            = "http/1.1",
-});
-
-reactor.TcpHandle = async (r, conn) =&gt;
-{
-    // The handshake itself is ring I/O - it awaits like everything else.
-    TlsSession tls = await r.GetService&lt;TlsService&gt;().AcceptAsync(conn);
-
-    // A request can ride in with the handshake's final flight - answer it first.
-    if (tls.DrainPlaintext().Length &gt; 0)
+    reactor.TcpHandle = async (r, conn) =&gt;
     {
-        conn.Write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"u8);
-        await conn.FlushAsync();
-    }
+        StaticAssets snapshot = r.GetService&lt;StaticAssets&gt;();
+        RingPool&lt;AssetReader&gt; readers = r.GetService&lt;RingPool&lt;AssetReader&gt;&gt;();
+
+        try
+        {
+            while (true)
+            {
+                RecvSnapshot recv = await conn.ReadAsync();
+
+                // The lease pins the snapshot for the whole request, so a concurrent Reload()
+                // cannot free the fd or the baked response out from under an in-flight send.
+                using (StaticAssets.Lease lease = snapshot.Acquire())
+                {
+                    // Resolve the target while the recv bytes are still valid. The lookup is
+                    // span-based, so a cache hit allocates no string at all.
+                    bool found = false;
+                    AssetCache.Asset asset = default;
+
+                    while (conn.TryGetItem(recv, out SpscRecvRing.Item item))
+                    {
+                        if (item.HasBuffer)
+                        {
+                            if (!found &amp;&amp; TryReadTarget(item.AsSpan(), out ReadOnlySpan&lt;byte&gt; target))
+                            {
+                                found = lease.TryGet(target, out asset);
+                            }
+                            conn.ReturnBuffer(in item);
+                        }
+                    }
+
+                    // Revalidated against disk (size + mtime + inode): the baked response is the
+                    // hot path only while the file is unchanged. An edit or an atomic rename is
+                    // served live from the new inode instead of stale from RAM.
+                    bool fresh = false, exists = false;
+                    if (found)
+                    {
+                        fresh = AssetCache.IsFresh(asset, out exists, out _);
+                    }
+
+                    if (found &amp;&amp; exists &amp;&amp; fresh &amp;&amp; asset.Response != 0)
+                    {
+                        // No open, no read, no formatting - a complete HTTP response already in
+                        // native memory. Just send it.
+                        await SendNativeAsync(conn, asset.Response, asset.ResponseLength);
+                    }
+                    else if (found &amp;&amp; exists)
+                    {
+                        // Too big to pin: read it off the ring at advancing offsets.
+                        AssetReader reader = await readers.RentAsync();
+                        try
+                        {
+                            Span&lt;byte&gt; header = stackalloc byte[256];
+                            conn.Write(header[..AssetCache.WriteResponseHeader(header, asset.Path, (int)asset.Length)]);
+
+                            long offset = 0;
+                            while (offset &lt; asset.Length)
+                            {
+                                int read = await reader.ReadAsync(asset.Fd, offset);   // io_uring positional read
+                                if (read &lt;= 0) break;
+                                await SendNativeAsync(conn, reader.Buffer, read);
+                                offset += read;
+                            }
+                        }
+                        finally
+                        {
+                            readers.Return(reader);
+                        }
+                    }
+                    else
+                    {
+                        conn.Write(&quot;HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n&quot;u8);
+                        await conn.FlushAsync();
+                    }
+                }
+
+                if (recv.IsClosed) return;
+                conn.ResetRead();
+            }
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    };
+
+    threads[id] = new Thread(reactor.Run) { Name = $&quot;reactor-{id}&quot; };
+    threads[id].Start();
+}
+
+Console.WriteLine($&quot;serving {assets.Count} files from {assets.RootDir} on :{config.Tcp.Port}&quot;);
+
+// assets.Reload() swaps in a fresh snapshot atomically after a deploy - in-flight requests finish
+// on the bytes they started with, and the old descriptors close after a grace period.
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}
+
+// Push native memory through the write slab in chunks.
+static async Task SendNativeAsync(TcpConnection conn, nint data, int length)
+{
+    const int Chunk = 12 * 1024;
+    int sent = 0;
 
     while (true)
     {
-        RecvSnapshot snap = await conn.ReadAsync();
-        // ... decrypt the received records, then answer in plaintext ...
-
-        conn.Write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"u8);
+        int take = Math.Min(length - sent, Chunk);
+        unsafe
+        {
+            conn.Write(new ReadOnlySpan&lt;byte&gt;((void*)(data + sent), take));
+        }
         await conn.FlushAsync();
+        sent += take;
 
-        if (snap.IsClosed || tls.Closed) return;
-        conn.ResetRead();
+        if (sent &gt;= length) return;
     }
-};</code></pre>
+}
+
+// &quot;GET /css/app.css?v=1 HTTP/1.1&quot; -&gt; &quot;/css/app.css&quot;
+static bool TryReadTarget(ReadOnlySpan&lt;byte&gt; request, out ReadOnlySpan&lt;byte&gt; target)
+{
+    target = default;
+
+    int firstSpace = request.IndexOf((byte)&#x27; &#x27;);
+    if (firstSpace &lt; 0) return false;
+
+    ReadOnlySpan&lt;byte&gt; afterMethod = request[(firstSpace + 1)..];
+    int secondSpace = afterMethod.IndexOf((byte)&#x27; &#x27;);
+    if (secondSpace &lt; 0) return false;
+
+    target = afterMethod[..secondSpace];
+
+    int query = target.IndexOf((byte)&#x27;?&#x27;);
+    if (query &gt;= 0) target = target[..query];
+
+    return true;
+}</code></pre>
+  </div>
+  <div class="pane pane-tls">
+    <div class="pane-head">
+      <h3>kTLS</h3>
+      <span class="pane-pkg">ioxide + ioxide.tls</span>
+    </div>
+<pre><code class="language-csharp">// A complete TLS server with kernel offload. Paste into a console app&#x27;s Program.cs and run it.
+//   dotnet add package ioxide
+//   dotnet add package ioxide.tls
+// Needs the Linux &#x27;tls&#x27; module (sudo modprobe tls), OpenSSL 3, and cert.pem / key.pem.
+//   curl -k https://127.0.0.1:8443/
+using ioxide;
+using ioxide.tls;
+using ioxide.utils;
+
+var config = new ServerConfig
+{
+    ReactorCount = Environment.ProcessorCount,
+    Tcp = new TcpOptions { Port = 8443 },
+};
+
+ReadOnlyMemory&lt;byte&gt; ok = &quot;HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok&quot;u8.ToArray();
+
+var threads = new Thread[config.ReactorCount];
+
+for (int id = 0; id &lt; threads.Length; id++)
+{
+    var reactor = new Reactor(id, config);
+
+    reactor.OnStart = r =&gt; TlsService.Start(r, new TlsOptions
+    {
+        CertificatePath = &quot;cert.pem&quot;,
+        KeyPath         = &quot;key.pem&quot;,
+        Alpn            = &quot;http/1.1&quot;,
+    });
+
+    reactor.TcpHandle = async (r, conn) =&gt;
+    {
+        TlsSession? tls = null;
+
+        try
+        {
+            // The OpenSSL handshake is driven over the ring, so it awaits like everything else.
+            // Once it completes, kernel TLS takes over transmit: everything you write below is
+            // PLAINTEXT and the kernel produces the records.
+            tls = await r.GetService&lt;TlsService&gt;().AcceptAsync(conn);
+
+            // A request can ride in with the handshake&#x27;s final flight - answer it first.
+            if (tls.DrainPlaintext().Length &gt; 0)
+            {
+                conn.Write(ok.Span);
+                await conn.FlushAsync();
+            }
+
+            while (true)
+            {
+                RecvSnapshot snapshot = await conn.ReadAsync();
+
+                int got = 0;
+                while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                {
+                    if (item.HasBuffer)
+                    {
+                        // Inbound still needs decrypting; only transmit is offloaded.
+                        got += Decrypt(tls, in item);
+                        conn.ReturnBuffer(in item);
+                    }
+                }
+
+                if (got &gt; 0)
+                {
+                    conn.Write(ok.Span);   // plaintext in; the kernel encrypts on send
+                    await conn.FlushAsync();
+                }
+
+                if (snapshot.IsClosed || tls.Closed) return;
+                conn.ResetRead();
+            }
+        }
+        catch (Exception e)
+        {
+            // Handlers are invoked fire-and-forget, so an unobserved handshake error would vanish
+            // silently - a missing &#x27;tls&#x27; kernel module shows up exactly here.
+            Console.Error.WriteLine($&quot;tls: {e.Message}&quot;);
+        }
+        finally
+        {
+            tls?.Dispose();
+            conn.DecRef();
+        }
+    };
+
+    threads[id] = new Thread(reactor.Run) { Name = $&quot;reactor-{id}&quot; };
+    threads[id].Start();
+}
+
+Console.WriteLine($&quot;TLS on :{config.Tcp.Port} across {config.ReactorCount} reactors (kTLS transmit offload)&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}
+
+static unsafe int Decrypt(TlsSession tls, in SpscRecvRing.Item item)
+{
+    fixed (byte* cipher = item.AsSpan())
+    {
+        return tls.Decrypt(cipher, item.AsSpan().Length).Length;
+    }
+}</code></pre>
   </div>
   <div class="pane pane-kestrel">
-<pre><code class="language-csharp">// ioxide.Kestrel: already have an ASP.NET Core app? Swap the transport underneath
-// it. One ring per core, SO_REUSEPORT load-balanced, with Kestrel's HTTP request
-// loop pinned to the reactor thread. Your endpoints, middleware and DI do not change.
+    <div class="pane-head">
+      <h3>ASP.NET Core</h3>
+      <span class="pane-pkg">ioxide.Kestrel</span>
+    </div>
+<pre><code class="language-csharp">// A complete ASP.NET Core app on the ioxide transport. Paste into a web project&#x27;s Program.cs.
+//   dotnet new web
+//   dotnet add package ioxide.Kestrel
 using ioxide.Kestrel;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.WebHost.UseIoxide(o =&gt; o.ReactorCount = 16);   // that is the whole change
+// The whole change. One ring per core, SO_REUSEPORT load-balanced, with Kestrel&#x27;s HTTP request
+// loop pinned to the reactor thread. Your endpoints, middleware and DI are untouched.
+builder.WebHost.UseIoxide(o =&gt; o.ReactorCount = Environment.ProcessorCount);
+
+builder.WebHost.ConfigureKestrel(o =&gt; o.ListenAnyIP(8080));
 
 var app = builder.Build();
 
-app.MapGet("/", () =&gt; "hello from io_uring");
-app.MapGet("/plaintext", () =&gt; Results.Text("Hello, World!"));
+app.MapGet(&quot;/&quot;, () =&gt; &quot;hello from io_uring&quot;);
+app.MapGet(&quot;/plaintext&quot;, () =&gt; Results.Text(&quot;Hello, World!&quot;));
 
-app.Run();
-
-// This is the escape hatch from "ioxide hands you raw bytes": when you want routing,
-// model binding and the rest of the framework, the same engine runs underneath it.</code></pre>
+app.Run();</code></pre>
   </div>
 </div>
 </section>
