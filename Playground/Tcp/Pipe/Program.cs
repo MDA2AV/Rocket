@@ -26,7 +26,14 @@ var config = new ServerConfig
     },
 };
 
-byte[] response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok"u8.ToArray();
+// PLAYGROUND_BODY sizes the body (2 = "ok"), matching Tcp.Raw so the two are comparable.
+int bodyBytes = Env.Int("PLAYGROUND_BODY", 2) is var n && n > 0 ? n : 2;
+byte[] body = bodyBytes == 2 ? "ok"u8.ToArray() : [.. Enumerable.Repeat((byte)'x', bodyBytes - 1), (byte)'\n'];
+byte[] response =
+[
+    .. System.Text.Encoding.ASCII.GetBytes($"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {body.Length}\r\n\r\n"),
+    .. body,
+];
 
 var threads = new Thread[config.ReactorCount];
 

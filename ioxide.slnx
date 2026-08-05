@@ -61,6 +61,11 @@
     <Project Path="Tests/ioxide.e2e.csproj" />
   </Folder>
 
+  <Folder Name="/bench/">
+    <Project Path="bench/Bench.Clients/Bench.Clients.csproj" />
+    <File Path="bench/run.sh" />
+  </Folder>
+
   <!-- Not built by the solution; here so the native bundle scripts are findable from the IDE. -->
   <Folder Name="/build/">
     <File Path="scripts/build-ngtcp2-native.sh" />
