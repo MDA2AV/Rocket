@@ -43,6 +43,7 @@
     <Project Path="Playground/Quic/Alpn/Playground.Quic.Alpn.csproj" />
     <Project Path="Playground/Pg/Playground.Pg.csproj" />
     <Project Path="Playground/File/Playground.File.csproj" />
+    <Project Path="Playground/Tls/HttpsClient/Playground.Tls.HttpsClient.csproj" />
     <Project Path="Playground/Proxy/H1/Playground.Proxy.H1.csproj" />
     <Project Path="Playground/Proxy/H3ToH1/Playground.Proxy.H3ToH1.csproj" />
     <Project Path="Playground/Proxy/H3ToH2/Playground.Proxy.H3ToH2.csproj" />

@@ -29,7 +29,7 @@ public sealed class Http2ClientConnection : IDisposable
     private const int EgressBufferSize = 64 * 1024;
     private const int IngressBufferSize = 64 * 1024;
 
-    private readonly RingSocket _socket;
+    private readonly IClientTransport _transport;
     private readonly byte[] _authority;
     private readonly byte[] _egress = new byte[EgressBufferSize];
 
@@ -63,9 +63,9 @@ public sealed class Http2ClientConnection : IDisposable
     // process dies.
     private readonly int _maxResponseBytes;
 
-    private Http2ClientConnection(RingSocket socket, string authority, int maxResponseBytes)
+    private Http2ClientConnection(IClientTransport transport, string authority, int maxResponseBytes)
     {
-        _socket = socket;
+        _transport = transport;
         _authority = System.Text.Encoding.ASCII.GetBytes(authority);
         _maxResponseBytes = maxResponseBytes;
     }
@@ -80,24 +80,22 @@ public sealed class Http2ClientConnection : IDisposable
     public int InFlight => _pending.Count;
 
     public static async Task<Http2ClientConnection> ConnectAsync(IRingHost host, string ip, ushort port,
-        string authority, int maxResponseBytes = 8 * 1024 * 1024)
+        string authority, TlsClientContext? tls = null, int maxResponseBytes = 8 * 1024 * 1024)
     {
-        RingSocket socket = RingSocket.CreateTcp(host);
-        try
+        IClientTransport transport = await ClientTransport.ConnectAsync(host, ip, port, tls);
+
+        // Over TLS, h2 is chosen by ALPN and nothing else. An origin that selected http/1.1 (or
+        // offered no ALPN at all) is not going to understand the HTTP/2 preface, and sending it
+        // anyway produces a connection that hangs rather than an error worth reading.
+        if (tls is not null && transport.NegotiatedAlpn != "h2")
         {
-            int result = await socket.ConnectAsync(ip, port);
-            if (result < 0)
-            {
-                throw new Http2ClientException($"connect to {ip}:{port} failed: errno {-result}");
-            }
-        }
-        catch
-        {
-            socket.Dispose();
-            throw;
+            string selected = transport.NegotiatedAlpn ?? "none";
+            transport.Dispose();
+            throw new Http2ClientException(
+                $"{ip}:{port} did not negotiate h2 over ALPN (selected: {selected})");
         }
 
-        var connection = new Http2ClientConnection(socket, authority, maxResponseBytes);
+        var connection = new Http2ClientConnection(transport, authority, maxResponseBytes);
         connection.Setup();
         _ = connection.PumpLoopAsync();
         await connection._ready.Task;   // preface + SETTINGS on the wire before the first request
@@ -211,7 +209,10 @@ public sealed class Http2ClientConnection : IDisposable
         }
 
         Write(buffer, ref cursor, ":method"u8, request.Method.Span);
-        Write(buffer, ref cursor, ":scheme"u8, "http"u8);
+        // Must match the transport. An origin reached over TLS sees ":scheme http" as a
+        // mismatch, and the strict ones reject the stream for it - harmless while this client was
+        // h2c-only, reachable the moment h2-over-TLS works.
+        Write(buffer, ref cursor, ":scheme"u8, _transport.IsSecure ? "https"u8 : "http"u8);
         Write(buffer, ref cursor, ":authority"u8, _authority);
         Write(buffer, ref cursor, ":path"u8, request.Path.Span);
 
@@ -236,7 +237,7 @@ public sealed class Http2ClientConnection : IDisposable
 
             while (!_failed && !_disposed)
             {
-                int n = await _socket.RecvAsync(receive, IngressBufferSize);
+                int n = await _transport.RecvAsync(receive, IngressBufferSize);
                 if (n <= 0)
                 {
                     throw new Http2ClientException(n == 0 ? "peer closed the connection" : $"recv failed: errno {-n}");
@@ -351,7 +352,7 @@ public sealed class Http2ClientConnection : IDisposable
         int sent = 0;
         while (sent < length)
         {
-            int n = await _socket.SendAsync(basePointer + sent, length - sent);
+            int n = await _transport.SendAsync(basePointer + sent, length - sent);
             if (n <= 0)
             {
                 _failed = true;
@@ -505,25 +506,7 @@ public sealed class Http2ClientConnection : IDisposable
             return;
         }
 
-        // 1xx is INTERIM (103 Early Hints, 100 Continue): the real response follows in another
-        // HEADERS section on the same stream. Keeping this section's bytes would leave BodyStart
-        // pointing at the interim headers, so the final response's headers would be returned as
-        // the body. Drop it and wait for the real one.
-        if (response.Status is >= 100 and < 200)
-        {
-            response.ResetForInterim();
-            pending.HeadersDone = false;
-            pending.BodyStart = 0;
-            pending.BodyLength = 0;
-            return;
-        }
-
-        if (!pending.HeadersDone)
-        {
-            pending.HeadersDone = true;
-            pending.BodyStart = response.ArenaLength;   // body bytes follow the header bytes
-        }
-        // A later section is TRAILERS: leaving BodyStart alone keeps the body range valid.
+        pending.Assembly.EndFieldSection(response);
     }
 
     [UnmanagedCallersOnly]
@@ -536,7 +519,7 @@ public sealed class Http2ClientConnection : IDisposable
             // Count what the arena ACCEPTED, not what arrived: past MaxResponseBytes the append is
             // refused and returns a zero-length range, and a body length that outran the arena
             // would make Freeze slice out of bounds - inside this callback, which is fatal.
-            pending.BodyLength += response.Append(new ReadOnlySpan<byte>(data, (int)dataLen)).Length;
+            pending.Assembly.BodyLength += response.Append(new ReadOnlySpan<byte>(data, (int)dataLen)).Length;
         }
     }
 
@@ -550,7 +533,7 @@ public sealed class Http2ClientConnection : IDisposable
         }
 
         HttpClientResponse response = pending.Response ?? new HttpClientResponse();
-        response.SetBodyRange((pending.BodyStart, pending.BodyLength));
+        response.SetBodyRange(pending.Assembly.BodyRange);
         response.Freeze();
 
         // Record only - resumed by CompleteFinishedRequests once nghttp2 unwinds.
@@ -605,7 +588,7 @@ public sealed class Http2ClientConnection : IDisposable
         {
             _self.Free();
         }
-        _socket.Dispose();
+        _transport.Dispose();
     }
 
     /// <summary>One in-flight request. IValueTaskSource with asynchronous continuations OFF, so the
@@ -618,9 +601,7 @@ public sealed class Http2ClientConnection : IDisposable
         };
 
         public HttpClientResponse? Response;
-        public bool HeadersDone;
-        public int BodyStart;
-        public int BodyLength;
+        public ResponseAssembly Assembly;
 
         public ValueTask<HttpClientResponse> Task => new(this, _core.Version);
 

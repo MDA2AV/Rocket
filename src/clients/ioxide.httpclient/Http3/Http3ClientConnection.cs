@@ -585,14 +585,13 @@ public sealed class Http3ClientConnection : IDisposable
     private static unsafe void CallbackEndHeaders(void* user, long streamId, int fin)
     {
         Http3ClientConnection connection = From(user);
-        if (connection._pending.TryGetValue(streamId, out PendingRequest? pending) &&
-            pending.Response is { } response && !pending.HeadersDone)
+        if (!connection._pending.TryGetValue(streamId, out PendingRequest? pending) ||
+            pending.Response is not { } response)
         {
-            pending.HeadersDone = true;
-            pending.BodyStart = response.ArenaLength;   // body bytes follow the header bytes
+            return;
         }
-        // A second field section is TRAILERS: leaving BodyStart alone keeps the body range valid
-        // (moving it here would slice past the body into the trailer bytes).
+
+        pending.Assembly.EndFieldSection(response);
     }
 
     [UnmanagedCallersOnly]
@@ -605,7 +604,7 @@ public sealed class Http3ClientConnection : IDisposable
             // Count what the arena ACCEPTED, not what arrived: past MaxResponseBytes the append is
             // refused and returns a zero-length range, and a body length that outran the arena
             // would make Freeze slice out of bounds - inside this callback, which is fatal.
-            pending.BodyLength += response.Append(new ReadOnlySpan<byte>(data, (int)dataLength)).Length;
+            pending.Assembly.BodyLength += response.Append(new ReadOnlySpan<byte>(data, (int)dataLength)).Length;
         }
     }
 
@@ -619,7 +618,7 @@ public sealed class Http3ClientConnection : IDisposable
         }
 
         HttpClientResponse response = pending.Response ?? new HttpClientResponse();
-        response.SetBodyRange((pending.BodyStart, pending.BodyLength));
+        response.SetBodyRange(pending.Assembly.BodyRange);
         response.Freeze();
 
         // Record only - the waiter is resumed by CompleteFinishedRequests once nghttp3 unwinds,
@@ -645,9 +644,7 @@ public sealed class Http3ClientConnection : IDisposable
 
         public HttpClientResponse? Response;
         public long StreamId;
-        public bool HeadersDone;   // first field section seen; a later one is trailers
-        public int BodyStart;
-        public int BodyLength;
+        public ResponseAssembly Assembly;
 
         public ValueTask<HttpClientResponse> Task => new(this, _core.Version);
 

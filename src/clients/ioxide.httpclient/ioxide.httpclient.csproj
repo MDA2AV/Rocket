@@ -10,12 +10,12 @@
     <PackageId>ioxide.httpclient</PackageId>
     <Version>0.3.100</Version>
     <Authors>MDA2AV</Authors>
-    <Description>The ring-native HTTP client for the ioxide io_uring runtime: HTTP/1.1, HTTP/2 (h2c) and HTTP/3 behind one API, with the protocol chosen per origin via Alt-Svc. One package - the h1 parser, the nghttp2 and nghttp3 bridges, and the negotiating client - sharing one set of message types. Every response resumes the awaiting handler inline on its own reactor thread.</Description>
+    <Description>The ring-native HTTP client for the ioxide io_uring runtime: HTTP/1.1, HTTP/2 and HTTP/3 behind one API, with the protocol chosen per origin via Alt-Svc. One package - the h1 parser, the nghttp2 and nghttp3 bridges, client-side TLS (SNI, ALPN and certificate verification) for https:// origins, and the negotiating client - sharing one set of message types. Every response resumes the awaiting handler inline on its own reactor thread.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://mda2av.github.io/ioxide/</PackageProjectUrl>
     <RepositoryUrl>https://github.com/MDA2AV/ioxide</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <PackageTags>io_uring;http3;h3;quic;httpclient;proxy;linux;ioxide</PackageTags>
+    <PackageTags>io_uring;http3;h3;quic;httpclient;https;tls;proxy;linux;ioxide</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
