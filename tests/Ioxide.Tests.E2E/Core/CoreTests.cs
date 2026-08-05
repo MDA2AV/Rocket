@@ -174,6 +174,7 @@ internal static class CoreTests
         runner.Test("core: recv-queue overflow closes that connection, server survives", () =>
         {
             var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var parked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             int parkerClaimed = 0;
 
             (int port, _, _) = TestServer.StartConfigured(
@@ -199,6 +200,7 @@ internal static class CoreTests
 
                             if (drained > 0 && Interlocked.Exchange(ref parkerClaimed, 1) == 0)
                             {
+                                parked.SetResult();   // the flood may start now, not 200 ms from now
                                 await gate.Task;
                             }
                             else if (drained > 0 && !snap.IsClosed)
@@ -234,8 +236,13 @@ internal static class CoreTests
             NetworkStream stream = flood.GetStream();
 
             stream.Write(new byte[64]);     // consumed; the handler parks
-            Thread.Sleep(200);
-            stream.Write(new byte[4096]);   // 64-byte buffers → 64 CQEs → the 8-slot queue overflows
+
+            // Wait for the park to actually happen. Sleeping a fixed 200 ms instead makes the test
+            // fail on a loaded machine: the flood is drained by a handler that never parked, the
+            // queue never overflows, and the read below waits out its timeout.
+            Assert.True(parked.Task.Wait(TimeSpan.FromSeconds(10)), "handler never parked");
+
+            stream.Write(new byte[4096]);   // 64-byte buffers -> 64 CQEs -> the 8-slot queue overflows
 
             bool closed;
             try

@@ -15,7 +15,42 @@ namespace Ioxide.Tests;
 /// </summary>
 public static class TestServer
 {
-    private static int _nextPort = 18080;
+    /// <summary>
+    /// Every test process needs its own port range, and the failure mode when it does not have one
+    /// is silent rather than loud: ioxide listeners set SO_REUSEPORT, so two processes binding the
+    /// same port BOTH succeed and the kernel load-balances connections between them. WaitForListen
+    /// connects happily and a test is then answered by the other process's server, which shows up
+    /// as an unrelated assertion failing somewhere far away.
+    ///
+    /// The window therefore mixes the entry assembly name (so different suites never overlap) with
+    /// the process id (so two runs of the SAME suite - a developer and CI, or two terminals - do
+    /// not either). No registration, no coordination, and new suites need no changes.
+    /// </summary>
+    private static int _nextPort = PortBaseForThisProcess();
+
+    // 20000 to 32700, which stops short of ip_local_port_range (32768 on Linux by default): a
+    // listener bound above that line races the machine's own ephemeral allocations, including the
+    // client sockets these very tests open.
+    private const int WindowSize = 100;
+    private const int WindowCount = 127;
+
+    private static int PortBaseForThisProcess()
+    {
+        string name = System.Reflection.Assembly.GetEntryAssembly()?.GetName().Name ?? "unknown";
+
+        // Hashed by hand: string.GetHashCode is randomized per process, so the suite half of the
+        // key would move between runs and stop being a property of the suite at all.
+        int hash = 17;
+        foreach (char c in name)
+        {
+            hash = (hash * 31) + c;
+        }
+
+        int window = Math.Abs(hash ^ Environment.ProcessId) % WindowCount;
+
+        // 20000 upward, clear of bench/run.sh (18080-18464) and the playground defaults.
+        return 20000 + (window * WindowSize);
+    }
 
     /// <summary>Reserve a unique port (e.g. for TcpOptions.ExtraPorts).</summary>
     public static int NextPort() => Interlocked.Increment(ref _nextPort);

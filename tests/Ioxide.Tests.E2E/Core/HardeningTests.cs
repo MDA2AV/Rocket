@@ -97,17 +97,14 @@ internal static class HardeningTests
                     },
                 });
 
-            Thread.Sleep(250);   // WaitForListen's probe connection must recycle and free its gid
-
-            // Fill the reactor to its gid cap with live keep-alive connections.
+            // Fill the reactor to its gid cap with live keep-alive connections. WaitForListen's
+            // probe connection still holds a gid until the reactor recycles it, so the fourth slot
+            // may not be free yet: retry rather than sleep a fixed 250 ms and hope. A loaded
+            // machine misses that deadline and the fill below fails on a server that is fine.
             var held = new List<TcpClient>();
             for (int i = 0; i < 4; i++)
             {
-                var c = new TcpClient();
-                c.Connect("127.0.0.1", port);
-                c.ReceiveTimeout = 4000;
-                held.Add(c);
-                GetOk(c);
+                held.Add(ConnectServing(port, TimeSpan.FromSeconds(10)));
             }
 
             // Beyond the cap: the unfixed core threw in AllocGid and the reactor died here.
@@ -132,12 +129,10 @@ internal static class HardeningTests
             // ...and accept fresh ones once capacity frees.
             held[3].Close();
             held.RemoveAt(3);
-            Thread.Sleep(300);   // recycle returns the gid
 
-            using var fresh = new TcpClient();
-            fresh.Connect("127.0.0.1", port);
-            fresh.ReceiveTimeout = 4000;
-            GetOk(fresh);
+            // The gid returns when the reactor recycles that connection, which is its own event,
+            // not a fixed interval - so retry until the capacity is actually back.
+            using TcpClient fresh = ConnectServing(port, TimeSpan.FromSeconds(10));
 
             foreach (TcpClient c in held)
             {
@@ -147,6 +142,38 @@ internal static class HardeningTests
     }
 
     private static int Fds() => Directory.EnumerateFileSystemEntries("/proc/self/fd").Count();
+
+    /// <summary>
+    /// Connect and keep trying until the server answers, up to a deadline. Capacity in these tests
+    /// frees on the reactor's own schedule (a recycle, a sweep), so waiting for the observable
+    /// outcome is the only synchronization that holds on a slow machine.
+    /// </summary>
+    private static TcpClient ConnectServing(int port, TimeSpan timeout)
+    {
+        long deadline = Environment.TickCount64 + (long)timeout.TotalMilliseconds;
+        Exception? last = null;
+
+        while (Environment.TickCount64 < deadline)
+        {
+            var candidate = new TcpClient();
+            try
+            {
+                candidate.Connect("127.0.0.1", port);
+                candidate.ReceiveTimeout = 1000;
+                GetOk(candidate);
+                candidate.ReceiveTimeout = 4000;
+                return candidate;
+            }
+            catch (Exception e)
+            {
+                last = e;
+                candidate.Dispose();
+                Thread.Sleep(50);
+            }
+        }
+
+        throw new Exception($"no connection served within {timeout.TotalSeconds}s: {last?.Message}");
+    }
 
     private static void GetOk(TcpClient c)
     {
