@@ -35,8 +35,8 @@ public sealed unsafe partial class Reactor
 
     /// <summary>
     /// Make this reactor able to open outbound QUIC connections and return the socket they send
-    /// from, opening one on an ephemeral port the first time if the app serves no QUIC of its own.
-    /// Reactor thread only. Idempotent.
+    /// from - a dedicated one on an ephemeral port, opened on first use. Reactor thread only.
+    /// Idempotent.
     /// </summary>
     public int QuicEnsureClientTransport()
     {
@@ -45,23 +45,17 @@ public sealed unsafe partial class Reactor
             return _udpFds[_quicClientSocketIndex];
         }
 
-        // Proxy shape: an inbound QUIC socket already exists, so share it - replies for outbound
-        // connections arrive on the same socket and route by DCID like everything else.
-        if (_quicOptions is not null)
-        {
-            int configured = Array.IndexOf(_udpFdPorts, _quicOptions.Port);
-            if (configured < 0)
-            {
-                throw new InvalidOperationException(
-                    $"ServerConfig.Quic is set to port {_quicOptions.Port} but no UDP socket is bound to it");
-            }
-            _quicClientSocketIndex = configured;
-            return _udpFds[configured];
-        }
-
-        // Standalone shape: bring up just enough datagram transport to be a client.
+        // Always a dedicated socket, even when this reactor also SERVES QUIC. Sharing the serving
+        // socket looks natural - one fd, replies demux by CID like everything else - but the
+        // serving port is SO_REUSEPORT across reactors, so an upstream's replies hash by 4-tuple
+        // over ALL reactors' sockets and land on ones that have never heard of the connection.
+        // With N reactors the handshake then times out (N-1)/N of the time. A per-reactor
+        // ephemeral port keeps the reply path deterministic, because only this reactor owns it.
         _quicClientSocketIndex = OpenClientUdpSocket();
-        AddTicker(QuicSweep);   // InitQuic never ran, so nothing is evicting idle connections yet
+        if (_quicOptions is null)
+        {
+            AddTicker(QuicSweep);   // InitQuic never ran; serving reactors registered it there
+        }
         return _udpFds[_quicClientSocketIndex];
     }
 
