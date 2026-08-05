@@ -77,6 +77,25 @@ internal static class AltSvcTests
             Assert.Equal(86_400, RingHttpClient.ParseAltSvc("h3=\":8443\"; ma=-5"u8).MaxAgeSeconds);
         });
 
+        runner.Test("alt-svc: an enormous ma= saturates instead of wrapping into the past", () =>
+        {
+            // The caller turns this into TickCount64 + seconds * 1000. Unclamped, a big enough
+            // value overflowed to a NEGATIVE deadline, which reads as already-expired - so an
+            // origin asking to cache its endpoint for a very long time got h3 disabled for the
+            // life of the client, silently and permanently. The opposite of what it asked for.
+            foreach (string huge in (string[])["10000000000000000", "9223372036854775", "9223372036854775807"])
+            {
+                RingHttpClient.AltSvc parsed =
+                    RingHttpClient.ParseAltSvc(System.Text.Encoding.ASCII.GetBytes($"h3=\":8443\"; ma={huge}"));
+
+                Assert.True(parsed.Advertises, $"ma={huge} should still advertise");
+
+                long deadline = Environment.TickCount64 + (parsed.MaxAgeSeconds * 1000);
+                Assert.True(deadline > Environment.TickCount64,
+                    $"ma={huge} produced a deadline in the past ({deadline})");
+            }
+        });
+
         runner.Test("alt-svc: malformed input terminates instead of hanging", () =>
         {
             // The value arrives from the network, so every shape has to reach a decision. A parse

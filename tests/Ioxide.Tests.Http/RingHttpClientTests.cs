@@ -154,6 +154,54 @@ internal static class RingHttpClientTests
             Assert.Equal("200|served by h3", body);
         });
 
+        runner.Test("ringclient: retiring a LIVE h3 pool leaves the client working", () =>
+        {
+            // Every other retirement test disposes a pool whose only connection had already failed
+            // itself, so the interesting case - tearing down a healthy pool with real QUIC state -
+            // went unexercised. A short ma= is what makes it reachable: h3 expires, the client
+            // drops back to h1, and that h1 response is where a retraction can finally be seen,
+            // while the pool underneath is still perfectly alive.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+
+            (_, int h3Port) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: static (_, connection) => new Nghttp3Connection(connection).RunBufferedAsync(
+                    static _ => Nghttp3Response.Text("served by h3")));
+
+            var origin = new SwitchableOrigin($"h3=\":{h3Port}\"; ma=1");
+            int h1Port = TestServer.Start(origin.Handler);
+
+            int driver = TestServer.Start(DriverHandler, onStart: reactor => RingHttpClient.Start(reactor,
+                new RingHttpClientOptions
+                {
+                    Host = "127.0.0.1",
+                    Port = (ushort)h1Port,
+                    ServerName = "localhost",
+                    AcquireTimeoutMs = 3000,
+                }));
+
+            Client.Get(driver, "/fetch");                       // learns the endpoint over h1
+            (_, string overH3) = Client.Get(driver, "/fetch", timeoutMs: 20_000);
+            Assert.Equal("200|served by h3", overH3);           // pool is open and healthy
+
+            // Let the one-second advertisement lapse, then retract it.
+            Thread.Sleep(1500);
+            origin.Advertise("clear");
+
+            (int status, string body) = Client.Get(driver, "/fetch", timeoutMs: 20_000);
+            Assert.Equal(200, status);
+            Assert.Equal("200|served by h1", body);
+
+            (_, string port) = Client.Get(driver, "/h3port");
+            Assert.Equal("0", port);
+
+            // The client survived disposing a live pool, which is the point.
+            (_, string after) = Client.Get(driver, "/fetch", timeoutMs: 20_000);
+            Assert.Equal("200|served by h1", after);
+        });
+
         runner.Test("ringclient: a dead h3 endpoint falls back to h1 instead of failing", () =>
         {
             int h1Port = TestServer.Start(AdvertisingOriginHandler(9999));

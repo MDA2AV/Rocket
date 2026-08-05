@@ -265,8 +265,10 @@ public sealed class RingHttpClient : IDisposable
         _http3ExpiresAtMs = Environment.TickCount64 + (advertisement.MaxAgeSeconds * 1000);
     }
 
-    // Drop the learned endpoint and the pool built around it. In-flight h3 requests on that pool
-    // fail; being h3 failures they demote and, when the method allows it, replay over HTTP/1.1.
+    /// <summary>
+    /// Drop the learned endpoint and the pool built around it. In-flight h3 requests on that pool
+    /// fail; being h3 failures they demote and, when the method allows it, replay over HTTP/1.1.
+    /// </summary>
     private void RetireHttp3(string reason)
     {
         if (_http3Port == 0 && _http3 is null)
@@ -275,10 +277,20 @@ public sealed class RingHttpClient : IDisposable
         }
 
         Console.Error.WriteLine($"[ringhttpclient] {_options.Host}: dropping h3 on :{_http3Port} - {reason}");
-        _http3?.Dispose();
+
+        // DETACH FIRST, dispose second. Disposing the pool closes its connections, and those
+        // completions resume the waiting requests INLINE - so arbitrary caller code runs inside
+        // the Dispose call below. Nulling afterwards would let that code observe a half-torn-down
+        // client: with Http3CooldownMs at 0 a resumed caller re-entering SendAsync still passes
+        // UseHttp3, EnsureHttp3Pool hands back the pool currently being disposed, and picking a
+        // connection from it mutates the very list Dispose is enumerating - or opens a fresh QUIC
+        // connection against an engine that is freed a moment later.
+        Http3ClientPool? retiring = _http3;
         _http3 = null;
         _http3Port = 0;
         _http3ExpiresAtMs = 0;
+
+        retiring?.Dispose();
     }
 
     // A UDP path that is blocked, or an origin that stopped serving h3: stay on HTTP/1.1 for the
@@ -337,6 +349,13 @@ public sealed class RingHttpClient : IDisposable
 
     /// <summary>RFC 7838 section 3.1: ma is optional and defaults to 24 hours.</summary>
     private const long DefaultMaxAgeSeconds = 86_400;
+
+    /// <summary>
+    /// Ceiling on an advertised lifetime, ~68 years. Far past any real ma=, and small enough that
+    /// TickCount64 + seconds * 1000 cannot wrap - which would turn "cache this for a very long
+    /// time" into an expiry in the past and disable h3 permanently.
+    /// </summary>
+    private const long MaxAgeSecondsLimit = int.MaxValue;
 
     /// <summary>
     /// Pull the h3 port out of an Alt-Svc value, e.g. <c>h3=":8443"; ma=86400, h3-29=":8443"</c>.
@@ -430,7 +449,11 @@ public sealed class RingHttpClient : IDisposable
             ReadOnlySpan<byte> raw = parameter[(equals + 1)..].Trim((byte)' ').Trim((byte)'"');
             if (long.TryParse(raw, out long seconds) && seconds >= 0)
             {
-                return seconds;
+                // Saturate. The value is whatever the origin typed, and the caller turns it into
+                // TickCount64 + seconds * 1000 - so a big enough one overflows and lands in the
+                // PAST, which reads as "expired" and disables h3 for the life of the client. An
+                // origin asking for a very long lifetime must not get the opposite of one.
+                return Math.Min(seconds, MaxAgeSecondsLimit);
             }
         }
 
