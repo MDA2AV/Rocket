@@ -58,10 +58,16 @@ public sealed class Http2ClientConnection : IDisposable
 
     private readonly TaskCompletionSource<bool> _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    private Http2ClientConnection(IClientTransport transport, string authority)
+    // Ceiling on headers + body per response. nghttp2 streams a response in through callbacks with
+    // no length known up front, so without this a single origin can grow the arena until the
+    // process dies.
+    private readonly int _maxResponseBytes;
+
+    private Http2ClientConnection(IClientTransport transport, string authority, int maxResponseBytes)
     {
         _transport = transport;
         _authority = System.Text.Encoding.ASCII.GetBytes(authority);
+        _maxResponseBytes = maxResponseBytes;
     }
 
     public bool IsBroken => _failed || _disposed || _retiring;
@@ -74,7 +80,7 @@ public sealed class Http2ClientConnection : IDisposable
     public int InFlight => _pending.Count;
 
     public static async Task<Http2ClientConnection> ConnectAsync(IRingHost host, string ip, ushort port,
-        string authority, TlsClientContext? tls = null)
+        string authority, TlsClientContext? tls = null, int maxResponseBytes = 8 * 1024 * 1024)
     {
         IClientTransport transport = await ClientTransport.ConnectAsync(host, ip, port, tls);
 
@@ -89,7 +95,7 @@ public sealed class Http2ClientConnection : IDisposable
                 $"{ip}:{port} did not negotiate h2 over ALPN (selected: {selected})");
         }
 
-        var connection = new Http2ClientConnection(transport, authority);
+        var connection = new Http2ClientConnection(transport, authority, maxResponseBytes);
         connection.Setup();
         _ = connection.PumpLoopAsync();
         await connection._ready.Task;   // preface + SETTINGS on the wire before the first request
@@ -387,14 +393,24 @@ public sealed class Http2ClientConnection : IDisposable
 
         foreach ((PendingRequest pending, HttpClientResponse? response, Exception? error) in finished)
         {
-            if (error is null)
-            {
-                pending.Complete(response!);
-            }
-            else
+            if (error is not null)
             {
                 pending.Fail(error);
+                continue;
             }
+
+            // The arena refused bytes for exceeding MaxResponseBytes. The callbacks could only
+            // record that; failing the caller happens here, where a throw no longer crosses
+            // nghttp2's frames.
+            if (response!.Overflowed)
+            {
+                response.Dispose();
+                pending.Fail(new Http2ClientException(
+                    $"response exceeds MaxResponseBytes ({_maxResponseBytes})"));
+                continue;
+            }
+
+            pending.Complete(response);
         }
     }
 
@@ -440,9 +456,12 @@ public sealed class Http2ClientConnection : IDisposable
         // would throw away the assembled one while BodyStart/BodyLength still describe its arena,
         // and CallbackEndStream would then slice those offsets out of the fresh, near-empty one.
         // Interim (1xx) heads are cleared by ResetForInterim instead, which reuses this object.
-        if (connection._pending.TryGetValue(streamId, out PendingRequest? pending))
+        if (connection._pending.TryGetValue(streamId, out PendingRequest? pending) &&
+            pending.Response is null)
         {
-            pending.Response ??= new HttpClientResponse();
+            var response = new HttpClientResponse();
+            response.SetMaxArenaBytes(connection._maxResponseBytes);
+            pending.Response = response;
         }
     }
 
@@ -497,8 +516,10 @@ public sealed class Http2ClientConnection : IDisposable
         if (connection._pending.TryGetValue(streamId, out PendingRequest? pending) &&
             pending.Response is { } response)
         {
-            response.Append(new ReadOnlySpan<byte>(data, (int)dataLen));
-            pending.Assembly.BodyLength += (int)dataLen;
+            // Count what the arena ACCEPTED, not what arrived: past MaxResponseBytes the append is
+            // refused and returns a zero-length range, and a body length that outran the arena
+            // would make Freeze slice out of bounds - inside this callback, which is fatal.
+            pending.Assembly.BodyLength += response.Append(new ReadOnlySpan<byte>(data, (int)dataLen)).Length;
         }
     }
 

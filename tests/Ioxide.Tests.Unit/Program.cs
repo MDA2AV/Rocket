@@ -15,6 +15,7 @@ internal static class Program
         AltSvcTests.Register(runner);
         MessageTests.Register(runner);
         ResponseAssemblyTests.Register(runner);
+        ResponseCapTests.Register(runner);
 
         return runner.Summary();
     }

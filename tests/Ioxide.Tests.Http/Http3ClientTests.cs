@@ -96,12 +96,42 @@ internal static class Http3ClientTests
             Assert.Equal(200, status);
             Assert.Equal("200|origin via shared socket", body);
         });
+
+        runner.Test("httpclient h3: a response past MaxResponseBytes fails the request, not the process", () =>
+        {
+            // The arena refuses the bytes from inside an nghttp3 callback, where throwing would
+            // cross native frames and kill the process. It records instead, and the connection
+            // turns that into a failed request after nghttp3 unwinds - so what the caller sees is
+            // an ordinary exception, and the reactor is still alive to serve the next request.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var serverEngine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+
+            (_, int originUdpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: serverEngine.CreateFactory(),
+                quicHandle: static (_, connection) => new Nghttp3Connection(connection).RunBufferedAsync(
+                    static request => Nghttp3Response.Text(
+                        request.Path.Span.SequenceEqual("/small"u8)
+                            ? "tiny"
+                            : new string('x', 64 * 1024))));
+
+            int driver = StartH3Driver(originUdpPort, maxResponseBytes: 8 * 1024);
+
+            (int status, string body) = Client.Get(driver, "/huge");
+            Assert.Equal(200, status);                       // the driver answered at all
+            Assert.True(body.StartsWith("599|"), $"request should have failed, got: {body}");
+            Assert.True(body.Contains("MaxResponseBytes"), $"should name the cap, got: {body}");
+
+            // The connection and its reactor survived, so a normal request still works.
+            (_, string after) = Client.Get(driver, "/small");
+            Assert.Equal("200|tiny", after);
+        });
     }
 
     // A TCP endpoint whose handler forwards to the h3 origin through the ring-native h3 client.
     // Its reactor has NO QUIC configuration: the first outbound connect opens an ephemeral-port
     // socket for it, which is what makes ioxide.httpclient usable without running a server.
-    private static int StartH3Driver(int originUdpPort)
+    private static int StartH3Driver(int originUdpPort, int maxResponseBytes = 8 * 1024 * 1024)
     {
         var options = new Http3ClientOptions
         {
@@ -109,6 +139,7 @@ internal static class Http3ClientTests
             Port = (ushort)originUdpPort,
             ServerName = "localhost",
             PoolSize = 1,
+            MaxResponseBytes = maxResponseBytes,
         };
 
         return TestServer.StartQuicClientHost(

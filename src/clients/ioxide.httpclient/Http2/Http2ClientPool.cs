@@ -18,6 +18,10 @@ public sealed record Http2ClientOptions
 
     public int AcquireTimeoutMs { get; init; } = 10_000;
 
+    /// <summary>Per-request ceiling for headers + body; a bigger response fails the request
+    /// instead of growing the arena without bound.</summary>
+    public int MaxResponseBytes { get; init; } = 8 * 1024 * 1024;
+
     /// <summary>
     /// TLS context for an <c>https://</c> origin, or null for h2c (cleartext, prior knowledge).
     /// With TLS the origin must select <c>h2</c> over ALPN or the connection is refused - that is
@@ -197,7 +201,7 @@ public sealed class Http2ClientPool : IDisposable
         try
         {
             Http2ClientConnection connection = await Http2ClientConnection.ConnectAsync(
-                _host, _options.Host, _options.Port, _authority, _options.Tls);
+                _host, _options.Host, _options.Port, _authority, _options.Tls, _options.MaxResponseBytes);
 
             if (_disposed)
             {

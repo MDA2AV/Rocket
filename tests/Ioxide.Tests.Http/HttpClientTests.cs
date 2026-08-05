@@ -17,6 +17,9 @@ namespace Ioxide.Tests;
 /// </summary>
 internal static class HttpClientTests
 {
+    // 9 MiB: comfortably past the 8 MiB ceiling that HttpClientResponse used to apply by default.
+    private const int HugeBodyBytes = 9 * 1024 * 1024;
+
     public static void Register(Runner runner)
     {
         runner.Test("httpclient h1: GET through a proxy handler (pool on the reactor)", () =>
@@ -144,6 +147,34 @@ internal static class HttpClientTests
             Assert.Equal($"200|{100_000}", body);
         });
 
+        runner.Test("httpclient h1: a response above the arena's old default ceiling is intact", () =>
+        {
+            // HttpClientResponse is shared by h1, h2 and h3, and h1 bounds responses a DIFFERENT
+            // way - Content-Length checked before allocating, never consulting Overflowed. Giving
+            // the shared arena a default ceiling therefore did not protect h1, it truncated it:
+            // parsing completed while the arena silently dropped bytes, and the caller got 200
+            // with empty headers and an empty body. Raising h1's own documented limit has to work.
+            int origin = TestServer.Start(OriginHandler);
+            int proxy = StartProxy(origin, maxResponseBytes: 32 * 1024 * 1024);
+
+            (int status, string body) = Client.Get(proxy, "/huge", timeoutMs: 30_000);
+            Assert.Equal(200, status);
+            Assert.Equal($"200|{HugeBodyBytes}", body);
+        });
+
+        runner.Test("httpclient h1: a response past MaxResponseBytes still fails loudly", () =>
+        {
+            // The other half: h1's own limit must keep rejecting, so the fix above did not simply
+            // remove the bound.
+            int origin = TestServer.Start(OriginHandler);
+            int proxy = StartProxy(origin, maxResponseBytes: 64 * 1024);
+
+            (int status, string body) = Client.Get(proxy, "/huge", timeoutMs: 30_000);
+            Assert.Equal(200, status);
+            Assert.True(body.StartsWith("599|"), $"expected the request to fail, got: {body[..Math.Min(60, body.Length)]}");
+            Assert.True(body.Contains("MaxResponseBytes"), $"should name the limit, got: {body[..Math.Min(60, body.Length)]}");
+        });
+
         runner.Test("httpclient h1: POST body reaches the origin intact", () =>
         {
             int origin = TestServer.Start(OriginHandler);
@@ -168,7 +199,8 @@ internal static class HttpClientTests
     // Start a proxy server: its handler calls the origin through the ring-native client and writes
     // "<upstream status>|<detail>" back. The pool is created in OnStart, so it belongs to this
     // reactor's ring - the documented way to use it.
-    private static int StartProxy(int originPort, int poolSize = 4, int? acquireTimeoutMs = null)
+    private static int StartProxy(int originPort, int poolSize = 4, int? acquireTimeoutMs = null,
+        int? maxResponseBytes = null)
     {
         var options = new HttpClientOptions
         {
@@ -177,6 +209,11 @@ internal static class HttpClientTests
             PoolSize = poolSize,
             ReceiveBufferSize = 4096,   // small on purpose: /big must exercise buffer growth
         };
+
+        if (maxResponseBytes is { } max)
+        {
+            options = options with { MaxResponseBytes = max };
+        }
 
         if (acquireTimeoutMs is { } timeout)
         {
@@ -227,7 +264,7 @@ internal static class HttpClientTests
                         upstreamStatus = response.Status;
                         detail = path switch
                         {
-                            "/big" => response.Body.Length.ToString(),
+                            "/big" or "/huge" => response.Body.Length.ToString(),
                             "/headers" => response.TryGetHeader("x-demo"u8, out ReadOnlyMemory<byte> demo)
                                 ? $"x-demo={Encoding.ASCII.GetString(demo.Span)}"
                                 : "x-demo=MISSING",
@@ -295,6 +332,15 @@ internal static class HttpClientTests
                     case "/big":
                         connection.Write(Encoding.ASCII.GetBytes(
                             $"HTTP/1.1 200 OK\r\nContent-Length: {100_000}\r\n\r\n" + new string('x', 100_000)));
+                        break;
+
+                    // Past the 8 MiB that used to be the shared response arena's default ceiling,
+                    // so a client raising MaxResponseBytes above it has something to prove itself
+                    // against.
+                    case "/huge":
+                        connection.Write(Encoding.ASCII.GetBytes(
+                            $"HTTP/1.1 200 OK\r\nContent-Length: {HugeBodyBytes}\r\n\r\n"
+                            + new string('h', HugeBodyBytes)));
                         break;
 
                     case "/post":
