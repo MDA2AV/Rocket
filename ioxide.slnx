@@ -4,6 +4,7 @@
 
   <!-- Protocol layers, native-bundled or pure C#. -->
   <Folder Name="/protocols/">
+    <Project Path="src/protocols/ioxide.nghttp2/ioxide.nghttp2.csproj" />
     <Project Path="src/protocols/ioxide.nghttp3/ioxide.nghttp3.csproj" />
     <Project Path="src/protocols/ioxide.http3/ioxide.http3.csproj" />
     <Project Path="src/protocols/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
@@ -43,6 +44,7 @@
     <Project Path="Playground/Pg/Playground.Pg.csproj" />
     <Project Path="Playground/File/Playground.File.csproj" />
     <Project Path="Playground/Tls/HttpsClient/Playground.Tls.HttpsClient.csproj" />
+    <Project Path="Playground/Nghttp2/Playground.Nghttp2.csproj" />
     <Project Path="Playground/Proxy/H1/Playground.Proxy.H1.csproj" />
     <Project Path="Playground/Proxy/H3ToH1/Playground.Proxy.H3ToH1.csproj" />
     <Project Path="Playground/Proxy/H3ToH2/Playground.Proxy.H3ToH2.csproj" />

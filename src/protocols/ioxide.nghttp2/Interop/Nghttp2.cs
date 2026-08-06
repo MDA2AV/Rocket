@@ -1,10 +1,13 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
+// The HTTP/2 CLIENT package drives the same shim from the other side; it is a sibling of this
+// package rather than an outside consumer, so it sees the P/Invoke surface.
+[assembly: InternalsVisibleTo("ioxide.httpclient")]
 [assembly: InternalsVisibleTo("Ioxide.Tests.Http")]
 [assembly: InternalsVisibleTo("Ioxide.Tests.Unit")]
 
-namespace ioxide.httpclient;
+namespace ioxide.nghttp2;
 
 /// <summary>
 /// P/Invoke surface of the ioxide.nghttp2 shim - nghttp2 statically linked into one self-contained
@@ -21,7 +24,9 @@ internal static unsafe partial class Nghttp2
 {
     private const string Lib = "ioxide_nghttp2";
 
-    /// <summary>Callback table handed to <see cref="ih2_client_new"/>. Each entry is an
+    /// <summary>Callback table handed to <see cref="ih2_client_new"/> or <see cref="ih2_server_new"/>.
+    /// The same table serves both directions - a server sees requests where a client sees
+    /// responses. Each entry is an
     /// [UnmanagedCallersOnly] static; `user` is a GCHandle to the managed bridge.</summary>
     [StructLayout(LayoutKind.Sequential)]
     internal struct Callbacks
@@ -37,6 +42,16 @@ internal static unsafe partial class Nghttp2
     /// <summary>Create a client session and queue the connection preface + SETTINGS. Returns the
     /// native handle, or 0 on allocation/init failure.</summary>
     [DllImport(Lib)] internal static extern nint ih2_client_new(Callbacks callbacks, void* user);
+
+    /// <summary>Create a server session and queue SETTINGS. The peer's connection preface is
+    /// validated out of <see cref="ih2_read"/>. Returns the handle, or 0 on failure.</summary>
+    [DllImport(Lib)] internal static extern nint ih2_server_new(Callbacks callbacks, void* user);
+
+    /// <summary>Answer the request on <paramref name="streamId"/>. Headers are packed the same way
+    /// as a request's, <c>:status</c> first. The body is copied natively and freed on stream
+    /// close. Returns 0, or a negative nghttp2 error.</summary>
+    [DllImport(Lib)] internal static extern int ih2_submit_response(nint connection, int streamId,
+        byte* headers, nuint headersLen, byte* body, nuint bodyLen);
 
     /// <summary>Submit a request. Headers are packed [u16 namelen][name][u16 valuelen][value]...,
     /// pseudo-headers first. The body is copied natively and freed on stream close. Returns the

@@ -23,16 +23,9 @@
     <None Include="../../../README.md" Pack="true" PackagePath="/" />
     <ProjectReference Include="../../ioxide/ioxide.csproj" />
     <ProjectReference Include="../../protocols/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
+    <ProjectReference Include="../../protocols/ioxide.nghttp2/ioxide.nghttp2.csproj" />
     <ProjectReference Include="../../protocols/ioxide.nghttp3/ioxide.nghttp3.csproj" />
   </ItemGroup>
 
-  <ItemGroup>
-    <!-- The self-contained nghttp2 bundle (built by scripts/build-nghttp2-native.sh): packed into
-         the nupkg's runtimes/ so consumers get it with no prerequisites, and copied next to the
-         output for ProjectReference/dev runs so DllImport probing finds it. -->
-    <None Include="runtimes/linux-x64/native/libioxide_nghttp2.so"
-          Pack="true" PackagePath="runtimes/linux-x64/native/"
-          CopyToOutputDirectory="PreserveNewest" Link="libioxide_nghttp2.so" />
-  </ItemGroup>
 
 </Project>
