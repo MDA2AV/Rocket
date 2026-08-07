@@ -40,6 +40,9 @@ internal static unsafe partial class OpenSsl
     [LibraryImport(Ssl)] public static partial int SSL_read(nint ssl, byte* buf, int num);
     [LibraryImport(Ssl)] public static partial int SSL_get_error(nint ssl, int ret);
 
+    /// <summary>What ALPN settled on, or nothing when the client offered none we serve.</summary>
+    [LibraryImport(Ssl)] public static partial void SSL_get0_alpn_selected(nint ssl, byte** data, uint* length);
+
     // Per-SSL user data: associate a managed object (a GCHandle) with an SSL so the static keylog
     // callback can find the right session without a global, pointer-keyed map.
     [LibraryImport(Ssl)] public static partial int SSL_set_ex_data(nint ssl, int idx, nint data);

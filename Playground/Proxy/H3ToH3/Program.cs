@@ -12,7 +12,7 @@ using Playground.Shared;
 //  connection - each reactor's outbound rides its own ephemeral-port socket instead, which makes
 //  the reply path deterministic.
 //
-//      PLAYGROUND_QUIC_PORT=8444 PLAYGROUND_PORT=8090 dotnet run -c Release --project Playground/Nghttp3
+//      PLAYGROUND_QUIC_PORT=8444 PLAYGROUND_PORT=8090 dotnet run -c Release --project Playground/Http3/Nghttp3
 //      dotnet run -c Release --project Playground/Proxy/H3ToH3
 //      curl --http3-only -ks https://127.0.0.1:8443/anything
 //

@@ -132,6 +132,10 @@ public sealed class TlsService
                 }
             }
 
+            // Available only once the handshake is complete, and the handler needs it before it
+            // decides which protocol loop to run.
+            session.CaptureAlpn();
+
             // App data that rode in with the client's Finished is sitting in the
             // rbio - decrypt it now so the handler starts with a clean slate.
             session.DrainPending();
@@ -232,34 +236,76 @@ public sealed class TlsService
             return OpenSsl.SSL_TLSEXT_ERR_NOACK;
         }
 
-        // Find our protocol in the client's length-prefixed offer list and point
-        // *out into the client buffer (standard practice - it outlives the callback).
+        // SERVER preference: walk OUR list in order and take the first the client also offered, so
+        // the order in TlsOptions.Alpn is what decides. Walking the client's list instead would
+        // hand it the choice, which is not what an operator listing ["h2", "http/1.1"] means.
+        //
+        // *out points into the CLIENT's buffer rather than ours - standard practice, since that
+        // buffer outlives the callback and ours would have to be pinned to match.
         var offered = new ReadOnlySpan<byte>((void*)inPtr, (int)inLen);
-        ReadOnlySpan<byte> want = wire.AsSpan(1);   // skip the length prefix
 
-        int i = 0;
-        while (i < offered.Length)
+        int ours = 0;
+        while (ours < wire.Length)
         {
-            int len = offered[i];
-            if (len == want.Length && offered.Slice(i + 1, len).SequenceEqual(want))
+            int wantLength = wire[ours];
+            ReadOnlySpan<byte> want = wire.AsSpan(ours + 1, wantLength);
+
+            int theirs = 0;
+            while (theirs < offered.Length)
             {
-                *(nint*)outPtr = inPtr + i + 1;
-                *(byte*)outLen = (byte)len;
-                return OpenSsl.SSL_TLSEXT_ERR_OK;
+                int haveLength = offered[theirs];
+                if (theirs + 1 + haveLength > offered.Length)
+                {
+                    break;   // malformed offer list; stop rather than read past it
+                }
+
+                if (haveLength == wantLength && offered.Slice(theirs + 1, haveLength).SequenceEqual(want))
+                {
+                    *(nint*)outPtr = inPtr + theirs + 1;
+                    *(byte*)outLen = (byte)haveLength;
+                    return OpenSsl.SSL_TLSEXT_ERR_OK;
+                }
+                theirs += 1 + haveLength;
             }
-            i += 1 + len;
+
+            ours += 1 + wantLength;
         }
 
-        return OpenSsl.SSL_TLSEXT_ERR_NOACK;   // no match: continue without ALPN
+        // Nothing in common. NOACK continues without the extension rather than failing the
+        // handshake - the client may still speak HTTP/1.1 quite happily.
+        return OpenSsl.SSL_TLSEXT_ERR_NOACK;
     }
 
-    private static byte[] BuildAlpnWire(string protocol)
+    /// <summary>
+    /// Protocols as ALPN wants them: each one a length byte then its ASCII name, in our preference
+    /// order. The select callback walks this, so position here is what decides the negotiation.
+    /// </summary>
+    private static byte[] BuildAlpnWire(string[] protocols)
     {
-        var wire = new byte[1 + protocol.Length];
-        wire[0] = (byte)protocol.Length;
-        for (int i = 0; i < protocol.Length; i++)
+        if (protocols.Length == 0)
         {
-            wire[1 + i] = (byte)protocol[i];
+            throw new ArgumentException("At least one ALPN protocol is required.", nameof(protocols));
+        }
+
+        int total = 0;
+        foreach (string protocol in protocols)
+        {
+            if (protocol.Length is 0 or > 255)
+            {
+                throw new ArgumentException($"ALPN protocol '{protocol}' must be 1..255 bytes.", nameof(protocols));
+            }
+            total += 1 + protocol.Length;
+        }
+
+        var wire = new byte[total];
+        int cursor = 0;
+        foreach (string protocol in protocols)
+        {
+            wire[cursor++] = (byte)protocol.Length;
+            for (int i = 0; i < protocol.Length; i++)
+            {
+                wire[cursor++] = (byte)protocol[i];
+            }
         }
         return wire;
     }

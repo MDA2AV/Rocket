@@ -4,7 +4,9 @@
 
   <!-- Protocol layers, native-bundled or pure C#. -->
   <Folder Name="/protocols/">
+    <Project Path="src/protocols/ioxide.nghttp2/ioxide.nghttp2.csproj" />
     <Project Path="src/protocols/ioxide.nghttp3/ioxide.nghttp3.csproj" />
+    <Project Path="src/protocols/ioxide.http2/ioxide.http2.csproj" />
     <Project Path="src/protocols/ioxide.http3/ioxide.http3.csproj" />
     <Project Path="src/protocols/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
   </Folder>
@@ -27,30 +29,57 @@
   </Folder>
 
   <!-- One runnable project per workload, over a shared library. Each is run directly with
-       "dotnet run" against its own project directory; see Playground/README.md. -->
+       "dotnet run" against its own project directory; see Playground/README.md.
+
+       Grouped to match the folders on disk, so the IDE tree and the repository agree. -->
   <Folder Name="/apps/playground/">
     <Project Path="Playground/Shared/Playground.Shared.csproj" />
+  </Folder>
+  <Folder Name="/apps/playground/tcp/">
     <Project Path="Playground/Tcp/Raw/Playground.Tcp.Raw.csproj" />
     <Project Path="Playground/Tcp/Pipe/Playground.Tcp.Pipe.csproj" />
     <Project Path="Playground/Tcp/Hop/Playground.Tcp.Hop.csproj" />
     <Project Path="Playground/Tcp/TaskRun/Playground.Tcp.TaskRun.csproj" />
     <Project Path="Playground/Tcp/Incremental/Playground.Tcp.Incremental.csproj" />
     <Project Path="Playground/Tcp/Big/Playground.Tcp.Big.csproj" />
-    <Project Path="Playground/Redis/Playground.Redis.csproj" />
+  </Folder>
+
+  <Folder Name="/apps/playground/tls/">
     <Project Path="Playground/Tls/Ktls/Playground.Tls.Ktls.csproj" />
     <Project Path="Playground/Tls/SslStream/Playground.Tls.SslStream.csproj" />
+  </Folder>
+
+  <Folder Name="/apps/playground/http2/">
+    <Project Path="Playground/Http2/Nghttp2/Playground.Http2.Nghttp2.csproj" />
+    <Project Path="Playground/Http2/Managed/Playground.Http2.Managed.csproj" />
+    <Project Path="Playground/Http2/Tls/Playground.Http2.Tls.csproj" />
+    <Project Path="Playground/Http2/SslStream/Playground.Http2.SslStream.csproj" />
+  </Folder>
+
+  <Folder Name="/apps/playground/http3/">
+    <Project Path="Playground/Http3/Nghttp3/Playground.Http3.Nghttp3.csproj" />
+    <Project Path="Playground/Http3/Buffered/Playground.Http3.Buffered.csproj" />
+  </Folder>
+
+  <Folder Name="/apps/playground/quic/">
     <Project Path="Playground/Quic/Alpn/Playground.Quic.Alpn.csproj" />
-    <Project Path="Playground/Pg/Playground.Pg.csproj" />
-    <Project Path="Playground/File/Playground.File.csproj" />
-    <Project Path="Playground/Tls/HttpsClient/Playground.Tls.HttpsClient.csproj" />
+  </Folder>
+
+  <Folder Name="/apps/playground/proxy/">
     <Project Path="Playground/Proxy/H1/Playground.Proxy.H1.csproj" />
     <Project Path="Playground/Proxy/H3ToH1/Playground.Proxy.H3ToH1.csproj" />
     <Project Path="Playground/Proxy/H3ToH2/Playground.Proxy.H3ToH2.csproj" />
     <Project Path="Playground/Proxy/H3ToH3/Playground.Proxy.H3ToH3.csproj" />
     <Project Path="Playground/Proxy/H1ToH3/Playground.Proxy.H1ToH3.csproj" />
-    <Project Path="Playground/Nghttp3/Playground.Nghttp3.csproj" />
-    <Project Path="Playground/Nghttp3Buffered/Playground.Nghttp3Buffered.csproj" />
   </Folder>
+
+  <Folder Name="/apps/playground/clients/">
+    <Project Path="Playground/Clients/Pg/Playground.Clients.Pg.csproj" />
+    <Project Path="Playground/Clients/Redis/Playground.Clients.Redis.csproj" />
+    <Project Path="Playground/Clients/File/Playground.Clients.File.csproj" />
+    <Project Path="Playground/Clients/Https/Playground.Clients.Https.csproj" />
+  </Folder>
+
 
   <!-- Research scratch - kept out of the main apps listing. -->
   <Folder Name="/apps/research/">

@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net10.0;net11.0</TargetFrameworks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>ioxide.http2</RootNamespace>
+
+    <PackageId>ioxide.http2</PackageId>
+    <Version>0.3.149</Version>
+    <Authors>MDA2AV</Authors>
+    <Description>Pure-C# HTTP/2 for the ioxide io_uring runtime: framing, HPACK (static and dynamic tables, Huffman) and flow control, with zero native code. A drop-in alternative to ioxide.nghttp2 for deployments that would rather not ship a native library - same connection shape, same request and response types.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://mda2av.github.io/ioxide/</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/MDA2AV/ioxide</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>io_uring;http2;h2;h2c;hpack;managed;linux;ioxide</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../../README.md" Pack="true" PackagePath="/" />
+    <ProjectReference Include="../../ioxide/ioxide.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -11,7 +11,7 @@ using Playground.Shared;
 //  port (the standalone shape of QUIC client mode), and replies route back by connection ID.
 //  Being an h3 client requires no h3 server.
 //
-//      dotnet run -c Release --project Playground/Nghttp3        # the h3 upstream on udp :8443
+//      dotnet run -c Release --project Playground/Http3/Nghttp3        # the h3 upstream on udp :8443
 //      dotnet run -c Release --project Playground/Proxy/H1ToH3
 //      curl http://127.0.0.1:8080/anything
 //
