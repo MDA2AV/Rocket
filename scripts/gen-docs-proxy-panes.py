@@ -13,40 +13,51 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 COMBOS = {
     "H1ToH1": ("h1 &rarr; h1", "HTTP/1.1 in &middot; HTTP/1.1 out",
                "ioxide + ioxide.httpclient",
-               ["PLAYGROUND_PORT=8081 dotnet run --project Playground/Tcp/Raw   # the origin",
-                "curl http://127.0.0.1:8080/"]),
+               [
+                'PLAYGROUND_PORT=8444 dotnet run --project Playground/Tls/Ktls   # a TLS origin',
+                'curl -k https://127.0.0.1:8443/']),
     "H1ToH2": ("h1 &rarr; h2", "HTTP/1.1 in &middot; HTTP/2 out",
                "ioxide + ioxide.httpclient",
-               ["PLAYGROUND_PORT=8081 dotnet run --project Playground/Http2/Nghttp2",
-                "curl http://127.0.0.1:8080/"]),
+               [
+                'PLAYGROUND_PORT=8444 dotnet run --project Playground/Http2/Tls  # an h2-over-TLS origin',
+                'curl -k https://127.0.0.1:8443/']),
     "H1ToH3": ("h1 &rarr; h3", "HTTP/1.1 in &middot; HTTP/3 out",
                "ioxide + ioxide.httpclient",
-               ["dotnet run --project Playground/Http3/Nghttp3         # h3 origin on udp :8443",
-                "curl http://127.0.0.1:8080/"]),
+               [
+                'dotnet run --project Playground/Http3/Nghttp3          # h3 origin on udp :8443',
+                'PLAYGROUND_UPSTREAM_PORT=8443 dotnet run --project Playground/Proxy/H1ToH3',
+                'curl -k https://127.0.0.1:8443/']),
     "H2ToH1": ("h2 &rarr; h1", "HTTP/2 in &middot; HTTP/1.1 out",
                "ioxide + ioxide.nghttp2 + ioxide.httpclient",
-               ["PLAYGROUND_PORT=8081 dotnet run --project Playground/Tcp/Raw   # the origin",
-                "curl --http2-prior-knowledge http://127.0.0.1:8080/"]),
+               [
+                'PLAYGROUND_PORT=8444 dotnet run --project Playground/Tls/Ktls   # a TLS origin',
+                'curl -k --http2 https://127.0.0.1:8443/']),
     "H2ToH2": ("h2 &rarr; h2", "HTTP/2 in &middot; HTTP/2 out",
                "ioxide + ioxide.nghttp2 + ioxide.httpclient",
-               ["PLAYGROUND_PORT=8081 dotnet run --project Playground/Http2/Nghttp2",
-                "curl --http2-prior-knowledge http://127.0.0.1:8080/"]),
+               [
+                'PLAYGROUND_PORT=8444 dotnet run --project Playground/Http2/Tls  # an h2-over-TLS origin',
+                'curl -k --http2 https://127.0.0.1:8443/']),
     "H2ToH3": ("h2 &rarr; h3", "HTTP/2 in &middot; HTTP/3 out",
                "ioxide + ioxide.nghttp2 + ioxide.httpclient",
-               ["dotnet run --project Playground/Http3/Nghttp3         # h3 origin on udp :8443",
-                "curl --http2-prior-knowledge http://127.0.0.1:8080/"]),
+               [
+                'dotnet run --project Playground/Http3/Nghttp3          # h3 origin on udp :8443',
+                'PLAYGROUND_UPSTREAM_PORT=8443 dotnet run --project Playground/Proxy/H2ToH3',
+                'curl -k --http2 https://127.0.0.1:8443/']),
     "H3ToH1": ("h3 &rarr; h1", "HTTP/3 in &middot; HTTP/1.1 out",
                "ioxide + ioxide.ngtcp2 + ioxide.nghttp3 + ioxide.httpclient",
-               ["PLAYGROUND_PORT=8081 dotnet run --project Playground/Tcp/Raw   # the origin",
-                "curl --http3-only -k https://127.0.0.1:8443/"]),
+               [
+                'PLAYGROUND_PORT=8444 dotnet run --project Playground/Tls/Ktls   # a TLS origin',
+                'curl --http3-only -k https://127.0.0.1:8443/']),
     "H3ToH2": ("h3 &rarr; h2", "HTTP/3 in &middot; HTTP/2 out",
                "ioxide + ioxide.ngtcp2 + ioxide.nghttp3 + ioxide.httpclient",
-               ["PLAYGROUND_PORT=8081 dotnet run --project Playground/Http2/Nghttp2",
-                "curl --http3-only -k https://127.0.0.1:8443/"]),
+               [
+                'PLAYGROUND_PORT=8444 dotnet run --project Playground/Http2/Tls  # an h2-over-TLS origin',
+                'curl --http3-only -k https://127.0.0.1:8443/']),
     "H3ToH3": ("h3 &rarr; h3", "HTTP/3 in &middot; HTTP/3 out",
                "ioxide + ioxide.ngtcp2 + ioxide.nghttp3 + ioxide.httpclient",
-               ["PLAYGROUND_QUIC_PORT=8444 dotnet run --project Playground/Http3/Nghttp3",
-                "curl --http3-only -k https://127.0.0.1:8443/"]),
+               [
+                'PLAYGROUND_QUIC_PORT=8444 dotnet run --project Playground/Http3/Nghttp3',
+                'curl --http3-only -k https://127.0.0.1:8443/']),
 }
 
 # The trailing note on each pane: what this combination is actually for.
@@ -93,9 +104,17 @@ def inline_shared(code: str) -> str:
         'const string keyPath  = "key.pem";\n\n',
         code)
 
+    # The upstream trust anchor defaults to the same self-signed cert the frontend serves, so the
+    # samples run against each other out of the box. Collapse the override to that default.
+    code = code.replace('Env.StrOrNull("PLAYGROUND_UPSTREAM_CA") ?? certPath', "certPath")
+
     code = re.sub(r'Env\.(?:Int|Port)\("[A-Z_]+", ([^)]+)\)', r"\1", code)
     code = re.sub(r'Env\.Str\("[A-Z_]+", ("[^"]*")\)', r"\1", code)
-    assert "Env." not in code and "QuicCert" not in code, "an indirection survived"
+    code = re.sub(r'Env\.Flag\("[A-Z_]+"\)', "false", code)
+
+    assert "Env." not in code and "QuicCert" not in code, \
+        "an indirection survived: " + "; ".join(
+            l.strip() for l in code.splitlines() if "Env." in l or "QuicCert" in l)
     return code
 
 

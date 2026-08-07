@@ -26,15 +26,15 @@ Run any of them with `dotnet run -c Release --project Playground/<Group>/<Name>`
 | [`Http3.Nghttp3`](Http3/Nghttp3/Program.cs) | 169 | HTTP/3 with **streamed** dispatch, and a `SIGTERM` GOAWAY drain. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
 | [`Http3.Buffered`](Http3/Buffered/Program.cs) | 146 | The same server with **buffered** dispatch - one method call is the whole difference. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
 | [`Quic.Alpn`](Quic/Alpn/Program.cs) | 111 | One QUIC listener, two protocols by ALPN: h3, or raw stream echo over the dual pipe. QUIC-only - `Tcp = null`. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
-| [`Proxy.H1ToH1`](Proxy/H1ToH1/Program.cs) | 131 | A reverse proxy, whole - both hops on one reactor thread. Read this one first. | `ioxide.httpclient` |
-| [`Proxy.H1ToH2`](Proxy/H1ToH2/Program.cs) | 132 | The same frontend, h2 upstream: `PoolSize` 1 carries every concurrent request. | `ioxide.httpclient` |
-| [`Proxy.H1ToH3`](Proxy/H1ToH3/Program.cs) | 131 | h1 in, h3 out - with no `Quic` config at all: the first connect opens an ephemeral client socket. | `ioxide.httpclient` |
-| [`Proxy.H2ToH1`](Proxy/H2ToH1/Program.cs) | 112 | The classic edge: clients get multiplexing, the origin keeps h1. The one combination whose pool must size for concurrency. | `ioxide.nghttp2`, `ioxide.httpclient` |
-| [`Proxy.H2ToH2`](Proxy/H2ToH2/Program.cs) | 103 | h2 both sides - two sockets per reactor whatever the load. Two HPACK tables that cannot be spliced. | `ioxide.nghttp2`, `ioxide.httpclient` |
-| [`Proxy.H2ToH3`](Proxy/H2ToH3/Program.cs) | 105 | The protocol-translating edge: TCP in, QUIC out, no server-side QUIC config. | `ioxide.nghttp2`, `ioxide.httpclient` |
-| [`Proxy.H3ToH1`](Proxy/H3ToH1/Program.cs) | 106 | HTTP/3 front door, HTTP/1.1 upstream - QUIC-only frontend, keep-alive h1 pool behind. | `ioxide.ngtcp2`, `ioxide.nghttp3`, `ioxide.httpclient` |
-| [`Proxy.H3ToH2`](Proxy/H3ToH2/Program.cs) | 103 | The same proxy with the pool swapped: requests multiplex onto one h2c upstream connection. | `ioxide.ngtcp2`, `ioxide.nghttp3`, `ioxide.httpclient` |
-| [`Proxy.H3ToH3`](Proxy/H3ToH3/Program.cs) | 105 | h3 on both sides: the upstream QUIC connections share the serving socket - one fd, both directions. | `ioxide.ngtcp2`, `ioxide.nghttp3`, `ioxide.httpclient` |
+| [`Proxy.H1ToH1`](Proxy/H1ToH1/Program.cs) | 207 | TLS both hops, and the one to read first - kTLS in, `TlsClientContext` out. Everything else here is this with one type changed. | `ioxide.httpclient` |
+| [`Proxy.H1ToH2`](Proxy/H1ToH2/Program.cs) | 208 | The same frontend, h2 upstream chosen by ALPN: `PoolSize` 1 carries every concurrent request. | `ioxide.httpclient` |
+| [`Proxy.H1ToH3`](Proxy/H1ToH3/Program.cs) | 196 | h1 in, h3 out. The upstream takes no TLS options at all - QUIC has no cleartext mode, and no `Quic` config is needed to be a client. | `ioxide.httpclient` |
+| [`Proxy.H2ToH1`](Proxy/H2ToH1/Program.cs) | 171 | The classic edge: h2 over TLS in (browsers refuse h2c), h1 origin behind. The one combination whose pool must size for concurrency. | `ioxide.nghttp2`, `ioxide.httpclient` |
+| [`Proxy.H2ToH2`](Proxy/H2ToH2/Program.cs) | 164 | h2 both sides - two sockets per reactor whatever the load. Two HPACK tables that cannot be spliced, and now two keys. | `ioxide.nghttp2`, `ioxide.httpclient` |
+| [`Proxy.H2ToH3`](Proxy/H2ToH3/Program.cs) | 150 | The protocol-translating edge: kTLS on TCP in, QUIC out, encrypted end to end by two completely different mechanisms. | `ioxide.nghttp2`, `ioxide.httpclient` |
+| [`Proxy.H3ToH1`](Proxy/H3ToH1/Program.cs) | 129 | HTTP/3 front door, TLS h1 upstream. `Tcp = null`, so every TCP socket the process owns is an outbound TLS one. | `ioxide.ngtcp2`, `ioxide.nghttp3`, `ioxide.httpclient` |
+| [`Proxy.H3ToH2`](Proxy/H3ToH2/Program.cs) | 127 | The same proxy with the upstream pool swapped: requests multiplex onto one h2-over-TLS connection. | `ioxide.ngtcp2`, `ioxide.nghttp3`, `ioxide.httpclient` |
+| [`Proxy.H3ToH3`](Proxy/H3ToH3/Program.cs) | 111 | The one that needed no TLS wiring at either end - QUIC has no cleartext mode, so both hops are TLS 1.3 by construction. | `ioxide.ngtcp2`, `ioxide.nghttp3`, `ioxide.httpclient` |
 | [`Clients.Pg`](Clients/Pg/Program.cs) | 181 | A `PgPool` per reactor: scalar queries, prepared params (`/add`, `/upper`), row streaming (`/rows`), errors and timeouts. | `ioxide.pg` |
 | [`Clients.Redis`](Clients/Redis/Program.cs) | 194 | A `RedisPool` per reactor: GET hot path, cache-aside, RESP types, explicit pipelining. | `ioxide.redis` |
 | [`Clients.File`](Clients/File/Program.cs) | 253 | Static files: baked responses, ring reads, disk revalidation, `SIGHUP` reload. | `ioxide.file` |
@@ -130,14 +130,24 @@ answers `500`, which is the error path working.
 | `PLAYGROUND_UPSTREAM_HOST` | `127.0.0.1` |
 | `PLAYGROUND_UPSTREAM_PORT` | `8081` |
 | `PLAYGROUND_UPSTREAM_POOL` | `8` h1 upstream, `32` for `H2ToH1`, `1` for any h2/h3 upstream |
+| `PLAYGROUND_UPSTREAM_SNI` | `localhost` - sent as SNI, and what the origin's certificate must match |
+| `PLAYGROUND_UPSTREAM_CA` | the frontend's own self-signed cert - a private CA goes here |
+| `PLAYGROUND_UPSTREAM_INSECURE` | `1` skips verification: encrypted but **unauthenticated** |
 
 Nine samples, one per frontend x upstream combination: the frontend protocol is the server type
 (`Nghttp2Connection`, `Nghttp3Connection`, or a raw TCP loop) and the upstream protocol is the
 pool type (`HttpClientPool`, `Http2ClientPool`, `Http3ClientPool`). Nothing else differs, which
 is the point.
 
-Each needs an origin to forward to - run one of the servers above on `PLAYGROUND_UPSTREAM_PORT`
-in another terminal. With nothing listening they answer `502` once the acquire timeout elapses.
+**Every hop is TLS.** Facing, that is kTLS for the h1 and h2 frontends (`modprobe tls`) and QUIC's
+own TLS 1.3 for the h3 ones; upstream, a `TlsClientContext` for h1 and h2 and again QUIC for h3.
+The h2 frontends offer only `h2` in ALPN, which is what makes them reachable from a browser at all.
+
+Each needs a **TLS** origin to forward to on `PLAYGROUND_UPSTREAM_PORT` - `Tls.Ktls` for an h1
+upstream, `Http2.Tls` for h2, `Http3.Nghttp3` for h3. They verify its certificate against the same
+self-signed cert they serve, so they work against each other out of the box. With nothing listening
+they answer `502` once the acquire timeout elapses, and a certificate that does not verify arrives
+the same way.
 
 ## Docker
 
