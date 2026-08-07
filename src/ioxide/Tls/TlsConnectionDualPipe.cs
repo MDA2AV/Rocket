@@ -1,6 +1,4 @@
-using System.Buffers;
 using System.IO.Pipelines;
-using ioxide.utils;
 
 namespace ioxide.tls;
 
@@ -8,31 +6,38 @@ namespace ioxide.tls;
 /// A duplex pipe over a TLS connection, for the frameworks that serve from <see cref="IDuplexPipe"/>
 /// rather than from the raw ring.
 ///
-/// The two halves are not symmetric, because ioxide's TLS is not:
+/// This composes rather than implements. Each direction has exactly two possible halves, and which
+/// one applies is not a choice the caller makes - it is what the handshake actually achieved:
 ///
-///   OUTBOUND - nothing to do. kTLS TX was enabled during the handshake, so the kernel produces the
-///              records; this delegates straight to <see cref="TcpConnectionDualPipe"/> and the
-///              writes plaintext exactly as it would without TLS.
-///   INBOUND  - a pump. Plaintext does not exist in ring memory, so the zero-copy reader has nothing
-///              to hand out: the pump reads ciphertext slices, decrypts them into a Pipe this class
-///              owns, and the caller reads that.
+/// <code>
+///            kernel                          OpenSSL
+///   read     TcpConnectionPipeReader         TlsPumpPipeReader
+///            (plaintext already in ring      (decrypts into a Pipe
+///             memory - zero copy)             this owns)
 ///
-/// Every consumer that serves TLS over pipes has had to write that pump itself, and the two in the
-/// wild both drop faults and both had to rediscover the handshake prologue below. Having it once
-/// here is the point.
+///   write    TcpConnectionPipeWriter         TlsEncryptingPipeWriter
+///            (plaintext into the slab,       (SSL_write, then the records
+///             the kernel makes records)       go into the slab)
+/// </code>
+///
+/// <see cref="TlsOptions.KernelRx"/> and <see cref="TlsOptions.KernelTx"/> express intent;
+/// <see cref="TlsService"/> decides per connection at the handoff, because intent is not always
+/// achievable - a handshake that left a partial record in the BIO cannot hand off to kTLS RX at
+/// all, and that connection silently keeps the userspace reader. <see cref="TlsSession"/> then
+/// reports the OUTCOME, which is what this reads.
+///
+/// That is why picking a type at the call site does not work: you would choose from configuration
+/// and be wrong for the connection where alignment failed. Choosing from the session is right by
+/// construction.
 /// </summary>
-/// <remarks>
-/// Reactor thread only, like everything else that touches a connection.
-/// </remarks>
+/// <remarks>Reactor thread only, like everything else that touches a connection.</remarks>
 public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
 {
-    private readonly TcpConnection _connection;
     private readonly TlsSession _tls;
     private readonly bool _ownsSession;
 
-    private readonly Pipe _inbound;
-    private readonly TcpConnectionDualPipe _outbound;   // only its writer is used
-    private readonly Task _pump;
+    private readonly TlsPumpPipeReader? _pump;      // only when OpenSSL decrypts
+    private readonly PipeWriter _writer;
 
     /// <summary>
     /// Wrap a connection whose TLS handshake has already completed (see
@@ -41,9 +46,8 @@ public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
     /// <param name="connection">The accepted connection, post-handshake.</param>
     /// <param name="session">The session that handshake produced.</param>
     /// <param name="options">
-    /// Buffering for the inbound pipe. Its pause threshold is what applies backpressure: the pump
-    /// awaits each flush, so a slow reader stops it pulling from the ring rather than letting
-    /// plaintext pile up without bound.
+    /// Buffering for the inbound pipe, when there is one. Ignored under kTLS RX, which needs no
+    /// buffer of its own: its pause threshold is the ring.
     /// </param>
     /// <param name="ownsSession">
     /// When true (the default) disposing this also disposes <paramref name="session"/>, which is
@@ -52,148 +56,51 @@ public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
     public TlsConnectionDualPipe(TcpConnection connection, TlsSession session,
         PipeOptions? options = null, bool ownsSession = true)
     {
-        _connection = connection;
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(session);
+
         _tls = session;
         _ownsSession = ownsSession;
 
-        // Inline schedulers, so a read resumes on the thread that completed the write - the
-        // reactor. A Pipe defaults to PipeScheduler.ThreadPool, and combined with
-        // useSynchronizationContext:false that hands the connection to a pool thread with a NULL
-        // SynchronizationContext, so nothing can post it back and the loop never returns. Every
-        // other awaitable in ioxide says the same thing as RunContinuationsAsynchronously = false.
-        _inbound = new Pipe(options ?? new PipeOptions(
-            readerScheduler: PipeScheduler.Inline,
-            writerScheduler: PipeScheduler.Inline,
-            useSynchronizationContext: false));
-        _outbound = new TcpConnectionDualPipe(connection);
+        if (session.KernelRx)
+        {
+            // The kernel decrypted, so plaintext is in ring memory and the ordinary zero-copy
+            // reader serves it. The one thing it cannot know about is plaintext the HANDSHAKE
+            // decrypted - that lives in the session, and for h2 it is the connection preface.
+            Input = new TlsProloguePipeReader(new TcpConnectionPipeReader(connection),
+                session.DrainPlaintext());
+        }
+        else
+        {
+            _pump = new TlsPumpPipeReader(connection, session, options);
+            Input = _pump;
+        }
 
-        _pump = PumpInboundAsync();
+        // kTLS TX means the kernel makes the records, so plaintext goes straight to the slab and
+        // the write path is the cleartext one, untouched.
+        _writer = session.KernelTx
+            ? new TcpConnectionPipeWriter(connection)
+            : new TlsEncryptingPipeWriter(connection, session);
     }
 
     /// <summary>Decrypted request bytes.</summary>
-    public PipeReader Input => _inbound.Reader;
+    public PipeReader Input { get; }
 
-    /// <summary>Response bytes, written as PLAINTEXT - the kernel encrypts them.</summary>
-    public PipeWriter Output => _outbound.Output;
-
-    private async Task PumpInboundAsync()
-    {
-        PipeWriter writer = _inbound.Writer;
-        Exception? failure = null;
-
-        try
-        {
-            if (!await WriteHandshakePlaintextAsync(writer))
-            {
-                return;
-            }
-
-            while (true)
-            {
-                RecvSnapshot snapshot = await _connection.ReadAsync();
-                int produced = DecryptAvailable(snapshot, writer);
-                _connection.ResetRead();
-
-                if (produced > 0)
-                {
-                    FlushResult flush = await writer.FlushAsync();
-                    if (flush.IsCompleted || flush.IsCanceled)
-                    {
-                        return;   // the reader is gone
-                    }
-                }
-
-                // close_notify is a clean end of stream; a closed snapshot without one is the peer
-                // vanishing. Both stop the pump, and the difference is left to the caller, which
-                // can still read TlsSession.Closed.
-                if (_tls.Closed || snapshot.IsClosed)
-                {
-                    return;
-                }
-            }
-        }
-        catch (Exception e)
-        {
-            // Deliberately kept, not swallowed. Completing the pipe cleanly on a TLS fault would
-            // make a bad MAC or a truncated stream indistinguishable from the peer hanging up
-            // politely - which is exactly what a truncation attack wants it to look like.
-            failure = e;
-        }
-        finally
-        {
-            await writer.CompleteAsync(failure);
-        }
-    }
-
-    /// <summary>
-    /// The client's first request usually rides in with its Finished flight, so the handshake has
-    /// already decrypted it. Miss this and the first request is silently dropped, then the pump
-    /// parks waiting for bytes that arrived before it started.
-    /// </summary>
-    private async ValueTask<bool> WriteHandshakePlaintextAsync(PipeWriter writer)
-    {
-        if (!WriteInitialPlaintext(writer))
-        {
-            return true;   // nothing rode in with the handshake
-        }
-
-        FlushResult flush = await writer.FlushAsync();
-        return !flush.IsCompleted && !flush.IsCanceled;
-    }
-
-    private bool WriteInitialPlaintext(PipeWriter writer)
-    {
-        ReadOnlySpan<byte> initial = _tls.DrainPlaintext();
-        if (initial.IsEmpty)
-        {
-            return false;
-        }
-
-        writer.Write(initial);
-        return true;
-    }
-
-    // Decrypt every buffer this snapshot carries, straight into the pipe. Each one is returned to
-    // the ring whatever happens: a decrypt that throws must not strand the kernel's buffer.
-    private unsafe int DecryptAvailable(in RecvSnapshot snapshot, PipeWriter writer)
-    {
-        int produced = 0;
-
-        while (_connection.TryGetItem(snapshot, out SpscRecvRing.Item item))
-        {
-            try
-            {
-                if (item.HasBuffer)
-                {
-                    produced += _tls.DecryptInto(item.Ptr, item.Len, writer);
-                }
-            }
-            finally
-            {
-                if (item.HasBuffer)
-                {
-                    _connection.ReturnBuffer(in item);
-                }
-            }
-        }
-
-        return produced;
-    }
+    /// <summary>Response bytes. Plaintext under kTLS TX; encrypted here otherwise.</summary>
+    public PipeWriter Output => _writer;
 
     public async ValueTask DisposeAsync()
     {
-        // Cancelling the reader unblocks a pump parked in FlushAsync; the connection's own teardown
-        // is what releases one parked in ReadAsync.
-        _inbound.Reader.CancelPendingRead();
+        if (_pump is not null)
+        {
+            await _pump.DisposeAsync();
+        }
+        else
+        {
+            Input.Complete();
+        }
 
-        try
-        {
-            await _pump;
-        }
-        catch
-        {
-            // The pump reports faults through the pipe, so anything here is teardown noise.
-        }
+        _writer.Complete();
 
         if (_ownsSession)
         {
