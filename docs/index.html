@@ -1136,6 +1136,11 @@ foreach (Thread t in threads) t.Join();</code></pre>
       protocol is the server you hand the connection to; the upstream protocol is the pool you
       call. Nothing else changes between the nine samples below - not the reactor, not the
       config, not the handler's shape.</p>
+      <p><b>Every hop is TLS</b>, which is the only way an h2 frontend is reachable from a browser
+      at all. It is reached three different ways: <b>kTLS</b> facing (OpenSSL handshake over the
+      ring, then the kernel owns transmit, so the handler writes plaintext), a
+      <code>TlsClientContext</code> upstream for h1 and h2, and for anything h3 <em>nothing</em> -
+      QUIC has no cleartext mode, so TLS 1.3 is already inside the transport.</p>
       <table>
         <tr><th></th><th>upstream h1</th><th>upstream h2</th><th>upstream h3</th></tr>
         <tr><td><b>frontend h1</b><br><span class="mx-t">a raw TCP loop</span></td>
@@ -1165,10 +1170,13 @@ foreach (Thread t in threads) t.Join();</code></pre>
       <b>h2 &rarr; h1</b> is the one sample here that sizes its pool for concurrency.</p>
       <p>Every pane is the corresponding
       <a href="https://github.com/MDA2AV/ioxide/tree/main/Playground/Proxy">Playground/Proxy</a>
-      program, whole, with the sample's environment-variable defaults inlined. None of them filter
-      hop-by-hop headers; a production proxy must, and <code>Connection</code>,
-      <code>Keep-Alive</code> and <code>Transfer-Encoding</code> are protocol errors to forward
-      into h2 or h3 at all.</p>
+      program, whole, with the sample's environment-variable defaults inlined. Two caveats they
+      share. They do not filter hop-by-hop headers - a production proxy must, and
+      <code>Connection</code>, <code>Keep-Alive</code> and <code>Transfer-Encoding</code> are
+      protocol errors to forward into h2 or h3 at all. And they trust the self-signed certificate
+      the playground generates, so they run against each other out of the box; a real deployment
+      points <code>CaFile</code> at a private CA or leaves it null for the system store. Turning
+      <code>VerifyCertificate</code> off leaves the hop encrypted but <em>unauthenticated</em>.</p>
     </div>
   </div>
   <div class="pane pane-pxh1toh1">
@@ -1177,29 +1185,38 @@ foreach (Thread t in threads) t.Join();</code></pre>
       <span class="pane-pkg">ioxide + ioxide.httpclient</span>
     </div>
 <pre><code class="language-csharp">// dotnet add package ioxide ioxide.httpclient
-//   PLAYGROUND_PORT=8081 dotnet run --project Playground/Tcp/Raw   # the origin
-//   curl http://127.0.0.1:8080/
+//   PLAYGROUND_PORT=8444 dotnet run --project Playground/Tls/Ktls   # a TLS origin
+//   curl -k https://127.0.0.1:8443/
 
 using System.Text;
 using ioxide;
 using ioxide.httpclient;
+using ioxide.tls;
 using ioxide.utils;
+
+const string certPath = &quot;cert.pem&quot;;      // any PEM pair; the sample generates one on first run
+const string keyPath  = &quot;key.pem&quot;;
 
 var config = new ServerConfig
 {
     ReactorCount = Environment.ProcessorCount,
     Tcp = new TcpOptions
     {
-        Port = 8080,
+        Port = 8443,
     },
 };
 
-var upstream = new HttpClientOptions
-{
-    Host = &quot;127.0.0.1&quot;,   // IPv4 literal: DNS would block the reactor
-    Port = 8081,
-    PoolSize = 8,         // keep-alive connections per reactor
-};
+string upstreamHost = &quot;127.0.0.1&quot;;   // IPv4 literal: DNS would block the reactor
+ushort upstreamPort = 8444;
+string upstreamName = &quot;localhost&quot;;    // sent as SNI, checked against the cert
+int upstreamPool = 8;                // keep-alive connections per reactor
+
+// The playground&#x27;s origins use a self-signed cert, so trust that file rather than the system
+// store. PLAYGROUND_UPSTREAM_CA points at a private CA instead; PLAYGROUND_UPSTREAM_INSECURE=1
+// skips verification, which leaves the hop encrypted but UNAUTHENTICATED - anything in the path
+// can present its own certificate and rewrite the whole exchange.
+string? upstreamCa = certPath;
+bool upstreamInsecure = false;
 
 var threads = new Thread[config.ReactorCount];
 
@@ -1207,60 +1224,89 @@ for (int i = 0; i &lt; threads.Length; i++)
 {
     var reactor = new Reactor(i, config);
 
-    // Opened on the reactor thread, so the outbound sockets ride this reactor&#x27;s ring too.
-    reactor.OnStart = r =&gt; HttpClientPool.Start(r, upstream);
+    reactor.OnStart = r =&gt;
+    {
+        // Inbound: terminate TLS for clients. ALPN is an ordered list and this proxy speaks one
+        // protocol, so it offers exactly one.
+        TlsService.Start(r, new TlsOptions
+        {
+            CertificatePath = certPath,
+            KeyPath = keyPath,
+            Alpn = [&quot;http/1.1&quot;],
+        });
+
+        // Outbound: one context per reactor, shared by that reactor&#x27;s pool - it holds no
+        // per-connection state, so every connection opened from it gets its own SSL.
+        HttpClientPool.Start(r, new HttpClientOptions
+        {
+            Host = upstreamHost,
+            Port = upstreamPort,
+            PoolSize = upstreamPool,
+            Tls = TlsClientContext.Create(new TlsClientOptions
+            {
+                ServerName = upstreamName,
+                AlpnProtocols = [&quot;http/1.1&quot;],
+                CaFile = upstreamInsecure ? null : upstreamCa,
+                VerifyCertificate = !upstreamInsecure,
+            }),
+        });
+    };
 
     reactor.TcpHandle = async (r, conn) =&gt;
     {
         HttpClientPool client = r.GetService&lt;HttpClientPool&gt;();
+        TlsSession? tls = null;
 
         try
         {
+            // The handshake reads and writes through this same connection; after it, the socket
+            // carries kTLS records the kernel en/decrypts.
+            tls = await r.GetService&lt;TlsService&gt;().AcceptAsync(conn);
+
+            // A request can ride in with the handshake&#x27;s final flight - answer it before parking
+            // in ReadAsync, or the client waits on a response we never send.
+            if (TryReadTarget(tls.DrainPlaintext(), out ReadOnlySpan&lt;byte&gt; early))
+            {
+                await ProxyAsync(conn, client, Encoding.ASCII.GetString(early));
+            }
+
             while (true)
             {
                 RecvSnapshot snapshot = await conn.ReadAsync();
 
-                string path = &quot;/&quot;;
-                while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                string? path = null;
+                unsafe
                 {
-                    if (item.HasBuffer)
+                    while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
                     {
-                        if (TryReadTarget(item.AsSpan(), out ReadOnlySpan&lt;byte&gt; target))
+                        if (item.HasBuffer)
                         {
-                            path = Encoding.ASCII.GetString(target);
+                            // Records in, plaintext out - the session decrypts what the ring got.
+                            if (TryReadTarget(tls.Decrypt(item.Ptr, item.Len), out ReadOnlySpan&lt;byte&gt; target))
+                            {
+                                path = Encoding.ASCII.GetString(target);
+                            }
+                            conn.ReturnBuffer(in item);
                         }
-                        conn.ReturnBuffer(in item);
                     }
                 }
 
-                try
+                if (path is not null)
                 {
-                    // The outbound call. Same ring, same thread - this await resumes inline.
-                    // The response owns its bytes, so dispose it when you&#x27;re done with them.
-                    using HttpClientResponse response = await client.GetAsync(path);
-
-                    conn.Write(Encoding.ASCII.GetBytes(
-                        $&quot;HTTP/1.1 {response.Status} OK\r\nContent-Length: {response.Body.Length}\r\n\r\n&quot;));
-                    conn.Write(response.Body.Span);   // bytes straight through, no decode
-                }
-                catch (HttpClientException e)
-                {
-                    // A dead origin surfaces here rather than hanging: the pool bounds the whole
-                    // acquire, so you get an exception and can answer with a 502.
-                    byte[] message = Encoding.ASCII.GetBytes($&quot;upstream: {e.Message}&quot;);
-                    conn.Write(Encoding.ASCII.GetBytes(
-                        $&quot;HTTP/1.1 502 Bad Gateway\r\nContent-Length: {message.Length}\r\n\r\n&quot;));
-                    conn.Write(message);
+                    await ProxyAsync(conn, client, path);
                 }
 
-                await conn.FlushAsync();
-
-                if (snapshot.IsClosed) return;
+                if (snapshot.IsClosed || tls.Closed) return;
                 conn.ResetRead();
             }
         }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($&quot;[proxy h1-&gt;h1] connection failed: {e.Message}&quot;);
+        }
         finally
         {
+            tls?.Dispose();
             conn.DecRef();
         }
     };
@@ -1269,14 +1315,46 @@ for (int i = 0; i &lt; threads.Length; i++)
     threads[i].Start();
 }
 
-Console.WriteLine($&quot;[proxy h1-&gt;h1] {config.ReactorCount} reactors on :{config.Tcp.Port} &quot;
-                + $&quot;-&gt; {upstream.Host}:{upstream.Port}, {upstream.PoolSize} connections each&quot;);
+Console.WriteLine($&quot;[proxy h1-&gt;h1] {config.ReactorCount} reactors, https on :{config.Tcp!.Port} &quot;
+                + $&quot;-&gt; https://{upstreamName} ({upstreamHost}:{upstreamPort}), &quot;
+                + $&quot;{upstreamPool} connections each, &quot;
+                + $&quot;verify={(upstreamInsecure ? &quot;OFF&quot; : upstreamCa ?? &quot;system store&quot;)}&quot;);
 
 foreach (Thread thread in threads)
 {
     thread.Join();
 }
 
+// One request out, one response back. Everything written here is PLAINTEXT: after the handshake
+// kTLS owns transmit, so there is nothing left for us to wrap.
+static async ValueTask ProxyAsync(TcpConnection conn, HttpClientPool client, string path)
+{
+    try
+    {
+        // The outbound call. Same ring, same thread - this await resumes inline. The response
+        // owns its bytes, so dispose it when you&#x27;re done with them.
+        using HttpClientResponse response = await client.GetAsync(path);
+
+        conn.Write(Encoding.ASCII.GetBytes(
+            $&quot;HTTP/1.1 {response.Status} OK\r\nContent-Length: {response.Body.Length}\r\n\r\n&quot;));
+        conn.Write(response.Body.Span);   // bytes straight through, no decode
+    }
+    catch (Exception e)
+    {
+        // A dead origin surfaces here rather than hanging: the pool bounds the whole acquire. A
+        // REFUSED CERTIFICATE arrives the same way - the handshake is part of opening the
+        // connection, so a name mismatch reads like any other upstream failure.
+        byte[] message = Encoding.ASCII.GetBytes($&quot;upstream: {e.Message}&quot;);
+        conn.Write(Encoding.ASCII.GetBytes(
+            $&quot;HTTP/1.1 502 Bad Gateway\r\nContent-Length: {message.Length}\r\n\r\n&quot;));
+        conn.Write(message);
+    }
+
+    await conn.FlushAsync();
+}
+
+// &quot;GET /sleep?x=1 HTTP/1.1&quot; -&gt; &quot;/sleep&quot;. Your framework of choice would do this for you; ioxide
+// deliberately doesn&#x27;t, so here it is in full.
 static bool TryReadTarget(ReadOnlySpan&lt;byte&gt; request, out ReadOnlySpan&lt;byte&gt; target)
 {
     target = default;
@@ -1303,29 +1381,38 @@ static bool TryReadTarget(ReadOnlySpan&lt;byte&gt; request, out ReadOnlySpan&lt;
       <span class="pane-pkg">ioxide + ioxide.httpclient</span>
     </div>
 <pre><code class="language-csharp">// dotnet add package ioxide ioxide.httpclient
-//   PLAYGROUND_PORT=8081 dotnet run --project Playground/Http2/Nghttp2
-//   curl http://127.0.0.1:8080/
+//   PLAYGROUND_PORT=8444 dotnet run --project Playground/Http2/Tls  # an h2-over-TLS origin
+//   curl -k https://127.0.0.1:8443/
 
 using System.Text;
 using ioxide;
 using ioxide.httpclient;
+using ioxide.tls;
 using ioxide.utils;
+
+const string certPath = &quot;cert.pem&quot;;      // any PEM pair; the sample generates one on first run
+const string keyPath  = &quot;key.pem&quot;;
 
 var config = new ServerConfig
 {
     ReactorCount = Environment.ProcessorCount,
     Tcp = new TcpOptions
     {
-        Port = 8080,
+        Port = 8443,
     },
 };
 
-var upstream = new Http2ClientOptions
-{
-    Host = &quot;127.0.0.1&quot;,   // IPv4 literal: DNS would block the reactor
-    Port = 8081,
-    PoolSize = 1,         // h2 multiplexes: one connection carries all
-};
+string upstreamHost = &quot;127.0.0.1&quot;;   // IPv4 literal: DNS would block the reactor
+ushort upstreamPort = 8444;
+string upstreamName = &quot;localhost&quot;;    // sent as SNI, checked against the cert
+int upstreamPool = 1;                // h2 multiplexes: one connection carries all
+
+// The playground&#x27;s origins use a self-signed cert, so trust that file rather than the system
+// store. PLAYGROUND_UPSTREAM_CA points at a private CA instead; PLAYGROUND_UPSTREAM_INSECURE=1
+// skips verification, which leaves the hop encrypted but UNAUTHENTICATED - anything in the path
+// can present its own certificate and rewrite the whole exchange.
+string? upstreamCa = certPath;
+bool upstreamInsecure = false;
 
 var threads = new Thread[config.ReactorCount];
 
@@ -1333,57 +1420,89 @@ for (int i = 0; i &lt; threads.Length; i++)
 {
     var reactor = new Reactor(i, config);
 
-    // Opened on the reactor thread, so the upstream socket rides this reactor&#x27;s ring too.
-    reactor.OnStart = r =&gt; Http2ClientPool.Start(r, upstream);
+    reactor.OnStart = r =&gt;
+    {
+        // Inbound: terminate TLS for clients. ALPN is an ordered list and this proxy speaks one
+        // protocol, so it offers exactly one.
+        TlsService.Start(r, new TlsOptions
+        {
+            CertificatePath = certPath,
+            KeyPath = keyPath,
+            Alpn = [&quot;http/1.1&quot;],
+        });
+
+        // Outbound: one context per reactor, shared by that reactor&#x27;s pool - it holds no
+        // per-connection state, so every connection opened from it gets its own SSL.
+        Http2ClientPool.Start(r, new Http2ClientOptions
+        {
+            Host = upstreamHost,
+            Port = upstreamPort,
+            PoolSize = upstreamPool,
+            Tls = TlsClientContext.Create(new TlsClientOptions
+            {
+                ServerName = upstreamName,
+                AlpnProtocols = [&quot;h2&quot;],       // h2 over TLS is chosen by ALPN, never assumed
+                CaFile = upstreamInsecure ? null : upstreamCa,
+                VerifyCertificate = !upstreamInsecure,
+            }),
+        });
+    };
 
     reactor.TcpHandle = async (r, conn) =&gt;
     {
         Http2ClientPool client = r.GetService&lt;Http2ClientPool&gt;();
+        TlsSession? tls = null;
 
         try
         {
+            // The handshake reads and writes through this same connection; after it, the socket
+            // carries kTLS records the kernel en/decrypts.
+            tls = await r.GetService&lt;TlsService&gt;().AcceptAsync(conn);
+
+            // A request can ride in with the handshake&#x27;s final flight - answer it before parking
+            // in ReadAsync, or the client waits on a response we never send.
+            if (TryReadTarget(tls.DrainPlaintext(), out ReadOnlySpan&lt;byte&gt; early))
+            {
+                await ProxyAsync(conn, client, Encoding.ASCII.GetString(early));
+            }
+
             while (true)
             {
                 RecvSnapshot snapshot = await conn.ReadAsync();
 
-                string path = &quot;/&quot;;
-                while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                string? path = null;
+                unsafe
                 {
-                    if (item.HasBuffer)
+                    while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
                     {
-                        if (TryReadTarget(item.AsSpan(), out ReadOnlySpan&lt;byte&gt; target))
+                        if (item.HasBuffer)
                         {
-                            path = Encoding.ASCII.GetString(target);
+                            // Records in, plaintext out - the session decrypts what the ring got.
+                            if (TryReadTarget(tls.Decrypt(item.Ptr, item.Len), out ReadOnlySpan&lt;byte&gt; target))
+                            {
+                                path = Encoding.ASCII.GetString(target);
+                            }
+                            conn.ReturnBuffer(in item);
                         }
-                        conn.ReturnBuffer(in item);
                     }
                 }
 
-                try
+                if (path is not null)
                 {
-                    // h1 request in, h2 stream out - same ring, same thread, inline resume.
-                    using HttpClientResponse response = await client.GetAsync(path);
-
-                    conn.Write(Encoding.ASCII.GetBytes(
-                        $&quot;HTTP/1.1 {response.Status} OK\r\nContent-Length: {response.Body.Length}\r\n\r\n&quot;));
-                    conn.Write(response.Body.Span);   // bytes straight through, no decode
-                }
-                catch (Exception e)
-                {
-                    byte[] message = Encoding.ASCII.GetBytes($&quot;upstream: {e.Message}&quot;);
-                    conn.Write(Encoding.ASCII.GetBytes(
-                        $&quot;HTTP/1.1 502 Bad Gateway\r\nContent-Length: {message.Length}\r\n\r\n&quot;));
-                    conn.Write(message);
+                    await ProxyAsync(conn, client, path);
                 }
 
-                await conn.FlushAsync();
-
-                if (snapshot.IsClosed) return;
+                if (snapshot.IsClosed || tls.Closed) return;
                 conn.ResetRead();
             }
         }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($&quot;[proxy h1-&gt;h2] connection failed: {e.Message}&quot;);
+        }
         finally
         {
+            tls?.Dispose();
             conn.DecRef();
         }
     };
@@ -1392,12 +1511,42 @@ for (int i = 0; i &lt; threads.Length; i++)
     threads[i].Start();
 }
 
-Console.WriteLine($&quot;[proxy h1-&gt;h2] {config.ReactorCount} reactors on :{config.Tcp!.Port} &quot;
-                + $&quot;-&gt; h2c {upstream.Host}:{upstream.Port}, {upstream.PoolSize} connection(s) each&quot;);
+Console.WriteLine($&quot;[proxy h1-&gt;h2] {config.ReactorCount} reactors, https on :{config.Tcp!.Port} &quot;
+                + $&quot;-&gt; h2 https://{upstreamName} ({upstreamHost}:{upstreamPort}), &quot;
+                + $&quot;{upstreamPool} connection(s) each, &quot;
+                + $&quot;verify={(upstreamInsecure ? &quot;OFF&quot; : upstreamCa ?? &quot;system store&quot;)}&quot;);
 
 foreach (Thread thread in threads)
 {
     thread.Join();
+}
+
+// One request out, one response back. Everything written here is PLAINTEXT: after the handshake
+// kTLS owns transmit, so there is nothing left for us to wrap.
+static async ValueTask ProxyAsync(TcpConnection conn, Http2ClientPool client, string path)
+{
+    try
+    {
+        // The outbound call is an h2 stream on a shared connection, not a socket of its own.
+        // Same ring, same thread - this await resumes inline.
+        using HttpClientResponse response = await client.GetAsync(path);
+
+        conn.Write(Encoding.ASCII.GetBytes(
+            $&quot;HTTP/1.1 {response.Status} OK\r\nContent-Length: {response.Body.Length}\r\n\r\n&quot;));
+        conn.Write(response.Body.Span);   // bytes straight through, no decode
+    }
+    catch (Exception e)
+    {
+        // A dead origin surfaces here rather than hanging: the pool bounds the whole acquire. A
+        // REFUSED CERTIFICATE arrives the same way - the handshake is part of opening the
+        // connection, so a name mismatch reads like any other upstream failure.
+        byte[] message = Encoding.ASCII.GetBytes($&quot;upstream: {e.Message}&quot;);
+        conn.Write(Encoding.ASCII.GetBytes(
+            $&quot;HTTP/1.1 502 Bad Gateway\r\nContent-Length: {message.Length}\r\n\r\n&quot;));
+        conn.Write(message);
+    }
+
+    await conn.FlushAsync();
 }
 
 // &quot;GET /sleep?x=1 HTTP/1.1&quot; -&gt; &quot;/sleep&quot;. Your framework of choice would do this for you; ioxide
@@ -1428,30 +1577,32 @@ static bool TryReadTarget(ReadOnlySpan&lt;byte&gt; request, out ReadOnlySpan&lt;
       <span class="pane-pkg">ioxide + ioxide.httpclient</span>
     </div>
 <pre><code class="language-csharp">// dotnet add package ioxide ioxide.httpclient
-//   dotnet run --project Playground/Http3/Nghttp3         # h3 origin on udp :8443
-//   curl http://127.0.0.1:8080/
+//   dotnet run --project Playground/Http3/Nghttp3          # h3 origin on udp :8443
+//   PLAYGROUND_UPSTREAM_PORT=8443 dotnet run --project Playground/Proxy/H1ToH3
+//   curl -k https://127.0.0.1:8443/
 
 using System.Text;
 using ioxide;
 using ioxide.httpclient;
+using ioxide.tls;
 using ioxide.utils;
+
+const string certPath = &quot;cert.pem&quot;;      // any PEM pair; the sample generates one on first run
+const string keyPath  = &quot;key.pem&quot;;
 
 var config = new ServerConfig
 {
     ReactorCount = Environment.ProcessorCount,
     Tcp = new TcpOptions
     {
-        Port = 8080,
+        Port = 8443,
     },
 };
 
-var upstream = new Http3ClientOptions
-{
-    Host = &quot;127.0.0.1&quot;,   // IPv4 literal: DNS would block the reactor
-    Port = 8443,         // the upstream&#x27;s QUIC (UDP) port
-    ServerName = &quot;localhost&quot;,
-    PoolSize = 1,         // h3 multiplexes: one connection carries all
-};
+string upstreamHost = &quot;127.0.0.1&quot;;   // IPv4 literal: DNS would block the reactor
+ushort upstreamPort = 8444;       // the upstream&#x27;s QUIC (UDP) port
+string upstreamName = &quot;localhost&quot;;    // sent as SNI, checked against the cert
+int upstreamPool = 1;                // h3 multiplexes: one connection carries all
 
 var threads = new Thread[config.ReactorCount];
 
@@ -1459,58 +1610,84 @@ for (int i = 0; i &lt; threads.Length; i++)
 {
     var reactor = new Reactor(i, config);
 
-    // Opening the pool here is what makes the reactor grow its client-side QUIC transport: an
-    // ephemeral UDP socket, armed on this ring, shared by every upstream connection.
-    reactor.OnStart = r =&gt; Http3ClientPool.Start(r, upstream);
+    reactor.OnStart = r =&gt;
+    {
+        // Inbound: terminate TLS for clients. ALPN is an ordered list and this proxy speaks one
+        // protocol, so it offers exactly one.
+        TlsService.Start(r, new TlsOptions
+        {
+            CertificatePath = certPath,
+            KeyPath = keyPath,
+            Alpn = [&quot;http/1.1&quot;],
+        });
+
+        // Outbound: no TLS options, because QUIC has no cleartext mode - TLS 1.3 is inside the
+        // transport and ALPN (&quot;h3&quot;) is negotiated as part of the connection handshake. Opening
+        // this pool is what makes the reactor grow its client-side QUIC transport.
+        Http3ClientPool.Start(r, new Http3ClientOptions
+        {
+            Host = upstreamHost,
+            Port = upstreamPort,
+            ServerName = upstreamName,
+            PoolSize = upstreamPool,
+        });
+    };
 
     reactor.TcpHandle = async (r, conn) =&gt;
     {
         Http3ClientPool client = r.GetService&lt;Http3ClientPool&gt;();
+        TlsSession? tls = null;
 
         try
         {
+            // The handshake reads and writes through this same connection; after it, the socket
+            // carries kTLS records the kernel en/decrypts.
+            tls = await r.GetService&lt;TlsService&gt;().AcceptAsync(conn);
+
+            // A request can ride in with the handshake&#x27;s final flight - answer it before parking
+            // in ReadAsync, or the client waits on a response we never send.
+            if (TryReadTarget(tls.DrainPlaintext(), out ReadOnlySpan&lt;byte&gt; early))
+            {
+                await ProxyAsync(conn, client, Encoding.ASCII.GetString(early));
+            }
+
             while (true)
             {
                 RecvSnapshot snapshot = await conn.ReadAsync();
 
-                string path = &quot;/&quot;;
-                while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                string? path = null;
+                unsafe
                 {
-                    if (item.HasBuffer)
+                    while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
                     {
-                        if (TryReadTarget(item.AsSpan(), out ReadOnlySpan&lt;byte&gt; target))
+                        if (item.HasBuffer)
                         {
-                            path = Encoding.ASCII.GetString(target);
+                            // Records in, plaintext out - the session decrypts what the ring got.
+                            if (TryReadTarget(tls.Decrypt(item.Ptr, item.Len), out ReadOnlySpan&lt;byte&gt; target))
+                            {
+                                path = Encoding.ASCII.GetString(target);
+                            }
+                            conn.ReturnBuffer(in item);
                         }
-                        conn.ReturnBuffer(in item);
                     }
                 }
 
-                try
+                if (path is not null)
                 {
-                    // h1 request in, h3 request out - same ring, same thread, inline resume.
-                    using HttpClientResponse response = await client.GetAsync(path);
-
-                    conn.Write(Encoding.ASCII.GetBytes(
-                        $&quot;HTTP/1.1 {response.Status} OK\r\nContent-Length: {response.Body.Length}\r\n\r\n&quot;));
-                    conn.Write(response.Body.Span);   // bytes straight through, no decode
-                }
-                catch (Exception e)
-                {
-                    byte[] message = Encoding.ASCII.GetBytes($&quot;upstream: {e.Message}&quot;);
-                    conn.Write(Encoding.ASCII.GetBytes(
-                        $&quot;HTTP/1.1 502 Bad Gateway\r\nContent-Length: {message.Length}\r\n\r\n&quot;));
-                    conn.Write(message);
+                    await ProxyAsync(conn, client, path);
                 }
 
-                await conn.FlushAsync();
-
-                if (snapshot.IsClosed) return;
+                if (snapshot.IsClosed || tls.Closed) return;
                 conn.ResetRead();
             }
         }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($&quot;[proxy h1-&gt;h3] connection failed: {e.Message}&quot;);
+        }
         finally
         {
+            tls?.Dispose();
             conn.DecRef();
         }
     };
@@ -1519,12 +1696,41 @@ for (int i = 0; i &lt; threads.Length; i++)
     threads[i].Start();
 }
 
-Console.WriteLine($&quot;[proxy h1-&gt;h3] {config.ReactorCount} reactors on :{config.Tcp!.Port} &quot;
-                + $&quot;-&gt; h3 {upstream.Host}:{upstream.Port} (client-only QUIC, ephemeral port)&quot;);
+Console.WriteLine($&quot;[proxy h1-&gt;h3] {config.ReactorCount} reactors, https on :{config.Tcp!.Port} &quot;
+                + $&quot;-&gt; h3 {upstreamName} ({upstreamHost}:udp {upstreamPort}), &quot;
+                + $&quot;{upstreamPool} connection(s) each&quot;);
 
 foreach (Thread thread in threads)
 {
     thread.Join();
+}
+
+// One request out, one response back. Everything written here is PLAINTEXT: after the handshake
+// kTLS owns transmit, so there is nothing left for us to wrap.
+static async ValueTask ProxyAsync(TcpConnection conn, Http3ClientPool client, string path)
+{
+    try
+    {
+        // The outbound call is a QUIC stream. Both hops are completions on this same ring - one
+        // from a TCP recv, one from a UDP recv - and both resume inline.
+        using HttpClientResponse response = await client.GetAsync(path);
+
+        conn.Write(Encoding.ASCII.GetBytes(
+            $&quot;HTTP/1.1 {response.Status} OK\r\nContent-Length: {response.Body.Length}\r\n\r\n&quot;));
+        conn.Write(response.Body.Span);   // bytes straight through, no decode
+    }
+    catch (Exception e)
+    {
+        // A dead origin surfaces here rather than hanging: the pool bounds the whole acquire. A
+        // refused certificate arrives the same way - for QUIC the TLS handshake IS the connection
+        // handshake, so it fails as a failed connect.
+        byte[] message = Encoding.ASCII.GetBytes($&quot;upstream: {e.Message}&quot;);
+        conn.Write(Encoding.ASCII.GetBytes(
+            $&quot;HTTP/1.1 502 Bad Gateway\r\nContent-Length: {message.Length}\r\n\r\n&quot;));
+        conn.Write(message);
+    }
+
+    await conn.FlushAsync();
 }
 
 // &quot;GET /sleep?x=1 HTTP/1.1&quot; -&gt; &quot;/sleep&quot;. Your framework of choice would do this for you; ioxide
@@ -1555,29 +1761,38 @@ static bool TryReadTarget(ReadOnlySpan&lt;byte&gt; request, out ReadOnlySpan&lt;
       <span class="pane-pkg">ioxide + ioxide.nghttp2 + ioxide.httpclient</span>
     </div>
 <pre><code class="language-csharp">// dotnet add package ioxide ioxide.nghttp2 ioxide.httpclient
-//   PLAYGROUND_PORT=8081 dotnet run --project Playground/Tcp/Raw   # the origin
-//   curl --http2-prior-knowledge http://127.0.0.1:8080/
+//   PLAYGROUND_PORT=8444 dotnet run --project Playground/Tls/Ktls   # a TLS origin
+//   curl -k --http2 https://127.0.0.1:8443/
 
 using System.Text;
 using ioxide;
 using ioxide.httpclient;
 using ioxide.nghttp2;
+using ioxide.tls;
+
+const string certPath = &quot;cert.pem&quot;;      // any PEM pair; the sample generates one on first run
+const string keyPath  = &quot;key.pem&quot;;
 
 var config = new ServerConfig
 {
     ReactorCount = Environment.ProcessorCount,
     Tcp = new TcpOptions
     {
-        Port = 8080,
+        Port = 8443,
     },
 };
 
-var upstream = new HttpClientOptions
-{
-    Host = &quot;127.0.0.1&quot;,   // IPv4 literal: DNS would block the reactor
-    Port = 8081,
-    PoolSize = 32,        // h1 has no multiplexing: size for concurrency
-};
+string upstreamHost = &quot;127.0.0.1&quot;;   // IPv4 literal: DNS would block the reactor
+ushort upstreamPort = 8444;
+string upstreamName = &quot;localhost&quot;;    // sent as SNI, checked against the cert
+int upstreamPool = 32;               // h1 has no multiplexing: size for concurrency
+
+// The playground&#x27;s origins use a self-signed cert, so trust that file rather than the system
+// store. PLAYGROUND_UPSTREAM_CA points at a private CA instead; PLAYGROUND_UPSTREAM_INSECURE=1
+// skips verification, which leaves the hop encrypted but UNAUTHENTICATED - anything in the path
+// can present its own certificate and rewrite the whole exchange.
+string? upstreamCa = certPath;
+bool upstreamInsecure = false;
 
 var threads = new Thread[config.ReactorCount];
 
@@ -1585,19 +1800,51 @@ for (int i = 0; i &lt; threads.Length; i++)
 {
     var reactor = new Reactor(i, config);
 
-    // The pool&#x27;s connections belong to THIS reactor&#x27;s ring - one pool per reactor, no locks.
-    reactor.OnStart = r =&gt; HttpClientPool.Start(r, upstream);
+    reactor.OnStart = r =&gt;
+    {
+        // Inbound: terminate TLS and offer only h2, because that is all this frontend serves. A
+        // client that cannot do h2 fails ALPN rather than silently getting something else.
+        TlsService.Start(r, new TlsOptions
+        {
+            CertificatePath = certPath,
+            KeyPath = keyPath,
+            Alpn = [&quot;h2&quot;],
+        });
+
+        // Outbound: one context per reactor, shared by that reactor&#x27;s pool - it holds no
+        // per-connection state, so every connection opened from it gets its own SSL.
+        HttpClientPool.Start(r, new HttpClientOptions
+        {
+            Host = upstreamHost,
+            Port = upstreamPort,
+            PoolSize = upstreamPool,
+            Tls = TlsClientContext.Create(new TlsClientOptions
+            {
+                ServerName = upstreamName,
+                AlpnProtocols = [&quot;http/1.1&quot;],
+                CaFile = upstreamInsecure ? null : upstreamCa,
+                VerifyCertificate = !upstreamInsecure,
+            }),
+        });
+    };
 
     reactor.TcpHandle = async (r, conn) =&gt;
     {
         HttpClientPool client = r.GetService&lt;HttpClientPool&gt;();
+        TlsSession? tls = null;
 
         try
         {
+            tls = await r.GetService&lt;TlsService&gt;().AcceptAsync(conn);
+
+            // The decrypt pump lives in the pipe, so everything below is the cleartext sample -
+            // and the pipe resumes inline on this reactor, so the upstream call below does too.
+            await using var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
+
             // Buffered + async: each stream dispatches with its body assembled, and the handler
             // may await - the upstream round trip resumes inline on this reactor. Concurrent
             // streams interleave here, which is exactly why the h1 pool has to be deep.
-            await new Nghttp2Connection(conn).RunBufferedAsync(async request =&gt;
+            await new Nghttp2Connection(pipe).RunBufferedAsync(async request =&gt;
             {
                 try
                 {
@@ -1624,7 +1871,8 @@ for (int i = 0; i &lt; threads.Length; i++)
                 catch (Exception e)
                 {
                     // Upstream down is a gateway error on this stream, not a dead h2 connection:
-                    // every other stream on it keeps working.
+                    // every other stream on it keeps working. A refused certificate arrives the
+                    // same way - the handshake is part of opening the upstream connection.
                     return new Nghttp2Response
                     {
                         Status = 502,
@@ -1633,8 +1881,13 @@ for (int i = 0; i &lt; threads.Length; i++)
                 }
             });
         }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($&quot;[proxy h2-&gt;h1] connection failed: {e.Message}&quot;);
+        }
         finally
         {
+            tls?.Dispose();
             conn.DecRef();
         }
     };
@@ -1643,8 +1896,10 @@ for (int i = 0; i &lt; threads.Length; i++)
     threads[i].Start();
 }
 
-Console.WriteLine($&quot;[proxy h2-&gt;h1] {config.ReactorCount} reactors, h2c on :{config.Tcp!.Port} &quot;
-                + $&quot;-&gt; http/1.1 {upstream.Host}:{upstream.Port}, {upstream.PoolSize} connections each&quot;);
+Console.WriteLine($&quot;[proxy h2-&gt;h1] {config.ReactorCount} reactors, h2 over TLS on :{config.Tcp!.Port} &quot;
+                + $&quot;-&gt; https://{upstreamName} ({upstreamHost}:{upstreamPort}), &quot;
+                + $&quot;{upstreamPool} connections each, &quot;
+                + $&quot;verify={(upstreamInsecure ? &quot;OFF&quot; : upstreamCa ?? &quot;system store&quot;)}&quot;);
 
 foreach (Thread thread in threads)
 {
@@ -1658,29 +1913,38 @@ foreach (Thread thread in threads)
       <span class="pane-pkg">ioxide + ioxide.nghttp2 + ioxide.httpclient</span>
     </div>
 <pre><code class="language-csharp">// dotnet add package ioxide ioxide.nghttp2 ioxide.httpclient
-//   PLAYGROUND_PORT=8081 dotnet run --project Playground/Http2/Nghttp2
-//   curl --http2-prior-knowledge http://127.0.0.1:8080/
+//   PLAYGROUND_PORT=8444 dotnet run --project Playground/Http2/Tls  # an h2-over-TLS origin
+//   curl -k --http2 https://127.0.0.1:8443/
 
 using System.Text;
 using ioxide;
 using ioxide.httpclient;
 using ioxide.nghttp2;
+using ioxide.tls;
+
+const string certPath = &quot;cert.pem&quot;;      // any PEM pair; the sample generates one on first run
+const string keyPath  = &quot;key.pem&quot;;
 
 var config = new ServerConfig
 {
     ReactorCount = Environment.ProcessorCount,
     Tcp = new TcpOptions
     {
-        Port = 8080,
+        Port = 8443,
     },
 };
 
-var upstream = new Http2ClientOptions
-{
-    Host = &quot;127.0.0.1&quot;,   // IPv4 literal: DNS would block the reactor
-    Port = 8081,
-    PoolSize = 1,         // h2 multiplexes: one connection carries all
-};
+string upstreamHost = &quot;127.0.0.1&quot;;   // IPv4 literal: DNS would block the reactor
+ushort upstreamPort = 8444;
+string upstreamName = &quot;localhost&quot;;    // sent as SNI, checked against the cert
+int upstreamPool = 1;                // h2 multiplexes: one connection carries all
+
+// The playground&#x27;s origins use a self-signed cert, so trust that file rather than the system
+// store. PLAYGROUND_UPSTREAM_CA points at a private CA instead; PLAYGROUND_UPSTREAM_INSECURE=1
+// skips verification, which leaves the hop encrypted but UNAUTHENTICATED - anything in the path
+// can present its own certificate and rewrite the whole exchange.
+string? upstreamCa = certPath;
+bool upstreamInsecure = false;
 
 var threads = new Thread[config.ReactorCount];
 
@@ -1688,15 +1952,50 @@ for (int i = 0; i &lt; threads.Length; i++)
 {
     var reactor = new Reactor(i, config);
 
-    reactor.OnStart = r =&gt; Http2ClientPool.Start(r, upstream);
+    reactor.OnStart = r =&gt;
+    {
+        // Inbound: terminate TLS and offer only h2, because that is all this frontend serves. A
+        // client that cannot do h2 fails ALPN rather than silently getting something else.
+        TlsService.Start(r, new TlsOptions
+        {
+            CertificatePath = certPath,
+            KeyPath = keyPath,
+            Alpn = [&quot;h2&quot;],
+        });
+
+        // Outbound: one context per reactor, shared by that reactor&#x27;s pool - it holds no
+        // per-connection state, so every connection opened from it gets its own SSL.
+        Http2ClientPool.Start(r, new Http2ClientOptions
+        {
+            Host = upstreamHost,
+            Port = upstreamPort,
+            PoolSize = upstreamPool,
+            Tls = TlsClientContext.Create(new TlsClientOptions
+            {
+                ServerName = upstreamName,
+                AlpnProtocols = [&quot;h2&quot;],       // h2 over TLS is chosen by ALPN, never assumed
+                CaFile = upstreamInsecure ? null : upstreamCa,
+                VerifyCertificate = !upstreamInsecure,
+            }),
+        });
+    };
 
     reactor.TcpHandle = async (r, conn) =&gt;
     {
         Http2ClientPool client = r.GetService&lt;Http2ClientPool&gt;();
+        TlsSession? tls = null;
 
         try
         {
-            await new Nghttp2Connection(conn).RunBufferedAsync(async request =&gt;
+            tls = await r.GetService&lt;TlsService&gt;().AcceptAsync(conn);
+
+            // The decrypt pump lives in the pipe, so everything below is the cleartext sample -
+            // and the pipe resumes inline on this reactor, so the upstream call below does too.
+            await using var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
+
+            // Buffered + async: each stream dispatches with its body assembled, and the handler
+            // may await - the upstream round trip resumes inline on this reactor.
+            await new Nghttp2Connection(pipe).RunBufferedAsync(async request =&gt;
             {
                 try
                 {
@@ -1706,7 +2005,9 @@ for (int i = 0; i &lt; threads.Length; i++)
                         request.Method, request.Path) { Body = request.Body });
 
                     // Copy before Dispose: the response arena is freed then, and nghttp2 copies
-                    // the h2 response only AFTER this handler returns.
+                    // the h2 response only AFTER this handler returns. A real proxy would also
+                    // drop hop-by-hop headers - Connection, Keep-Alive, Transfer-Encoding are all
+                    // illegal in h2 and would be a protocol error to forward.
                     var proxied = new Nghttp2Response
                     {
                         Status = response.Status,
@@ -1720,6 +2021,9 @@ for (int i = 0; i &lt; threads.Length; i++)
                 }
                 catch (Exception e)
                 {
+                    // Upstream down is a gateway error on this stream, not a dead h2 connection:
+                    // every other stream on it keeps working. A refused certificate arrives the
+                    // same way - the handshake is part of opening the upstream connection.
                     return new Nghttp2Response
                     {
                         Status = 502,
@@ -1728,8 +2032,13 @@ for (int i = 0; i &lt; threads.Length; i++)
                 }
             });
         }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($&quot;[proxy h2-&gt;h2] connection failed: {e.Message}&quot;);
+        }
         finally
         {
+            tls?.Dispose();
             conn.DecRef();
         }
     };
@@ -1738,8 +2047,10 @@ for (int i = 0; i &lt; threads.Length; i++)
     threads[i].Start();
 }
 
-Console.WriteLine($&quot;[proxy h2-&gt;h2] {config.ReactorCount} reactors, h2c on :{config.Tcp!.Port} &quot;
-                + $&quot;-&gt; h2c {upstream.Host}:{upstream.Port}&quot;);
+Console.WriteLine($&quot;[proxy h2-&gt;h2] {config.ReactorCount} reactors, h2 over TLS on :{config.Tcp!.Port} &quot;
+                + $&quot;-&gt; h2 https://{upstreamName} ({upstreamHost}:{upstreamPort}), &quot;
+                + $&quot;{upstreamPool} connection(s) each, &quot;
+                + $&quot;verify={(upstreamInsecure ? &quot;OFF&quot; : upstreamCa ?? &quot;system store&quot;)}&quot;);
 
 foreach (Thread thread in threads)
 {
@@ -1753,30 +2064,32 @@ foreach (Thread thread in threads)
       <span class="pane-pkg">ioxide + ioxide.nghttp2 + ioxide.httpclient</span>
     </div>
 <pre><code class="language-csharp">// dotnet add package ioxide ioxide.nghttp2 ioxide.httpclient
-//   dotnet run --project Playground/Http3/Nghttp3         # h3 origin on udp :8443
-//   curl --http2-prior-knowledge http://127.0.0.1:8080/
+//   dotnet run --project Playground/Http3/Nghttp3          # h3 origin on udp :8443
+//   PLAYGROUND_UPSTREAM_PORT=8443 dotnet run --project Playground/Proxy/H2ToH3
+//   curl -k --http2 https://127.0.0.1:8443/
 
 using System.Text;
 using ioxide;
 using ioxide.httpclient;
 using ioxide.nghttp2;
+using ioxide.tls;
+
+const string certPath = &quot;cert.pem&quot;;      // any PEM pair; the sample generates one on first run
+const string keyPath  = &quot;key.pem&quot;;
 
 var config = new ServerConfig
 {
     ReactorCount = Environment.ProcessorCount,
     Tcp = new TcpOptions
     {
-        Port = 8080,
+        Port = 8443,
     },
 };
 
-var upstream = new Http3ClientOptions
-{
-    Host = &quot;127.0.0.1&quot;,   // IPv4 literal: DNS would block the reactor
-    Port = 8443,         // the upstream&#x27;s QUIC (UDP) port
-    ServerName = &quot;localhost&quot;,
-    PoolSize = 1,         // h3 multiplexes: one connection carries all
-};
+string upstreamHost = &quot;127.0.0.1&quot;;   // IPv4 literal: DNS would block the reactor
+ushort upstreamPort = 8444;       // the upstream&#x27;s QUIC (UDP) port
+string upstreamName = &quot;localhost&quot;;    // sent as SNI, checked against the cert
+int upstreamPool = 1;                // h3 multiplexes: one connection carries all
 
 var threads = new Thread[config.ReactorCount];
 
@@ -1784,17 +2097,45 @@ for (int i = 0; i &lt; threads.Length; i++)
 {
     var reactor = new Reactor(i, config);
 
-    // Opening the pool here is what makes the reactor grow its client-side QUIC transport: an
-    // ephemeral UDP socket, armed on this ring, shared by every upstream connection.
-    reactor.OnStart = r =&gt; Http3ClientPool.Start(r, upstream);
+    reactor.OnStart = r =&gt;
+    {
+        // Inbound: terminate TLS and offer only h2, because that is all this frontend serves. A
+        // client that cannot do h2 fails ALPN rather than silently getting something else.
+        TlsService.Start(r, new TlsOptions
+        {
+            CertificatePath = certPath,
+            KeyPath = keyPath,
+            Alpn = [&quot;h2&quot;],
+        });
+
+        // Outbound: no TLS options, because QUIC has no cleartext mode - TLS 1.3 is inside the
+        // transport and ALPN (&quot;h3&quot;) is negotiated as part of the connection handshake. Opening
+        // this pool is what makes the reactor grow its client-side QUIC transport.
+        Http3ClientPool.Start(r, new Http3ClientOptions
+        {
+            Host = upstreamHost,
+            Port = upstreamPort,
+            ServerName = upstreamName,
+            PoolSize = upstreamPool,
+        });
+    };
 
     reactor.TcpHandle = async (r, conn) =&gt;
     {
         Http3ClientPool client = r.GetService&lt;Http3ClientPool&gt;();
+        TlsSession? tls = null;
 
         try
         {
-            await new Nghttp2Connection(conn).RunBufferedAsync(async request =&gt;
+            tls = await r.GetService&lt;TlsService&gt;().AcceptAsync(conn);
+
+            // The decrypt pump lives in the pipe, so everything below is the cleartext sample -
+            // and the pipe resumes inline on this reactor, so the upstream call below does too.
+            await using var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
+
+            // Buffered + async: each stream dispatches with its body assembled, and the handler
+            // may await - the upstream round trip resumes inline on this reactor.
+            await new Nghttp2Connection(pipe).RunBufferedAsync(async request =&gt;
             {
                 try
                 {
@@ -1804,7 +2145,9 @@ for (int i = 0; i &lt; threads.Length; i++)
                         request.Method, request.Path) { Body = request.Body });
 
                     // Copy before Dispose: the response arena is freed then, and nghttp2 copies
-                    // the h2 response only AFTER this handler returns.
+                    // the h2 response only AFTER this handler returns. A real proxy would also
+                    // drop hop-by-hop headers - Connection, Keep-Alive, Transfer-Encoding are all
+                    // illegal in h2 and would be a protocol error to forward.
                     var proxied = new Nghttp2Response
                     {
                         Status = response.Status,
@@ -1818,6 +2161,9 @@ for (int i = 0; i &lt; threads.Length; i++)
                 }
                 catch (Exception e)
                 {
+                    // Upstream down is a gateway error on this stream, not a dead h2 connection:
+                    // every other stream on it keeps working. A refused certificate arrives the
+                    // same way - the handshake is part of opening the upstream connection.
                     return new Nghttp2Response
                     {
                         Status = 502,
@@ -1826,8 +2172,13 @@ for (int i = 0; i &lt; threads.Length; i++)
                 }
             });
         }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($&quot;[proxy h2-&gt;h3] connection failed: {e.Message}&quot;);
+        }
         finally
         {
+            tls?.Dispose();
             conn.DecRef();
         }
     };
@@ -1836,8 +2187,9 @@ for (int i = 0; i &lt; threads.Length; i++)
     threads[i].Start();
 }
 
-Console.WriteLine($&quot;[proxy h2-&gt;h3] {config.ReactorCount} reactors, h2c on :{config.Tcp!.Port} &quot;
-                + $&quot;-&gt; h3 {upstream.Host}:{upstream.Port} (client-only QUIC, ephemeral port)&quot;);
+Console.WriteLine($&quot;[proxy h2-&gt;h3] {config.ReactorCount} reactors, h2 over TLS on :{config.Tcp!.Port} &quot;
+                + $&quot;-&gt; h3 {upstreamName} ({upstreamHost}:udp {upstreamPort}), &quot;
+                + $&quot;{upstreamPool} connection(s) each&quot;);
 
 foreach (Thread thread in threads)
 {
@@ -1851,7 +2203,7 @@ foreach (Thread thread in threads)
       <span class="pane-pkg">ioxide + ioxide.ngtcp2 + ioxide.nghttp3 + ioxide.httpclient</span>
     </div>
 <pre><code class="language-csharp">// dotnet add package ioxide ioxide.ngtcp2 ioxide.nghttp3 ioxide.httpclient
-//   PLAYGROUND_PORT=8081 dotnet run --project Playground/Tcp/Raw   # the origin
+//   PLAYGROUND_PORT=8444 dotnet run --project Playground/Tls/Ktls   # a TLS origin
 //   curl --http3-only -k https://127.0.0.1:8443/
 
 using ioxide;
@@ -1877,12 +2229,18 @@ var config = new ServerConfig
     },
 };
 
-var upstream = new HttpClientOptions
-{
-    Host = &quot;127.0.0.1&quot;,   // IPv4 literal: DNS would block the reactor
-    Port = 8081,
-    PoolSize = 8,         // keep-alive connections per reactor
-};
+string upstreamHost = &quot;127.0.0.1&quot;;   // IPv4 literal: DNS would block the reactor
+ushort upstreamPort = 8444;
+int upstreamPool = 8;                // keep-alive connections per reactor
+
+string upstreamName = &quot;localhost&quot;;    // sent as SNI, checked against the cert
+
+// The playground&#x27;s origins use a self-signed cert, so trust that file rather than the system
+// store. PLAYGROUND_UPSTREAM_CA points at a private CA instead; PLAYGROUND_UPSTREAM_INSECURE=1
+// skips verification, which leaves the hop encrypted but UNAUTHENTICATED - anything in the path
+// can present its own certificate and rewrite the whole exchange.
+string? upstreamCa = certPath;
+bool upstreamInsecure = false;
 
 var threads = new Thread[config.ReactorCount];
 
@@ -1890,8 +2248,24 @@ for (int i = 0; i &lt; threads.Length; i++)
 {
     var reactor = new Reactor(i, config);
 
-    // The pool&#x27;s connections belong to THIS reactor&#x27;s ring - one pool per reactor, no locks.
-    reactor.OnStart = r =&gt; HttpClientPool.Start(r, upstream);
+    reactor.OnStart = r =&gt;
+    {
+        // Outbound: one context per reactor, shared by that reactor&#x27;s pool - it holds no
+        // per-connection state, so every connection opened from it gets its own SSL.
+        HttpClientPool.Start(r, new HttpClientOptions
+        {
+            Host = upstreamHost,
+            Port = upstreamPort,
+            PoolSize = upstreamPool,
+            Tls = TlsClientContext.Create(new TlsClientOptions
+            {
+                ServerName = upstreamName,
+                AlpnProtocols = [&quot;http/1.1&quot;],
+                CaFile = upstreamInsecure ? null : upstreamCa,
+                VerifyCertificate = !upstreamInsecure,
+            }),
+        });
+    };
 
     reactor.QuicHandle = (r, conn) =&gt;
     {
@@ -1939,7 +2313,8 @@ for (int i = 0; i &lt; threads.Length; i++)
 }
 
 Console.WriteLine($&quot;[proxy h3-&gt;h1] {config.ReactorCount} reactors, h3 on udp :{config.Quic!.Port} &quot;
-                + $&quot;-&gt; http/1.1 {upstream.Host}:{upstream.Port}&quot;);
+                + $&quot;-&gt; https://{upstreamName} ({upstreamHost}:{upstreamPort}), &quot;
+                + $&quot;verify={(upstreamInsecure ? &quot;OFF&quot; : upstreamCa ?? &quot;system store&quot;)}&quot;);
 
 foreach (Thread thread in threads)
 {
@@ -1953,7 +2328,7 @@ foreach (Thread thread in threads)
       <span class="pane-pkg">ioxide + ioxide.ngtcp2 + ioxide.nghttp3 + ioxide.httpclient</span>
     </div>
 <pre><code class="language-csharp">// dotnet add package ioxide ioxide.ngtcp2 ioxide.nghttp3 ioxide.httpclient
-//   PLAYGROUND_PORT=8081 dotnet run --project Playground/Http2/Nghttp2
+//   PLAYGROUND_PORT=8444 dotnet run --project Playground/Http2/Tls  # an h2-over-TLS origin
 //   curl --http3-only -k https://127.0.0.1:8443/
 
 using ioxide;
@@ -1979,12 +2354,18 @@ var config = new ServerConfig
     },
 };
 
-var upstream = new Http2ClientOptions
-{
-    Host = &quot;127.0.0.1&quot;,   // IPv4 literal: DNS would block the reactor
-    Port = 8081,
-    PoolSize = 1,         // h2 multiplexes: one connection carries all
-};
+string upstreamHost = &quot;127.0.0.1&quot;;   // IPv4 literal: DNS would block the reactor
+ushort upstreamPort = 8444;
+int upstreamPool = 1;                // h2 multiplexes: one connection carries all
+
+string upstreamName = &quot;localhost&quot;;    // sent as SNI, checked against the cert
+
+// The playground&#x27;s origins use a self-signed cert, so trust that file rather than the system
+// store. PLAYGROUND_UPSTREAM_CA points at a private CA instead; PLAYGROUND_UPSTREAM_INSECURE=1
+// skips verification, which leaves the hop encrypted but UNAUTHENTICATED - anything in the path
+// can present its own certificate and rewrite the whole exchange.
+string? upstreamCa = certPath;
+bool upstreamInsecure = false;
 
 var threads = new Thread[config.ReactorCount];
 
@@ -1992,7 +2373,24 @@ for (int i = 0; i &lt; threads.Length; i++)
 {
     var reactor = new Reactor(i, config);
 
-    reactor.OnStart = r =&gt; Http2ClientPool.Start(r, upstream);
+    reactor.OnStart = r =&gt;
+    {
+        // Outbound: one context per reactor, shared by that reactor&#x27;s pool - it holds no
+        // per-connection state, so every connection opened from it gets its own SSL.
+        Http2ClientPool.Start(r, new Http2ClientOptions
+        {
+            Host = upstreamHost,
+            Port = upstreamPort,
+            PoolSize = upstreamPool,
+            Tls = TlsClientContext.Create(new TlsClientOptions
+            {
+                ServerName = upstreamName,
+                AlpnProtocols = [&quot;h2&quot;],       // h2 over TLS is chosen by ALPN, never assumed
+                CaFile = upstreamInsecure ? null : upstreamCa,
+                VerifyCertificate = !upstreamInsecure,
+            }),
+        });
+    };
 
     reactor.QuicHandle = (r, conn) =&gt;
     {
@@ -2036,7 +2434,8 @@ for (int i = 0; i &lt; threads.Length; i++)
 }
 
 Console.WriteLine($&quot;[proxy h3-&gt;h2] {config.ReactorCount} reactors, h3 on udp :{config.Quic!.Port} &quot;
-                + $&quot;-&gt; h2c {upstream.Host}:{upstream.Port}&quot;);
+                + $&quot;-&gt; h2 https://{upstreamName} ({upstreamHost}:{upstreamPort}), &quot;
+                + $&quot;verify={(upstreamInsecure ? &quot;OFF&quot; : upstreamCa ?? &quot;system store&quot;)}&quot;);
 
 foreach (Thread thread in threads)
 {

@@ -36,12 +36,18 @@ var config = new ServerConfig
     },
 };
 
-var upstream = new HttpClientOptions
-{
-    Host = Env.Str("PLAYGROUND_UPSTREAM_HOST", "127.0.0.1"),   // IPv4 literal: DNS would block the reactor
-    Port = Env.Port("PLAYGROUND_UPSTREAM_PORT", 8081),
-    PoolSize = Env.Int("PLAYGROUND_UPSTREAM_POOL", 8),         // keep-alive connections per reactor
-};
+string upstreamHost = Env.Str("PLAYGROUND_UPSTREAM_HOST", "127.0.0.1");   // IPv4 literal: DNS would block the reactor
+ushort upstreamPort = Env.Port("PLAYGROUND_UPSTREAM_PORT", 8444);
+int upstreamPool = Env.Int("PLAYGROUND_UPSTREAM_POOL", 8);                // keep-alive connections per reactor
+
+string upstreamName = Env.Str("PLAYGROUND_UPSTREAM_SNI", "localhost");    // sent as SNI, checked against the cert
+
+// The playground's origins use a self-signed cert, so trust that file rather than the system
+// store. PLAYGROUND_UPSTREAM_CA points at a private CA instead; PLAYGROUND_UPSTREAM_INSECURE=1
+// skips verification, which leaves the hop encrypted but UNAUTHENTICATED - anything in the path
+// can present its own certificate and rewrite the whole exchange.
+string? upstreamCa = Env.StrOrNull("PLAYGROUND_UPSTREAM_CA") ?? certPath;
+bool upstreamInsecure = Env.Flag("PLAYGROUND_UPSTREAM_INSECURE");
 
 var threads = new Thread[config.ReactorCount];
 
@@ -49,8 +55,24 @@ for (int i = 0; i < threads.Length; i++)
 {
     var reactor = new Reactor(i, config);
 
-    // The pool's connections belong to THIS reactor's ring - one pool per reactor, no locks.
-    reactor.OnStart = r => HttpClientPool.Start(r, upstream);
+    reactor.OnStart = r =>
+    {
+        // Outbound: one context per reactor, shared by that reactor's pool - it holds no
+        // per-connection state, so every connection opened from it gets its own SSL.
+        HttpClientPool.Start(r, new HttpClientOptions
+        {
+            Host = upstreamHost,
+            Port = upstreamPort,
+            PoolSize = upstreamPool,
+            Tls = TlsClientContext.Create(new TlsClientOptions
+            {
+                ServerName = upstreamName,
+                AlpnProtocols = ["http/1.1"],
+                CaFile = upstreamInsecure ? null : upstreamCa,
+                VerifyCertificate = !upstreamInsecure,
+            }),
+        });
+    };
 
     reactor.QuicHandle = (r, conn) =>
     {
@@ -98,7 +120,8 @@ for (int i = 0; i < threads.Length; i++)
 }
 
 Console.WriteLine($"[proxy h3->h1] {config.ReactorCount} reactors, h3 on udp :{config.Quic!.Port} "
-                + $"-> http/1.1 {upstream.Host}:{upstream.Port}");
+                + $"-> https://{upstreamName} ({upstreamHost}:{upstreamPort}), "
+                + $"verify={(upstreamInsecure ? "OFF" : upstreamCa ?? "system store")}");
 
 foreach (Thread thread in threads)
 {

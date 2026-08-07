@@ -56,7 +56,15 @@ public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
         _tls = session;
         _ownsSession = ownsSession;
 
-        _inbound = new Pipe(options ?? new PipeOptions(useSynchronizationContext: false));
+        // Inline schedulers, so a read resumes on the thread that completed the write - the
+        // reactor. A Pipe defaults to PipeScheduler.ThreadPool, and combined with
+        // useSynchronizationContext:false that hands the connection to a pool thread with a NULL
+        // SynchronizationContext, so nothing can post it back and the loop never returns. Every
+        // other awaitable in ioxide says the same thing as RunContinuationsAsynchronously = false.
+        _inbound = new Pipe(options ?? new PipeOptions(
+            readerScheduler: PipeScheduler.Inline,
+            writerScheduler: PipeScheduler.Inline,
+            useSynchronizationContext: false));
         _outbound = new TcpConnectionDualPipe(connection);
 
         _pump = PumpInboundAsync();

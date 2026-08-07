@@ -30,6 +30,39 @@ internal static class TlsPipeTests
             Assert.Equal("pipe-tls-ok", body);
         }, skip: !ktls);
 
+        runner.Test("tls pipe: serving never leaves the reactor thread", () =>
+        {
+            // ioxide supports off-reactor submission - SubmitClientOp marshals through _remoteOps
+            // and wakes the ring - but that is an escape hatch for USER code that deliberately goes
+            // cross-thread. None of ioxide's own seams may trip it.
+            //
+            // TlsConnectionDualPipe did. Its inbound Pipe was built with
+            // PipeOptions(useSynchronizationContext: false) and nothing else, and a Pipe's
+            // schedulers default to PipeScheduler.ThreadPool - so the first genuinely-async
+            // ReadAsync completed on a pool thread with a NULL SynchronizationContext, which is
+            // what makes it permanent: with no context, nothing can post the connection back. From
+            // there every client call on that connection paid a queue hop and an eventfd wake, and
+            // nothing reported it. Only UdpSendTo throws on the wrong thread; the TCP path is
+            // silent, so an h3 upstream was the only way to see it at all.
+            //
+            // Checking OnReactorThread is checking the exact predicate SubmitClientOp branches on.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
+
+            var affinity = new ReactorAffinity();
+            int port = TestServer.Start(AffinityHandler(affinity), r => TlsService.Start(r, options));
+
+            (int status, string body) = Client.GetTls(port, "/");
+            Assert.Equal(200, status);
+            Assert.Equal("pipe-tls-ok", body);
+
+            // A handler that never ran would leave Drift empty and pass vacuously.
+            Assert.True(affinity.Checks >= 2,
+                $"expected at least two observations, got {affinity.Checks}");
+            Assert.True(affinity.Drift.Count == 0,
+                "ioxide moved the handler off its reactor: " + string.Join("; ", affinity.Drift));
+        }, skip: !ktls);
+
         runner.Test("tls pipe: garbage after the handshake faults the reader, not a clean EOF", () =>
         {
             // The property both hand-rolled pumps get wrong. A TLS protocol error must reach the
@@ -55,6 +88,49 @@ internal static class TlsPipeTests
                 $"expected the decrypt to fault, got: {reason}");
         }, skip: !ktls);
     }
+
+    // Same shape as PipeHandler, with an affinity observation on either side of the await that
+    // matters: the one on the TLS pipe's reader.
+    private static Func<Reactor, TcpConnection, Task> AffinityHandler(ReactorAffinity affinity)
+        => async (reactor, connection) =>
+        {
+            TlsSession? session = null;
+            TlsConnectionDualPipe? pipe = null;
+            try
+            {
+                session = await reactor.GetService<TlsService>()!.AcceptAsync(connection);
+                affinity.Check(reactor, "after AcceptAsync");
+
+                pipe = new TlsConnectionDualPipe(connection, session);
+
+                ReadResult read = await pipe.Input.ReadAsync();
+                affinity.Check(reactor, "after Input.ReadAsync");
+                pipe.Input.AdvanceTo(read.Buffer.End);
+
+                const string body = "pipe-tls-ok";
+                pipe.Output.Write(Encoding.ASCII.GetBytes(
+                    $"HTTP/1.1 200 OK\r\nContent-Length: {body.Length}\r\n\r\n{body}"));
+                await pipe.Output.FlushAsync();
+                affinity.Check(reactor, "after Output.FlushAsync");
+            }
+            catch
+            {
+                // The client hung up, or the handshake failed - the harness probes the port with a
+                // raw TCP connection, so this fires once per run and is not a test failure.
+            }
+            finally
+            {
+                if (pipe is not null)
+                {
+                    await pipe.DisposeAsync();
+                }
+                else
+                {
+                    session?.Dispose();
+                }
+                connection.DecRef();
+            }
+        };
 
     // Serves one request off the decrypted PipeReader and answers as plaintext through the pipe's
     // writer, which is where kTLS takes over.
