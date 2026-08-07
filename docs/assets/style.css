@@ -213,6 +213,16 @@ nav.top .links a.gh svg { display: block; }
 #tab-h2:checked ~ .ex-menu label[for="tab-h2"],
 #tab-h2cs:checked ~ .ex-menu label[for="tab-h2cs"],
 #tab-h2tls:checked ~ .ex-menu label[for="tab-h2tls"],
+#tab-pxmatrix:checked ~ .ex-menu label[for="tab-pxmatrix"],
+#tab-pxh1toh1:checked ~ .ex-menu label[for="tab-pxh1toh1"],
+#tab-pxh1toh2:checked ~ .ex-menu label[for="tab-pxh1toh2"],
+#tab-pxh1toh3:checked ~ .ex-menu label[for="tab-pxh1toh3"],
+#tab-pxh2toh1:checked ~ .ex-menu label[for="tab-pxh2toh1"],
+#tab-pxh2toh2:checked ~ .ex-menu label[for="tab-pxh2toh2"],
+#tab-pxh2toh3:checked ~ .ex-menu label[for="tab-pxh2toh3"],
+#tab-pxh3toh1:checked ~ .ex-menu label[for="tab-pxh3toh1"],
+#tab-pxh3toh2:checked ~ .ex-menu label[for="tab-pxh3toh2"],
+#tab-pxh3toh3:checked ~ .ex-menu label[for="tab-pxh3toh3"],
 #tab-qpipe:checked ~ .ex-menu label[for="tab-qpipe"],
 #tab-qraw:checked ~ .ex-menu label[for="tab-qraw"],
 #tab-h3:checked ~ .ex-menu label[for="tab-h3"],
@@ -301,6 +311,16 @@ nav.top .links a.gh svg { display: block; }
 #tab-h2:checked ~ .pane-h2 { display: block; }
 #tab-h2cs:checked ~ .pane-h2cs { display: block; }
 #tab-h2tls:checked ~ .pane-h2tls { display: block; }
+#tab-pxmatrix:checked ~ .pane-pxmatrix { display: block; }
+#tab-pxh1toh1:checked ~ .pane-pxh1toh1 { display: block; }
+#tab-pxh1toh2:checked ~ .pane-pxh1toh2 { display: block; }
+#tab-pxh1toh3:checked ~ .pane-pxh1toh3 { display: block; }
+#tab-pxh2toh1:checked ~ .pane-pxh2toh1 { display: block; }
+#tab-pxh2toh2:checked ~ .pane-pxh2toh2 { display: block; }
+#tab-pxh2toh3:checked ~ .pane-pxh2toh3 { display: block; }
+#tab-pxh3toh1:checked ~ .pane-pxh3toh1 { display: block; }
+#tab-pxh3toh2:checked ~ .pane-pxh3toh2 { display: block; }
+#tab-pxh3toh3:checked ~ .pane-pxh3toh3 { display: block; }
 #tab-qpipe:checked ~ .pane-qpipe { display: block; }
 #tab-qraw:checked ~ .pane-qraw { display: block; }
 #tab-h3:checked ~ .pane-h3 { display: block; }
@@ -356,6 +376,11 @@ nav.top .links a.gh svg { display: block; }
 }
 .pane .ex-foot b { color: var(--text); }
 
+/* The combination matrix: the row header names the frontend, each cell jumps to that sample. */
+.mx-t { color: var(--text-dim); font-size: 0.82em; }
+.vs td .ex-jump { display: inline-block; padding: 0.1rem 0; }
+.mx-pool { color: var(--text-dim); font-size: 0.88em; }
+
 /* A cross-reference that switches tabs, styled as a link because that is what it behaves like. */
 .ex-jump {
   color: var(--accent-soft);
@@ -404,6 +429,16 @@ nav.top .links a.gh svg { display: block; }
   #tab-h2:checked ~ .ex-menu label[for="tab-h2"],
   #tab-h2cs:checked ~ .ex-menu label[for="tab-h2cs"],
   #tab-h2tls:checked ~ .ex-menu label[for="tab-h2tls"],
+  #tab-pxmatrix:checked ~ .ex-menu label[for="tab-pxmatrix"],
+  #tab-pxh1toh1:checked ~ .ex-menu label[for="tab-pxh1toh1"],
+  #tab-pxh1toh2:checked ~ .ex-menu label[for="tab-pxh1toh2"],
+  #tab-pxh1toh3:checked ~ .ex-menu label[for="tab-pxh1toh3"],
+  #tab-pxh2toh1:checked ~ .ex-menu label[for="tab-pxh2toh1"],
+  #tab-pxh2toh2:checked ~ .ex-menu label[for="tab-pxh2toh2"],
+  #tab-pxh2toh3:checked ~ .ex-menu label[for="tab-pxh2toh3"],
+  #tab-pxh3toh1:checked ~ .ex-menu label[for="tab-pxh3toh1"],
+  #tab-pxh3toh2:checked ~ .ex-menu label[for="tab-pxh3toh2"],
+  #tab-pxh3toh3:checked ~ .ex-menu label[for="tab-pxh3toh3"],
   #tab-qpipe:checked ~ .ex-menu label[for="tab-qpipe"],
   #tab-qraw:checked ~ .ex-menu label[for="tab-qraw"],
   #tab-h3:checked ~ .ex-menu label[for="tab-h3"],

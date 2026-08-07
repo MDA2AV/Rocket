@@ -66,11 +66,15 @@
   </Folder>
 
   <Folder Name="/apps/playground/proxy/">
-    <Project Path="Playground/Proxy/H1/Playground.Proxy.H1.csproj" />
+    <Project Path="Playground/Proxy/H1ToH1/Playground.Proxy.H1ToH1.csproj" />
+    <Project Path="Playground/Proxy/H1ToH2/Playground.Proxy.H1ToH2.csproj" />
+    <Project Path="Playground/Proxy/H1ToH3/Playground.Proxy.H1ToH3.csproj" />
+    <Project Path="Playground/Proxy/H2ToH1/Playground.Proxy.H2ToH1.csproj" />
+    <Project Path="Playground/Proxy/H2ToH2/Playground.Proxy.H2ToH2.csproj" />
+    <Project Path="Playground/Proxy/H2ToH3/Playground.Proxy.H2ToH3.csproj" />
     <Project Path="Playground/Proxy/H3ToH1/Playground.Proxy.H3ToH1.csproj" />
     <Project Path="Playground/Proxy/H3ToH2/Playground.Proxy.H3ToH2.csproj" />
     <Project Path="Playground/Proxy/H3ToH3/Playground.Proxy.H3ToH3.csproj" />
-    <Project Path="Playground/Proxy/H1ToH3/Playground.Proxy.H1ToH3.csproj" />
   </Folder>
 
   <Folder Name="/apps/playground/clients/">
