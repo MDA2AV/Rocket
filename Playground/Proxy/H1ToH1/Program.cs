@@ -5,7 +5,7 @@ using ioxide.utils;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  proxy - a reverse proxy, whole. Every inbound request is forwarded to an upstream origin
+//  proxy h1->h1 - a reverse proxy, whole. Every inbound request is forwarded to an upstream origin
 //  through the ring-native HTTP client and the response is relayed back. BOTH hops - the inbound
 //  connection and the outbound call - run on this reactor's ring and resume inline, so a proxied
 //  request never leaves the thread it arrived on. No thread pool, no cross-core handoff.
@@ -13,7 +13,7 @@ using Playground.Shared;
 //      # terminal 1: an origin to forward to
 //      PLAYGROUND_PORT=8081 dotnet run -c Release --project Playground/Tcp/Raw
 //      # terminal 2: the proxy
-//      dotnet run -c Release --project Playground/Proxy/H1
+//      dotnet run -c Release --project Playground/Proxy/H1ToH1
 //      curl http://127.0.0.1:8080/
 //
 //  Needs: ioxide.httpclient
@@ -103,7 +103,7 @@ for (int i = 0; i < threads.Length; i++)
     threads[i].Start();
 }
 
-Console.WriteLine($"[proxy] {config.ReactorCount} reactors on :{config.Tcp.Port} "
+Console.WriteLine($"[proxy h1->h1] {config.ReactorCount} reactors on :{config.Tcp.Port} "
                 + $"-> {upstream.Host}:{upstream.Port}, {upstream.PoolSize} connections each");
 
 foreach (Thread thread in threads)

@@ -6,8 +6,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <RootNamespace>Playground.Proxy.H1</RootNamespace>
-    <AssemblyName>Playground.Proxy.H1</AssemblyName>
+    <RootNamespace>Playground.Proxy.H1ToH2</RootNamespace>
+    <AssemblyName>Playground.Proxy.H1ToH2</AssemblyName>
   </PropertyGroup>
 
   <ItemGroup>
