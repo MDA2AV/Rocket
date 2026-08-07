@@ -6,16 +6,16 @@ using ioxide.utils;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  nghttp3-buffered - the same HTTP/3 server as Playground/Nghttp3, with the OTHER dispatch mode.
+//  nghttp3-buffered - the same HTTP/3 server as Playground/Http3/Nghttp3, with the OTHER dispatch mode.
 //
 //  BUFFERED: dispatch waits for end-of-stream, so the whole body is already in request.Body when
 //  your handler runs - no BodyReader, no pacing - and the handler may still await (a PgPool query,
 //  Redis, anything ioxide-native resumes inline on the reactor).
 //
-//  The trade: memory holds the entire body, so this suits normal-sized requests. Use Playground/Nghttp3
+//  The trade: memory holds the entire body, so this suits normal-sized requests. Use Playground/Http3/Nghttp3
 //  when uploads can be large or hostile.
 //
-//      dotnet run -c Release --project Playground/Nghttp3Buffered
+//      dotnet run -c Release --project Playground/Http3/Buffered
 //      curl --http3-only -k https://127.0.0.1:8443/
 //
 //  Needs: ioxide, ioxide.ngtcp2, ioxide.nghttp3

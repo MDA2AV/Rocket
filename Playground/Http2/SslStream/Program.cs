@@ -10,7 +10,7 @@ using Playground.Shared;
 //  http2-sslstream - HTTP/2 over the BCL's SslStream instead of kTLS. Fully managed, portable,
 //  no kernel module, and slower - every byte is encrypted in userspace both ways.
 //
-//      dotnet run -c Release --project Playground/Http2SslStream
+//      dotnet run -c Release --project Playground/Http2/SslStream
 //      curl -k --http2 https://127.0.0.1:8443/
 //
 //  The point of this sample is what it demonstrates about the shape: Nghttp2Connection takes an
@@ -18,7 +18,7 @@ using Playground.Shared;
 //  over the ring directly, over kTLS, or over SslStream, without knowing which - the transport is
 //  a constructor argument, not a branch inside the protocol.
 //
-//  Compare with Playground/Http2Tls for the kTLS version. Needs: ioxide, ioxide.nghttp2
+//  Compare with Playground/Http2/Tls for the kTLS version. Needs: ioxide, ioxide.nghttp2
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 (string certPath, string keyPath) = QuicCert.Ensure(
@@ -60,7 +60,7 @@ for (int i = 0; i < threads.Length; i++)
 
             if (ssl.NegotiatedApplicationProtocol != SslApplicationProtocol.Http2)
             {
-                return;   // this sample only serves h2; see Playground/Http2Tls for the fallback
+                return;   // this sample only serves h2; see Playground/Http2/Tls for the fallback
             }
 
             await new Nghttp2Connection(new StreamDuplexPipe(ssl)).RunBufferedAsync(

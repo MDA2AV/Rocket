@@ -12,9 +12,9 @@ using Playground.Shared;
 //
 //  STREAMED dispatch: your handler runs at end-of-headers, while the body is still arriving. Each
 //  chunk you read credits the peer's flow-control window, so memory is bound by one window rather
-//  than by the size of the upload. See Playground/Nghttp3Buffered for the other mode.
+//  than by the size of the upload. See Playground/Http3/Buffered for the other mode.
 //
-//      dotnet run -c Release --project Playground/Nghttp3
+//      dotnet run -c Release --project Playground/Http3/Nghttp3
 //      curl --http3-only -k https://127.0.0.1:8443/
 //      h2load --alpn-list=h3 -n 1 -c 1 -d bigfile.bin https://127.0.0.1:8443/
 //

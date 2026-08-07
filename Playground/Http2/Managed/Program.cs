@@ -7,7 +7,7 @@ using Playground.Shared;
 //  http2 - an HTTP/2 server in pure C#: framing, HPACK and flow control; ioxide owns the
 //  ring, the loop and the connection, so a response is written straight into the write slab.
 //
-//      dotnet run -c Release --project Playground/Http2
+//      dotnet run -c Release --project Playground/Http2/Managed
 //      curl --http2-prior-knowledge http://127.0.0.1:8080/hello
 //
 //  This is h2c with PRIOR KNOWLEDGE: the peer opens with the HTTP/2 connection preface and no

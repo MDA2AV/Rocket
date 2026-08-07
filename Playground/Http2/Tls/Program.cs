@@ -9,7 +9,7 @@ using Playground.Shared;
 //  http2-tls - HTTP/2 over TLS, negotiated by ALPN, alongside HTTP/1.1 on the SAME port. This is
 //  what a browser expects: it offers "h2,http/1.1" and the server chooses.
 //
-//      dotnet run -c Release --project Playground/Http2Tls
+//      dotnet run -c Release --project Playground/Http2/Tls
 //      curl -k --http2 https://127.0.0.1:8443/          # negotiates h2
 //      curl -k --http1.1 https://127.0.0.1:8443/        # same port, gets http/1.1
 //
