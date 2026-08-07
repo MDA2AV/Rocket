@@ -120,8 +120,11 @@ public sealed unsafe class TlsSession : IDisposable
         }
     }
 
-    /// <summary>Maximum plaintext in one TLS record, RFC 8446 section 5.1.</summary>
-    private const int MaxRecordPlaintext = 16 * 1024;
+    /// <summary>
+    /// The most plaintext one TLS record can carry (RFC 8446 section 5.1). A destination this size
+    /// can always take a whole record, which is the protocol's own bound rather than a tuning knob.
+    /// </summary>
+    public const int MaxRecordPlaintext = 16 * 1024;
 
     /// <summary>
     /// Classify a non-positive SSL_read. False means stop and wait for more ciphertext; a genuine
@@ -150,6 +153,50 @@ public sealed unsafe class TlsSession : IDisposable
             default:
                 throw new IOException($"TLS decrypt failed (error {err}): {OpenSsl.LastError()}");
         }
+    }
+
+    /// <summary>
+    /// Hand ciphertext to the record layer without asking for plaintext back. Pair it with
+    /// <see cref="DrainInto"/>, which is what makes decrypting IN PLACE legal: a memory BIO copies
+    /// into its own buffer, so once this returns the caller's memory is dead as a source and may be
+    /// reused as the destination.
+    /// </summary>
+    public void Feed(byte* ciphertext, int length) => OpenSsl.BIO_write(_rbio, ciphertext, length);
+
+    /// <summary>
+    /// Pull up to <paramref name="length"/> bytes of plaintext out of whatever <see cref="Feed"/>
+    /// has already delivered, writing straight into <paramref name="destination"/>.
+    /// </summary>
+    /// <param name="more">
+    /// True when the destination filled and the record layer still has plaintext ready. The caller
+    /// must drain the rest somewhere else before feeding again - a record can straddle recvs, so
+    /// the buffer that completes one may be far smaller than the plaintext it releases.
+    /// </param>
+    /// <returns>Bytes written. Zero means nothing was ready, not that the connection ended.</returns>
+    public int DrainInto(byte* destination, int length, out bool more)
+    {
+        more = false;
+        int total = 0;
+
+        while (total < length)
+        {
+            int n = OpenSsl.SSL_read(_ssl, destination + total, length - total);
+
+            if (n > 0)
+            {
+                total += n;
+                continue;
+            }
+
+            // WANT_READ here means the record layer is empty, which is the ordinary end of a drain.
+            ShouldKeepReading(n);
+            return total;
+        }
+
+        // The destination is full. One more probe decides whether anything is still queued: a
+        // zero-length SSL_read cannot tell us, so ask OpenSSL directly.
+        more = OpenSsl.SSL_pending(_ssl) > 0;
+        return total;
     }
 
     internal void DrainPending()
