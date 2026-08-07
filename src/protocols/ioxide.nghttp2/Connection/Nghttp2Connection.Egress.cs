@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.IO.Pipelines;
 
 namespace ioxide.nghttp2;
 
@@ -106,13 +107,13 @@ public sealed partial class Nghttp2Connection
                 break;
             }
 
-            _connection.Write(_egress.AsSpan(0, produced));
+            _pipe.Output.Write(_egress.AsSpan(0, produced));
             staged = true;
         }
 
         if (staged)
         {
-            await _connection.FlushAsync();
+            await _pipe.Output.FlushAsync();
         }
     }
 

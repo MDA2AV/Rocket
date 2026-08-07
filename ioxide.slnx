@@ -47,6 +47,8 @@
     <Project Path="Playground/Tls/HttpsClient/Playground.Tls.HttpsClient.csproj" />
     <Project Path="Playground/Nghttp2/Playground.Nghttp2.csproj" />
     <Project Path="Playground/Http2/Playground.Http2.csproj" />
+    <Project Path="Playground/Http2SslStream/Playground.Http2SslStream.csproj" />
+    <Project Path="Playground/Http2Tls/Playground.Http2Tls.csproj" />
     <Project Path="Playground/Proxy/H1/Playground.Proxy.H1.csproj" />
     <Project Path="Playground/Proxy/H3ToH1/Playground.Proxy.H3ToH1.csproj" />
     <Project Path="Playground/Proxy/H3ToH2/Playground.Proxy.H3ToH2.csproj" />

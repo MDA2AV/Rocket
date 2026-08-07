@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.IO.Pipelines;
 using System.Runtime.InteropServices;
 
 namespace ioxide.nghttp2;
@@ -18,8 +19,10 @@ namespace ioxide.nghttp2;
 /// the loop here looks like the HTTP/2 client's - feed <c>ih2_read</c>, drain <c>ih2_write</c> -
 /// rather than like its HTTP/3 counterpart.
 ///
-/// Works for h2c with prior knowledge (the peer opens with the connection preface) and for h2 over
-/// TLS, where ALPN selected "h2" and the plaintext arrives already decrypted.
+/// It speaks to an <see cref="IDuplexPipe"/> and therefore knows nothing about TLS. Hand it a
+/// <c>TcpConnectionDualPipe</c> for h2c, or a <c>TlsConnectionDualPipe</c> for h2 over TLS, or a
+/// pipe over anything else - the protocol code is identical in every case, and the transport is
+/// chosen where the connection is accepted.
 /// </summary>
 /// <remarks>
 /// Reactor thread only. nghttp2's callbacks fire INSIDE <c>ih2_read</c>, so they may only deposit
@@ -32,7 +35,7 @@ public sealed partial class Nghttp2Connection : IDisposable
     // room for several without regrowing.
     private const int EgressBufferSize = 64 * 1024;
 
-    private readonly TcpConnection _connection;
+    private readonly IDuplexPipe _pipe;
     private readonly Nghttp2Options _options;
     private readonly byte[] _egress = new byte[EgressBufferSize];
 
@@ -50,11 +53,21 @@ public sealed partial class Nghttp2Connection : IDisposable
     // let it submit a response and re-enter nghttp2 while it is still on the stack.
     private readonly List<PendingRequest> _readyThisPass = [];
 
-    public Nghttp2Connection(TcpConnection connection, Nghttp2Options? options = null)
+    /// <summary>
+    /// Serve over an already-chosen transport. The pipe is the caller's to dispose - it may be a
+    /// TLS pipe with a session behind it, and only the caller knows.
+    /// </summary>
+    public Nghttp2Connection(IDuplexPipe pipe, Nghttp2Options? options = null)
     {
-        _connection = connection;
+        _pipe = pipe;
         _options = options ?? new Nghttp2Options();
         Setup();
+    }
+
+    /// <summary>Convenience for cleartext h2c: wraps the connection in its own duplex pipe.</summary>
+    public Nghttp2Connection(TcpConnection connection, Nghttp2Options? options = null)
+        : this(new TcpConnectionDualPipe(connection), options)
+    {
     }
 
     /// <summary>True once the session can serve no more - protocol error, or the peer is gone.</summary>

@@ -1,5 +1,5 @@
 using System.Buffers;
-using ioxide.utils;
+using System.IO.Pipelines;
 
 namespace ioxide.http2;
 
@@ -17,13 +17,14 @@ namespace ioxide.http2;
 /// a native library is inconvenient; take nghttp2 when you want the reference implementation's
 /// coverage of the protocol's darker corners.
 ///
-/// This is h2c with prior knowledge, or h2 over TLS where ALPN selected "h2" and the plaintext
-/// arrives already decrypted.
+/// Like its nghttp2 counterpart it speaks to an <see cref="IDuplexPipe"/> and knows nothing about
+/// TLS: hand it a <c>TcpConnectionDualPipe</c> for h2c or a <c>TlsConnectionDualPipe</c> for h2
+/// over TLS, and the protocol code is identical either way.
 /// </summary>
 /// <remarks>Reactor thread only.</remarks>
 public sealed partial class Http2Connection : IDisposable
 {
-    private readonly TcpConnection _connection;
+    private readonly IDuplexPipe _pipe;
     private readonly Http2Options _options;
     private readonly HpackDecoder _decoder;
 
@@ -49,11 +50,20 @@ public sealed partial class Http2Connection : IDisposable
     private int _peerInitialStreamWindow = 65535;
     private int _peerMaxFrameSize = 16384;
 
-    public Http2Connection(TcpConnection connection, Http2Options? options = null)
+    /// <summary>
+    /// Serve over an already-chosen transport. The pipe is the caller's to dispose.
+    /// </summary>
+    public Http2Connection(IDuplexPipe pipe, Http2Options? options = null)
     {
-        _connection = connection;
+        _pipe = pipe;
         _options = options ?? new Http2Options();
         _decoder = new HpackDecoder();
+    }
+
+    /// <summary>Convenience for cleartext h2c: wraps the connection in its own duplex pipe.</summary>
+    public Http2Connection(TcpConnection connection, Http2Options? options = null)
+        : this(new TcpConnectionDualPipe(connection), options)
+    {
     }
 
     /// <summary>True once the connection can serve no more.</summary>
@@ -105,10 +115,10 @@ public sealed partial class Http2Connection : IDisposable
 
             while (!IsBroken)
             {
-                RecvSnapshot snapshot = await _connection.ReadAsync();
+                ReadResult read = await _pipe.Input.ReadAsync();
 
-                bool received = Accumulate(snapshot);
-                _connection.ResetRead();
+                bool received = Accumulate(read.Buffer);
+                _pipe.Input.AdvanceTo(read.Buffer.End);
 
                 if (received)
                 {
@@ -117,7 +127,7 @@ public sealed partial class Http2Connection : IDisposable
                     await FlushAsync();
                 }
 
-                if (snapshot.IsClosed)
+                if (read.IsCompleted || read.IsCanceled)
                 {
                     return;
                 }
@@ -135,28 +145,18 @@ public sealed partial class Http2Connection : IDisposable
         }
     }
 
-    // Copy every buffer this snapshot carries into the accumulator. Buffers go back to the ring
-    // whatever happens.
-    private unsafe bool Accumulate(in RecvSnapshot snapshot)
+    // Copy into the accumulator, because a frame can straddle segments AND reads, and the parser
+    // wants one contiguous view. The pipe's memory is only valid until AdvanceTo.
+    private bool Accumulate(in ReadOnlySequence<byte> buffer)
     {
         bool any = false;
 
-        while (_connection.TryGetItem(snapshot, out SpscRecvRing.Item item))
+        foreach (ReadOnlyMemory<byte> segment in buffer)
         {
-            try
+            if (segment.Length > 0)
             {
-                if (item.HasBuffer && item.Len > 0)
-                {
-                    Append(new ReadOnlySpan<byte>(item.Ptr, item.Len));
-                    any = true;
-                }
-            }
-            finally
-            {
-                if (item.HasBuffer)
-                {
-                    _connection.ReturnBuffer(in item);
-                }
+                Append(segment.Span);
+                any = true;
             }
         }
 

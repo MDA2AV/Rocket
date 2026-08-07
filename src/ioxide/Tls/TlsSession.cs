@@ -30,6 +30,23 @@ public sealed unsafe class TlsSession : IDisposable
     /// <summary>True once the peer sent close_notify.</summary>
     public bool Closed { get; private set; }
 
+    /// <summary>
+    /// The protocol ALPN settled on, or null when the client offered none this port serves. This
+    /// is how a handler serving several protocols on one port knows which loop to run - without
+    /// it, advertising both h2 and http/1.1 tells the client something the server cannot act on.
+    /// </summary>
+    public string? NegotiatedAlpn { get; private set; }
+
+    internal void CaptureAlpn()
+    {
+        byte* data;
+        uint length;
+        OpenSsl.SSL_get0_alpn_selected(_ssl, &data, &length);
+        NegotiatedAlpn = data == null || length == 0
+            ? null
+            : System.Text.Encoding.ASCII.GetString(data, (int)length);
+    }
+
     internal TlsSession(nint ssl, nint rbio)
     {
         _ssl = ssl;

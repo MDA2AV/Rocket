@@ -1,4 +1,5 @@
-using ioxide.utils;
+using System.Buffers;
+using System.IO.Pipelines;
 
 namespace ioxide.nghttp2;
 
@@ -24,20 +25,16 @@ public sealed partial class Nghttp2Connection
 
             while (!IsBroken)
             {
-                RecvSnapshot snapshot = await _connection.ReadAsync();
+                ReadResult read = await _pipe.Input.ReadAsync();
 
-                bool fed = FeedAvailable(snapshot);
-                _connection.ResetRead();
+                Feed(read.Buffer);
+                _pipe.Input.AdvanceTo(read.Buffer.End);
 
                 // Handlers run HERE, after ih2_read has unwound - see the callbacks file.
                 await DispatchReadyAsync(handler);
                 await FlushEgressAsync();
 
-                if (snapshot.IsClosed && !fed)
-                {
-                    return;
-                }
-                if (snapshot.IsClosed || Nghttp2.ih2_is_dead(_handle) != 0)
+                if (read.IsCompleted || read.IsCanceled || Nghttp2.ih2_is_dead(_handle) != 0)
                 {
                     return;
                 }
@@ -55,36 +52,26 @@ public sealed partial class Nghttp2Connection
         }
     }
 
-    // Feed every buffer this snapshot carries into nghttp2. Buffers are returned whatever happens:
-    // a parse that throws must not strand the kernel's memory.
-    private unsafe bool FeedAvailable(in RecvSnapshot snapshot)
+    // Feed each segment straight to nghttp2. The segments are the ring's own memory when the pipe
+    // is a TcpConnectionDualPipe, so nothing is copied; a frame split across two of them is fine,
+    // because nghttp2 carries partial frames between calls.
+    private unsafe void Feed(in ReadOnlySequence<byte> buffer)
     {
-        bool fed = false;
-
-        while (_connection.TryGetItem(snapshot, out SpscRecvRing.Item item))
+        foreach (ReadOnlyMemory<byte> segment in buffer)
         {
-            try
+            if (segment.Length == 0)
             {
-                if (item.HasBuffer && item.Len > 0)
-                {
-                    nint consumed = Nghttp2.ih2_read(_handle, item.Ptr, (nuint)item.Len);
-                    if (consumed < 0)
-                    {
-                        _failed = true;   // protocol error; the drain below still sends GOAWAY
-                    }
-                    fed = true;
-                }
+                continue;
             }
-            finally
+
+            using System.Buffers.MemoryHandle handle = segment.Pin();
+            nint consumed = Nghttp2.ih2_read(_handle, (byte*)handle.Pointer, (nuint)segment.Length);
+            if (consumed < 0)
             {
-                if (item.HasBuffer)
-                {
-                    _connection.ReturnBuffer(in item);
-                }
+                _failed = true;   // protocol error; the drain still sends GOAWAY
+                return;
             }
         }
-
-        return fed;
     }
 
     private async ValueTask DispatchReadyAsync(Func<Nghttp2Request, ValueTask<Nghttp2Response>> handler)

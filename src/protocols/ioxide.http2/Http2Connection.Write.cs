@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Buffers.Binary;
+using System.IO.Pipelines;
 
 namespace ioxide.http2;
 
@@ -13,7 +14,7 @@ public sealed partial class Http2Connection
 
     private void Stage(ReadOnlySpan<byte> bytes)
     {
-        _connection.Write(bytes);
+        _pipe.Output.Write(bytes);
         _staged = true;
     }
 
@@ -24,7 +25,7 @@ public sealed partial class Http2Connection
             return;
         }
         _staged = false;
-        await _connection.FlushAsync();
+        await _pipe.Output.FlushAsync();
     }
 
     private void WriteSettings()

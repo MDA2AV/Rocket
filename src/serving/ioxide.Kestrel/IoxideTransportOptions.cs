@@ -29,7 +29,8 @@ public sealed class IoxideTransportOptions
     /// TLS termination via kTLS (kernel TLS), done in the transport on the listed ports. When set, the
     /// reactor runs the TLS 1.3 handshake on accept, installs kTLS TX, and hands Kestrel a plaintext
     /// connection with the TLS connection features set - so the endpoint must NOT use <c>UseHttps()</c>.
-    /// Null = no TLS (every port is plaintext). Currently HTTP/1.1 only (see <see cref="IoxideTlsOptions.Alpn"/>).
+    /// Null = no TLS (every port is plaintext). See <see cref="IoxideTlsOptions.Alpn"/> for which
+    /// protocols a TLS port advertises.
     /// </summary>
     public IoxideTlsOptions? Tls { get; set; }
 
@@ -37,13 +38,13 @@ public sealed class IoxideTransportOptions
     /// Convenience over assigning <see cref="Tls"/>: terminate kTLS on <paramref name="ports"/> with one
     /// certificate/key. Example: <c>o.UseTls("/certs/server.crt", "/certs/server.key", new[] { 8081 });</c>.
     /// </summary>
-    public void UseTls(string certificatePath, string keyPath, IEnumerable<int> ports, string alpn = "http/1.1")
+    public void UseTls(string certificatePath, string keyPath, IEnumerable<int> ports, params string[] alpn)
     {
         var tls = new IoxideTlsOptions
         {
             CertificatePath = certificatePath,
             KeyPath = keyPath,
-            Alpn = alpn,
+            Alpn = alpn.Length == 0 ? ["http/1.1"] : alpn,
         };
         foreach (var p in ports)
         {
@@ -62,9 +63,11 @@ public sealed class IoxideTlsOptions
     /// <summary>PEM private key file.</summary>
     public required string KeyPath { get; set; }
 
-    /// <summary>The single ALPN protocol to advertise/select (HTTP/1.1 for now). HTTP/2-over-TLS needs
-    /// dynamic ALPN, which is not yet exposed by ioxide.tls.</summary>
-    public string Alpn { get; set; } = "http/1.1";
+    /// <summary>
+    /// Protocols to advertise, MOST PREFERRED FIRST. The server walks this list and picks the first
+    /// entry the client also offered, so order is the policy - ALPN itself carries no weights.
+    /// </summary>
+    public string[] Alpn { get; set; } = ["http/1.1"];
 
     /// <summary>Listen ports that terminate TLS in the transport. Connections on other ports stay plaintext.</summary>
     public HashSet<int> Ports { get; set; } = new();
