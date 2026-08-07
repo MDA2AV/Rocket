@@ -30,16 +30,19 @@ using Playground.Shared;
 var config = new ServerConfig
 {
     ReactorCount = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
+    // PLAYGROUND_INCREMENTAL=1 switches the recv path to per-connection incremental buffer rings.
+    Incremental = Env.Flag("PLAYGROUND_INCREMENTAL") ? new IncrementalOptions() : null,
     Tcp = new TcpOptions
     {
         Port = Env.Port("PLAYGROUND_PORT", 8443),
     },
 };
 
-byte[] body = "ok"u8.ToArray();
+int bodyBytes = Env.Int("PLAYGROUND_BODY", 2);
+byte[] body = bodyBytes == 2 ? "ok"u8.ToArray() : [.. Enumerable.Repeat((byte)'x', bodyBytes)];
 
-// PLAYGROUND_INPLACE=1 swaps the inbound TLS pipe for the in-place reader.
-bool inPlace = Env.Flag("PLAYGROUND_INPLACE");
+// PLAYGROUND_TLSPIPE picks the inbound TLS pipe: pump (default) | inplace | direct.
+string tlsPipe = Env.Str("PLAYGROUND_TLSPIPE", "pump");
 byte[] http11Response =
 [
     .. Encoding.ASCII.GetBytes($"HTTP/1.1 200 OK\r\nContent-Length: {body.Length}\r\n\r\n"),
@@ -83,9 +86,12 @@ for (int i = 0; i < threads.Length; i++)
                 // Both are handed to the same Nghttp2Connection, which is the point.
                 // The two share only IDuplexPipe, which is not disposable - hence the second
                 // declaration rather than one `await using`.
-                IDuplexPipe pipe = inPlace
-                    ? new TlsConnectionDualPipeInPlace(conn, tls, ownsSession: false)
-                    : new TlsConnectionDualPipe(conn, tls, ownsSession: false);
+                IDuplexPipe pipe = tlsPipe switch
+                {
+                    "inplace" => new TlsConnectionDualPipeInPlace(conn, tls, ownsSession: false),
+                    "direct"  => new TlsConnectionDualPipeDirect(conn, tls, ownsSession: false),
+                    _         => new TlsConnectionDualPipe(conn, tls, ownsSession: false),
+                };
                 await using IAsyncDisposable owner = (IAsyncDisposable)pipe;
 
                 await new Nghttp2Connection(pipe).RunBufferedAsync(_ => new Nghttp2Response
@@ -142,7 +148,7 @@ for (int i = 0; i < threads.Length; i++)
 
 Console.WriteLine($"[http2-tls] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
                 + $"ALPN h2 then http/1.1, cert {certPath}, "
-                + $"inbound={(inPlace ? "in-place" : "pump+Pipe")}");
+                + $"inbound={tlsPipe}");
 
 foreach (Thread thread in threads)
 {
