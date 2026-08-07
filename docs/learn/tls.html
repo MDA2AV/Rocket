@@ -127,8 +127,14 @@ reactor.OnStart = r =&gt; TlsService.Start(r, options);</code></pre>
                 conn.ReturnBuffer(in item);
             }
 
-            conn.Write(response);          // plaintext in; the kernel makes the records
-            await conn.FlushAsync();       // ordinary io_uring send
+            // Answer per REQUEST, not per read. TLS hands back RECORDS, not requests, so a
+            // request split across two records decrypts twice - and one response per decrypt
+            // is two responses to one request. Feed() above is doing the accumulating.
+            while (TakeOneRequest())
+            {
+                conn.Write(response);      // plaintext in; the kernel makes the records
+            }
+            await conn.FlushAsync();       // ordinary io_uring send, once per batch
 
             if (snapshot.IsClosed || (tls?.Closed ?? false)) return;
             conn.ResetRead();

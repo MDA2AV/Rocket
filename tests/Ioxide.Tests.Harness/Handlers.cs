@@ -1,4 +1,5 @@
 using System.Text;
+using System.Runtime.InteropServices;
 using ioxide;
 using ioxide.file;
 using ioxide.tls;
@@ -129,6 +130,7 @@ public static class Handlers
     public static async Task Tls(Reactor r, TcpConnection conn)
     {
         TlsSession? tls = null;
+        var carry = new List<byte>();
 
         try
         {
@@ -138,19 +140,35 @@ public static class Handlers
             {
                 RecvSnapshot snapshot = await conn.ReadAsync();
 
-                int got = 0;
                 while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
                 {
                     if (item.HasBuffer)
                     {
-                        got += DecryptLength(tls, item);
+                        AppendPlaintext(tls, item, carry);
                         conn.ReturnBuffer(in item);
                     }
                 }
 
-                if (got > 0)
+                // Answer per REQUEST, not per decrypt. Those are the same thing only while a
+                // client sends each request in one TLS record - split one across records and
+                // "some plaintext arrived" fires once per record, so one request draws several
+                // responses. TLS reassembly is not the issue: OpenSSL yields nothing until a
+                // record is whole. Framing above it is ours, exactly as in the plaintext path.
+                int responded = 0;
+                int idx;
+                while ((idx = CollectionsMarshal.AsSpan(carry).IndexOf("\r\n\r\n"u8)) >= 0)
+                {
+                    carry.RemoveRange(0, idx + 4);
+                    responded++;
+                }
+
+                for (int i = 0; i < responded; i++)
                 {
                     Wire.Write(conn, 200, "tls-ok");
+                }
+
+                if (responded > 0)
+                {
                     await conn.FlushAsync();
                 }
 
@@ -173,9 +191,9 @@ public static class Handlers
         }
     }
 
-    private static unsafe int DecryptLength(TlsSession tls, in SpscRecvRing.Item item)
+    private static unsafe void AppendPlaintext(TlsSession tls, in SpscRecvRing.Item item, List<byte> carry)
     {
-        return tls.Decrypt(item.Ptr, item.Len).Length;
+        carry.AddRange(tls.Decrypt(item.Ptr, item.Len).ToArray());
     }
 
     // The asset cache hands back one native response block; copy it through the write slab.

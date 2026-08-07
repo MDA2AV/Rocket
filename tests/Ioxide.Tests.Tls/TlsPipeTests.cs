@@ -30,6 +30,33 @@ internal static class TlsPipeTests
             Assert.Equal("pipe-tls-ok", body);
         }, skip: !ktls);
 
+        // A single TLS record delivered in N-byte TCP writes, so the server genuinely holds
+        // partial-record state across recvs. Chunking at the SslStream level would NOT do this -
+        // SslStream.Write emits one complete record per call, so every recv would carry whole
+        // records and the test would pass against a server that cannot reassemble at all. The
+        // first version of this test did exactly that and survived the mutation below.
+        //
+        // Nothing in ioxide reassembles records. OpenSSL's memory BIO does: Feed appends whatever
+        // arrived and SSL_read answers WANT_READ until a record is whole, which ShouldKeepReading
+        // reports as "not complete yet" rather than as a fault. These tests exist to keep that
+        // true, because the failure mode is silent - a half-record looks exactly like a quiet
+        // connection.
+        foreach (int chunk in new[] { 1, 7, 64, 1024 })
+        {
+            int size = chunk;
+            runner.Test($"tls pipe: TLS records split across {size}-byte TCP writes", () =>
+            {
+                (string certPath, string keyPath) = TestCert.Ensure();
+                var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
+
+                int port = TestServer.Start(WholeRequestHandler, r => TlsService.Start(r, options));
+
+                (int status, string body) = Client.GetTlsSplitRecords(port, "/", size);
+                Assert.Equal(200, status);
+                Assert.Equal("pipe-tls-ok", body);
+            }, skip: !ktls);
+        }
+
         runner.Test("tls pipe: serving never leaves the reactor thread", () =>
         {
             // ioxide supports off-reactor submission - SubmitClientOp marshals through _remoteOps
@@ -131,6 +158,73 @@ internal static class TlsPipeTests
                 connection.DecRef();
             }
         };
+
+    /// <summary>
+    /// Answers only once a COMPLETE request has been reassembled - it reads until it sees the
+    /// blank line that ends the head, and never responds otherwise.
+    ///
+    /// That requirement is the whole test. PipeHandler writes its 200 after a single ReadAsync
+    /// whatever that read contained, so it answers just as happily when reassembly is broken and
+    /// the pipe completes early - which is exactly how the first two versions of the split-record
+    /// tests passed against a deliberately broken pump.
+    /// </summary>
+    private static async Task WholeRequestHandler(Reactor reactor, TcpConnection connection)
+    {
+        TlsSession? session = null;
+        TlsConnectionDualPipe? pipe = null;
+        try
+        {
+            session = await reactor.GetService<TlsService>()!.AcceptAsync(connection);
+            pipe = new TlsConnectionDualPipe(connection, session);
+
+            while (true)
+            {
+                ReadResult read = await pipe.Input.ReadAsync();
+
+                if (Terminated(read.Buffer))
+                {
+                    pipe.Input.AdvanceTo(read.Buffer.End);
+
+                    const string body = "pipe-tls-ok";
+                    pipe.Output.Write(Encoding.ASCII.GetBytes(
+                        $"HTTP/1.1 200 OK\r\nContent-Length: {body.Length}\r\n\r\n{body}"));
+                    await pipe.Output.FlushAsync();
+                    return;
+                }
+
+                // Nothing consumed, everything examined: the pipe must wait for more bytes rather
+                // than handing back the same partial head forever.
+                pipe.Input.AdvanceTo(read.Buffer.Start, read.Buffer.End);
+
+                if (read.IsCompleted)
+                {
+                    return;   // the stream ended mid-request - no response, and the test fails
+                }
+            }
+        }
+        catch
+        {
+            // The harness probes the port with a raw TCP connection, which fails the handshake.
+        }
+        finally
+        {
+            if (pipe is not null)
+            {
+                await pipe.DisposeAsync();
+            }
+            else
+            {
+                session?.Dispose();
+            }
+            connection.DecRef();
+        }
+    }
+
+    private static bool Terminated(in ReadOnlySequence<byte> buffer)
+    {
+        var reader = new SequenceReader<byte>(buffer);
+        return reader.TryReadTo(out ReadOnlySequence<byte> _, "\r\n\r\n"u8, advancePastDelimiter: true);
+    }
 
     // Serves one request off the decrypted PipeReader and answers as plaintext through the pipe's
     // writer, which is where kTLS takes over.

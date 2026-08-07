@@ -1,4 +1,5 @@
 using System.IO.Pipelines;
+using System.Runtime.InteropServices;
 using System.Text;
 using ioxide;
 using ioxide.nghttp2;
@@ -104,10 +105,35 @@ for (int i = 0; i < threads.Length; i++)
 
             // Anything else: HTTP/1.1 on the same port, written as plaintext because kTLS is
             // producing the records.
+            //
+            // The carry is not incidental. TLS hands back RECORDS, not requests, so a request
+            // split across two records decrypts twice - and answering on "plaintext arrived"
+            // would answer twice to one request. Framing is ours; ioxide does not parse HTTP.
+            var carry = new List<byte>();
+
+            // The client's first request usually rides in with its Finished flight, so the
+            // handshake already decrypted it and it is sitting in the session, not in any recv
+            // buffer. Miss this and that request is dropped and the loop parks on bytes that
+            // already arrived - which is exactly what happened here before.
+            carry.AddRange(tls.DrainPlaintext());
+
             while (true)
             {
+                bool wrote = false;
+                int end;
+                while ((end = CollectionsMarshal.AsSpan(carry).IndexOf("\r\n\r\n"u8)) >= 0)
+                {
+                    carry.RemoveRange(0, end + 4);
+                    conn.Write(http11Response);
+                    wrote = true;
+                }
+
+                if (wrote)
+                {
+                    await conn.FlushAsync();
+                }
+
                 RecvSnapshot snapshot = await conn.ReadAsync();
-                bool sawRequest = false;
 
                 unsafe
                 {
@@ -115,16 +141,10 @@ for (int i = 0; i < threads.Length; i++)
                     {
                         if (item.HasBuffer)
                         {
-                            sawRequest |= tls.Decrypt(item.Ptr, item.Len).Length > 0;
+                            carry.AddRange(tls.Decrypt(item.Ptr, item.Len));
                             conn.ReturnBuffer(in item);
                         }
                     }
-                }
-
-                if (sawRequest)
-                {
-                    conn.Write(http11Response);
-                    await conn.FlushAsync();
                 }
 
                 if (snapshot.IsClosed || tls.Closed) return;
