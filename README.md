@@ -1,70 +1,62 @@
-[![ioxide](https://img.shields.io/nuget/v/ioxide?label=ioxide)](https://www.nuget.org/packages/ioxide/)
-[![ioxide.httpclient](https://img.shields.io/nuget/v/ioxide.httpclient?label=ioxide.httpclient)](https://www.nuget.org/packages/ioxide.httpclient/)
-[![ioxide.pg](https://img.shields.io/nuget/v/ioxide.pg?label=ioxide.pg)](https://www.nuget.org/packages/ioxide.pg/)
-[![ioxide.redis](https://img.shields.io/nuget/v/ioxide.redis?label=ioxide.redis)](https://www.nuget.org/packages/ioxide.redis/)
-[![ioxide.file](https://img.shields.io/nuget/v/ioxide.file?label=ioxide.file)](https://www.nuget.org/packages/ioxide.file/)
-[![ioxide.Kestrel](https://img.shields.io/nuget/v/ioxide.Kestrel?label=ioxide.Kestrel)](https://www.nuget.org/packages/ioxide.Kestrel/)
-[![ioxide.ngtcp2](https://img.shields.io/nuget/v/ioxide.ngtcp2?label=ioxide.ngtcp2)](https://www.nuget.org/packages/ioxide.ngtcp2/)
-[![ioxide.nghttp3](https://img.shields.io/nuget/v/ioxide.nghttp3?label=ioxide.nghttp3)](https://www.nuget.org/packages/ioxide.nghttp3/)
+# ioxide
+
+[![nuget](https://img.shields.io/nuget/v/ioxide?label=nuget&color=blue)](https://www.nuget.org/packages/ioxide/)
+[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![net](https://img.shields.io/badge/.NET-10%20%7C%2011-blue)](https://dotnet.microsoft.com/)
+[![linux](https://img.shields.io/badge/linux-6.1%2B-blue)](https://kernel.org/)
 
 **A shared-nothing io_uring runtime for .NET.**
 
-One ring per reactor thread - run one per core. Each reactor owns its ring, its SO_REUSEPORT
-listener, its connections and its clients outright: nothing is shared, so nothing is locked.
-HTTP, Postgres, Redis and file I/O all submit on the owning ring and resume inline on the
-same thread. No thread pool on the hot path. No native dependencies - raw syscalls, nothing else.
+One ring per reactor thread, one reactor per core. Each reactor owns its ring, its SO_REUSEPORT
+listener, its connections and its clients outright, so nothing is shared and nothing is locked - a
+request never leaves the core it arrived on, inbound and outbound alike. What makes that practical
+in .NET is that you do not give up the platform's async model to get it: handlers are ordinary
+`async Task` code, ring completions resume their continuations **inline on the reactor thread**, and
+a per-reactor `SynchronizationContext` catches everything that would otherwise escape - timers,
+`HttpClient`, `Task.Run`. You always wake up on your reactor, so connection, pool and handler state
+stays single-threaded without a lock in sight.
 
-> Linux 6.1+ · .NET 10 / .NET 11 · status `0.2.6` - experimental
+ioxide hands you raw bytes and stays out of HTTP; when you want a framework on top,
+`ioxide.Kestrel` swaps the transport under an existing ASP.NET Core app with your endpoints
+unchanged.
 
-**[Documentation](https://mda2av.github.io/ioxide/)** - architecture, guides, and every example
-below as runnable code you can read side by side.
+> Linux 6.1+ · .NET 10 / .NET 11 · `0.3.149` - experimental
 
-## First-class async/await
-
-Shared-nothing runtimes usually ask you to give up the platform's async model. ioxide keeps it:
-handlers are ordinary `async Task` code, and `await` works everywhere.
-
-- Ring completions resume their continuations inline on the reactor thread - an awaited recv,
-  query or file read picks up exactly where it left off, with no thread pool hop.
-- A per-reactor `SynchronizationContext` catches everything that would otherwise escape:
-  timers, `HttpClient`, `Task.Run` results - their continuations post back to the owning reactor.
-- Ring operations await through reusable, allocation-free awaitables.
-
-You always wake up on your reactor. That is what makes shared-nothing practical in .NET:
-connection, pool and handler state stays single-threaded without a lock in sight.
-
-## Clients ride the same ring
-
-Every client is opened from the reactor's start hook, which runs on the reactor thread - so the
-connections it makes belong to that reactor's ring. The handler fetches it back as a reactor
-service. There is one pool per reactor and no sharing between them, which is why none of it needs
-a lock.
-
-That holds for a Postgres query, a Redis command, an outbound HTTP call and a positional file
-read alike: each is submitted on the ring that accepted the request and resumes on the same
-thread, so a request never leaves the core it arrived on. A reverse proxy built this way keeps
-both hops - inbound connection and outbound call - on one thread for the life of the request.
-
-## Scope
-
-ioxide hands you raw bytes and stays out of HTTP. Request parsing and response bytes are your
-code; the runtime owns the ring, the connections and the clients. When you want a framework on
-top, `ioxide.Kestrel` swaps the transport under an existing ASP.NET Core app - one ring per core,
-with Kestrel's request loop pinned to the reactor thread, and your endpoints unchanged.
+**[Documentation](https://mda2av.github.io/ioxide/)** - architecture, guides, and every example as
+runnable code side by side.
 
 ## Packages
 
+Every package shares one version and depends only on the runtime. Start with
+**[`ioxide`](https://www.nuget.org/packages/ioxide/)** - reactors, TCP/UDP transports, connections,
+the ring-native client seam, and TLS termination (OpenSSL handshake over the ring, then kTLS, so
+handlers keep writing plaintext) - then add exactly what you use.
+
+**Protocols.** HTTP/2 and HTTP/3 each come twice: a bundled native, or the same surface in pure C#.
+
 | Package | What it does |
 | --- | --- |
-| `ioxide` | The runtime: reactors, TCP/UDP transports, connections, the ring-native client seam, and TLS termination (OpenSSL handshake over the ring, then kTLS - handlers keep writing plaintext). |
-| `ioxide.httpclient` | The ring-native HTTP client: HTTP/1.1, HTTP/2 (h2c) and HTTP/3 behind one API, Alt-Svc negotiation, one set of message types. Bundles the nghttp2 native. |
-| `ioxide.ngtcp2` | QUIC engine: ngtcp2 + picotls bundled native. Only system dependency is OpenSSL 3. |
-| `ioxide.nghttp3` | HTTP/3 + QPACK (nghttp3), bundled native. Rides any QUIC connection. |
-| `ioxide.http3` | Pure-C# HTTP/3: frames, QPACK, Huffman. Zero native code, drop-in for `ioxide.nghttp3`. |
-| `ioxide.pg` | Postgres driver. A pool per reactor; connect, query and stream rows on the owning ring. |
-| `ioxide.redis` | Redis client. RESP2, pipelining, pub/sub - pooled per reactor. |
-| `ioxide.file` | Static assets. Immutable snapshots, baked responses, positional ring reads. |
-| `ioxide.Kestrel` | ASP.NET Core transport: `UseIoxide()` and Kestrel runs one ring per core. |
+| [`ioxide.ngtcp2`](https://www.nuget.org/packages/ioxide.ngtcp2/) | QUIC. ngtcp2 + picotls as one bundled native; only system dependency is OpenSSL 3. |
+| [`ioxide.nghttp3`](https://www.nuget.org/packages/ioxide.nghttp3/) | HTTP/3 + QPACK (nghttp3), bundled native. Rides any QUIC connection. |
+| [`ioxide.http3`](https://www.nuget.org/packages/ioxide.http3/) | HTTP/3 in pure C# - frames, QPACK, Huffman. Zero native code, drop-in for `ioxide.nghttp3`. |
+| [`ioxide.nghttp2`](https://www.nuget.org/packages/ioxide.nghttp2/) | HTTP/2 (nghttp2), bundled native. h2c, or h2 over TLS via ALPN. |
+| [`ioxide.http2`](https://www.nuget.org/packages/ioxide.http2/) | HTTP/2 in pure C# - framing, HPACK, flow control. Zero native code, drop-in for `ioxide.nghttp2`. |
+
+**Clients.** One pool per reactor, opened on the reactor thread, so every call rides the ring that
+accepted the request.
+
+| Package | What it does |
+| --- | --- |
+| [`ioxide.httpclient`](https://www.nuget.org/packages/ioxide.httpclient/) | HTTP/1.1, HTTP/2 and HTTP/3 behind one API, protocol chosen per origin via Alt-Svc, with client-side TLS for `https://`. |
+| [`ioxide.pg`](https://www.nuget.org/packages/ioxide.pg/) | Postgres. Connect, query and stream rows on the owning ring. |
+| [`ioxide.redis`](https://www.nuget.org/packages/ioxide.redis/) | Redis. RESP2, pipelining, pub/sub. |
+| [`ioxide.file`](https://www.nuget.org/packages/ioxide.file/) | Static assets. Immutable snapshots, baked responses, positional ring reads. |
+
+**Serving.**
+
+| Package | What it does |
+| --- | --- |
+| [`ioxide.Kestrel`](https://www.nuget.org/packages/ioxide.Kestrel/) | ASP.NET Core transport: `UseIoxide()` and Kestrel runs one ring per core, its request loop pinned to the reactor thread. |
 
 ## Where the code is
 
@@ -72,6 +64,6 @@ Nothing here is pseudocode. Every pattern above exists as something you can run:
 
 | | What you get |
 | --- | --- |
-| **[Documentation](https://mda2av.github.io/ioxide/)** | The examples browser - TCP, QUIC, HTTP/3, every client, and the ASP.NET drop-in, side by side. |
-| **[Playground](Playground/)** | One project per workload. Each `Program.cs` is a **complete** server - config, reactors, threads, handler - so you can copy the file out and run it. |
+| **[Documentation](https://mda2av.github.io/ioxide/)** | The examples browser - TCP, QUIC, HTTP/2, HTTP/3, every client, and the ASP.NET drop-in, side by side. |
+| **[Playground](Playground/)** | One project per workload, grouped by topic. Each `Program.cs` is a **complete** server - config, reactors, threads, handler - so you can copy the file out and run it. |
 | **[Examples.AspNet](Examples.AspNet/)** | `UseIoxide()` measured against a stock Kestrel baseline. |
