@@ -38,6 +38,7 @@ internal static unsafe partial class OpenSsl
     [LibraryImport(Ssl)] public static partial void SSL_set_bio(nint ssl, nint rbio, nint wbio);
     [LibraryImport(Ssl)] public static partial int SSL_accept(nint ssl);
     [LibraryImport(Ssl)] public static partial int SSL_read(nint ssl, byte* buf, int num);
+    [LibraryImport(Ssl)] public static partial int SSL_write(nint ssl, byte* buf, int num);
     [LibraryImport(Ssl)] public static partial int SSL_get_error(nint ssl, int ret);
 
     /// <summary>

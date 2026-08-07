@@ -37,6 +37,8 @@ var tlsOptions = new TlsOptions
     // PLAYGROUND_KTLS_RX=1 lets the kernel decrypt inbound too, so recv returns plaintext and
     // TlsSession.Decrypt becomes a pass-through.
     KernelRx = Env.Flag("PLAYGROUND_KTLS_RX"),
+    // PLAYGROUND_KTLS_TX=0 drops kernel TLS entirely - OpenSSL both directions.
+    KernelTx = !Env.Flag("PLAYGROUND_NO_KTLS_TX"),
     CertificatePath = certPath,
     KeyPath         = keyPath,
 };
@@ -83,7 +85,7 @@ for (int i = 0; i < threads.Length; i++)
             // A request can ride in with the handshake's final flight - answer it before parking
             // in ReadAsync, or the client waits on a response we never send.
             carry.AddRange(tls.DrainPlaintext());
-            if (Answer(conn, carry, response))
+            if (Answer(conn, tls, carry, response))
             {
                 await conn.FlushAsync();
             }
@@ -102,7 +104,7 @@ for (int i = 0; i < threads.Length; i++)
                     }
                 }
 
-                if (Answer(conn, carry, response))
+                if (Answer(conn, tls, carry, response))
                 {
                     await conn.FlushAsync();   // plaintext: the kernel encrypts on send
                 }
@@ -143,7 +145,7 @@ static unsafe void Decrypt(TlsSession tls, in SpscRecvRing.Item item, List<byte>
 
 // One response per COMPLETE request in the carry, and none for a partial one. Returns whether
 // anything was written, so the caller flushes once for the batch rather than once per request.
-static bool Answer(TcpConnection conn, List<byte> carry, ReadOnlyMemory<byte> response)
+static bool Answer(TcpConnection conn, TlsSession tls, List<byte> carry, ReadOnlyMemory<byte> response)
 {
     bool wrote = false;
     int end;
@@ -151,7 +153,18 @@ static bool Answer(TcpConnection conn, List<byte> carry, ReadOnlyMemory<byte> re
     while ((end = CollectionsMarshal.AsSpan(carry).IndexOf("\r\n\r\n"u8)) >= 0)
     {
         carry.RemoveRange(0, end + 4);
-        conn.Write(response.Span);
+
+        // With kTLS the kernel makes the records, so plaintext goes straight in. Without it,
+        // OpenSSL has to encrypt first - the one line that differs between the two worlds.
+        if (tls.KernelTx)
+        {
+            conn.Write(response.Span);
+        }
+        else
+        {
+            tls.WriteEncrypted(conn, response.Span);
+        }
+
         wrote = true;
     }
 

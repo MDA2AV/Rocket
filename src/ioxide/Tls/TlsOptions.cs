@@ -46,4 +46,20 @@ public sealed class TlsOptions
     /// one that does loses the connection.
     /// </summary>
     public bool KernelRx { get; init; }
+
+    /// <summary>
+    /// Let the kernel encrypt outbound records. <b>On by default</b> - this is ioxide's normal TLS
+    /// write path, and the reason handlers write plaintext.
+    ///
+    /// Turning it off keeps everything in OpenSSL: the socket gets no TLS ULP at all, handlers must
+    /// hand responses to <see cref="TlsSession.WriteEncrypted"/> instead of writing them straight
+    /// to the connection, and <c>MSG_WAITALL</c> stays on because there is no kTLS to reject it.
+    ///
+    /// The trade is one copy. kTLS takes plaintext into the write slab and encrypts on send; OpenSSL
+    /// encrypts into its write BIO and the records are then read into the slab. What that costs in
+    /// practice is a question worth measuring rather than assuming - and turning kTLS off also
+    /// drops its constraints: no 'tls' kernel module, no TLS-1.3-only, no single-ciphersuite limit,
+    /// and no handshake-alignment problem.
+    /// </summary>
+    public bool KernelTx { get; init; } = true;
 }

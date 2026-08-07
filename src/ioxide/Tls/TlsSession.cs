@@ -16,6 +16,7 @@ public sealed unsafe class TlsSession : IDisposable
 
     private readonly nint _ssl;
     private readonly nint _rbio;
+    private readonly nint _wbio;
     private byte[] _plain = new byte[16 * 1024];
     private int _plainLen;
     private bool _disposed;
@@ -35,6 +36,10 @@ public sealed unsafe class TlsSession : IDisposable
     /// plaintext and <see cref="Decrypt"/> has nothing left to do.
     /// </summary>
     public bool KernelRx { get; private set; }
+
+    /// <summary>True when the kernel encrypts outbound records - the default. False means the
+    /// handler must go through <see cref="WriteEncrypted"/>.</summary>
+    public bool KernelTx => _txEnabled;
 
     internal void MarkKernelRx() => KernelRx = true;
 
@@ -58,10 +63,11 @@ public sealed unsafe class TlsSession : IDisposable
             : System.Text.Encoding.ASCII.GetString(data, (int)length);
     }
 
-    internal TlsSession(nint ssl, nint rbio)
+    internal TlsSession(nint ssl, nint rbio, nint wbio)
     {
         _ssl = ssl;
         _rbio = rbio;
+        _wbio = wbio;
     }
 
     internal void AttachHandle(GCHandle handle) => _handle = handle;
@@ -205,6 +211,53 @@ public sealed unsafe class TlsSession : IDisposable
 
     /// <summary>Bytes still unread in the BIO - zero means the handshake consumed exactly whole records.</summary>
     public nuint PendingCiphertext => OpenSsl.BIO_ctrl_pending(_rbio);
+
+    /// <summary>
+    /// Encrypt <paramref name="plaintext"/> with OpenSSL and stage the records into the
+    /// connection's write slab. The counterpart to letting kTLS do it: use this when
+    /// <c>TlsOptions.KernelTx</c> is off and the socket carries no TLS ULP.
+    /// </summary>
+    /// <remarks>
+    /// This is where the extra copy the kTLS write path avoids actually lives. kTLS takes plaintext
+    /// straight into the slab and the kernel encrypts on send; here OpenSSL encrypts into its write
+    /// BIO first, and BIO_read then moves the records into the slab. Two passes over the bytes
+    /// instead of one - though BIO_read at least writes directly into the slab rather than through
+    /// an intermediate of ours.
+    /// </remarks>
+    public void WriteEncrypted(TcpConnection connection, ReadOnlySpan<byte> plaintext)
+    {
+        fixed (byte* p = plaintext)
+        {
+            if (OpenSsl.SSL_write(_ssl, p, plaintext.Length) <= 0)
+            {
+                throw new IOException($"TLS encrypt failed: {OpenSsl.LastError()}");
+            }
+        }
+
+        while (true)
+        {
+            int pending = (int)OpenSsl.BIO_ctrl_pending(_wbio);
+            if (pending <= 0)
+            {
+                return;
+            }
+
+            int chunk = Math.Min(pending, 16 * 1024);
+            Span<byte> destination = connection.GetSpan(chunk);
+
+            int n;
+            fixed (byte* d = destination)
+            {
+                n = OpenSsl.BIO_read(_wbio, d, chunk);
+            }
+
+            if (n <= 0)
+            {
+                return;
+            }
+            connection.Advance(n);
+        }
+    }
 
     private bool ShouldKeepReading(int result)
     {
