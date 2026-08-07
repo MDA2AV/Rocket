@@ -221,8 +221,7 @@ nav.top .links a.gh svg { display: block; }
 #tab-redis:checked ~ .ex-menu label[for="tab-redis"],
 #tab-files:checked ~ .ex-menu label[for="tab-files"],
 #tab-tls:checked ~ .ex-menu label[for="tab-tls"],
-#tab-tlspipe:checked ~ .ex-menu label[for="tab-tlspipe"],
-#tab-kestrel:checked ~ .ex-menu label[for="tab-kestrel"] {
+#tab-tlspipe:checked ~ .ex-menu label[for="tab-tlspipe"] {
   color: var(--accent-soft);
   border-left-color: var(--accent-soft);
   background: var(--code-bg);
@@ -311,7 +310,6 @@ nav.top .links a.gh svg { display: block; }
 #tab-files:checked ~ .pane-files { display: block; }
 #tab-tls:checked ~ .pane-tls { display: block; }
 #tab-tlspipe:checked ~ .pane-tlspipe { display: block; }
-#tab-kestrel:checked ~ .pane-kestrel { display: block; }
 .pane pre {
   margin: 0;
   font-size: 0.82rem;   /* smaller than body code: these are whole programs, not fragments */
@@ -414,8 +412,7 @@ nav.top .links a.gh svg { display: block; }
   #tab-redis:checked ~ .ex-menu label[for="tab-redis"],
   #tab-files:checked ~ .ex-menu label[for="tab-files"],
   #tab-tls:checked ~ .ex-menu label[for="tab-tls"],
-  #tab-tlspipe:checked ~ .ex-menu label[for="tab-tlspipe"],
-  #tab-kestrel:checked ~ .ex-menu label[for="tab-kestrel"] {
+  #tab-tlspipe:checked ~ .ex-menu label[for="tab-tlspipe"] {
     border-bottom-color: var(--accent-soft);
   }
 }
