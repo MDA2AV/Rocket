@@ -210,6 +210,9 @@ nav.top .links a.gh svg { display: block; }
 #tab-inc:checked ~ .ex-menu label[for="tab-inc"],
 #tab-pipe:checked ~ .ex-menu label[for="tab-pipe"],
 #tab-vs:checked ~ .ex-menu label[for="tab-vs"],
+#tab-h2:checked ~ .ex-menu label[for="tab-h2"],
+#tab-h2cs:checked ~ .ex-menu label[for="tab-h2cs"],
+#tab-h2tls:checked ~ .ex-menu label[for="tab-h2tls"],
 #tab-qpipe:checked ~ .ex-menu label[for="tab-qpipe"],
 #tab-qraw:checked ~ .ex-menu label[for="tab-qraw"],
 #tab-h3:checked ~ .ex-menu label[for="tab-h3"],
@@ -296,6 +299,9 @@ nav.top .links a.gh svg { display: block; }
 #tab-inc:checked ~ .pane-inc { display: block; }
 #tab-pipe:checked ~ .pane-pipe { display: block; }
 #tab-vs:checked ~ .pane-vs { display: block; }
+#tab-h2:checked ~ .pane-h2 { display: block; }
+#tab-h2cs:checked ~ .pane-h2cs { display: block; }
+#tab-h2tls:checked ~ .pane-h2tls { display: block; }
 #tab-qpipe:checked ~ .pane-qpipe { display: block; }
 #tab-qraw:checked ~ .pane-qraw { display: block; }
 #tab-h3:checked ~ .pane-h3 { display: block; }
@@ -337,6 +343,29 @@ nav.top .links a.gh svg { display: block; }
   opacity: 0.85;
 }
 
+/* A note under the code, for what the sample cannot say by itself: what to pick, what it costs.
+   Shares the code block's chrome and drops its top border, so the two read as one panel - the
+   mirror of what .pane-head does above it. */
+.pane .ex-foot {
+  margin: 0;
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  border-top: none;
+  padding: 1rem 1.35rem;
+  font-size: 0.87rem;
+  line-height: 1.7;
+  color: var(--text-dim);
+}
+.pane .ex-foot b { color: var(--text); }
+
+/* A cross-reference that switches tabs, styled as a link because that is what it behaves like. */
+.ex-jump {
+  color: var(--accent-soft);
+  border-bottom: 1px dotted currentColor;
+  cursor: pointer;
+}
+.ex-jump:hover { color: var(--accent); }
+
 /* Below the menu's width budget it stops being fixed and stacks above the code. */
 @media (max-width: 1400px) {
   .ex-menu {
@@ -374,6 +403,9 @@ nav.top .links a.gh svg { display: block; }
   #tab-inc:checked ~ .ex-menu label[for="tab-inc"],
   #tab-pipe:checked ~ .ex-menu label[for="tab-pipe"],
   #tab-vs:checked ~ .ex-menu label[for="tab-vs"],
+  #tab-h2:checked ~ .ex-menu label[for="tab-h2"],
+  #tab-h2cs:checked ~ .ex-menu label[for="tab-h2cs"],
+  #tab-h2tls:checked ~ .ex-menu label[for="tab-h2tls"],
   #tab-qpipe:checked ~ .ex-menu label[for="tab-qpipe"],
   #tab-qraw:checked ~ .ex-menu label[for="tab-qraw"],
   #tab-h3:checked ~ .ex-menu label[for="tab-h3"],
@@ -382,6 +414,7 @@ nav.top .links a.gh svg { display: block; }
   #tab-redis:checked ~ .ex-menu label[for="tab-redis"],
   #tab-files:checked ~ .ex-menu label[for="tab-files"],
   #tab-tls:checked ~ .ex-menu label[for="tab-tls"],
+  #tab-tlspipe:checked ~ .ex-menu label[for="tab-tlspipe"],
   #tab-kestrel:checked ~ .ex-menu label[for="tab-kestrel"] {
     border-bottom-color: var(--accent-soft);
   }

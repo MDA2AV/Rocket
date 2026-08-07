@@ -35,7 +35,7 @@
     <a href="dev-core.html" class="pkg">ioxide <span class="muted">core</span></a>
     <a href="dev-pg.html" class="pkg">ioxide.pg</a>
     <a href="dev-redis.html" class="pkg">ioxide.redis</a>
-    <a href="dev-tls.html" class="pkg">ioxide.tls</a>
+    <a href="dev-tls.html" class="pkg">ioxide <span class="muted">tls</span></a>
     <a href="dev-file.html" class="pkg">ioxide.file</a>
   </aside>
 
@@ -46,7 +46,9 @@
     and the kernel encrypts your responses, zero-copy. <b>SslStream</b> over
     <code>ConnectionStream</code> is the portable path: fully managed, full-featured, and a bit
     slower. Both terminate on a <a href="multiport.html">dedicated port</a> and need nothing from
-    the core engine beyond what is already public.</p>
+    the core engine beyond what is already public - and both ship <b>inside the <code>ioxide</code>
+    package</b>. The namespace is still <code>ioxide.tls</code>, but there is no separate
+    PackageReference to add.</p>
 
     <div class="xref"><b>Using TLS.</b> How the handshake, per-session ex_data keying, and the kTLS
     hand-off work is in <a href="dev-tls.html">ioxide.tls internals</a>.</div>
@@ -91,7 +93,7 @@ var options = new TlsOptions
 {
     CertificatePath = "/certs/server.crt",   // PEM chain
     KeyPath         = "/certs/server.key",    // PEM private key
-    Alpn            = "http/1.1",
+    Alpn            = ["http/1.1"],           // ordered, most preferred first
 };
 
 reactor.OnStart = r =&gt; TlsService.Start(r, options);</code></pre>
@@ -157,6 +159,42 @@ reactor.OnStart = r =&gt; TlsService.Start(r, options);</code></pre>
     the handshake and desync the hand-off, which assumes the first application record is sequence
     zero.</p>
 
+    <h2>ALPN: choosing the protocol</h2>
+    <p><code>TlsOptions.Alpn</code> is an <b>ordered list, most preferred first</b>. RFC 7301 carries
+    no weights or quality values - a plain ordered list is the whole wire format - so position
+    <em>is</em> the preference. The server walks your list and takes the first entry the client also
+    offered, which means the policy lives entirely in the order you write:</p>
+<pre><code class="language-csharp">Alpn = ["h2", "http/1.1"],   // a browser offers both and lands on h2
+</code></pre>
+    <p>What was chosen comes back on <code>TlsSession.NegotiatedAlpn</code>, and that pair is all it
+    takes to run two protocol loops from one handler on one port:</p>
+<pre><code class="language-csharp">TlsSession tls = await r.GetService&lt;TlsService&gt;()!.AcceptAsync(conn);
+
+if (tls.NegotiatedAlpn == "h2")
+{
+    // The decrypt pump lives in the pipe, so the HTTP/2 code below is
+    // byte-for-byte the h2c version.
+    await using var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
+    await new Nghttp2Connection(pipe).RunBufferedAsync(request =&gt; new Nghttp2Response
+    {
+        Status = 200,
+        Body   = body,
+    });
+    return;
+}
+
+// http/1.1 on the same port, written as plaintext - kTLS owns transmit from here.
+</code></pre>
+    <p><code>TlsConnectionDualPipe</code> is what makes the branch cheap. It is an
+    <code>IDuplexPipe</code> whose reader decrypts on the way in and whose writer delegates to the
+    connection's - so a protocol implementation that takes a pipe never learns whether TLS is
+    involved. <code>Nghttp2Connection</code>, <code>Http2Connection</code> and a
+    <code>Stream</code>-based <code>SslStream</code> path are all the same code with a different
+    constructor argument. Both HTTP/2 servers are on the
+    <a href="../index.html">examples browser</a>, and
+    <a href="https://github.com/MDA2AV/ioxide/tree/main/Playground/Http2">Playground/Http2</a> has
+    the four variants in full.</p>
+
     <h2>kTLS: receive, and the one limitation</h2>
     <p>The transmit side is kernel-offloaded; the <b>receive side is userspace</b>. Each inbound
     slice is fed to OpenSSL and decrypted with <code>SSL_read</code> (that is what
@@ -178,7 +216,7 @@ reactor.OnStart = r =&gt; TlsService.Start(r, options);</code></pre>
       <li><b>TLS 1.3 only</b>, single cipher suite <code>TLS_AES_128_GCM_SHA256</code> - the kTLS
       key layout we program requires a fixed, known cipher.</li>
       <li><b>No session resumption</b> (tickets disabled, see above).</li>
-      <li><b>ALPN</b> is selected from the client's offer (default <code>http/1.1</code>).</li>
+      <li><b>ALPN</b> is selected from the client's offer, by server preference (see above).</li>
       <li><b>Linux <code>tls</code> kernel module</b> (<code>modprobe tls</code>; standard on
       mainstream distros) and <b>OpenSSL 3</b> (present in the .NET runtime images).</li>
     </ul>
