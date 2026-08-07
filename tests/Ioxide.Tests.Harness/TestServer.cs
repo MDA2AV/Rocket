@@ -395,6 +395,186 @@ public static class Client
     }
 
     /// <summary>
+    /// Split ONE request across several TLS records - each SslStream.Write emits its own complete
+    /// record - and report how many responses came back.
+    ///
+    /// This is the other fragmentation axis and the one that actually distinguishes handlers.
+    /// A record split across TCP is all-or-nothing: OpenSSL yields nothing until it is whole, so
+    /// even a handler that answers per decrypt sees exactly one decrypt. Split the REQUEST across
+    /// records and each one decrypts on its own, so answering per decrypt answers several times.
+    /// </summary>
+    public static int CountTlsResponsesForMultiRecordRequest(int port, string path, int records,
+        int settleMs = 1200, int timeoutMs = 15000)
+    {
+        using var client = new TcpClient();
+        client.NoDelay = true;
+        client.Connect("127.0.0.1", port);
+        client.ReceiveTimeout = timeoutMs;
+
+        using var ssl = new SslStream(client.GetStream(), leaveInnerStreamOpen: true, (_, _, _, _) => true);
+        ssl.AuthenticateAsClient(new SslClientAuthenticationOptions
+        {
+            TargetHost = "localhost",
+            EnabledSslProtocols = SslProtocols.Tls13,
+        });
+
+        byte[] request = Encoding.ASCII.GetBytes($"GET {path} HTTP/1.1\r\nHost: test\r\n\r\n");
+        int piece = Math.Max(1, request.Length / records);
+
+        for (int offset = 0; offset < request.Length; offset += piece)
+        {
+            ssl.Write(request, offset, Math.Min(piece, request.Length - offset));
+            ssl.Flush();
+            Thread.Sleep(30);   // let each record be its own recv on the server
+        }
+
+        Thread.Sleep(settleMs);
+        client.ReceiveTimeout = 600;
+
+        var seen = new System.Text.StringBuilder();
+        byte[] buffer = new byte[8192];
+        try
+        {
+            while (true)
+            {
+                int n = ssl.Read(buffer, 0, buffer.Length);
+                if (n <= 0) break;
+                seen.Append(Encoding.ASCII.GetString(buffer, 0, n));
+            }
+        }
+        catch (IOException)
+        {
+        }
+
+        int count = 0, at = 0;
+        string text = seen.ToString();
+        while ((at = text.IndexOf("HTTP/1.1 200", at, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            at += 12;
+        }
+        return count;
+    }
+
+    /// <summary>
+    /// Like <see cref="GetTlsSplitRecords"/>, but reports how many complete responses came back for
+    /// ONE request. A handler that answers per decrypt rather than per request replies more than
+    /// once when the request arrives in pieces.
+    /// </summary>
+    public static int CountTlsResponsesForSplitRequest(int port, string path, int chunk,
+        int settleMs = 1200, int timeoutMs = 15000)
+    {
+        using var client = new TcpClient();
+        client.NoDelay = true;
+        client.Connect("127.0.0.1", port);
+        client.ReceiveTimeout = timeoutMs;
+
+        using var chunking = new ChunkingStream(client.GetStream(), chunk);
+        using var ssl = new SslStream(chunking, leaveInnerStreamOpen: true, (_, _, _, _) => true);
+        ssl.AuthenticateAsClient(new SslClientAuthenticationOptions
+        {
+            TargetHost = "localhost",
+            EnabledSslProtocols = SslProtocols.Tls13,
+        });
+
+        Send(ssl, path);
+
+        // Let every response the server intends to send arrive before counting.
+        Thread.Sleep(settleMs);
+        client.ReceiveTimeout = 600;
+
+        var seen = new System.Text.StringBuilder();
+        byte[] buffer = new byte[8192];
+        try
+        {
+            while (true)
+            {
+                int n = ssl.Read(buffer, 0, buffer.Length);
+                if (n <= 0) break;
+                seen.Append(Encoding.ASCII.GetString(buffer, 0, n));
+            }
+        }
+        catch (IOException)
+        {
+            // read timeout - everything the server sent is already in `seen`
+        }
+
+        int count = 0, at = 0;
+        while ((at = seen.ToString().IndexOf("HTTP/1.1 200", at, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            at += 12;
+        }
+        return count;
+    }
+
+    /// <summary>
+    /// Send a request over TLS whose <b>TLS records are split across TCP writes</b>.
+    ///
+    /// The distinction matters and is easy to get wrong: SslStream.Write emits one COMPLETE record
+    /// per call, so chunking at the SslStream level only produces many small whole records - which
+    /// exercises nothing, because every recv then carries entire records. Chunking must happen
+    /// BELOW TLS, so a single record arrives in pieces and the server has to hold partial record
+    /// state across recvs. With chunk = 1 every byte of every record is its own TCP write.
+    /// </summary>
+    public static (int Status, string Body) GetTlsSplitRecords(int port, string path, int chunk,
+        int timeoutMs = 15000)
+    {
+        using var client = new TcpClient();
+        client.NoDelay = true;
+        client.Connect("127.0.0.1", port);
+        client.ReceiveTimeout = timeoutMs;
+
+        using var chunking = new ChunkingStream(client.GetStream(), chunk);
+        using var ssl = new SslStream(chunking, leaveInnerStreamOpen: true, (_, _, _, _) => true);
+        ssl.AuthenticateAsClient(new SslClientAuthenticationOptions
+        {
+            TargetHost = "localhost",
+            EnabledSslProtocols = SslProtocols.Tls13,
+        });
+
+        Send(ssl, path);
+        return ReadResponse(ssl);
+    }
+
+    /// <summary>Splits every write into <paramref name="chunk"/>-byte writes, each flushed.</summary>
+    private sealed class ChunkingStream(Stream inner, int chunk) : Stream
+    {
+        public override void Write(byte[] buffer, int offset, int count)
+            => Write(buffer.AsSpan(offset, count));
+
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            for (int i = 0; i < buffer.Length; i += chunk)
+            {
+                inner.Write(buffer.Slice(i, Math.Min(chunk, buffer.Length - i)));
+                inner.Flush();
+
+                // The pause is the point, not politeness. TCP_NODELAY stops the SENDER batching,
+                // but the receiver still coalesces whatever has arrived into one recv - so without
+                // a gap the server drains the whole record in a single completion and never holds
+                // partial state. Sleeping lets the reactor's recv land mid-record, which is the
+                // only thing that exercises reassembly.
+                if (i + chunk < buffer.Length)
+                {
+                    Thread.Sleep(1);
+                }
+            }
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => inner.Read(buffer, offset, count);
+        public override void Flush() => inner.Flush();
+        public override bool CanRead => inner.CanRead;
+        public override bool CanWrite => inner.CanWrite;
+        public override bool CanSeek => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+    }
+
+
+    /// <summary>
     /// Complete a TLS handshake, then write bytes that are not a valid TLS record. The server's
     /// decrypt must surface that as a FAULT rather than as "the record is incomplete, wait for
     /// more" - a corrupted stream that looks like a quiet connection leaves the reader hanging on
