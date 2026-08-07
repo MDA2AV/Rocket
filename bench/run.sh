@@ -81,7 +81,7 @@ else
 fi
 
 # ── h3 server ───────────────────────────────────────────────────────────────────────────────
-play Nghttp3 PLAYGROUND_REACTORS=$R PLAYGROUND_QUIC_PORT=18444 PLAYGROUND_PORT=18090
+play Http3/Nghttp3 PLAYGROUND_REACTORS=$R PLAYGROUND_QUIC_PORT=18444 PLAYGROUND_PORT=18090
 if [ -x "$H3X" ]; then
   N=$("$H3X" -k -t 4 --connections 64 -m 8 -d $DUR --send-batch 8 https://127.0.0.1:18444/ 2>&1 \
       | grep -oE 'throughput:  [0-9]+' | grep -oE '[0-9]+')
@@ -121,7 +121,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   docker rm -f bench-redis >/dev/null 2>&1
   docker run -d --name bench-redis --network host redis:7-alpine >/dev/null 2>&1
   sleep 2
-  play Redis PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18085 \
+  play Clients/Redis PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18085 \
     && note "redis" "${R}r" "$(wrk_h1 http://127.0.0.1:18085/) req/s"
   stop_play
   docker rm -f bench-redis >/dev/null 2>&1
@@ -131,7 +131,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     -e POSTGRES_USER=bench -e POSTGRES_PASSWORD=bench -e POSTGRES_DB=bench \
     -e POSTGRES_HOST_AUTH_METHOD=trust postgres:18 >/dev/null 2>&1
   sleep 6
-  play Pg PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18086 \
+  play Clients/Pg PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18086 \
     && note "pg" "${R}r" "$(wrk_h1 http://127.0.0.1:18086/) req/s"
   stop_play
   docker rm -f bench-pg >/dev/null 2>&1
@@ -140,7 +140,7 @@ else
   note "pg" "${R}r" "SKIP (docker unavailable)"
 fi
 
-play File PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18087 \
+play Clients/File PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18087 \
   && note "file" "${R}r" "$(wrk_h1 http://127.0.0.1:18087/index.html) req/s"
 stop_play
 

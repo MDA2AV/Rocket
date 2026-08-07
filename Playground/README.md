@@ -4,7 +4,7 @@ One project per sample, and **each `Program.cs` is a complete ioxide server you 
 run**. The config, the reactors, the threads, the connection loop and the handler are all there in
 the file - nothing that touches an ioxide API is hidden behind a helper.
 
-Run any of them with `dotnet run -c Release --project Playground/<Name>`, then hit
+Run any of them with `dotnet run -c Release --project Playground/<Group>/<Name>`, then hit
 `http://127.0.0.1:8080/`. Linux only - the engine is io_uring.
 
 ## Samples
@@ -17,24 +17,29 @@ Run any of them with `dotnet run -c Release --project Playground/<Name>`, then h
 | [`Tcp.TaskRun`](Tcp/TaskRun/Program.cs) | 84 | Awaiting ordinary thread-pool work and still resuming on the reactor. | `ioxide` |
 | [`Tcp.Incremental`](Tcp/Incremental/Program.cs) | 95 | `Tcp.Raw` with the per-connection buffer-ring mode - one config block is the whole diff. Kernel 6.12+. | `ioxide` |
 | [`Tcp.Big`](Tcp/Big/Program.cs) | 101 | The write path under a 100 KB body: `SEND_ZC`, slab overflow (`grow` vs `seg`), checksum-able output. | `ioxide` |
-| [`Pg`](Pg/Program.cs) | 181 | A `PgPool` per reactor: scalar queries, prepared params (`/add`, `/upper`), row streaming (`/rows`), errors and timeouts. | `ioxide.pg` |
-| [`File`](File/Program.cs) | 253 | Static files: baked responses, ring reads, disk revalidation, `SIGHUP` reload. | `ioxide.file` |
+| [`Tls.Ktls`](Tls/Ktls/Program.cs) | 133 | OpenSSL handshake on the ring, then **kernel TLS** transmit - the handler writes plaintext. | `ioxide` |
+| [`Tls.SslStream`](Tls/SslStream/Program.cs) | 100 | The BCL `SslStream` over `TcpConnectionStream` - portable userspace TLS, the kTLS comparison point. | `ioxide` |
+| [`Http2.Nghttp2`](Http2/Nghttp2/Program.cs) | 66 | HTTP/2 (h2c, prior knowledge) with nghttp2 doing framing, HPACK and flow control. | `ioxide.nghttp2` |
+| [`Http2.Managed`](Http2/Managed/Program.cs) | 66 | The same server with **zero native code** - framing, HPACK and flow control in C#. Drop-in for the above. | `ioxide.http2` |
+| [`Http2.Tls`](Http2/Tls/Program.cs) | 132 | h2 **and** http/1.1 on one port, chosen by ALPN. The HTTP/2 code is unchanged - only the pipe differs. | `ioxide.nghttp2` |
+| [`Http2.SslStream`](Http2/SslStream/Program.cs) | 100 | The same HTTP/2 over the BCL `SslStream`, via a ten-line `Stream`-to-`IDuplexPipe` adapter. | `ioxide.nghttp2` |
+| [`Http3.Nghttp3`](Http3/Nghttp3/Program.cs) | 169 | HTTP/3 with **streamed** dispatch, and a `SIGTERM` GOAWAY drain. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
+| [`Http3.Buffered`](Http3/Buffered/Program.cs) | 146 | The same server with **buffered** dispatch - one method call is the whole difference. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
+| [`Quic.Alpn`](Quic/Alpn/Program.cs) | 111 | One QUIC listener, two protocols by ALPN: h3, or raw stream echo over the dual pipe. QUIC-only - `Tcp = null`. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
 | [`Proxy.H1`](Proxy/H1/Program.cs) | 131 | A reverse proxy where both hops stay on one reactor thread. | `ioxide.httpclient` |
 | [`Proxy.H3ToH1`](Proxy/H3ToH1/Program.cs) | 106 | HTTP/3 front door, HTTP/1.1 upstream - QUIC-only frontend, keep-alive h1 pool behind. | `ioxide.ngtcp2`, `ioxide.nghttp3`, `ioxide.httpclient` |
 | [`Proxy.H3ToH2`](Proxy/H3ToH2/Program.cs) | 104 | The same proxy with the pool swapped: requests multiplex onto one h2c upstream connection. | `ioxide.ngtcp2`, `ioxide.nghttp3`, `ioxide.httpclient` |
 | [`Proxy.H3ToH3`](Proxy/H3ToH3/Program.cs) | 107 | h3 on both sides: the upstream QUIC connections share the serving socket - one fd, both directions. | `ioxide.ngtcp2`, `ioxide.nghttp3`, `ioxide.httpclient` |
 | [`Proxy.H1ToH3`](Proxy/H1ToH3/Program.cs) | 129 | h1 in, h3 out - with no `Quic` config at all: the first connect opens an ephemeral client socket. | `ioxide.httpclient` |
-| [`Nghttp3`](Nghttp3/Program.cs) | 169 | HTTP/3 with **streamed** dispatch, and a `SIGTERM` GOAWAY drain. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
-| [`Nghttp3Buffered`](Nghttp3Buffered/Program.cs) | 146 | The same server with **buffered** dispatch - one method call is the whole difference. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
-| [`Quic.Alpn`](Quic/Alpn/Program.cs) | 111 | One QUIC listener, two protocols by ALPN: h3, or raw stream echo over the dual pipe. QUIC-only - `Tcp = null`. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
-| [`Redis`](Redis/Program.cs) | 194 | A `RedisPool` per reactor: GET hot path, cache-aside, RESP types, explicit pipelining. | `ioxide.redis` |
-| [`Tls.Ktls`](Tls/Ktls/Program.cs) | 133 | OpenSSL handshake on the ring, then **kernel TLS** transmit - the handler writes plaintext. | `ioxide` |
-| [`Tls.SslStream`](Tls/SslStream/Program.cs) | 100 | The BCL `SslStream` over `TcpConnectionStream` - portable userspace TLS, the kTLS comparison point. | `ioxide` |
+| [`Clients.Pg`](Clients/Pg/Program.cs) | 181 | A `PgPool` per reactor: scalar queries, prepared params (`/add`, `/upper`), row streaming (`/rows`), errors and timeouts. | `ioxide.pg` |
+| [`Clients.Redis`](Clients/Redis/Program.cs) | 194 | A `RedisPool` per reactor: GET hot path, cache-aside, RESP types, explicit pipelining. | `ioxide.redis` |
+| [`Clients.File`](Clients/File/Program.cs) | 253 | Static files: baked responses, ring reads, disk revalidation, `SIGHUP` reload. | `ioxide.file` |
+| [`Clients.Https`](Clients/Https/Program.cs) | 160 | Calling an `https://` origin: SNI, ALPN and certificate verification on the client side. | `ioxide.httpclient` |
 
 Read `Tcp.Raw` first - every other sample is that same skeleton with one thing changed.
 
 Each project references only the packages it demonstrates: `Tcp.Raw` publishes three assemblies and
-no native libraries at all, while `Nghttp3` pulls in the ngtcp2 and nghttp3 bundles. So the build
+no native libraries at all, while `Http3.Nghttp3` pulls in the ngtcp2 and nghttp3 bundles. So the build
 graph, not a comment, decides what each sample is allowed to touch.
 
 ## What is shared, and why so little
@@ -45,7 +50,7 @@ graph, not a comment, decides what each sample is allowed to touch.
 | --- | --- |
 | `Env.cs` | `PLAYGROUND_*` parsing. Noise; you would use your own config. |
 | `QuicCert.cs` | Generating a self-signed localhost cert. X509 boilerplate, nothing to do with ioxide. |
-| `SampleAssets.cs` | Writing a demo `index.html` so `File` has something to serve. |
+| `SampleAssets.cs` | Writing a demo `index.html` so `Clients.File` has something to serve. |
 
 Everything else is duplicated across samples **on purpose**. The read/respond/`DecRef` loop appears
 in eight files because it is the ioxide idiom - the thing you came here to copy. Factoring it into a
@@ -54,8 +59,8 @@ shared `ServeAsync` would make the Playground shorter and make it useless.
 ## HTTP/3
 
 Both samples answer every request with a single reused response object, so the handler stays small
-enough to read at a glance. `Nghttp3` reads the request body through `BodyReader` while it is still
-arriving; `Nghttp3Buffered` gets it complete in `request.Body`. That one difference is the reason
+enough to read at a glance. `Http3.Nghttp3` reads the request body through `BodyReader` while it is still
+arriving; `Http3.Buffered` gets it complete in `request.Body`. That one difference is the reason
 both exist.
 
 They also listen on TCP `:8080` alongside UDP `:8443`, and answer
@@ -128,7 +133,7 @@ proxy in another. With nothing listening it answers `502` once the acquire timeo
 ## Docker
 
 `Playground/Dockerfile` builds one image per sample, selected with `--build-arg SAMPLE=<path>` from
-the repo root - `Tcp/Raw`, `Pg`, `Nghttp3` and so on, matching the directory layout. Publish
+the repo root - `Tcp/Raw`, `Clients.Pg`, `Http3.Nghttp3` and so on, matching the directory layout. Publish
 `8080/tcp`, and `8443/udp` as well for the HTTP/3 samples.
 
 io_uring pins memory, so a container running many reactors may need `--ulimit memlock=-1:-1`.
