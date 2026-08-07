@@ -1,4 +1,5 @@
 using System.Text;
+using System.Runtime.InteropServices;
 using ioxide;
 using ioxide.tls;
 using ioxide.utils;
@@ -63,6 +64,13 @@ for (int i = 0; i < threads.Length; i++)
     reactor.TcpHandle = async (r, conn) =>
     {
         TlsSession? tls = null;
+
+        // Decrypted bytes waiting to be framed. TLS hands back records, not requests: split one
+        // request across two records and each decrypts on its own, so answering per decrypt
+        // answers twice. The carry is what turns "some plaintext arrived" into "a request
+        // arrived", exactly as the plaintext samples do - ioxide does not parse HTTP for you.
+        var carry = new List<byte>();
+
         try
         {
             // The handshake reads and writes through this same connection; after it, the socket
@@ -71,9 +79,9 @@ for (int i = 0; i < threads.Length; i++)
 
             // A request can ride in with the handshake's final flight - answer it before parking
             // in ReadAsync, or the client waits on a response we never send.
-            if (tls.DrainPlaintext().Length > 0)
+            carry.AddRange(tls.DrainPlaintext());
+            if (Answer(conn, carry, response))
             {
-                conn.Write(response);
                 await conn.FlushAsync();
             }
 
@@ -81,21 +89,19 @@ for (int i = 0; i < threads.Length; i++)
             {
                 RecvSnapshot snapshot = await conn.ReadAsync();
 
-                int got = 0;
                 while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
                 {
                     if (item.HasBuffer)
                     {
                         // Records in, plaintext out - the session decrypts what the ring received.
-                        got += DecryptLength(tls, in item);
+                        Decrypt(tls, in item, carry);
                         conn.ReturnBuffer(in item);
                     }
                 }
 
-                if (got > 0)
+                if (Answer(conn, carry, response))
                 {
-                    conn.Write(response);   // plaintext: the kernel encrypts on send
-                    await conn.FlushAsync();
+                    await conn.FlushAsync();   // plaintext: the kernel encrypts on send
                 }
 
                 if (snapshot.IsClosed || tls.Closed) return;
@@ -129,5 +135,22 @@ foreach (Thread thread in threads)
 
 // Decrypt takes a raw pointer (the buffer belongs to the ring); the pointer work stays out of the
 // async handler, which cannot contain unsafe code.
-static unsafe int DecryptLength(TlsSession tls, in SpscRecvRing.Item item)
-    => tls.Decrypt(item.Ptr, item.Len).Length;
+static unsafe void Decrypt(TlsSession tls, in SpscRecvRing.Item item, List<byte> carry)
+    => carry.AddRange(tls.Decrypt(item.Ptr, item.Len));
+
+// One response per COMPLETE request in the carry, and none for a partial one. Returns whether
+// anything was written, so the caller flushes once for the batch rather than once per request.
+static bool Answer(TcpConnection conn, List<byte> carry, ReadOnlyMemory<byte> response)
+{
+    bool wrote = false;
+    int end;
+
+    while ((end = CollectionsMarshal.AsSpan(carry).IndexOf("\r\n\r\n"u8)) >= 0)
+    {
+        carry.RemoveRange(0, end + 4);
+        conn.Write(response.Span);
+        wrote = true;
+    }
+
+    return wrote;
+}

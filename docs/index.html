@@ -210,8 +210,10 @@ for (int id = 0; id &lt; threads.Length; id++)
                 {
                     ok.Span.CopyTo(writer.GetSpan(ok.Length));
                     writer.Advance(ok.Length);
-                    await writer.FlushAsync();
+                    wrote = true;
                 }
+
+                if (wrote) await writer.FlushAsync();
 
                 reader.AdvanceTo(consumed, buffer.End);   // partial tail is kept
 
@@ -437,6 +439,7 @@ foreach (Thread t in threads) t.Join();</code></pre>
     </div>
 <pre><code class="language-csharp">// dotnet add package ioxide      -- TLS ships in the core package
 // Needs the Linux &#x27;tls&#x27; module (sudo modprobe tls), OpenSSL 3, and cert.pem / key.pem.
+using System.Runtime.InteropServices;
 using ioxide;
 using ioxide.tls;
 using ioxide.utils;
@@ -482,6 +485,7 @@ for (int id = 0; id &lt; threads.Length; id++)
     reactor.TcpHandle = async (r, conn) =&gt;
     {
         TlsSession? tls = null;
+        var carry = new List&lt;byte&gt;();   // decrypted bytes waiting to be framed into requests
 
         try
         {
@@ -500,21 +504,29 @@ for (int id = 0; id &lt; threads.Length; id++)
             {
                 RecvSnapshot snapshot = await conn.ReadAsync();
 
-                int got = 0;
                 while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
                 {
                     if (item.HasBuffer)
                     {
-                        got += Decrypt(tls, in item);   // only transmit is offloaded
+                        Decrypt(tls, in item, carry);   // only transmit is offloaded
                         conn.ReturnBuffer(in item);
                     }
                 }
 
-                if (got &gt; 0)
+                // One response per COMPLETE request. TLS hands back RECORDS, not requests: a
+                // request split across two records decrypts twice, so answering on &quot;plaintext
+                // arrived&quot; would answer twice to one request. Framing is yours either way -
+                // this is the same carry the cleartext samples keep.
+                bool wrote = false;
+                int end;
+                while ((end = CollectionsMarshal.AsSpan(carry).IndexOf(&quot;\r\n\r\n&quot;u8)) &gt;= 0)
                 {
+                    carry.RemoveRange(0, end + 4);
                     conn.Write(ok.Span);   // plaintext in; the kernel produces the records
-                    await conn.FlushAsync();
+                    wrote = true;
                 }
+
+                if (wrote) await conn.FlushAsync();
 
                 if (snapshot.IsClosed || tls.Closed) return;
                 conn.ResetRead();
@@ -539,11 +551,11 @@ for (int id = 0; id &lt; threads.Length; id++)
 Console.WriteLine($&quot;TLS on :{config.Tcp.Port} (kTLS transmit offload)&quot;);
 foreach (Thread t in threads) t.Join();
 
-static unsafe int Decrypt(TlsSession tls, in SpscRecvRing.Item item)
+static unsafe void Decrypt(TlsSession tls, in SpscRecvRing.Item item, List&lt;byte&gt; carry)
 {
     fixed (byte* cipher = item.AsSpan())
     {
-        return tls.Decrypt(cipher, item.AsSpan().Length).Length;
+        carry.AddRange(tls.Decrypt(cipher, item.AsSpan().Length));
     }
 }</code></pre>
   </div>
@@ -556,6 +568,7 @@ static unsafe int Decrypt(TlsSession tls, in SpscRecvRing.Item item)
 <pre><code class="language-csharp">// dotnet add package ioxide      -- TLS ships in the core package
 // Needs the Linux &#x27;tls&#x27; module (sudo modprobe tls), OpenSSL 3, and cert.pem / key.pem.
 using System.IO.Pipelines;
+using System.Runtime.InteropServices;
 using ioxide;
 using ioxide.tls;
 
@@ -584,6 +597,7 @@ for (int id = 0; id &lt; threads.Length; id++)
     reactor.TcpHandle = async (r, conn) =&gt;
     {
         TlsSession? tls = null;
+        var carry = new List&lt;byte&gt;();   // decrypted bytes waiting to be framed into requests
 
         try
         {
@@ -609,15 +623,19 @@ for (int id = 0; id &lt; threads.Length; id++)
 
                 // The pipe hands CIPHERTEXT - only transmit is offloaded - so decrypt each
                 // segment as it is consumed.
-                int got = 0;
                 foreach (ReadOnlyMemory&lt;byte&gt; segment in result.Buffer)
                 {
-                    got += Decrypt(tls, segment.Span);
+                    Decrypt(tls, segment.Span, carry);
                 }
                 reader.AdvanceTo(result.Buffer.End);
 
-                if (got &gt; 0)
+                // Answer per REQUEST, not per decrypt - a request split across two TLS records
+                // decrypts twice, and &quot;plaintext arrived&quot; would fire for each.
+                bool wrote = false;
+                int end;
+                while ((end = CollectionsMarshal.AsSpan(carry).IndexOf(&quot;\r\n\r\n&quot;u8)) &gt;= 0)
                 {
+                    carry.RemoveRange(0, end + 4);
                     // The write side is the plain pipes path, untouched: plaintext into the
                     // slab, one flush - the kernel encrypts on send.
                     ok.Span.CopyTo(writer.GetSpan(ok.Length));
@@ -647,11 +665,11 @@ for (int id = 0; id &lt; threads.Length; id++)
 Console.WriteLine($&quot;TLS on :{config.Tcp.Port} (kTLS transmit offload, pipes surface)&quot;);
 foreach (Thread t in threads) t.Join();
 
-static unsafe int Decrypt(TlsSession tls, ReadOnlySpan&lt;byte&gt; ciphertext)
+static unsafe void Decrypt(TlsSession tls, ReadOnlySpan&lt;byte&gt; ciphertext, List&lt;byte&gt; carry)
 {
     fixed (byte* cipher = ciphertext)
     {
-        return tls.Decrypt(cipher, ciphertext.Length).Length;
+        carry.AddRange(tls.Decrypt(cipher, ciphertext.Length));
     }
 }
 </code></pre>
@@ -793,6 +811,7 @@ foreach (Thread t in threads) t.Join();
 // Needs the Linux &#x27;tls&#x27; module (sudo modprobe tls), OpenSSL 3, and cert.pem / key.pem.
 //   curl -k --http2   https://127.0.0.1:8443/     # negotiates h2
 //   curl -k --http1.1 https://127.0.0.1:8443/     # same port, gets http/1.1
+using System.Runtime.InteropServices;
 using ioxide;
 using ioxide.nghttp2;
 using ioxide.tls;
@@ -846,10 +865,26 @@ for (int id = 0; id &lt; threads.Length; id++)
 
             // Anything else: HTTP/1.1 on the same port. Written as PLAINTEXT - after the handshake
             // kernel TLS owns transmit, so there is nothing left to wrap.
+            // The first request usually rides in with the handshake's Finished flight, so it is
+            // already decrypted and sitting in the session rather than in any recv buffer.
+            var carry = new List&lt;byte&gt;(tls.DrainPlaintext().ToArray());
+
             while (true)
             {
+                // One response per COMPLETE request. TLS hands back RECORDS, not requests - split
+                // one request across two records and answering per decrypt answers twice.
+                bool wrote = false;
+                int end;
+                while ((end = CollectionsMarshal.AsSpan(carry).IndexOf(&quot;\r\n\r\n&quot;u8)) &gt;= 0)
+                {
+                    carry.RemoveRange(0, end + 4);
+                    conn.Write(http11);
+                    wrote = true;
+                }
+
+                if (wrote) await conn.FlushAsync();
+
                 RecvSnapshot snapshot = await conn.ReadAsync();
-                bool request = false;
 
                 unsafe
                 {
@@ -857,16 +892,10 @@ for (int id = 0; id &lt; threads.Length; id++)
                     {
                         if (item.HasBuffer)
                         {
-                            request |= tls.Decrypt(item.Ptr, item.Len).Length &gt; 0;
+                            carry.AddRange(tls.Decrypt(item.Ptr, item.Len));
                             conn.ReturnBuffer(in item);
                         }
                     }
-                }
-
-                if (request)
-                {
-                    conn.Write(http11);
-                    await conn.FlushAsync();
                 }
 
                 if (snapshot.IsClosed || tls.Closed) return;
