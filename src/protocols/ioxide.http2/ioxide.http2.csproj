@@ -8,7 +8,7 @@
     <RootNamespace>ioxide.http2</RootNamespace>
 
     <PackageId>ioxide.http2</PackageId>
-    <Version>0.3.149</Version>
+    <Version>0.4.152</Version>
     <Authors>MDA2AV</Authors>
     <Description>Pure-C# HTTP/2 for the ioxide io_uring runtime: framing, HPACK (static and dynamic tables, Huffman) and flow control, with zero native code. A drop-in alternative to ioxide.nghttp2 for deployments that would rather not ship a native library - same connection shape, same request and response types.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
