@@ -37,6 +37,9 @@ var config = new ServerConfig
 };
 
 byte[] body = "ok"u8.ToArray();
+
+// PLAYGROUND_INPLACE=1 swaps the inbound TLS pipe for the in-place reader.
+bool inPlace = Env.Flag("PLAYGROUND_INPLACE");
 byte[] http11Response =
 [
     .. Encoding.ASCII.GetBytes($"HTTP/1.1 200 OK\r\nContent-Length: {body.Length}\r\n\r\n"),
@@ -68,9 +71,23 @@ for (int i = 0; i < threads.Length; i++)
 
             if (tls.NegotiatedAlpn == "h2")
             {
-                // The decrypt pump lives in the pipe, so the HTTP/2 code below is identical to the
-                // cleartext sample.
-                await using var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
+                // The decrypt lives in the pipe, so the HTTP/2 code below is identical to the
+                // cleartext sample. Two implementations of the same seam:
+                //
+                //   default   TlsConnectionDualPipe          decrypts into a Pipe it owns, fed by
+                //                                            a pump task
+                //   INPLACE=1 TlsConnectionDualPipeInPlace   decrypts inside the recv buffer and
+                //                                            hands that memory out - no pump, no
+                //                                            Pipe, backpressure is the ring
+                //
+                // Both are handed to the same Nghttp2Connection, which is the point.
+                // The two share only IDuplexPipe, which is not disposable - hence the second
+                // declaration rather than one `await using`.
+                IDuplexPipe pipe = inPlace
+                    ? new TlsConnectionDualPipeInPlace(conn, tls, ownsSession: false)
+                    : new TlsConnectionDualPipe(conn, tls, ownsSession: false);
+                await using IAsyncDisposable owner = (IAsyncDisposable)pipe;
+
                 await new Nghttp2Connection(pipe).RunBufferedAsync(_ => new Nghttp2Response
                 {
                     Status = 200,
@@ -124,7 +141,8 @@ for (int i = 0; i < threads.Length; i++)
 }
 
 Console.WriteLine($"[http2-tls] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
-                + $"ALPN h2 then http/1.1, cert {certPath}");
+                + $"ALPN h2 then http/1.1, cert {certPath}, "
+                + $"inbound={(inPlace ? "in-place" : "pump+Pipe")}");
 
 foreach (Thread thread in threads)
 {

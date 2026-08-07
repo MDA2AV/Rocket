@@ -40,6 +40,12 @@ internal static unsafe partial class OpenSsl
     [LibraryImport(Ssl)] public static partial int SSL_read(nint ssl, byte* buf, int num);
     [LibraryImport(Ssl)] public static partial int SSL_get_error(nint ssl, int ret);
 
+    /// <summary>
+    /// Plaintext already decrypted and waiting, in bytes. Distinguishes "the destination filled but
+    /// there is more" from "that was everything", which a zero-length SSL_read cannot.
+    /// </summary>
+    [LibraryImport(Ssl)] public static partial int SSL_pending(nint ssl);
+
     /// <summary>What ALPN settled on, or nothing when the client offered none we serve.</summary>
     [LibraryImport(Ssl)] public static partial void SSL_get0_alpn_selected(nint ssl, byte** data, uint* length);
 
