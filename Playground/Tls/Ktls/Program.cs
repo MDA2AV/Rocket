@@ -34,6 +34,9 @@ var config = new ServerConfig
 
 var tlsOptions = new TlsOptions
 {
+    // PLAYGROUND_KTLS_RX=1 lets the kernel decrypt inbound too, so recv returns plaintext and
+    // TlsSession.Decrypt becomes a pass-through.
+    KernelRx = Env.Flag("PLAYGROUND_KTLS_RX"),
     CertificatePath = certPath,
     KeyPath         = keyPath,
 };

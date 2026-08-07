@@ -21,4 +21,29 @@ public sealed class TlsOptions
     /// rather than being rejected - it may still speak HTTP/1.1 perfectly well.
     /// </summary>
     public string[] Alpn { get; init; } = ["http/1.1"];
+
+    /// <summary>
+    /// Let the kernel decrypt inbound records too, not just encrypt outbound ones. Off by default.
+    ///
+    /// TLS in ioxide is asymmetric: kTLS TX is programmed for every connection, so responses are
+    /// encrypted by the kernel on the existing send path, while inbound records are decrypted in
+    /// userspace by OpenSSL. Turning this on programs TLS_RX as well, after which an ordinary recv
+    /// returns PLAINTEXT and <see cref="TlsSession.Decrypt"/> is a no-op - plaintext then lands
+    /// directly in ring memory, so the zero-copy reader works on TLS connections exactly as it does
+    /// on cleartext ones.
+    ///
+    /// Two reasons it is opt-in.
+    ///
+    /// The handoff must land on a record boundary. Whatever the handshake already pulled off the
+    /// socket is invisible to the kernel, so the record sequence it starts at has to account for
+    /// it - and if the handshake left a PARTIAL record behind, those bytes are gone and no sequence
+    /// number can recover them. That connection silently stays on the userspace path.
+    ///
+    /// And a recv can then fail with EIO. With kTLS RX a non-application-data record - a TLS 1.3
+    /// KeyUpdate, or an alert - is only retrievable through recvmsg with a TLS_GET_RECORD_TYPE
+    /// control message. The reactor's TCP hot path uses IORING_OP_RECV, which carries no control
+    /// data, so the kernel refuses the read instead. Clients that never send one are unaffected;
+    /// one that does loses the connection.
+    /// </summary>
+    public bool KernelRx { get; init; }
 }

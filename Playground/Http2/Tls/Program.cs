@@ -58,6 +58,8 @@ for (int i = 0; i < threads.Length; i++)
 
     reactor.OnStart = r => TlsService.Start(r, new TlsOptions
     {
+        // PLAYGROUND_KTLS_RX=1 hands inbound decryption to the kernel as well as outbound.
+        KernelRx = Env.Flag("PLAYGROUND_KTLS_RX"),
         CertificatePath = certPath,
         KeyPath = keyPath,
 
@@ -87,13 +89,25 @@ for (int i = 0; i < threads.Length; i++)
                 // Both are handed to the same Nghttp2Connection, which is the point.
                 // The two share only IDuplexPipe, which is not disposable - hence the second
                 // declaration rather than one `await using`.
-                IDuplexPipe pipe = tlsPipe switch
+                // THE POINT OF kTLS RX. The kernel already decrypted these bytes, so plaintext is
+                // sitting in ring memory - which means the ordinary zero-copy reader can hand it
+                // straight out. No pump, no owned Pipe, no decrypt step: a TLS connection uses the
+                // exact same TcpConnectionDualPipe a cleartext one does.
+                // ...but only when the handshake swallowed nothing. If the client's first bytes
+                // rode in with its Finished flight they were decrypted into the session, not into
+                // any recv buffer, and a pipe that knows nothing about TLS will never yield them.
+                // For h2 that is the connection preface, so it is the common case, not an edge one.
+                IDuplexPipe pipe = tls.KernelRx && tls.DrainPlaintext().IsEmpty
+                    ? new TcpConnectionDualPipe(conn)
+                    : tlsPipe switch
                 {
                     "inplace" => new TlsConnectionDualPipeInPlace(conn, tls, ownsSession: false),
                     "direct"  => new TlsConnectionDualPipeDirect(conn, tls, ownsSession: false),
                     _         => new TlsConnectionDualPipe(conn, tls, ownsSession: false),
                 };
-                await using IAsyncDisposable owner = (IAsyncDisposable)pipe;
+                // Only the TLS pipes own anything; the plain one is a view over the connection.
+                await using IAsyncDisposable owner =
+                    pipe as IAsyncDisposable ?? NullAsyncDisposable.Instance;
 
                 await new Nghttp2Connection(pipe).RunBufferedAsync(_ => new Nghttp2Response
                 {
@@ -173,4 +187,12 @@ Console.WriteLine($"[http2-tls] {config.ReactorCount} reactors on :{config.Tcp!.
 foreach (Thread thread in threads)
 {
     thread.Join();
+}
+
+// IDuplexPipe is not disposable, and TcpConnectionDualPipe genuinely has nothing to release - it
+// is a pair of views over the connection. This keeps the one `await using` above honest.
+internal sealed class NullAsyncDisposable : IAsyncDisposable
+{
+    public static readonly NullAsyncDisposable Instance = new();
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }
