@@ -34,7 +34,12 @@ public sealed class TlsService
     }
 
     /// <summary>Create the per-reactor service and register it. Call from <c>Reactor.OnStart</c>.</summary>
-    public static TlsService Start(Reactor reactor, TlsOptions options)
+    /// <param name="register">
+    /// When false the service is not registered on the reactor - for hosts that run SEVERAL TLS
+    /// contexts on one reactor (one per listen port, say) and hold the instances themselves.
+    /// <see cref="Reactor.GetService{T}"/> only ever returns the last registered one.
+    /// </param>
+    public static TlsService Start(Reactor reactor, TlsOptions options, bool register = true)
     {
         // RX alone cannot be programmed: the handoff shares the TCP_ULP that EnableTx installs.
         // Refuse loudly rather than silently serving the userspace path the caller opted out of.
@@ -43,6 +48,19 @@ public sealed class TlsService
             throw new ArgumentException(
                 "KernelRx requires KernelTx: kTLS RX is programmed at the same handoff as TX. " +
                 "Set KernelTx = true as well, or drop KernelRx.", nameof(options));
+        }
+
+        // The certificate and key each come from exactly one place - a path or in-memory PEM.
+        // Neither set (possible now that the path is not `required`) and both set are refused.
+        if ((options.CertificatePath is null) == (options.CertificatePem is null))
+        {
+            throw new ArgumentException(
+                "Exactly one certificate source: set CertificatePath or CertificatePem.", nameof(options));
+        }
+        if ((options.KeyPath is null) == (options.KeyPem is null))
+        {
+            throw new ArgumentException(
+                "Exactly one key source: set KeyPath or KeyPem.", nameof(options));
         }
 
         nint ctx = OpenSsl.SSL_CTX_new(OpenSsl.TLS_server_method());
@@ -69,14 +87,7 @@ public sealed class TlsService
             OpenSsl.SSL_CTX_set_num_tickets(ctx, 0);
         }
 
-        if (OpenSsl.SSL_CTX_use_certificate_chain_file(ctx, options.CertificatePath) != 1)
-        {
-            throw new IOException($"certificate '{options.CertificatePath}': {OpenSsl.LastError()}");
-        }
-        if (OpenSsl.SSL_CTX_use_PrivateKey_file(ctx, options.KeyPath, OpenSsl.SSL_FILETYPE_PEM) != 1)
-        {
-            throw new IOException($"private key '{options.KeyPath}': {OpenSsl.LastError()}");
-        }
+        LoadCertificate(ctx, options);
 
         // The ALPN protocol to select is handed to the (static) callback via its arg, so the
         // configured TlsOptions.Alpn is honored instead of being hard-coded.
@@ -93,8 +104,123 @@ public sealed class TlsService
         }
 
         var service = new TlsService(ctx, alpnHandle, options.KernelRx, options.KernelTx);
-        reactor.AddService(service);
+        if (register)
+        {
+            reactor.AddService(service);
+        }
         return service;
+    }
+
+    // Certificate and key, from whichever source the options carry. The file route is OpenSSL's
+    // own loaders; the in-memory route reads the same PEM through a memory BIO.
+    private static void LoadCertificate(nint ctx, TlsOptions options)
+    {
+        if (options.CertificatePath is not null)
+        {
+            if (OpenSsl.SSL_CTX_use_certificate_chain_file(ctx, options.CertificatePath) != 1)
+            {
+                throw new IOException($"certificate '{options.CertificatePath}': {OpenSsl.LastError()}");
+            }
+        }
+        else
+        {
+            LoadCertificatePem(ctx, options.CertificatePem!);
+        }
+
+        if (options.KeyPath is not null)
+        {
+            if (OpenSsl.SSL_CTX_use_PrivateKey_file(ctx, options.KeyPath, OpenSsl.SSL_FILETYPE_PEM) != 1)
+            {
+                throw new IOException($"private key '{options.KeyPath}': {OpenSsl.LastError()}");
+            }
+        }
+        else
+        {
+            LoadKeyPem(ctx, options.KeyPem!);
+        }
+    }
+
+    private static unsafe void LoadCertificatePem(nint ctx, string pem)
+    {
+        byte[] bytes = System.Text.Encoding.ASCII.GetBytes(pem);
+        fixed (byte* p = bytes)
+        {
+            // The memory BIO reads the pinned buffer in place, so the fixed block spans every read.
+            nint bio = OpenSsl.BIO_new_mem_buf(p, bytes.Length);
+            if (bio == 0)
+            {
+                throw new IOException($"CertificatePem: {OpenSsl.LastError()}");
+            }
+
+            try
+            {
+                // First PEM block is the leaf; use_certificate takes its own reference.
+                nint leaf = OpenSsl.PEM_read_bio_X509(bio, 0, 0, 0);
+                if (leaf == 0)
+                {
+                    throw new IOException($"CertificatePem carries no certificate: {OpenSsl.LastError()}");
+                }
+                int ok = OpenSsl.SSL_CTX_use_certificate(ctx, leaf);
+                OpenSsl.X509_free(leaf);
+                if (ok != 1)
+                {
+                    throw new IOException($"CertificatePem: {OpenSsl.LastError()}");
+                }
+
+                // Any further blocks are the chain, closest-to-leaf first, exactly as in a chain
+                // file. add_extra_chain_cert takes ownership on success, so no free there.
+                while (true)
+                {
+                    nint extra = OpenSsl.PEM_read_bio_X509(bio, 0, 0, 0);
+                    if (extra == 0)
+                    {
+                        OpenSsl.ERR_clear_error();   // end-of-data queues PEM_R_NO_START_LINE
+                        break;
+                    }
+                    if (OpenSsl.SSL_CTX_ctrl(ctx, OpenSsl.SSL_CTRL_EXTRA_CHAIN_CERT, 0, extra) != 1)
+                    {
+                        OpenSsl.X509_free(extra);
+                        throw new IOException($"CertificatePem chain: {OpenSsl.LastError()}");
+                    }
+                }
+            }
+            finally
+            {
+                OpenSsl.BIO_free(bio);
+            }
+        }
+    }
+
+    private static unsafe void LoadKeyPem(nint ctx, string pem)
+    {
+        byte[] bytes = System.Text.Encoding.ASCII.GetBytes(pem);
+        fixed (byte* p = bytes)
+        {
+            nint bio = OpenSsl.BIO_new_mem_buf(p, bytes.Length);
+            if (bio == 0)
+            {
+                throw new IOException($"KeyPem: {OpenSsl.LastError()}");
+            }
+
+            try
+            {
+                nint key = OpenSsl.PEM_read_bio_PrivateKey(bio, 0, 0, 0);
+                if (key == 0)
+                {
+                    throw new IOException($"KeyPem carries no private key: {OpenSsl.LastError()}");
+                }
+                int ok = OpenSsl.SSL_CTX_use_PrivateKey(ctx, key);
+                OpenSsl.EVP_PKEY_free(key);
+                if (ok != 1)
+                {
+                    throw new IOException($"KeyPem: {OpenSsl.LastError()}");
+                }
+            }
+            finally
+            {
+                OpenSsl.BIO_free(bio);
+            }
+        }
     }
 
     /// <summary>

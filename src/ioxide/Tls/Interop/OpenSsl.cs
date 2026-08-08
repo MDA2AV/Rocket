@@ -14,6 +14,7 @@ internal static unsafe partial class OpenSsl
     public const int SSL_ERROR_ZERO_RETURN = 6;
     public const int SSL_CTRL_SET_MIN_PROTO_VERSION = 123;
     public const int SSL_CTRL_SET_MAX_PROTO_VERSION = 124;
+    public const int SSL_CTRL_EXTRA_CHAIN_CERT = 14;
     public const int TLS1_3_VERSION = 0x0304;
     public const int SSL_TLSEXT_ERR_OK = 0;
     public const int SSL_TLSEXT_ERR_NOACK = 3;
@@ -59,6 +60,18 @@ internal static unsafe partial class OpenSsl
 
     [LibraryImport(Crypto)] public static partial nint BIO_new(nint type);
     [LibraryImport(Crypto)] public static partial nint BIO_s_mem();
+    [LibraryImport(Crypto)] public static partial nint BIO_new_mem_buf(byte* buf, int len);
+    [LibraryImport(Crypto)] public static partial int BIO_free(nint bio);
+
+    // PEM-from-memory loading: the same certificate/key material a chain file carries, read
+    // through a memory BIO instead. The password-callback arguments are always null here.
+    [LibraryImport(Crypto)] public static partial nint PEM_read_bio_X509(nint bio, nint x, nint cb, nint u);
+    [LibraryImport(Crypto)] public static partial nint PEM_read_bio_PrivateKey(nint bio, nint pkey, nint cb, nint u);
+    [LibraryImport(Crypto)] public static partial void X509_free(nint x509);
+    [LibraryImport(Crypto)] public static partial void EVP_PKEY_free(nint pkey);
+    [LibraryImport(Crypto)] public static partial void ERR_clear_error();
+    [LibraryImport(Ssl)] public static partial int SSL_CTX_use_certificate(nint ctx, nint x509);
+    [LibraryImport(Ssl)] public static partial int SSL_CTX_use_PrivateKey(nint ctx, nint pkey);
     [LibraryImport(Crypto)] public static partial int BIO_write(nint bio, byte* data, int dlen);
     [LibraryImport(Crypto)] public static partial int BIO_read(nint bio, byte* data, int dlen);
     [LibraryImport(Crypto)] public static partial nuint BIO_ctrl_pending(nint bio);
