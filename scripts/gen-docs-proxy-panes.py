@@ -84,8 +84,8 @@ NOTES = {
     "H3ToH1": "QUIC-only frontend: <code>Tcp = null</code>, so every TCP socket this process owns is "
               "outbound. The h3 server and the h1 client share the reactor and nothing else.",
     "H3ToH2": "The same program as <b>h3 &rarr; h1</b> with the pool swapped - which is the whole point "
-              "of the matrix. Concurrent h3 requests fan into one h2c upstream connection instead of "
-              "taking a keep-alive connection each.",
+              "of the matrix. Concurrent h3 requests fan into one h2-over-TLS upstream connection "
+              "instead of taking a keep-alive connection each.",
     "H3ToH3": "QUIC on both sides, and the upstream connections share the serving socket: one fd, both "
               "directions. Nothing else in this set collapses that far.",
 }

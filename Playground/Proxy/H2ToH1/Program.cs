@@ -15,11 +15,11 @@ using Playground.Shared;
 //  the handshake, before a single byte of HTTP exists.
 //
 //  Note what Nghttp2Connection is handed - a TlsConnectionDualPipe. It never learns that TLS is
-//  involved: the pipe decrypts on the way in and kTLS encrypts on the way out, so the HTTP/2 code
+//  involved: the pipe decrypts on the way in and encrypts on the way out, so the HTTP/2 code
 //  is byte-for-byte the h2c version.
 //
 //      # a TLS origin to forward to
-//      PLAYGROUND_PORT=8444 dotnet run -c Release --project Playground/Tls/Ktls
+//      PLAYGROUND_PORT=8444 dotnet run -c Release --project Playground/Tls/OpenSsl
 //      dotnet run -c Release --project Playground/Proxy/H2ToH1
 //      curl -k --http2 https://127.0.0.1:8443/
 //
@@ -30,7 +30,7 @@ using Playground.Shared;
 //  unbounded, with the whole acquire bounded by HttpClientOptions.AcquireTimeoutMs - a saturated
 //  origin surfaces as a 502 on that stream, not as an fd leak.
 //
-//  Needs the Linux 'tls' module (sudo modprobe tls). Needs: ioxide, ioxide.nghttp2, ioxide.httpclient
+//  Needs: ioxide, ioxide.nghttp2, ioxide.httpclient
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 (string certPath, string keyPath) = QuicCert.Ensure(

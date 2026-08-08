@@ -20,7 +20,7 @@ using Playground.Shared;
 //  run two different protocol loops.
 //
 //  Note what Nghttp2Connection is handed: a TlsConnectionDualPipe. It never learns that TLS is
-//  involved - the pipe decrypts on the way in, and kTLS encrypts on the way out, so the protocol
+//  involved - the pipe decrypts on the way in and encrypts on the way out, so the protocol
 //  code is byte-for-byte the same as the h2c sample. Needs: ioxide, ioxide.nghttp2
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -104,22 +104,9 @@ for (int i = 0; i < threads.Length; i++)
             if (tls.NegotiatedAlpn == "h2")
             {
                 // The decrypt lives in the pipe, so the HTTP/2 code below is identical to the
-                // cleartext sample. Two implementations of the same seam:
-                //
-                //   default   TlsConnectionDualPipe          decrypts into a Pipe it owns, fed by
-                //                                            a pump task
-                //   INPLACE=1 TlsConnectionDualPipeInPlace   decrypts inside the recv buffer and
-                //                                            hands that memory out - no pump, no
-                //                                            Pipe, backpressure is the ring
-                //
-                // Both are handed to the same Nghttp2Connection, which is the point.
-                // The two share only IDuplexPipe, which is not disposable - hence the second
-                // declaration rather than one `await using`.
-                // One type, both worlds. Which halves it uses is decided by what the handshake
-                // achieved, not by anything chosen here - see TlsConnectionDualPipe.
-                var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
-
-                await using var owner = pipe;
+                // cleartext sample. Which halves the pipe uses is decided by what the handshake
+                // achieved, not by anything chosen here.
+                await using var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
 
                 await new Nghttp2Connection(pipe).RunBufferedAsync(_ => new Nghttp2Response
                 {
@@ -129,8 +116,7 @@ for (int i = 0; i < threads.Length; i++)
                 return;
             }
 
-            // Anything else: HTTP/1.1 on the same port, written as plaintext because kTLS is
-            // producing the records.
+            // Anything else: HTTP/1.1 on the same port.
             //
             // The carry is not incidental. TLS hands back RECORDS, not requests, so a request
             // split across two records decrypts twice - and answering on "plaintext arrived"

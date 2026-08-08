@@ -135,7 +135,7 @@ for (int i = 0; i < threads.Length; i++)
 
                 if (Answer(conn, tls, carry, response))
                 {
-                    await conn.FlushAsync();   // plaintext: the kernel encrypts on send
+                    await conn.FlushAsync();
                 }
 
                 if (snapshot.IsClosed || tls.Closed) return;

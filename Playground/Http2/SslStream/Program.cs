@@ -7,8 +7,8 @@ using ioxide.nghttp2;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  http2-sslstream - HTTP/2 over the BCL's SslStream instead of kTLS. Fully managed, portable,
-//  no kernel module, and slower - every byte is encrypted in userspace both ways.
+//  http2-sslstream - HTTP/2 over the BCL's SslStream instead of ioxide's own termination. Fully
+//  managed, portable, and slower - the bytes cross a Stream both ways.
 //
 //      dotnet run -c Release --project Playground/Http2/SslStream
 //      curl -k --http2 https://127.0.0.1:8443/

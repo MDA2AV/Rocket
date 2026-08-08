@@ -19,8 +19,9 @@ PANES = {
         "directions unless you ask for this, and that line is what makes the <code>conn.Write</code> "
         "below legal: it puts PLAINTEXT into the slab and the kernel turns it into records. Without "
         "it the same call would put <b>cleartext on the wire</b>, which is why every other sample "
-        "goes through <code>TlsSession.Write</code> - correct in either mode. Receive stays in "
-        "userspace either way. Compare "
+        "goes through <code>TlsSession.Write</code> - correct in either mode. Receive follows the "
+        "<code>kernelRx</code> knob: userspace by default, kernel-decrypted when you flip it "
+        "(experimental). Compare "
         "<label for=\"tab-tlsossl\" class=\"ex-jump\">openssl &middot; raw</label>."),
     "tlsossl": (
         "Tls/OpenSsl", "OpenSSL &middot; raw ring", "ioxide",
@@ -57,12 +58,11 @@ PANES = {
         "Tls/SslStream", "TLS &middot; SslStream", "ioxide",
         ["curl -k https://127.0.0.1:8443/"],
         "The third TLS backend, and the portable one: the BCL's <code>SslStream</code> over "
-        "<code>TcpConnectionStream</code>. Fully managed, full-featured - client certificates, "
-        "resumption, TLS 1.2 - and the slowest of the three, because every byte is encrypted in "
-        "userspace <em>and</em> copied through a <code>Stream</code>. Reach for it when you need "
-        "something OpenSSL itself cannot give you; otherwise "
-        "<label for=\"tab-tlsossl\" class=\"ex-jump\">openssl &middot; raw</label> gets you the same "
-        "features on the ring."),
+        "<code>TcpConnectionStream</code>. Fully managed, full-featured, and the slowest of the "
+        "three, because the bytes are copied through a <code>Stream</code> both ways. Reach for it "
+        "for <b>client certificates</b> - the ring-native path does not do mTLS - or anything else "
+        "OpenSSL-on-the-ring does not expose; for TLS 1.2 and resumption the default already has "
+        "you covered: <label for=\"tab-tlsossl\" class=\"ex-jump\">openssl &middot; raw</label>."),
     "big": (
         "Tcp/Big", "TCP &middot; large responses", "ioxide",
         ["curl -s http://127.0.0.1:8080/ | wc -c"],
@@ -102,8 +102,8 @@ PANES = {
         "HTTP/2 over the BCL's <code>SslStream</code>, and the point is the ten-line "
         "<code>Stream</code>-to-<code>IDuplexPipe</code> adapter at the bottom. "
         "<code>Nghttp2Connection</code> takes a pipe, so the same HTTP/2 code runs over the ring "
-        "directly, over kTLS, or over <code>SslStream</code> - the transport is a constructor "
-        "argument, not a branch inside the protocol."),
+        "directly, over ioxide's TLS, or over <code>SslStream</code> - the transport is a "
+        "constructor argument, not a branch inside the protocol."),
     "h3buf": (
         "Http3/Buffered", "HTTP/3 &middot; buffered dispatch", "ioxide + ioxide.ngtcp2 + ioxide.nghttp3",
         ["curl --http3-only -k https://127.0.0.1:8443/"],

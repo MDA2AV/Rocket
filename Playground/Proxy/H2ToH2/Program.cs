@@ -24,7 +24,7 @@ using Playground.Shared;
 //      dotnet run -c Release --project Playground/Proxy/H2ToH2
 //      curl -k --http2 https://127.0.0.1:8443/
 //
-//  Needs the Linux 'tls' module (sudo modprobe tls). Needs: ioxide, ioxide.nghttp2, ioxide.httpclient
+//  Needs: ioxide, ioxide.nghttp2, ioxide.httpclient
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 (string certPath, string keyPath) = QuicCert.Ensure(

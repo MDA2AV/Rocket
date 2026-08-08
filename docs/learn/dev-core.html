@@ -411,7 +411,7 @@ internal void Clear()
       <code>Stream</code> (so <code>SslStream</code> and other BCL code can ride a connection - see
       <a href="dev-tls.html">TLS internals</a>), and a duplex pipe pairing.</li>
     </ul>
-<p class="src"><b>ConnectionStream.cs</b> · the Stream write bridge - stage into the slab, then chain onto the connection's flush source (no async state machine, so an SslStream write still resumes inline)</p>
+<p class="src"><b>TcpConnectionStream.cs</b> · the Stream write bridge - stage into the slab, then chain onto the connection's flush source (no async state machine, so an SslStream write still resumes inline)</p>
 <pre><code class="language-csharp">public override ValueTask WriteAsync(ReadOnlyMemory&lt;byte&gt; buffer, CancellationToken cancellationToken = default)
 {
     Span&lt;byte&gt; destination = _conn.GetSpan(1);   // full slab when empty
@@ -434,7 +434,7 @@ internal void Clear()
     _pendingFlush.UnsafeOnCompleted(_onFlushDone);
     return new ValueTask(this, _writeCore.Version);
 }</code></pre>
-<p>One subtlety: a <code>ConnectionStream</code> is <em>both</em> an
+<p>One subtlety: a <code>TcpConnectionStream</code> is <em>both</em> an
 <code>IValueTaskSource&lt;int&gt;</code> (read) and an <code>IValueTaskSource</code> (write) at once -
 the returned value task's static type (<code>ValueTask&lt;int&gt;</code> vs <code>ValueTask</code>)
 routes each <code>GetResult</code>/<code>OnCompleted</code> to the right backing core, so read and

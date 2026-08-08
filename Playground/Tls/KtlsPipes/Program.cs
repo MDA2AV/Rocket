@@ -31,8 +31,8 @@ using Playground.Shared;
 //  userspace reader whatever the config said. TlsSession reports what actually happened.
 //
 //  Compare the raw-ring pair, Playground/Tls/Ktls and Playground/Tls/OpenSsl. Those two DO differ
-//  in the handler, because at that level the backend is visible: kTLS writes plaintext, OpenSSL
-//  calls WriteEncrypted. Over a pipe it is not. Needs: ioxide
+//  in the handler, because at that level the backend is visible: kTLS writes plaintext straight
+//  to the connection, OpenSSL goes through TlsSession.Write. Over a pipe it is not. Needs: ioxide
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 // ── Knobs ────────────────────────────────────────────────────────────────────────────────────
@@ -49,6 +49,13 @@ Env.Override(ref port, ref reactors, ref bodyBytes);
 // A real PEM pair, or null to generate a self-signed localhost cert on first run.
 string? certOverride = null;
 string? keyOverride  = null;
+
+// Hand INBOUND decryption to the kernel too. Off by default and experimental: about one first
+// connection in twelve fails outright, and a client sending a TLS 1.3 KeyUpdate loses the
+// connection. Transmit stays kernel-side either way - that is the point of this sample.
+bool kernelRx = false;
+
+Env.OverrideKtls(ref kernelRx);
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 (string certPath, string keyPath) = QuicCert.Ensure(certOverride, keyOverride);
@@ -67,10 +74,12 @@ var tlsOptions = new TlsOptions
     CertificatePath = certPath,
     KeyPath = keyPath,
 
-    // NOT the default - TLS is OpenSSL both ways unless you ask for this. The kernel encrypts
-    // outbound records while receive stays in OpenSSL, so this is the mixed mode: kTLS TX,
-    // userspace RX. See Playground/Tls/OpenSslPipes for the same server without this line.
+    // NOT the default - TLS is OpenSSL both ways unless you ask for this. As shipped this is the
+    // mixed mode, kernel TX with OpenSSL RX; Playground/Tls/OpenSslPipes is the same server
+    // without this line.
     KernelTx = true,
+
+    KernelRx = kernelRx,
 };
 
 byte[] body = new byte[bodyBytes];
@@ -156,7 +165,8 @@ for (int i = 0; i < threads.Length; i++)
 }
 
 Console.WriteLine($"[tls-ktls-pipes] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
-                + $"{bodyBytes}-byte body, tx={(tlsOptions.KernelTx ? "kernel" : "openssl")}");
+                + $"{bodyBytes}-byte body, tx={(tlsOptions.KernelTx ? "kernel" : "openssl")}, "
+                + $"rx={(kernelRx ? "kernel (experimental)" : "openssl")}");
 
 foreach (Thread thread in threads)
 {

@@ -45,7 +45,7 @@
     them. <b><code>ioxide.tls</code></b> is the native path: the handshake runs over the ring,
     OpenSSL does the record crypto in both directions by default, and kernel TLS transmit offload
     is one flag away for the deployments that can use it. <b>SslStream</b> over
-    <code>ConnectionStream</code> is the portable path: fully managed, full-featured, and a bit
+    <code>TcpConnectionStream</code> is the portable path: fully managed, full-featured, and a bit
     slower. Both terminate on a <a href="multiport.html">dedicated port</a> and need nothing from
     the core engine beyond what is already public - and both ship <b>inside the <code>ioxide</code>
     package</b>. The namespace is still <code>ioxide.tls</code>, but there is no separate
@@ -55,7 +55,7 @@
     hand-off work is in <a href="dev-tls.html">ioxide.tls internals</a>.</div>
 
     <table>
-      <tr><th></th><th><code>ioxide.tls</code></th><th>SslStream + <code>ConnectionStream</code></th></tr>
+      <tr><th></th><th><code>ioxide.tls</code></th><th>SslStream + <code>TcpConnectionStream</code></th></tr>
       <tr><td>crypto</td><td>OpenSSL; kernel TX offload opt-in</td><td>fully managed</td></tr>
       <tr><td>copies</td><td>one staged copy; zero-copy send under kTLS TX</td><td>buffered both ways</td></tr>
       <tr><td>TLS versions</td><td>1.2 and 1.3 (1.3 only under kTLS)</td><td>1.2 and 1.3</td></tr>
@@ -193,7 +193,7 @@ if (tls.NegotiatedAlpn == "h2")
     return;
 }
 
-// http/1.1 on the same port, written as plaintext - kTLS owns transmit from here.
+// http/1.1 on the same port - tls.Write encrypts correctly in either backend.
 </code></pre>
     <p><code>TlsConnectionDualPipe</code> is what makes the branch cheap. It is an
     <code>IDuplexPipe</code> whose reader decrypts on the way in and whose writer delegates to the
@@ -277,20 +277,22 @@ if (tls.NegotiatedAlpn == "h2")
     <p>The remainder of this section is about kTLS specifically.
     The cost is dominated by the <em>inherent</em> work of encrypting each response - which the
     kernel does, on the existing send path, with no userspace copy - plus the small fixed cost of
-    decrypting each request. There is no managed-crypto tax and no extra copy on the send side,
-    which is exactly why it beats a userspace TLS stack: those copy plaintext into a TLS library
-    before encrypting; kTLS skips that copy entirely. The remaining gap to plaintext is the AES-GCM
-    work itself, which no TLS implementation avoids.</p>
+    decrypting each request. Skipping the userspace copy does <em>not</em> make it faster than
+    OpenSSL on the ring: the table above has OpenSSL level or ahead at every size, because the
+    crypto dominates and the kernel path gives up batching the userspace one keeps. What the
+    kernel path uniquely enables is <code>sendfile</code> and NIC offload - which loopback numbers
+    cannot show. The remaining gap to plaintext is the AES-GCM work itself, which no TLS
+    implementation avoids.</p>
 
-    <h2>SslStream over ConnectionStream</h2>
+    <h2>SslStream over TcpConnectionStream</h2>
     <p>When you want TLS without the kernel module, or you need TLS 1.2 clients, client
     certificates, or session resumption, use the BCL's <code>SslStream</code> over a
-    <code>ConnectionStream</code>. <code>ConnectionStream</code> is a general-purpose
+    <code>TcpConnectionStream</code>. <code>TcpConnectionStream</code> is a general-purpose
     <code>Stream</code> over a connection (in the core engine), so this path needs nothing from
     <code>ioxide.tls</code> at all:</p>
 <pre><code class="language-csharp">reactor.TcpHandle = async (r, conn) =&gt;
 {
-    var ssl = new SslStream(new ConnectionStream(conn), leaveInnerStreamOpen: false);
+    var ssl = new SslStream(new TcpConnectionStream(conn), leaveInnerStreamOpen: false);
     await ssl.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
     {
         ServerCertificate    = cert,
@@ -308,7 +310,7 @@ if (tls.NegotiatedAlpn == "h2")
     ssl.Dispose();
     conn.DecRef();
 };</code></pre>
-    <p><b>It stays on the reactor.</b> <code>ConnectionStream</code> is built on the same
+    <p><b>It stays on the reactor.</b> <code>TcpConnectionStream</code> is built on the same
     <code>RunContinuationsAsynchronously = false</code> value-task sources as the rest of the
     engine, and <code>SslStream</code> uses <code>ConfigureAwait(false)</code> and does its crypto
     inline - so for request/response traffic the whole thing resumes inline on the reactor thread,
@@ -319,13 +321,14 @@ if (tls.NegotiatedAlpn == "h2")
     <p><b>The trade-off is throughput.</b> <code>SslStream</code> buffers and copies on both sides
     and does all crypto in managed code, so it runs around 0.65&times; the throughput of kTLS on
     the same workload. In return you get TLS 1.2 and 1.3, client certificates, resumption, and zero
-    native dependencies - portable to any OS. The <code>ConnectionStream</code> bridge itself is
+    native dependencies - portable to any OS. The <code>TcpConnectionStream</code> bridge itself is
     allocation-free and is not the bottleneck; the cost is <code>SslStream</code>'s own.</p>
 
     <h2>Which to use</h2>
-    <p>Three options, not two - and the middle one is new. It used to be that wanting TLS 1.2,
-    resumption or client certificates meant leaving the ring for <code>SslStream</code>. It no
-    longer does: <code>KernelTx = false</code> gives those on the ring-native path.</p>
+    <p>Three options, not two - and the middle one is new. It used to be that wanting TLS 1.2 or
+    resumption meant leaving the ring for <code>SslStream</code>. It no longer does: the default
+    gives both on the ring-native path. Client certificates remain the exception - the ring-native
+    path does not do mTLS, so that still means <code>SslStream</code>.</p>
     <ul>
       <li><b>kTLS</b> (<code>KernelTx = true</code>) &rarr; you are on Linux 6+ with the
       <code>tls</code> module, TLS 1.3 and ALPN are enough, and you want <code>sendfile</code> or a
@@ -335,7 +338,7 @@ if (tls.NegotiatedAlpn == "h2")
       that lacks one; TLS 1.2 available, any ciphersuite, resumption back, and no
       handshake-alignment constraint. Costs nothing measurable here - see the table above. Sample:
       <a href="https://github.com/MDA2AV/ioxide/tree/main/Playground/Tls/OpenSsl">Tls/OpenSsl</a>.</li>
-      <li><b>SslStream</b> over <code>ConnectionStream</code> &rarr; now only for what OpenSSL itself
+      <li><b>SslStream</b> over <code>TcpConnectionStream</code> &rarr; now only for what OpenSSL itself
       cannot give you, or when you want the BCL's stack specifically. It is the slowest of the
       three, because every byte is encrypted in userspace <em>and</em> copied through a
       <code>Stream</code>.</li>

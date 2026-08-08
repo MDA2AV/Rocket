@@ -270,7 +270,7 @@ foreach (Thread thread in threads)
 {
     thread.Join();
 }</code></pre>
-    <p class="ex-foot">The third TLS backend, and the portable one: the BCL's <code>SslStream</code> over <code>TcpConnectionStream</code>. Fully managed, full-featured - client certificates, resumption, TLS 1.2 - and the slowest of the three, because every byte is encrypted in userspace <em>and</em> copied through a <code>Stream</code>. Reach for it when you need something OpenSSL itself cannot give you; otherwise <label for="tab-tlsossl" class="ex-jump">openssl &middot; raw</label> gets you the same features on the ring.</p>
+    <p class="ex-foot">The third TLS backend, and the portable one: the BCL's <code>SslStream</code> over <code>TcpConnectionStream</code>. Fully managed, full-featured, and the slowest of the three, because the bytes are copied through a <code>Stream</code> both ways. Reach for it for <b>client certificates</b> - the ring-native path does not do mTLS - or anything else OpenSSL-on-the-ring does not expose; for TLS 1.2 and resumption the default already has you covered: <label for="tab-tlsossl" class="ex-jump">openssl &middot; raw</label>.</p>
   </div>
   <div class="pane pane-big">
     <div class="pane-head">
@@ -637,7 +637,7 @@ internal sealed class StreamDuplexPipe(Stream stream) : IDuplexPipe
     public PipeReader Input { get; } = PipeReader.Create(stream, new StreamPipeReaderOptions(leaveOpen: true));
     public PipeWriter Output { get; } = PipeWriter.Create(stream, new StreamPipeWriterOptions(leaveOpen: true));
 }</code></pre>
-    <p class="ex-foot">HTTP/2 over the BCL's <code>SslStream</code>, and the point is the ten-line <code>Stream</code>-to-<code>IDuplexPipe</code> adapter at the bottom. <code>Nghttp2Connection</code> takes a pipe, so the same HTTP/2 code runs over the ring directly, over kTLS, or over <code>SslStream</code> - the transport is a constructor argument, not a branch inside the protocol.</p>
+    <p class="ex-foot">HTTP/2 over the BCL's <code>SslStream</code>, and the point is the ten-line <code>Stream</code>-to-<code>IDuplexPipe</code> adapter at the bottom. <code>Nghttp2Connection</code> takes a pipe, so the same HTTP/2 code runs over the ring directly, over ioxide's TLS, or over <code>SslStream</code> - the transport is a constructor argument, not a branch inside the protocol.</p>
   </div>
   <div class="pane pane-h3buf">
     <div class="pane-head">
@@ -1132,17 +1132,12 @@ for (int id = 0; id &lt; threads.Length; id++)
                 while (TryParseRequest(ref buffer, out _))   // framing is your code
                 {
                     consumed = buffer.Start;
+                    ok.Span.CopyTo(writer.GetSpan(ok.Length));   // one response per request
+                    writer.Advance(ok.Length);
                     respond = true;
                 }
 
-                if (respond)
-                {
-                    ok.Span.CopyTo(writer.GetSpan(ok.Length));
-                    writer.Advance(ok.Length);
-                    wrote = true;
-                }
-
-                if (wrote) await writer.FlushAsync();
+                if (respond) await writer.FlushAsync();
 
                 reader.AdvanceTo(consumed, buffer.End);   // partial tail is kept
 
@@ -1502,7 +1497,8 @@ for (int i = 0; i &lt; threads.Length; i++)
 }
 
 Console.WriteLine($&quot;[tls-ktls] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
-                + $&quot;{bodyBytes}-byte body, cert {certPath}&quot;);
+                + $&quot;{bodyBytes}-byte body, rx={(kernelRx ? &quot;kernel (experimental)&quot; : &quot;openssl&quot;)}, &quot;
+                + $&quot;cert {certPath}&quot;);
 
 foreach (Thread thread in threads)
 {
@@ -1535,7 +1531,7 @@ static bool Answer(TcpConnection conn, List&lt;byte&gt; carry, ReadOnlyMemory&lt
 
     return wrote;
 }</code></pre>
-    <p class="ex-foot"><b>Opt-in</b> - note the explicit <code>KernelTx = true</code>. TLS is OpenSSL in both directions unless you ask for this, and that line is what makes the <code>conn.Write</code> below legal: it puts PLAINTEXT into the slab and the kernel turns it into records. Without it the same call would put <b>cleartext on the wire</b>, which is why every other sample goes through <code>TlsSession.Write</code> - correct in either mode. Receive stays in userspace either way. Compare <label for="tab-tlsossl" class="ex-jump">openssl &middot; raw</label>.</p>
+    <p class="ex-foot"><b>Opt-in</b> - note the explicit <code>KernelTx = true</code>. TLS is OpenSSL in both directions unless you ask for this, and that line is what makes the <code>conn.Write</code> below legal: it puts PLAINTEXT into the slab and the kernel turns it into records. Without it the same call would put <b>cleartext on the wire</b>, which is why every other sample goes through <code>TlsSession.Write</code> - correct in either mode. Receive follows the <code>kernelRx</code> knob: userspace by default, kernel-decrypted when you flip it (experimental). Compare <label for="tab-tlsossl" class="ex-jump">openssl &middot; raw</label>.</p>
   </div>
 
   <div class="pane pane-tlspipe">
@@ -1562,6 +1558,11 @@ int    bodyBytes = 8 * 1024;                    // TLS cost is per-byte, so a 2-
 
 const string certPath = &quot;cert.pem&quot;;   // any PEM pair
 const string keyPath  = &quot;key.pem&quot;;
+
+// Hand INBOUND decryption to the kernel too. Off by default and experimental: about one first
+// connection in twelve fails outright, and a client sending a TLS 1.3 KeyUpdate loses the
+// connection. Transmit stays kernel-side either way - that is the point of this sample.
+bool kernelRx = false;
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 
@@ -1579,10 +1580,12 @@ var tlsOptions = new TlsOptions
     CertificatePath = certPath,
     KeyPath = keyPath,
 
-    // NOT the default - TLS is OpenSSL both ways unless you ask for this. The kernel encrypts
-    // outbound records while receive stays in OpenSSL, so this is the mixed mode: kTLS TX,
-    // userspace RX. See Playground/Tls/OpenSslPipes for the same server without this line.
+    // NOT the default - TLS is OpenSSL both ways unless you ask for this. As shipped this is the
+    // mixed mode, kernel TX with OpenSSL RX; Playground/Tls/OpenSslPipes is the same server
+    // without this line.
     KernelTx = true,
+
+    KernelRx = kernelRx,
 };
 
 byte[] body = new byte[bodyBytes];
@@ -1668,7 +1671,8 @@ for (int i = 0; i &lt; threads.Length; i++)
 }
 
 Console.WriteLine($&quot;[tls-ktls-pipes] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
-                + $&quot;{bodyBytes}-byte body, tx={(tlsOptions.KernelTx ? &quot;kernel&quot; : &quot;openssl&quot;)}&quot;);
+                + $&quot;{bodyBytes}-byte body, tx={(tlsOptions.KernelTx ? &quot;kernel&quot; : &quot;openssl&quot;)}, &quot;
+                + $&quot;rx={(kernelRx ? &quot;kernel (experimental)&quot; : &quot;openssl&quot;)}&quot;);
 
 foreach (Thread thread in threads)
 {
@@ -1782,7 +1786,7 @@ for (int i = 0; i &lt; threads.Length; i++)
 
                 if (Answer(conn, tls, carry, response))
                 {
-                    await conn.FlushAsync();   // plaintext: the kernel encrypts on send
+                    await conn.FlushAsync();
                 }
 
                 if (snapshot.IsClosed || tls.Closed) return;
@@ -2195,22 +2199,9 @@ for (int i = 0; i &lt; threads.Length; i++)
             if (tls.NegotiatedAlpn == &quot;h2&quot;)
             {
                 // The decrypt lives in the pipe, so the HTTP/2 code below is identical to the
-                // cleartext sample. Two implementations of the same seam:
-                //
-                //   default   TlsConnectionDualPipe          decrypts into a Pipe it owns, fed by
-                //                                            a pump task
-                //   INPLACE=1 TlsConnectionDualPipeInPlace   decrypts inside the recv buffer and
-                //                                            hands that memory out - no pump, no
-                //                                            Pipe, backpressure is the ring
-                //
-                // Both are handed to the same Nghttp2Connection, which is the point.
-                // The two share only IDuplexPipe, which is not disposable - hence the second
-                // declaration rather than one `await using`.
-                // One type, both worlds. Which halves it uses is decided by what the handshake
-                // achieved, not by anything chosen here - see TlsConnectionDualPipe.
-                var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
-
-                await using var owner = pipe;
+                // cleartext sample. Which halves the pipe uses is decided by what the handshake
+                // achieved, not by anything chosen here.
+                await using var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
 
                 await new Nghttp2Connection(pipe).RunBufferedAsync(_ =&gt; new Nghttp2Response
                 {
@@ -2220,8 +2211,7 @@ for (int i = 0; i &lt; threads.Length; i++)
                 return;
             }
 
-            // Anything else: HTTP/1.1 on the same port, written as plaintext because kTLS is
-            // producing the records.
+            // Anything else: HTTP/1.1 on the same port.
             //
             // The carry is not incidental. TLS hands back RECORDS, not requests, so a request
             // split across two records decrypts twice - and answering on &quot;plaintext arrived&quot;
@@ -2660,8 +2650,7 @@ for (int i = 0; i &lt; threads.Length; i++)
 
         try
         {
-            // The handshake reads and writes through this same connection; after it, the socket
-            // carries kTLS records the kernel en/decrypts.
+            // The handshake reads and writes through this same connection.
             tls = await r.GetService&lt;TlsService&gt;().AcceptAsync(conn);
 
             // A request can ride in with the handshake&#x27;s final flight - answer it before parking
@@ -2726,8 +2715,8 @@ foreach (Thread thread in threads)
     thread.Join();
 }
 
-// One request out, one response back. Everything written here is PLAINTEXT: after the handshake
-// kTLS owns transmit, so there is nothing left for us to wrap.
+// One request out, one response back. tls.Write encrypts correctly whichever backend the
+// session ended up with.
 static async ValueTask ProxyAsync(TcpConnection conn, TlsSession tls, HttpClientPool client, string path)
 {
     try
@@ -2856,8 +2845,7 @@ for (int i = 0; i &lt; threads.Length; i++)
 
         try
         {
-            // The handshake reads and writes through this same connection; after it, the socket
-            // carries kTLS records the kernel en/decrypts.
+            // The handshake reads and writes through this same connection.
             tls = await r.GetService&lt;TlsService&gt;().AcceptAsync(conn);
 
             // A request can ride in with the handshake&#x27;s final flight - answer it before parking
@@ -2922,8 +2910,8 @@ foreach (Thread thread in threads)
     thread.Join();
 }
 
-// One request out, one response back. Everything written here is PLAINTEXT: after the handshake
-// kTLS owns transmit, so there is nothing left for us to wrap.
+// One request out, one response back. tls.Write encrypts correctly whichever backend the
+// session ended up with.
 static async ValueTask ProxyAsync(TcpConnection conn, TlsSession tls, Http2ClientPool client, string path)
 {
     try
@@ -3041,8 +3029,7 @@ for (int i = 0; i &lt; threads.Length; i++)
 
         try
         {
-            // The handshake reads and writes through this same connection; after it, the socket
-            // carries kTLS records the kernel en/decrypts.
+            // The handshake reads and writes through this same connection.
             tls = await r.GetService&lt;TlsService&gt;().AcceptAsync(conn);
 
             // A request can ride in with the handshake&#x27;s final flight - answer it before parking
@@ -3106,8 +3093,8 @@ foreach (Thread thread in threads)
     thread.Join();
 }
 
-// One request out, one response back. Everything written here is PLAINTEXT: after the handshake
-// kTLS owns transmit, so there is nothing left for us to wrap.
+// One request out, one response back. tls.Write encrypts correctly whichever backend the
+// session ended up with.
 static async ValueTask ProxyAsync(TcpConnection conn, TlsSession tls, Http3ClientPool client, string path)
 {
     try
@@ -3842,7 +3829,7 @@ foreach (Thread thread in threads)
 {
     thread.Join();
 }</code></pre>
-    <p class="ex-foot">The same program as <b>h3 &rarr; h1</b> with the pool swapped - which is the whole point of the matrix. Concurrent h3 requests fan into one h2c upstream connection instead of taking a keep-alive connection each.</p>
+    <p class="ex-foot">The same program as <b>h3 &rarr; h1</b> with the pool swapped - which is the whole point of the matrix. Concurrent h3 requests fan into one h2-over-TLS upstream connection instead of taking a keep-alive connection each.</p>
   </div>
   <div class="pane pane-pxh3toh3">
     <div class="pane-head">

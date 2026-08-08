@@ -10,8 +10,8 @@ using Playground.Shared;
 //  protocol-translating edge: the client half of a migration where the origin moved to h3 and the
 //  clients have not.
 //
-//  Both hops are TLS 1.3 and they get there completely differently. INBOUND is kTLS on a TCP
-//  socket: OpenSSL handshake over the ring, then the kernel owns transmit. OUTBOUND is QUIC,
+//  Both hops are encrypted and get there completely differently. INBOUND is TLS on a TCP
+//  socket, terminated here - OpenSSL both ways by default. OUTBOUND is QUIC,
 //  where TLS is inside the transport and the crypto handshake IS the connection handshake - so
 //  the upstream pool takes no TLS options at all, only the ServerName the certificate must match.
 //
@@ -23,7 +23,7 @@ using Playground.Shared;
 //      PLAYGROUND_UPSTREAM_PORT=8443 dotnet run -c Release --project Playground/Proxy/H2ToH3
 //      curl -k --http2 https://127.0.0.1:8443/
 //
-//  Needs the Linux 'tls' module (sudo modprobe tls). Needs: ioxide, ioxide.nghttp2, ioxide.httpclient
+//  Needs: ioxide, ioxide.nghttp2, ioxide.httpclient
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 (string certPath, string keyPath) = QuicCert.Ensure(

@@ -16,7 +16,7 @@ using Playground.Shared;
 //
 //  PLAYGROUND_TLS_CERT/_KEY point at a real PEM pair; otherwise a self-signed localhost cert is
 //  generated. PLAYGROUND_BODY sizes the response (default 8 KB - a representative JSON/HTML-ish
-//  payload, since TLS overhead only shows against real bodies). Needs: ioxide.tls
+//  payload, since TLS overhead only shows against real bodies). Needs: ioxide
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 // ── Knobs ────────────────────────────────────────────────────────────────────────────────────
@@ -153,7 +153,8 @@ for (int i = 0; i < threads.Length; i++)
 }
 
 Console.WriteLine($"[tls-ktls] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
-                + $"{bodyBytes}-byte body, cert {certPath}");
+                + $"{bodyBytes}-byte body, rx={(kernelRx ? "kernel (experimental)" : "openssl")}, "
+                + $"cert {certPath}");
 
 foreach (Thread thread in threads)
 {
