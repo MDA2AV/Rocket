@@ -313,15 +313,47 @@ if (tls.NegotiatedAlpn == "h2")
     allocation-free and is not the bottleneck; the cost is <code>SslStream</code>'s own.</p>
 
     <h2>Which to use</h2>
+    <p>Three options, not two - and the middle one is new. It used to be that wanting TLS 1.2,
+    resumption or client certificates meant leaving the ring for <code>SslStream</code>. It no
+    longer does: <code>KernelTx = false</code> gives those on the ring-native path.</p>
     <ul>
-      <li><b>Maximum TLS throughput on Linux 6+</b> with the <code>tls</code> module available, and
-      TLS 1.3 / ALPN is enough &rarr; <b>kTLS</b> (<code>ioxide.tls</code>).</li>
-      <li><b>Portability, older clients, or full TLS features</b> (client certs, resumption,
-      TLS 1.2), or you just do not want a kernel-module dependency &rarr; <b>SslStream</b> over
-      <code>ConnectionStream</code>.</li>
+      <li><b>kTLS</b> (the default) &rarr; you are on Linux 6+ with the <code>tls</code> module, TLS
+      1.3 and ALPN are enough, and you want <code>sendfile</code> or a NIC that offloads TLS.
+      Sample: <a href="https://github.com/MDA2AV/ioxide/tree/main/Playground/Tls/Ktls">Tls/Ktls</a>.</li>
+      <li><b>OpenSSL both ways</b> (<code>KernelTx = false</code>) &rarr; no kernel module (so it runs
+      in a container that lacks it), TLS 1.2 available, any ciphersuite, resumption back, and no
+      handshake-alignment constraint. Costs nothing measurable here - see the table above. Sample:
+      <a href="https://github.com/MDA2AV/ioxide/tree/main/Playground/Tls/OpenSsl">Tls/OpenSsl</a>.</li>
+      <li><b>SslStream</b> over <code>ConnectionStream</code> &rarr; now only for what OpenSSL itself
+      cannot give you, or when you want the BCL's stack specifically. It is the slowest of the
+      three, because every byte is encrypted in userspace <em>and</em> copied through a
+      <code>Stream</code>.</li>
     </ul>
-    <p>Both ride a dedicated port via <a href="multiport.html">multi-port</a>, so you can even serve
-    plaintext on one port and either TLS path on another from the same reactors.</p>
+    <p>Serving from an <code>IDuplexPipe</code> makes the first two indistinguishable in your code:
+    <code>TlsConnectionDualPipe</code> picks its halves from the session, so the same handler runs
+    on either backend with no branch. That is what
+    <a href="https://github.com/MDA2AV/ioxide/tree/main/Playground/Tls/Pipes">Tls/Pipes</a>
+    demonstrates - one handler, two backends, one flag between them.</p>
+    <p>All of them ride a dedicated port via <a href="multiport.html">multi-port</a>, so you can
+    serve plaintext on one port and any TLS path on another from the same reactors.</p>
+
+    <h2>Kernel decryption, and why it is off</h2>
+    <p><code>TlsOptions.KernelRx</code> hands inbound records to the kernel as well, after which an
+    ordinary recv returns plaintext and the zero-copy reader serves TLS connections exactly as it
+    serves cleartext ones - no pump, no owned buffer. It is <b>experimental and off by default</b>,
+    for two reasons that are not going away on their own.</p>
+    <ul>
+      <li>The handoff must land on a record boundary. Whatever the handshake already pulled off the
+      socket is invisible to the kernel, so the record sequence it starts at has to account for it -
+      and a <em>partial</em> record left behind cannot be accounted for at all, because those bytes
+      are gone. That connection silently keeps the userspace reader.</li>
+      <li>A non-application-data record - a TLS 1.3 <code>KeyUpdate</code>, or an alert - is only
+      retrievable through <code>recvmsg</code> with a control message. The TCP hot path uses
+      <code>IORING_OP_RECV</code>, which carries none, so the kernel refuses the read and the
+      connection dies. Clients that never send one are unaffected.</li>
+    </ul>
+    <p>There is also a known race: roughly one first connection in twelve fails outright. Measured,
+    not fixed. Treat the flag as a research toggle rather than a deployment option.</p>
 
     <div class="next"><a href="files.html">Static files →</a></div>
   </main>
