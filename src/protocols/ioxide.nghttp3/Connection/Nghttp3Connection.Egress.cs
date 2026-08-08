@@ -41,6 +41,14 @@ public sealed partial class Nghttp3Connection
         {
             while (true)
             {
+                // Backpressure: stop draining a large response once the connection's send retention
+                // is at its high-water. nghttp3 holds the un-pulled tail; the RunBuffered loop calls
+                // PumpEgress again on the next inbound datagram (acks drain retention), so it resumes.
+                if (!_quicConnection.CanQueueSend)
+                {
+                    return;
+                }
+
                 long streamId;
                 int fin;
                 long producedBytes = Nghttp3.ih3_writev(_nghttp3Handle, &streamId, &fin, egressPointer, (nuint)_egress.Length);

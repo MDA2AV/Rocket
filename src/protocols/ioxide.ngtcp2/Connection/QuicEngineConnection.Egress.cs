@@ -88,6 +88,15 @@ public unsafe partial class QuicEngineConnection
     {
         ReplayOut();
         FlushConnection();
+
+        // Acks (processed just before this on the inbound path) freed retention: if a producer
+        // paused at the high-water, tell it to resume queueing. The read loop never sees these acks,
+        // so this is the resume trigger for a response larger than the retention window.
+        if (_sendAtCapacity && !_closed && _outRetained < _maxSendRetention)
+        {
+            _sendAtCapacity = false;
+            OnSendCapacityAvailable?.Invoke();
+        }
     }
 
     // Drain ngtcp2's own frames (ACKs, handshake, CRYPTO, MAX_STREAMS) until it has nothing more.

@@ -15,6 +15,10 @@ using Playground.Shared;
 //  The trade: memory holds the entire body, so this suits normal-sized requests. Use Playground/Http3/Nghttp3
 //  when uploads can be large or hostile.
 //
+//  It doubles as the QUIC/HTTP3 tuning reference: the Knobs block below shows every h3-path option
+//  (engine, listener, UDP, QPACK) as a literal, including maxSendRetentionBytes - the knob that
+//  bounds memory when serving large responses.
+//
 //      dotnet run -c Release --project Playground/Http3/Buffered
 //      curl --http3-only -k https://127.0.0.1:8443/
 //
@@ -26,6 +30,10 @@ using Playground.Shared;
 // Env.Override exists only so bench/run.sh can drive the sample from outside; delete those lines
 // when you copy this out and the literals above them are the entire configuration.
 
+// This sample is the QUIC/HTTP3 tuning reference: every knob the h3 path exposes is here as a
+// literal, grouped by the type it feeds. The defaults are the shipping defaults - shown, not
+// changed - so you can see the whole surface and edit one line.
+
 ushort quicPort = 8443;                        // https://127.0.0.1:8443/ over UDP - h3 lives here
 ushort tcpPort  = 8080;                        // the TCP listener, so the process serves both
 int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
@@ -33,12 +41,27 @@ int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reac
 Env.Override(ref tcpPort, ref reactors);
 Env.OverrideQuic(ref quicPort, ref reactors);
 
-// UDP receive slots per reactor: how many datagrams the ring can have outstanding at once.
-int udpRecvSlots = 16;
+// ── QuicEngine: the per-endpoint QUIC/TLS state, shared by every connection ───────────────────
+uint cidLength = 8;                            // connection-id length this endpoint mints (1..20)
 
-// QPACK dynamic table. 0 keeps every header literal, which costs bytes but never blocks a
-// stream on a table update; raise it and set QpackBlockedStreams to trade one for the other.
+// Per-connection send-retention high-water. A response larger than this is streamed out paced by
+// the peer's acks instead of buffered whole, so memory stays ~this-per-connection whatever the
+// response size - the knob that lets HTTP/3 serve large files. Raise for more in-flight throughput
+// on fat links; lower to cap memory under many connections. Default 16 MiB.
+long maxSendRetentionBytes = 16L << 20;
+
+// ── QuicOptions: the listener ─────────────────────────────────────────────────────────────────
+int idleTimeoutMs = 60_000;                    // close a connection idle this long (no packets)
+
+// ── UdpOptions: how datagrams are received ────────────────────────────────────────────────────
+int  udpRecvSlots = 16;                        // multishot recv slots per reactor - datagrams the ring can hold at once
+bool gro          = true;                       // UDP_GRO: coalesce received datagrams into one recv (fewer syscalls)
+
+// ── Nghttp3Options: the HTTP/3 layer ──────────────────────────────────────────────────────────
+// QPACK dynamic table. 0 keeps every header literal, which costs bytes but never blocks a stream
+// on a table update; raise it and set QpackBlockedStreams to trade one for the other.
 long qpackCapacity = 0;
+long qpackBlockedStreams = qpackCapacity > 0 ? 100 : 0;
 
 // A real PEM pair, or null to generate a self-signed localhost cert on first run.
 string? certOverride = null;
@@ -47,17 +70,18 @@ string? keyOverride  = null;
 
 (string certPath, string keyPath) = QuicCert.Ensure(certOverride, keyOverride);
 
-using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+using var engine = new QuicEngine(certPath, keyPath, cidLength, alpn: ["h3"], maxSendRetentionBytes);
 
 var config = new ServerConfig
 {
     ReactorCount = reactors,
     Tcp = new TcpOptions { Port = tcpPort },
-    Udp = new UdpOptions { RecvSlots = udpRecvSlots },
+    Udp = new UdpOptions { RecvSlots = udpRecvSlots, Gro = gro },
     Quic = new QuicOptions
     {
         Port = quicPort,
-        LocalCidLength = 8,
+        LocalCidLength = (int)cidLength,        // must match the engine's cidLength
+        IdleTimeoutMs = idleTimeoutMs,
         ConnectionFactory = engine.CreateFactory(),
     },
 };
@@ -65,7 +89,7 @@ var config = new ServerConfig
 var h3Options = new Nghttp3Options
 {
     QpackDynamicTableCapacity = qpackCapacity,
-    QpackBlockedStreams = qpackCapacity > 0 ? 100 : 0,
+    QpackBlockedStreams = qpackBlockedStreams,
 };
 
 // Built once and reused for every request - the h3 layer copies it into nghttp3 at submit and never
