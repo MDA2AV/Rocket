@@ -23,6 +23,17 @@ PANES = {
         "wire</b>, which is why every other sample goes through <code>TlsSession.Write</code> - "
         "correct in either mode. Compare "
         "<label for=\"tab-tlsossl\" class=\"ex-jump\">openssl &middot; raw</label>."),
+    "tlshybrid": (
+        "Tls/Hybrid", "hybrid &middot; raw ring", "ioxide",
+        ["sudo modprobe tls        # the kernel half still needs the module",
+         "curl -k https://127.0.0.1:8443/"],
+        "The deployable kernel mode: <b>kernel TX, OpenSSL RX</b>. The handler still writes "
+        "plaintext - the kernel makes the records on send, which is what keeps <code>sendfile</code> "
+        "and NIC offload reachable - while receive takes the well-trodden userspace path instead of "
+        "kernel RX's experimental one. "
+        "<label for=\"tab-tls\" class=\"ex-jump\">ktls &middot; raw</label> is this plus kernel "
+        "receive; <label for=\"tab-tlsossl\" class=\"ex-jump\">openssl &middot; raw</label> is the "
+        "default, with the kernel in neither direction."),
     "tlsossl": (
         "Tls/OpenSsl", "OpenSSL &middot; raw ring", "ioxide",
         ["curl -k https://127.0.0.1:8443/        # no modprobe needed"],
@@ -52,6 +63,15 @@ PANES = {
         "<code>TcpConnectionPipeWriter</code> or <code>TlsEncryptingPipeWriter</code>, chosen from the "
         "<em>session</em>. It has to be the session and not the config, because a handshake that left a "
         "partial record keeps the userspace reader whatever was asked for."),
+    "tlsmulti": (
+        "Tls/MultiPort", "plaintext + TLS &middot; one server", "ioxide",
+        ["curl  http://127.0.0.1:8080/", "curl -ks https://127.0.0.1:8081/"],
+        "One server, two doors: plaintext on <code>:8080</code>, TLS on <code>:8081</code>, and ONE "
+        "serve loop for both. The branch on <code>ListenerPort</code> is the entire difference - "
+        "the TLS door builds a <code>TlsConnectionDualPipe</code>, the plaintext door pairs the "
+        "connection's own reader and writer, and the loop reads an <code>IDuplexPipe</code> without "
+        "knowing which it got. Ports come from <a href=\"learn/multiport.html\">multi-port</a>; "
+        "TLS is the default backend, OpenSSL both ways."),
 
     # ── transport ────────────────────────────────────────────────────────────────────────────
     "tlsbcl": (
