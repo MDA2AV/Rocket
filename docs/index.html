@@ -1385,6 +1385,12 @@ int    bodyBytes = 8 * 1024;                    // TLS cost is per-byte, so a 2-
 
 const string certPath = &quot;cert.pem&quot;;   // any PEM pair
 const string keyPath  = &quot;key.pem&quot;;
+
+// Hand INBOUND decryption to the kernel too, so neither direction goes through OpenSSL. Off by
+// default and experimental: a TLS 1.3 KeyUpdate cannot be read through IORING_OP_RECV, and about
+// one first connection in twelve fails outright. Transmit stays kernel-side either way - that is
+// the point of this sample and is not a knob, because the handler below writes plaintext.
+bool kernelRx = false;
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 
@@ -1406,6 +1412,8 @@ var tlsOptions = new TlsOptions
     // handler below write PLAINTEXT to the connection: the kernel turns it into records on send.
     // Remove this line and conn.Write would put cleartext on the wire.
     KernelTx = true,
+
+    KernelRx = kernelRx,
 };
 
 byte[] body = new byte[bodyBytes];
@@ -2128,9 +2136,14 @@ const string keyPath  = &quot;key.pem&quot;;
 // is identical either way; this only changes how recv buffers are handed out.
 bool incrementalBuffers = false;
 
-// Hand INBOUND decryption to the kernel as well as outbound. Experimental and off for a reason:
-// a TLS 1.3 KeyUpdate cannot be read through IORING_OP_RECV, and roughly one first connection in
-// twelve fails outright. See docs/learn/tls.html.
+// Hand OUTBOUND encryption to the kernel: the handler writes plaintext and the kernel makes the
+// records. Off by default - OpenSSL both ways is the portable path, and on loopback the kernel
+// is not faster. Its real payoff is sendfile and NIC offload, which a benchmark here cannot see.
+bool kernelTx = false;
+
+// Hand INBOUND decryption to the kernel as well. Requires kernelTx - the RX handoff happens at
+// the same moment as the TX one - and is experimental for a reason: a TLS 1.3 KeyUpdate cannot be
+// read through IORING_OP_RECV, and roughly one first connection in twelve fails outright.
 bool kernelRx = false;
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -2161,6 +2174,7 @@ for (int i = 0; i &lt; threads.Length; i++)
 
     reactor.OnStart = r =&gt; TlsService.Start(r, new TlsOptions
     {
+        KernelTx = kernelTx,
         KernelRx = kernelRx,
         CertificatePath = certPath,
         KeyPath = keyPath,
@@ -2271,7 +2285,8 @@ for (int i = 0; i &lt; threads.Length; i++)
 
 Console.WriteLine($&quot;[http2-tls] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
                 + $&quot;ALPN h2 then http/1.1, cert {certPath}, &quot;
-                + $&quot;rx={(kernelRx ? &quot;kernel&quot; : &quot;openssl&quot;)}, tx=kernel&quot;);
+                + $&quot;rx={(kernelTx &amp;&amp; kernelRx ? &quot;kernel&quot; : &quot;openssl&quot;)}, &quot;
+                + $&quot;tx={(kernelTx ? &quot;kernel&quot; : &quot;openssl&quot;)}&quot;);
 
 foreach (Thread thread in threads)
 {

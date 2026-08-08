@@ -25,6 +25,18 @@ public static class Env
         => Environment.GetEnvironmentVariable(name) == "1";
 
     /// <summary>
+    /// Tri-state, unlike <see cref="Flag"/>: unset keeps the sample's own literal, so a harness can
+    /// force a knob OFF as well as on. "1" and "0" are the only values that mean anything.
+    /// </summary>
+    public static bool Bool(string name, bool fallback)
+        => Environment.GetEnvironmentVariable(name) switch
+        {
+            "1" => true,
+            "0" => false,
+            _ => fallback,
+        };
+
+    /// <summary>
     /// Apply the harness overrides to a sample's knobs, in one call, so the sample itself can
     /// declare them as plain literals you edit.
     ///
@@ -55,4 +67,21 @@ public static class Env
         quicPort = Port("PLAYGROUND_QUIC_PORT", quicPort);
         reactors = Int("PLAYGROUND_REACTORS", reactors);
     }
+
+    /// <summary>
+    /// The kTLS knobs, same escape hatch. These exist so bench/tls-matrix.sh can measure one build
+    /// in every backend combination instead of rebuilding per cell - a sample that only ever runs
+    /// one way does not need them.
+    /// </summary>
+    public static void OverrideKtls(ref bool kernelTx, ref bool kernelRx)
+    {
+        kernelTx = Bool("PLAYGROUND_KTLS_TX", kernelTx);
+        kernelRx = Bool("PLAYGROUND_KTLS_RX", kernelRx);
+    }
+
+    /// <summary>
+    /// For the samples where transmit is kTLS by construction and only receive is a choice.
+    /// </summary>
+    public static void OverrideKtls(ref bool kernelRx)
+        => kernelRx = Bool("PLAYGROUND_KTLS_RX", kernelRx);
 }

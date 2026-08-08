@@ -33,6 +33,14 @@ Env.Override(ref port, ref reactors, ref bodyBytes);
 // A real PEM pair, or null to generate a self-signed localhost cert on first run.
 string? certOverride = null;
 string? keyOverride  = null;
+
+// Hand INBOUND decryption to the kernel too, so neither direction goes through OpenSSL. Off by
+// default and experimental: a TLS 1.3 KeyUpdate cannot be read through IORING_OP_RECV, and about
+// one first connection in twelve fails outright. Transmit stays kernel-side either way - that is
+// the point of this sample and is not a knob, because the handler below writes plaintext.
+bool kernelRx = false;
+
+Env.OverrideKtls(ref kernelRx);
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 (string certPath, string keyPath) = QuicCert.Ensure(certOverride, keyOverride);
@@ -55,6 +63,8 @@ var tlsOptions = new TlsOptions
     // handler below write PLAINTEXT to the connection: the kernel turns it into records on send.
     // Remove this line and conn.Write would put cleartext on the wire.
     KernelTx = true,
+
+    KernelRx = kernelRx,
 };
 
 byte[] body = new byte[bodyBytes];
