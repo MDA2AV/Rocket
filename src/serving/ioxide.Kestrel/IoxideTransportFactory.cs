@@ -27,7 +27,7 @@ internal sealed class IoxideTransportFactory : IConnectionListenerFactory
             throw new NotSupportedException($"ioxide transport only supports {nameof(IPEndPoint)} (got {endpoint.GetType().Name}).");
         }
 
-        // If this port is configured for kTLS, build the ioxide.tls options the listener hands to its reactors.
+        // If this port terminates TLS, build the ioxide.tls options the listener hands to its reactors.
         ioxide.tls.TlsOptions? tlsOptions = null;
         if (_options.Tls is { } tls && tls.Ports.Contains(ipEndpoint.Port))
         {
@@ -36,6 +36,7 @@ internal sealed class IoxideTransportFactory : IConnectionListenerFactory
                 CertificatePath = tls.CertificatePath,
                 KeyPath = tls.KeyPath,
                 Alpn = tls.Alpn,
+                KernelTx = tls.KernelTx,
             };
         }
 

@@ -26,16 +26,17 @@ public sealed class IoxideTransportOptions
     public Action<Reactor>? OnReactorStart { get; set; }
 
     /// <summary>
-    /// TLS termination via kTLS (kernel TLS), done in the transport on the listed ports. When set, the
-    /// reactor runs the TLS 1.3 handshake on accept, installs kTLS TX, and hands Kestrel a plaintext
-    /// connection with the TLS connection features set - so the endpoint must NOT use <c>UseHttps()</c>.
-    /// Null = no TLS (every port is plaintext). See <see cref="IoxideTlsOptions.Alpn"/> for which
-    /// protocols a TLS port advertises.
+    /// TLS termination, done in the transport on the listed ports. When set, the reactor runs the
+    /// handshake on accept - OpenSSL carries the records both ways unless
+    /// <see cref="IoxideTlsOptions.KernelTx"/> opts transmit into the kernel - and hands Kestrel a
+    /// plaintext connection with the TLS connection features set, so the endpoint must NOT use
+    /// <c>UseHttps()</c>. Null = no TLS (every port is plaintext). See
+    /// <see cref="IoxideTlsOptions.Alpn"/> for which protocols a TLS port advertises.
     /// </summary>
     public IoxideTlsOptions? Tls { get; set; }
 
     /// <summary>
-    /// Convenience over assigning <see cref="Tls"/>: terminate kTLS on <paramref name="ports"/> with one
+    /// Convenience over assigning <see cref="Tls"/>: terminate TLS on <paramref name="ports"/> with one
     /// certificate/key. Example: <c>o.UseTls("/certs/server.crt", "/certs/server.key", new[] { 8081 });</c>.
     /// </summary>
     public void UseTls(string certificatePath, string keyPath, IEnumerable<int> ports, params string[] alpn)
@@ -54,7 +55,7 @@ public sealed class IoxideTransportOptions
     }
 }
 
-/// <summary>kTLS termination settings for the ioxide Kestrel transport.</summary>
+/// <summary>TLS termination settings for the ioxide Kestrel transport.</summary>
 public sealed class IoxideTlsOptions
 {
     /// <summary>PEM certificate chain file.</summary>
@@ -62,6 +63,13 @@ public sealed class IoxideTlsOptions
 
     /// <summary>PEM private key file.</summary>
     public required string KeyPath { get; set; }
+
+    /// <summary>
+    /// Opt into kernel TLS transmit offload. Off by default: OpenSSL encrypts responses in the
+    /// send pump, which needs no 'tls' kernel module. See <c>ioxide.tls.TlsOptions.KernelTx</c>
+    /// for what the kernel path buys and what it constrains.
+    /// </summary>
+    public bool KernelTx { get; set; }
 
     /// <summary>
     /// Protocols to advertise, MOST PREFERRED FIRST. The server walks this list and picks the first
