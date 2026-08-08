@@ -212,6 +212,7 @@ nav.top .links a.gh svg { display: block; }
 #tab-vs:checked ~ .ex-menu label[for="tab-vs"],
 #tab-tlsosslpipe:checked ~ .ex-menu label[for="tab-tlsosslpipe"],
 #tab-tlsossl:checked ~ .ex-menu label[for="tab-tlsossl"],
+#tab-tlsmulti:checked ~ .ex-menu label[for="tab-tlsmulti"],
 #tab-tlsbcl:checked ~ .ex-menu label[for="tab-tlsbcl"],
 #tab-big:checked ~ .ex-menu label[for="tab-big"],
 #tab-hop:checked ~ .ex-menu label[for="tab-hop"],
@@ -241,6 +242,7 @@ nav.top .links a.gh svg { display: block; }
 #tab-redis:checked ~ .ex-menu label[for="tab-redis"],
 #tab-files:checked ~ .ex-menu label[for="tab-files"],
 #tab-tls:checked ~ .ex-menu label[for="tab-tls"],
+#tab-tlshybrid:checked ~ .ex-menu label[for="tab-tlshybrid"],
 #tab-tlspipe:checked ~ .ex-menu label[for="tab-tlspipe"] {
   color: var(--accent-soft);
   border-left-color: var(--accent-soft);
@@ -335,6 +337,7 @@ nav.top .links a.gh svg { display: block; }
 #tab-vs:checked ~ .pane-vs { display: block; }
 #tab-tlsosslpipe:checked ~ .pane-tlsosslpipe { display: block; }
 #tab-tlsossl:checked ~ .pane-tlsossl { display: block; }
+#tab-tlsmulti:checked ~ .pane-tlsmulti { display: block; }
 #tab-tlsbcl:checked ~ .pane-tlsbcl { display: block; }
 #tab-big:checked ~ .pane-big { display: block; }
 #tab-hop:checked ~ .pane-hop { display: block; }
@@ -364,6 +367,7 @@ nav.top .links a.gh svg { display: block; }
 #tab-redis:checked ~ .pane-redis { display: block; }
 #tab-files:checked ~ .pane-files { display: block; }
 #tab-tls:checked ~ .pane-tls { display: block; }
+#tab-tlshybrid:checked ~ .pane-tlshybrid { display: block; }
 #tab-tlspipe:checked ~ .pane-tlspipe { display: block; }
 .pane pre {
   margin: 0;
@@ -463,6 +467,7 @@ nav.top .links a.gh svg { display: block; }
   #tab-vs:checked ~ .ex-menu label[for="tab-vs"],
   #tab-tlsosslpipe:checked ~ .ex-menu label[for="tab-tlsosslpipe"],
   #tab-tlsossl:checked ~ .ex-menu label[for="tab-tlsossl"],
+  #tab-tlsmulti:checked ~ .ex-menu label[for="tab-tlsmulti"],
   #tab-tlsbcl:checked ~ .ex-menu label[for="tab-tlsbcl"],
   #tab-big:checked ~ .ex-menu label[for="tab-big"],
   #tab-hop:checked ~ .ex-menu label[for="tab-hop"],
@@ -492,6 +497,7 @@ nav.top .links a.gh svg { display: block; }
   #tab-redis:checked ~ .ex-menu label[for="tab-redis"],
   #tab-files:checked ~ .ex-menu label[for="tab-files"],
   #tab-tls:checked ~ .ex-menu label[for="tab-tls"],
+  #tab-tlshybrid:checked ~ .ex-menu label[for="tab-tlshybrid"],
   #tab-tlspipe:checked ~ .ex-menu label[for="tab-tlspipe"] {
     border-bottom-color: var(--accent-soft);
   }
