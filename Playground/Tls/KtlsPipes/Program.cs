@@ -18,7 +18,7 @@ using Playground.Shared;
 //  TlsConnectionDualPipe composes rather than implements. Each direction has two possible halves:
 //
 //              kernel                       OpenSSL
-//    read      TcpConnectionPipeReader      TlsPumpPipeReader
+//    read      TcpConnectionPipeReader      TlsDecryptingPipeReader
 //              (plaintext is already in     (decrypts into a Pipe
 //               ring memory - zero copy)     it owns)
 //    write     TcpConnectionPipeWriter      TlsEncryptingPipeWriter

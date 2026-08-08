@@ -47,7 +47,7 @@ PANES = {
         "Diff this against <label for=\"tab-tlspipe\" class=\"ex-jump\">ktls &middot; pipes</label> and "
         "the only functional difference is <code>KernelTx</code>; the rest is the banner and the log "
         "tag. That is the point of the pipe seam - <code>TlsConnectionDualPipe</code> pairs "
-        "<code>TcpConnectionPipeReader</code> or <code>TlsPumpPipeReader</code> with "
+        "<code>TcpConnectionPipeReader</code> or <code>TlsDecryptingPipeReader</code> with "
         "<code>TcpConnectionPipeWriter</code> or <code>TlsEncryptingPipeWriter</code>, chosen from the "
         "<em>session</em>. It has to be the session and not the config, because a handshake that left a "
         "partial record keeps the userspace reader whatever was asked for."),

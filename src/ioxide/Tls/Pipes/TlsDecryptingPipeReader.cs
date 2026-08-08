@@ -18,14 +18,14 @@ namespace ioxide.tls;
 /// supplies the destination, the backpressure and the consumed/examined bookkeeping.
 /// </summary>
 /// <remarks>Reactor thread only.</remarks>
-public sealed class TlsPumpPipeReader : PipeReader, IAsyncDisposable
+public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
 {
     private readonly TcpConnection _conn;
     private readonly TlsSession _session;
     private readonly Pipe _inbound;
     private readonly Task _pump;
 
-    public TlsPumpPipeReader(TcpConnection connection, TlsSession session, PipeOptions? options = null)
+    public TlsDecryptingPipeReader(TcpConnection connection, TlsSession session, PipeOptions? options = null)
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
         _session = session ?? throw new ArgumentNullException(nameof(session));
