@@ -330,9 +330,10 @@ if (tls.NegotiatedAlpn == "h2")
     gives both on the ring-native path. Client certificates remain the exception - the ring-native
     path does not do mTLS, so that still means <code>SslStream</code>.</p>
     <ul>
-      <li><b>kTLS</b> (<code>KernelTx = true</code>) &rarr; you are on Linux 6+ with the
-      <code>tls</code> module, TLS 1.3 and ALPN are enough, and you want <code>sendfile</code> or a
-      NIC that offloads TLS.
+      <li><b>kTLS</b> (<code>KernelTx = true</code>; as shipped the hybrid - kernel TX, OpenSSL
+      RX, with <code>KernelRx</code> completing both directions, experimental) &rarr; you are on
+      Linux 6+ with the <code>tls</code> module, TLS 1.3 and ALPN are enough, and you want
+      <code>sendfile</code> or a NIC that offloads TLS.
       Sample: <a href="https://github.com/MDA2AV/ioxide/tree/main/Playground/Tls/Ktls">Tls/Ktls</a>.</li>
       <li><b>OpenSSL both ways</b> (the default) &rarr; no kernel module, so it runs in a container
       that lacks one; TLS 1.2 available, any ciphersuite, resumption back, and no

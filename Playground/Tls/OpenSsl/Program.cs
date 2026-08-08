@@ -1,5 +1,4 @@
 using System.Text;
-using System.Runtime.InteropServices;
 using ioxide;
 using ioxide.tls;
 using ioxide.utils;
@@ -102,7 +101,7 @@ for (int i = 0; i < threads.Length; i++)
         // request across two records and each decrypts on its own, so answering per decrypt
         // answers twice. The carry is what turns "some plaintext arrived" into "a request
         // arrived", exactly as the plaintext samples do - ioxide does not parse HTTP for you.
-        var carry = new List<byte>();
+        var carry = new Carry();
 
         try
         {
@@ -113,7 +112,7 @@ for (int i = 0; i < threads.Length; i++)
 
             // A request can ride in with the handshake's final flight - answer it before parking
             // in ReadAsync, or the client waits on a response we never send.
-            carry.AddRange(tls.DrainPlaintext());
+            carry.Append(tls.DrainPlaintext());
             if (Answer(conn, tls, carry, response))
             {
                 await conn.FlushAsync();
@@ -169,19 +168,19 @@ foreach (Thread thread in threads)
 
 // Decrypt takes a raw pointer (the buffer belongs to the ring); the pointer work stays out of the
 // async handler, which cannot contain unsafe code.
-static unsafe void Decrypt(TlsSession tls, in SpscRecvRing.Item item, List<byte> carry)
-    => carry.AddRange(tls.Decrypt(item.Ptr, item.Len));
+static unsafe void Decrypt(TlsSession tls, in SpscRecvRing.Item item, Carry carry)
+    => carry.Append(tls.Decrypt(item.Ptr, item.Len));
 
 // One response per COMPLETE request in the carry, and none for a partial one. Returns whether
 // anything was written, so the caller flushes once for the batch rather than once per request.
-static bool Answer(TcpConnection conn, TlsSession tls, List<byte> carry, ReadOnlyMemory<byte> response)
+static bool Answer(TcpConnection conn, TlsSession tls, Carry carry, ReadOnlyMemory<byte> response)
 {
     bool wrote = false;
     int end;
 
-    while ((end = CollectionsMarshal.AsSpan(carry).IndexOf("\r\n\r\n"u8)) >= 0)
+    while ((end = carry.Span.IndexOf("\r\n\r\n"u8)) >= 0)
     {
-        carry.RemoveRange(0, end + 4);
+        carry.Consume(end + 4);
 
         // The one line that differs from Tls/Ktls. There, kTLS is producing the records so the
         // handler writes plaintext; here OpenSSL has to encrypt before anything reaches the slab.
@@ -191,4 +190,31 @@ static bool Answer(TcpConnection conn, TlsSession tls, List<byte> carry, ReadOnl
     }
 
     return wrote;
+}
+
+// Decrypted-but-unframed bytes: append at the end, consume from the front. A List<byte> pressed
+// into this job needs CollectionsMarshal to be searched and RemoveRange to be consumed; a plain
+// array does both directly.
+sealed class Carry
+{
+    private byte[] _buf = new byte[8 * 1024];
+    private int _len;
+
+    public ReadOnlySpan<byte> Span => _buf.AsSpan(0, _len);
+
+    public void Append(ReadOnlySpan<byte> bytes)
+    {
+        if (_buf.Length - _len < bytes.Length)
+        {
+            Array.Resize(ref _buf, Math.Max(_buf.Length * 2, _len + bytes.Length));
+        }
+        bytes.CopyTo(_buf.AsSpan(_len));
+        _len += bytes.Length;
+    }
+
+    public void Consume(int count)
+    {
+        _buf.AsSpan(count, _len - count).CopyTo(_buf);
+        _len -= count;
+    }
 }

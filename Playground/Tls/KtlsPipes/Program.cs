@@ -6,7 +6,8 @@ using ioxide.tls;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  tls-ktls-pipes - TLS served through an IDuplexPipe, with kernel TLS doing the crypto.
+//  tls-ktls-pipes - TLS served through an IDuplexPipe, with the kernel doing the transmit
+//  crypto - the hybrid, same as Tls/Ktls; kernelRx = true is full kTLS (experimental).
 //
 //      sudo modprobe tls        # kTLS needs the module
 //      curl -ks https://127.0.0.1:8443/ | head -c 40
