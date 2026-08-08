@@ -72,6 +72,9 @@ done
 play Tls/SslStream PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18443 \
   && note "tls-sslstream" "${R}r" "$(wrk_h1 https://127.0.0.1:18443/) req/s"
 stop_play
+play Tls/OpenSsl PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18443 \
+  && note "tls-openssl" "${R}r" "$(wrk_h1 https://127.0.0.1:18443/) req/s"
+stop_play
 if [ -d /sys/module/tls ]; then
   play Tls/Ktls PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18443 \
     && note "tls-ktls" "${R}r" "$(wrk_h1 https://127.0.0.1:18443/) req/s"
