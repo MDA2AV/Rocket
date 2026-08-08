@@ -20,6 +20,22 @@ internal static class TlsTests
             Assert.Equal("tls-ok", body);
         });
 
+        runner.Test("tls: in-memory PEM options serve a request", () =>
+        {
+            // The same material the path route loads, handed over as text - the route a host takes
+            // when its certificate lives in a store or an X509Certificate2, not on disk.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var options = new TlsOptions
+            {
+                CertificatePem = File.ReadAllText(certPath),
+                KeyPem = File.ReadAllText(keyPath),
+            };
+            int port = TestServer.Start(Handlers.Tls, r => TlsService.Start(r, options));
+            (int status, string body) = Client.GetTls(port, "/");
+            Assert.Equal(200, status);
+            Assert.Equal("tls-ok", body);
+        });
+
         // The opt-in path: EnableTx programs the keys, Write switches to bare slab writes, the
         // MSG_WAITALL flag is cleared, close_notify goes out as a kTLS control send. None of that
         // executes under the default any more, so this round-trip is its entire coverage.

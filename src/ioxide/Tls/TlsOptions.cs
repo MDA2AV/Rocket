@@ -2,11 +2,22 @@ namespace ioxide.tls;
 
 public sealed class TlsOptions
 {
-    /// <summary>PEM certificate chain file.</summary>
-    public required string CertificatePath { get; init; }
+    /// <summary>PEM certificate chain file. Exactly one of this and <see cref="CertificatePem"/>
+    /// must be set - <see cref="TlsService.Start"/> refuses anything else.</summary>
+    public string? CertificatePath { get; init; }
 
-    /// <summary>PEM private key file.</summary>
-    public required string KeyPath { get; init; }
+    /// <summary>PEM private key file. Exactly one of this and <see cref="KeyPem"/> must be set.</summary>
+    public string? KeyPath { get; init; }
+
+    /// <summary>
+    /// The certificate chain as PEM text, leaf first - the in-memory alternative to
+    /// <see cref="CertificatePath"/>, for hosts that carry certificates as data (an
+    /// <c>X509Certificate2</c> export, a secrets store) rather than as files on disk.
+    /// </summary>
+    public string? CertificatePem { get; init; }
+
+    /// <summary>The private key as PEM text - the in-memory alternative to <see cref="KeyPath"/>.</summary>
+    public string? KeyPem { get; init; }
 
     /// <summary>
     /// Protocols this port serves, MOST PREFERRED FIRST. The client sends what it supports and the
