@@ -30,6 +30,15 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
     private static extern int Shutdown(int sockfd, int how);
     private const int ShutWr = 1;   // SHUT_WR
 
+    // Pipe backpressure thresholds (bytes). Inbound (recv -> Kestrel's parser) is given a megabyte of
+    // slack so a fast peer is not throttled mid-request; outbound (Kestrel's response -> the send
+    // pump) is tighter, since a stalled response should stop being produced sooner. Each pipe resumes
+    // at half its pause mark to avoid flapping.
+    private const int InboundPauseBytes  = 1024 * 1024;
+    private const int InboundResumeBytes = 512 * 1024;
+    private const int OutboundPauseBytes  = 64 * 1024;
+    private const int OutboundResumeBytes = 32 * 1024;
+
     public PipeReader Input => _input;
     public PipeWriter Output => _outbound.Writer;
 
@@ -45,15 +54,15 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
         _inbound = new Pipe(new PipeOptions(
             readerScheduler: scheduler,
             writerScheduler: scheduler,
-            pauseWriterThreshold: 1024 * 1024,
-            resumeWriterThreshold: 512 * 1024,
+            pauseWriterThreshold: InboundPauseBytes,
+            resumeWriterThreshold: InboundResumeBytes,
             useSynchronizationContext: false));
 
         _outbound = new Pipe(new PipeOptions(
             readerScheduler: scheduler,
             writerScheduler: PipeScheduler.ThreadPool,
-            pauseWriterThreshold: 64 * 1024,
-            resumeWriterThreshold: 32 * 1024,
+            pauseWriterThreshold: OutboundPauseBytes,
+            resumeWriterThreshold: OutboundResumeBytes,
             useSynchronizationContext: false));
 
         _input = new ReactorPinReader(_inbound.Reader, reactor);

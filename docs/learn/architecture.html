@@ -109,7 +109,7 @@
 
     <h2>Completion routing: tags and generations</h2>
     <p>Every SQE carries its routing in <code>user_data</code>:</p>
-<pre><code class="language-plaintext">[63:56] kind     accept · recv · send · wake · client · cancel
+<pre><code class="language-plaintext">[63:56] kind     accept · recv · send · wake · client · cancel · timer
 [47:32] gen      the connection's generation at submit time
 [31:0]  fd       (or the client-op slot)</code></pre>
     <p>Dispatch is an array index (<code>connections[fd]</code> - fds are small dense integers, so
@@ -153,8 +153,9 @@
     lives.</p>
 
     <h2>Wiring and services</h2>
-    <p>Three seams connect an application: <code>Handle</code> (the per-connection loop),
-    <code>OnStart</code> (runs on the reactor thread before serving - open ring-native clients
+    <p>Three seams connect an application: <code>TcpHandle</code> (the per-connection loop, with
+    <code>QuicHandle</code> its QUIC twin), <code>OnStart</code> (runs on the reactor thread before
+    serving - open ring-native clients
     here so they bind to this reactor's ring), and typed services
     (<code>AddService&lt;T&gt;</code> / <code>GetService&lt;T&gt;</code>) so one reactor can carry
     any number of clients. The engine never names a client type - see

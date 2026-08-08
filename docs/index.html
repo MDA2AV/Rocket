@@ -2984,7 +2984,11 @@ using ioxide;
 using ioxide.ngtcp2;
 
 // ngtcp2 + picotls, bundled native - TLS 1.3 lives inside the transport.
-using var engine = new QuicEngine(&quot;cert.pem&quot;, &quot;key.pem&quot;, cidLength: 8, alpn: [&quot;echo&quot;]);
+// maxSendRetentionBytes: per-connection send-retention high-water - a response larger than this
+// streams out paced by acks instead of buffered whole, so QUIC serves large responses without
+// unbounded per-connection memory. Default 16 MiB.
+using var engine = new QuicEngine(&quot;cert.pem&quot;, &quot;key.pem&quot;, cidLength: 8, alpn: [&quot;echo&quot;],
+                                  maxSendRetentionBytes: 16L &lt;&lt; 20);
 
 var config = new ServerConfig
 {
@@ -3061,7 +3065,11 @@ foreach (Thread t in threads) t.Join();</code></pre>
 using ioxide;
 using ioxide.ngtcp2;
 
-using var engine = new QuicEngine(&quot;cert.pem&quot;, &quot;key.pem&quot;, cidLength: 8, alpn: [&quot;echo&quot;]);
+// maxSendRetentionBytes: per-connection send-retention high-water - a response larger than this
+// streams out paced by acks instead of buffered whole, so QUIC serves large responses without
+// unbounded per-connection memory. Default 16 MiB.
+using var engine = new QuicEngine(&quot;cert.pem&quot;, &quot;key.pem&quot;, cidLength: 8, alpn: [&quot;echo&quot;],
+                                  maxSendRetentionBytes: 16L &lt;&lt; 20);
 
 var config = new ServerConfig
 {
@@ -3137,7 +3145,11 @@ using ioxide;
 using ioxide.nghttp3;
 using ioxide.ngtcp2;
 
-using var engine = new QuicEngine(&quot;cert.pem&quot;, &quot;key.pem&quot;, cidLength: 8, alpn: [&quot;h3&quot;]);
+// maxSendRetentionBytes: per-connection send-retention high-water - a response larger than this
+// streams out paced by acks instead of buffered whole, so h3 serves large files without unbounded
+// per-connection memory. Default 16 MiB.
+using var engine = new QuicEngine(&quot;cert.pem&quot;, &quot;key.pem&quot;, cidLength: 8, alpn: [&quot;h3&quot;],
+                                  maxSendRetentionBytes: 16L &lt;&lt; 20);
 
 var config = new ServerConfig
 {

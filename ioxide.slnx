@@ -104,6 +104,7 @@
     <Project Path="tests/Ioxide.Tests.Redis/Ioxide.Tests.Redis.csproj" />
     <Project Path="tests/Ioxide.Tests.Tls/Ioxide.Tests.Tls.csproj" />
     <Project Path="tests/Ioxide.Tests.File/Ioxide.Tests.File.csproj" />
+    <Project Path="tests/Ioxide.Tests.Chaos/Ioxide.Tests.Chaos.csproj" />
   </Folder>
 
   <Folder Name="/bench/">

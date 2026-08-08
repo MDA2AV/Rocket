@@ -5,7 +5,7 @@ its own and a failure names the area immediately.
 
 ```bash
 dotnet build -c Release ioxide.slnx
-for s in Unit E2E Http Pg Redis Tls File; do
+for s in Unit E2E Http Pg Redis Tls File Chaos; do
   dotnet run --project tests/Ioxide.Tests.$s -c Release --no-build
 done
 ```
@@ -19,11 +19,13 @@ done
 | `Redis` | The Redis client | a redis |
 | `Tls` | kTLS handshake and encrypted writes | the `tls` kernel module (`sudo modprobe tls`) |
 | `File` | Static assets: cache, ring reads, revalidation | nothing |
+| `Chaos` | Malformed and hostile inputs across TCP, TLS, h2c and QUIC/HTTP/3: fragmentation, coalescing, oversize, garbage, resets, slow drips | nothing |
 
 Anything missing **skips** rather than fails, so every suite is safe to run anywhere.
 
 `Ioxide.Tests.Harness` is the shared library: the runner and its asserts, `TestServer` (starts a
-real reactor on a unique port), `Client` (a socket-level HTTP client), and the generic handlers.
+real reactor on a unique port), `Client` (a socket-level HTTP client), `H3TestClient` (a native
+ngtcp2 + nghttp3 driver used by both the E2E and Chaos suites), and the generic handlers.
 Module-specific handlers live with their suite - `PgHandlers` in the Pg project, not here - so the
 harness never references a module it does not need.
 

@@ -96,12 +96,15 @@ catch (PgException e) when (e.SqlState == "42P01")
 
     <h2>Wire details</h2>
     <ul>
-      <li>Simple query protocol, UTF-8 throughout; the parser walks messages incrementally and
-      compacts/grows its native buffer (64KB → 1MB) for large responses.</li>
-      <li><code>PgResult</code> carries the first column of the first row as text, the row count,
-      and the command tag - enough for the common case; a typed row reader is roadmap.</li>
-      <li>Trust authentication only, today. SCRAM, the extended protocol (prepared statements),
-      and pipelining are the driver's roadmap, in that order.</li>
+      <li>Simple and extended (parameterised, auto-prepared) query protocols, UTF-8 throughout; the
+      parser walks messages incrementally and compacts then grows its native buffer up to
+      <code>PgOptions.MaxReceiveBytes</code> (default 64&nbsp;MB) for large responses.</li>
+      <li><code>PgResult</code> carries the first column of the first row as text, the row count, and
+      the command tag for the common case; the streaming overload
+      (<code>QueryAsync(sql, args, onRow)</code>) hands each row to the callback as a
+      <code>PgRow</code> over <code>PgColumn[]</code>. Typed column conversion is roadmap.</li>
+      <li>Trust and SCRAM-SHA-256 authentication; parameterised queries auto-prepare, and commands
+      pipeline onto a connection - many in flight, answered in order.</li>
     </ul>
 
     <div class="note">Parallel requests overlap their queries across the pool instead of

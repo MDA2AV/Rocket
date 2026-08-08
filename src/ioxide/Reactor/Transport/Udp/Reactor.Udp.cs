@@ -18,6 +18,12 @@ public delegate void UdpDatagramHandler(Reactor reactor, in UdpDatagram datagram
 /// </summary>
 public sealed unsafe partial class Reactor
 {
+    // Receive/send buffer requested on every UDP socket. QUIC bursts (many connections per peer
+    // socket, GSO trains) overflow the ~212 KB default while the reactor drains a batch, so ask for
+    // more; the kernel clamps to net.core.rmem_max/wmem_max, making this best-effort headroom rather
+    // than a hard requirement.
+    private const int UdpSocketBufferBytes = 8 * 1024 * 1024;
+
     /// <summary>
     /// Per-datagram handler, invoked inline on the reactor thread. Like the TCP <see cref="Handle"/>,
     /// set it before <see cref="Run"/>.
@@ -231,10 +237,7 @@ public sealed unsafe partial class Reactor
             setsockopt(fd, SOL_UDP, UDP_GRO, &one, sizeof(int));
         }
 
-        // QUIC bursts (many conns per peer socket, GSO trains) overflow the ~212KB default while
-        // the reactor drains a batch; ask for more - the kernel clamps to net.core.rmem_max, so
-        // this is best-effort headroom, not a requirement.
-        int buf = 8 * 1024 * 1024;
+        int buf = UdpSocketBufferBytes;
         setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buf, sizeof(int));
         setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buf, sizeof(int));
 
