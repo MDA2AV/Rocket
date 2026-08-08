@@ -18,14 +18,14 @@ namespace ioxide.tls;
 /// supplies the destination, the backpressure and the consumed/examined bookkeeping.
 /// </summary>
 /// <remarks>Reactor thread only.</remarks>
-public sealed class TlsPumpPipeReader : PipeReader, IAsyncDisposable
+public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
 {
     private readonly TcpConnection _conn;
     private readonly TlsSession _session;
     private readonly Pipe _inbound;
     private readonly Task _pump;
 
-    public TlsPumpPipeReader(TcpConnection connection, TlsSession session, PipeOptions? options = null)
+    public TlsDecryptingPipeReader(TcpConnection connection, TlsSession session, PipeOptions? options = null)
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
         _session = session ?? throw new ArgumentNullException(nameof(session));
@@ -33,11 +33,22 @@ public sealed class TlsPumpPipeReader : PipeReader, IAsyncDisposable
         // Inline schedulers, so a read resumes on the thread that completed the write - the
         // reactor. A Pipe defaults to PipeScheduler.ThreadPool, and combined with
         // useSynchronizationContext:false that hands the connection to a pool thread with a NULL
-        // SynchronizationContext, so nothing can post it back and the loop never returns.
-        _inbound = new Pipe(options ?? new PipeOptions(
-            readerScheduler: PipeScheduler.Inline,
-            writerScheduler: PipeScheduler.Inline,
-            useSynchronizationContext: false));
+        // SynchronizationContext, so nothing can post it back and the loop never returns. That is
+        // why caller options contribute only their BUFFERING: the schedulers are not theirs to
+        // choose, and honoring a PipeOptions built with the BCL defaults would wedge the connection.
+        _inbound = new Pipe(options is null
+            ? new PipeOptions(
+                readerScheduler: PipeScheduler.Inline,
+                writerScheduler: PipeScheduler.Inline,
+                useSynchronizationContext: false)
+            : new PipeOptions(
+                pool: options.Pool,
+                readerScheduler: PipeScheduler.Inline,
+                writerScheduler: PipeScheduler.Inline,
+                pauseWriterThreshold: options.PauseWriterThreshold,
+                resumeWriterThreshold: options.ResumeWriterThreshold,
+                minimumSegmentSize: options.MinimumSegmentSize,
+                useSynchronizationContext: false));
 
         _pump = PumpInboundAsync();
     }
@@ -56,11 +67,20 @@ public sealed class TlsPumpPipeReader : PipeReader, IAsyncDisposable
 
     public override void Complete(Exception? exception = null) => _inbound.Reader.Complete(exception);
 
+    /// <summary>
+    /// Stops the pump and waits for it. This CLOSES the connection's I/O: a pump parked in
+    /// <c>ReadAsync</c> has nothing else that will ever release it - the peer may stay open and
+    /// quiet forever - so disposal marks the connection closed to wake it. Complete and flush the
+    /// write side first; a flush after this point is a no-op.
+    /// </summary>
     public async ValueTask DisposeAsync()
     {
-        // Cancelling the reader unblocks a pump parked in FlushAsync; the connection's own teardown
-        // is what releases one parked in ReadAsync.
+        // Cancelling the reader unblocks a pump parked in the pipe's FlushAsync; MarkClosed wakes
+        // one parked in the connection's ReadAsync with a closed snapshot. Without the second, a
+        // server-initiated close against a quiet peer awaited a CQE that never comes, and the
+        // handler's finally - the DecRef that releases the connection - never ran.
         _inbound.Reader.CancelPendingRead();
+        _conn.MarkClosed();
 
         try
         {

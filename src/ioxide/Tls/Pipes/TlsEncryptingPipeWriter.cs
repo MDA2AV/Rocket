@@ -42,20 +42,28 @@ public sealed class TlsEncryptingPipeWriter : PipeWriter
 
     public override Memory<byte> GetMemory(int sizeHint = 0)
     {
+        ThrowIfCompleted();
         Ensure(sizeHint);
         return _staging.AsMemory(_staged);
     }
 
     public override Span<byte> GetSpan(int sizeHint = 0)
     {
+        ThrowIfCompleted();
         Ensure(sizeHint);
         return _staging.AsSpan(_staged);
     }
 
-    public override void Advance(int bytes) => _staged += bytes;
+    public override void Advance(int bytes)
+    {
+        ThrowIfCompleted();
+        _staged += bytes;
+    }
 
     public override ValueTask<FlushResult> FlushAsync(CancellationToken cancellationToken = default)
     {
+        ThrowIfCompleted();
+
         if (_cancelRequested)
         {
             _cancelRequested = false;
@@ -88,12 +96,32 @@ public sealed class TlsEncryptingPipeWriter : PipeWriter
         }
         _completed = true;
 
+        // Complete commits: advanced-but-unflushed plaintext is encrypted into the slab, exactly
+        // as the kTLS-mode TcpConnectionPipeWriter leaves its advanced bytes there - either way
+        // the connection's final flush carries them out. A faulted completion discards instead;
+        // committing half a response on an error would dress a failure up as a short success.
+        if (exception is null && _staged > 0)
+        {
+            _tls.WriteEncrypted(_conn, _staging.AsSpan(0, _staged));
+        }
+        _staged = 0;
+
         if (_staging.Length > 0)
         {
             ArrayPool<byte>.Shared.Return(_staging);
             _staging = [];
         }
-        _staged = 0;
+    }
+
+    // After Complete the staging buffer is back in the pool and the session may already be
+    // disposed - an unguarded flush would hand SSL_write a freed SSL*. Fail as a managed
+    // exception on the offending caller, not as native corruption of the whole reactor.
+    private void ThrowIfCompleted()
+    {
+        if (_completed)
+        {
+            throw new InvalidOperationException("The PipeWriter is completed; no further writes are allowed.");
+        }
     }
 
     private void Ensure(int sizeHint)

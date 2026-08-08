@@ -33,6 +33,14 @@ Env.Override(ref port, ref reactors, ref bodyBytes);
 // A real PEM pair, or null to generate a self-signed localhost cert on first run.
 string? certOverride = null;
 string? keyOverride  = null;
+
+// Hand INBOUND decryption to the kernel too, so neither direction goes through OpenSSL. Off by
+// default and experimental: a TLS 1.3 KeyUpdate cannot be read through IORING_OP_RECV, and about
+// one first connection in twelve fails outright. Transmit stays kernel-side either way - that is
+// the point of this sample and is not a knob, because the handler below writes plaintext.
+bool kernelRx = false;
+
+Env.OverrideKtls(ref kernelRx);
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 (string certPath, string keyPath) = QuicCert.Ensure(certOverride, keyOverride);
@@ -50,6 +58,13 @@ var tlsOptions = new TlsOptions
 {
     CertificatePath = certPath,
     KeyPath         = keyPath,
+
+    // NOT the default - TLS is OpenSSL both ways unless you ask for this. It is what lets the
+    // handler below write PLAINTEXT to the connection: the kernel turns it into records on send.
+    // Remove this line and conn.Write would put cleartext on the wire.
+    KernelTx = true,
+
+    KernelRx = kernelRx,
 };
 
 byte[] body = new byte[bodyBytes];
@@ -161,8 +176,9 @@ static bool Answer(TcpConnection conn, List<byte> carry, ReadOnlyMemory<byte> re
     {
         carry.RemoveRange(0, end + 4);
 
-        // kTLS is producing the records, so this is PLAINTEXT going into the slab. Compare
-        // Playground/Tls/OpenSsl, where the same line is tls.WriteEncrypted(conn, ...).
+        // PLAINTEXT into the slab - safe only because KernelTx = true above. TlsSession.Write
+        // is the call that is correct either way, and is what every other sample uses; this one
+        // spells it out because demonstrating the kTLS write path is the point of the file.
         conn.Write(response.Span);
 
         wrote = true;

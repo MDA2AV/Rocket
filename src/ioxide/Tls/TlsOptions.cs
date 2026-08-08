@@ -23,16 +23,16 @@ public sealed class TlsOptions
     public string[] Alpn { get; init; } = ["http/1.1"];
 
     /// <summary>
-    /// Let the kernel decrypt inbound records too, not just encrypt outbound ones. Off by default.
+    /// Let the kernel decrypt inbound records too. Off by default, experimental, and it requires
+    /// <see cref="KernelTx"/>: RX is programmed at the same handoff as TX and shares the TCP_ULP
+    /// that EnableTx installs, so asking for RX alone is refused at
+    /// <see cref="TlsService.Start"/>.
     ///
-    /// TLS in ioxide is asymmetric: kTLS TX is programmed for every connection, so responses are
-    /// encrypted by the kernel on the existing send path, while inbound records are decrypted in
-    /// userspace by OpenSSL. Turning this on programs TLS_RX as well, after which an ordinary recv
-    /// returns PLAINTEXT and <see cref="TlsSession.Decrypt"/> is a no-op - plaintext then lands
-    /// directly in ring memory, so the zero-copy reader works on TLS connections exactly as it does
-    /// on cleartext ones.
+    /// With both on, an ordinary recv returns PLAINTEXT and <see cref="TlsSession.Decrypt"/> is a
+    /// no-op - plaintext then lands directly in ring memory, so the zero-copy reader works on TLS
+    /// connections exactly as it does on cleartext ones.
     ///
-    /// Two reasons it is opt-in.
+    /// Two reasons it is opt-in even where <see cref="KernelTx"/> is.
     ///
     /// The handoff must land on a record boundary. Whatever the handshake already pulled off the
     /// socket is invisible to the kernel, so the record sequence it starts at has to account for
@@ -48,18 +48,25 @@ public sealed class TlsOptions
     public bool KernelRx { get; init; }
 
     /// <summary>
-    /// Let the kernel encrypt outbound records. <b>On by default</b> - this is ioxide's normal TLS
-    /// write path, and the reason handlers write plaintext.
+    /// Let the kernel encrypt outbound records. <b>Off by default</b> - TLS is OpenSSL in both
+    /// directions unless you turn this on.
     ///
-    /// Turning it off keeps everything in OpenSSL: the socket gets no TLS ULP at all, handlers must
-    /// hand responses to <see cref="TlsSession.WriteEncrypted"/> instead of writing them straight
-    /// to the connection, and <c>MSG_WAITALL</c> stays on because there is no kTLS to reject it.
+    /// It used to default on, which made ioxide's TLS asymmetric: the kernel encrypted, OpenSSL
+    /// decrypted. That asymmetry is now something you opt into rather than something you inherit,
+    /// because it is not free and it was not faster. Measured on loopback, HTTP/1.1, 4 reactors:
+    /// kTLS trails OpenSSL by roughly 20-25% on large single writes and costs about 20% more CPU
+    /// per request, while a small response shows no difference either way. What it constrains is
+    /// the part that matters: the Linux <c>tls</c> module has to be present, TLS 1.3 only, one
+    /// ciphersuite, and session resumption is disabled because a ticket would consume a record
+    /// sequence number and desynchronise the handoff.
     ///
-    /// The trade is one copy. kTLS takes plaintext into the write slab and encrypts on send; OpenSSL
-    /// encrypts into its write BIO and the records are then read into the slab. What that costs in
-    /// practice is a question worth measuring rather than assuming - and turning kTLS off also
-    /// drops its constraints: no 'tls' kernel module, no TLS-1.3-only, no single-ciphersuite limit,
-    /// and no handshake-alignment problem.
+    /// Turn it on for what it is actually for - <c>sendfile</c> and NICs that offload TLS - neither
+    /// of which those measurements exercise.
+    ///
+    /// <b>It changes what a handler must write.</b> With kTLS the kernel produces the records, so
+    /// a handler writes plaintext straight to the connection; without it OpenSSL has to encrypt
+    /// first. <see cref="TlsSession.Write"/> is correct either way and is what samples use - a bare
+    /// <c>connection.Write</c> on a session with this off puts CLEARTEXT on the wire.
     /// </summary>
-    public bool KernelTx { get; init; } = true;
+    public bool KernelTx { get; init; }
 }

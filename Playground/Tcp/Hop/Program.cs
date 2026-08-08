@@ -16,12 +16,23 @@ using Playground.Shared;
 //  Needs: ioxide
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+// Edit these. That is the whole mechanism - there is no config file and nothing else to find.
+// Env.Override exists only so bench/run.sh can drive the sample from outside; delete that line
+// when you copy this out and the literals above it are the entire configuration.
+
+ushort port     = 8080;                        // http://127.0.0.1:8080/
+int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+
+Env.Override(ref port, ref reactors);
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
 var config = new ServerConfig
 {
-    ReactorCount = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
+    ReactorCount = reactors,
     Tcp = new TcpOptions
     {
-        Port = Env.Port("PLAYGROUND_PORT", 8080),
+        Port = port,
     },
 };
 

@@ -10,14 +10,14 @@ namespace ioxide.tls;
 /// one applies is not a choice the caller makes - it is what the handshake actually achieved:
 ///
 /// <code>
-///            kernel                          OpenSSL
-///   read     TcpConnectionPipeReader         TlsPumpPipeReader
-///            (plaintext already in ring      (decrypts into a Pipe
-///             memory - zero copy)             this owns)
-///
+///                  kTLS (opt-in)                   OpenSSL (default)
+///   read     TcpConnectionPipeReader         TlsDecryptingPipeReader
 ///   write    TcpConnectionPipeWriter         TlsEncryptingPipeWriter
-///            (plaintext into the slab,       (SSL_write, then the records
-///             the kernel makes records)       go into the slab)
+///
+/// The kTLS column is the plaintext connection's own reader and writer, reused unchanged: with the
+/// kernel doing the crypto there is nothing for a TLS-specific half to do. The OpenSSL column is
+/// the pair that has to exist - one decrypts into a Pipe it owns, the other encrypts before the
+/// bytes reach the slab.
 /// </code>
 ///
 /// <see cref="TlsOptions.KernelRx"/> and <see cref="TlsOptions.KernelTx"/> express intent;
@@ -33,10 +33,11 @@ namespace ioxide.tls;
 /// <remarks>Reactor thread only, like everything else that touches a connection.</remarks>
 public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
 {
+    private readonly TcpConnection _conn;
     private readonly TlsSession _tls;
     private readonly bool _ownsSession;
 
-    private readonly TlsPumpPipeReader? _pump;      // only when OpenSSL decrypts
+    private readonly TlsDecryptingPipeReader? _pump;      // only when OpenSSL decrypts
     private readonly PipeWriter _writer;
 
     /// <summary>
@@ -46,8 +47,10 @@ public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
     /// <param name="connection">The accepted connection, post-handshake.</param>
     /// <param name="session">The session that handshake produced.</param>
     /// <param name="options">
-    /// Buffering for the inbound pipe, when there is one. Ignored under kTLS RX, which needs no
-    /// buffer of its own: its pause threshold is the ring.
+    /// Buffering for the inbound pipe, when there is one - pool, thresholds and segment size.
+    /// Schedulers are NOT taken from it: the pipe forces Inline both ways, because anything else
+    /// hands the connection to a pool thread the reactor never gets back. Ignored under kTLS RX,
+    /// which needs no buffer of its own: its pause threshold is the ring.
     /// </param>
     /// <param name="ownsSession">
     /// When true (the default) disposing this also disposes <paramref name="session"/>, which is
@@ -59,6 +62,7 @@ public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(session);
 
+        _conn = connection;
         _tls = session;
         _ownsSession = ownsSession;
 
@@ -72,12 +76,12 @@ public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
         }
         else
         {
-            _pump = new TlsPumpPipeReader(connection, session, options);
+            _pump = new TlsDecryptingPipeReader(connection, session, options);
             Input = _pump;
         }
 
-        // kTLS TX means the kernel makes the records, so plaintext goes straight to the slab and
-        // the write path is the cleartext one, untouched.
+        // Default is OpenSSL: encrypt before the bytes reach the slab. With kTLS opted in the
+        // kernel makes the records instead, so the plaintext connection's own writer is enough.
         _writer = session.KernelTx
             ? new TcpConnectionPipeWriter(connection)
             : new TlsEncryptingPipeWriter(connection, session);
@@ -91,6 +95,13 @@ public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        // Write side first, while the connection still sends: Complete() commits any advanced-but-
+        // unflushed plaintext into the slab, and the flush carries it out. The read side's disposal
+        // marks the connection closed (nothing else releases a pump parked on a quiet peer), and
+        // after that a flush is a no-op - so this order is load-bearing, not stylistic.
+        _writer.Complete();
+        await _conn.FlushAsync();
+
         if (_pump is not null)
         {
             await _pump.DisposeAsync();
@@ -100,11 +111,9 @@ public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
             Input.Complete();
         }
 
-        _writer.Complete();
-
         if (_ownsSession)
         {
-            _tls.Dispose();   // sends close_notify over kTLS when the peer has not already closed
+            _tls.Dispose();   // sends close_notify when the peer has not already closed, both modes
         }
     }
 }

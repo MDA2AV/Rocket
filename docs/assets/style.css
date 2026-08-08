@@ -212,6 +212,14 @@ nav.top .links a.gh svg { display: block; }
 #tab-vs:checked ~ .ex-menu label[for="tab-vs"],
 #tab-tlsosslpipe:checked ~ .ex-menu label[for="tab-tlsosslpipe"],
 #tab-tlsossl:checked ~ .ex-menu label[for="tab-tlsossl"],
+#tab-tlsbcl:checked ~ .ex-menu label[for="tab-tlsbcl"],
+#tab-big:checked ~ .ex-menu label[for="tab-big"],
+#tab-hop:checked ~ .ex-menu label[for="tab-hop"],
+#tab-taskrun:checked ~ .ex-menu label[for="tab-taskrun"],
+#tab-h2bcl:checked ~ .ex-menu label[for="tab-h2bcl"],
+#tab-h3buf:checked ~ .ex-menu label[for="tab-h3buf"],
+#tab-quicalpn:checked ~ .ex-menu label[for="tab-quicalpn"],
+#tab-https:checked ~ .ex-menu label[for="tab-https"],
 #tab-h2:checked ~ .ex-menu label[for="tab-h2"],
 #tab-h2cs:checked ~ .ex-menu label[for="tab-h2cs"],
 #tab-h2tls:checked ~ .ex-menu label[for="tab-h2tls"],
@@ -238,6 +246,21 @@ nav.top .links a.gh svg { display: block; }
   border-left-color: var(--accent-soft);
   background: var(--code-bg);
 }
+
+/* Section headers above the collapsible groups: transport first, then what rides on it. The
+   rule is the separation - without it the menu is one long list and the two halves blur. */
+.ex-group {
+  font-size: 0.62rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 1.1rem 0.9rem 0.35rem 1.1rem;
+  border-top: 1px solid var(--line);
+  margin-top: 0.6rem;
+  opacity: 0.75;
+}
+.ex-group:first-of-type { border-top: none; margin-top: 0.2rem; padding-top: 0.5rem; }
+.ex-menu .ex-group + .ex-sect { border-top: none; margin-top: 0; }
 
 /* ── the overview: hero + three cards, the default state ───────────────────── */
 
@@ -312,6 +335,14 @@ nav.top .links a.gh svg { display: block; }
 #tab-vs:checked ~ .pane-vs { display: block; }
 #tab-tlsosslpipe:checked ~ .pane-tlsosslpipe { display: block; }
 #tab-tlsossl:checked ~ .pane-tlsossl { display: block; }
+#tab-tlsbcl:checked ~ .pane-tlsbcl { display: block; }
+#tab-big:checked ~ .pane-big { display: block; }
+#tab-hop:checked ~ .pane-hop { display: block; }
+#tab-taskrun:checked ~ .pane-taskrun { display: block; }
+#tab-h2bcl:checked ~ .pane-h2bcl { display: block; }
+#tab-h3buf:checked ~ .pane-h3buf { display: block; }
+#tab-quicalpn:checked ~ .pane-quicalpn { display: block; }
+#tab-https:checked ~ .pane-https { display: block; }
 #tab-h2:checked ~ .pane-h2 { display: block; }
 #tab-h2cs:checked ~ .pane-h2cs { display: block; }
 #tab-h2tls:checked ~ .pane-h2tls { display: block; }
@@ -432,6 +463,14 @@ nav.top .links a.gh svg { display: block; }
   #tab-vs:checked ~ .ex-menu label[for="tab-vs"],
   #tab-tlsosslpipe:checked ~ .ex-menu label[for="tab-tlsosslpipe"],
   #tab-tlsossl:checked ~ .ex-menu label[for="tab-tlsossl"],
+  #tab-tlsbcl:checked ~ .ex-menu label[for="tab-tlsbcl"],
+  #tab-big:checked ~ .ex-menu label[for="tab-big"],
+  #tab-hop:checked ~ .ex-menu label[for="tab-hop"],
+  #tab-taskrun:checked ~ .ex-menu label[for="tab-taskrun"],
+  #tab-h2bcl:checked ~ .ex-menu label[for="tab-h2bcl"],
+  #tab-h3buf:checked ~ .ex-menu label[for="tab-h3buf"],
+  #tab-quicalpn:checked ~ .ex-menu label[for="tab-quicalpn"],
+  #tab-https:checked ~ .ex-menu label[for="tab-https"],
   #tab-h2:checked ~ .ex-menu label[for="tab-h2"],
   #tab-h2cs:checked ~ .ex-menu label[for="tab-h2cs"],
   #tab-h2tls:checked ~ .ex-menu label[for="tab-h2tls"],

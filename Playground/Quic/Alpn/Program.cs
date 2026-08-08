@@ -22,9 +22,25 @@ using Playground.Shared;
 //  Needs: ioxide.ngtcp2, ioxide.nghttp3
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-(string certPath, string keyPath) = QuicCert.Ensure(
-    Env.StrOrNull("PLAYGROUND_QUIC_CERT"),
-    Env.StrOrNull("PLAYGROUND_QUIC_KEY"));
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+// Edit these. That is the whole mechanism - there is no config file and nothing else to find.
+// Env.OverrideQuic exists only so bench/run.sh can drive the sample from outside; delete that
+// line when you copy this out and the literals above it are the entire configuration.
+
+ushort quicPort = 8443;                        // https://127.0.0.1:8443/ - UDP, not TCP
+int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+
+Env.OverrideQuic(ref quicPort, ref reactors);
+
+// UDP receive slots per reactor: how many datagrams the ring can have outstanding at once.
+int udpRecvSlots = 16;
+
+// A real PEM pair, or null to generate a self-signed localhost cert on first run.
+string? certOverride = null;
+string? keyOverride  = null;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+(string certPath, string keyPath) = QuicCert.Ensure(certOverride, keyOverride);
 
 // Permissive ALPN (no allowlist): h3 clients negotiate "h3"; everything else still handshakes
 // and falls through to the echo branch.
@@ -32,12 +48,12 @@ using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
 
 var config = new ServerConfig
 {
-    ReactorCount = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
+    ReactorCount = reactors,
     Tcp = null,   // QUIC-only: no TCP listener is bound
-    Udp = new UdpOptions { RecvSlots = Env.Int("PLAYGROUND_UDP_SLOTS", 16) },
+    Udp = new UdpOptions { RecvSlots = udpRecvSlots },
     Quic = new QuicOptions
     {
-        Port = Env.Port("PLAYGROUND_QUIC_PORT", 8443),
+        Port = quicPort,
         LocalCidLength = 8,
         ConnectionFactory = engine.CreateFactory(),
     },

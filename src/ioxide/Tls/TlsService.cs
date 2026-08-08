@@ -6,11 +6,12 @@ namespace ioxide.tls;
 
 /// <summary>
 /// Per-reactor TLS termination. <see cref="AcceptAsync"/> drives the TLS 1.3 handshake through
-/// OpenSSL memory BIOs - handshake bytes ride the same ring recv/send as everything else - then
-/// enables kernel TLS transmit offload, so the handler keeps writing plaintext through
-/// <c>conn.Write</c>/<c>FlushAsync</c> while the kernel produces the records. Receives stay in
-/// userspace: the handler passes each ciphertext slice through <see cref="TlsSession.Decrypt"/>.
-/// Requests are small and responses are big, so the kernel does the heavy direction.
+/// OpenSSL memory BIOs - handshake bytes ride the same ring recv/send as everything else - and
+/// hands back the <see cref="TlsSession"/> that carries the connection from there. By default
+/// OpenSSL owns both directions: the handler writes through <see cref="TlsSession.Write"/> and
+/// passes each ciphertext slice through <see cref="TlsSession.Decrypt"/>. Kernel TLS is opt-in
+/// per direction (<see cref="TlsOptions.KernelTx"/> / <see cref="TlsOptions.KernelRx"/>), and the
+/// handoff happens here, right after the handshake.
 /// </summary>
 public sealed class TlsService
 {
@@ -35,23 +36,38 @@ public sealed class TlsService
     /// <summary>Create the per-reactor service and register it. Call from <c>Reactor.OnStart</c>.</summary>
     public static TlsService Start(Reactor reactor, TlsOptions options)
     {
+        // RX alone cannot be programmed: the handoff shares the TCP_ULP that EnableTx installs.
+        // Refuse loudly rather than silently serving the userspace path the caller opted out of.
+        if (options.KernelRx && !options.KernelTx)
+        {
+            throw new ArgumentException(
+                "KernelRx requires KernelTx: kTLS RX is programmed at the same handoff as TX. " +
+                "Set KernelTx = true as well, or drop KernelRx.", nameof(options));
+        }
+
         nint ctx = OpenSsl.SSL_CTX_new(OpenSsl.TLS_server_method());
         if (ctx == 0)
         {
             throw new IOException($"SSL_CTX_new: {OpenSsl.LastError()}");
         }
 
-        // TLS 1.3 only, one suite: kTLS needs AES-128-GCM keys and a known layout.
-        OpenSsl.SSL_CTX_ctrl(ctx, OpenSsl.SSL_CTRL_SET_MIN_PROTO_VERSION, OpenSsl.TLS1_3_VERSION, 0);
-        OpenSsl.SSL_CTX_ctrl(ctx, OpenSsl.SSL_CTRL_SET_MAX_PROTO_VERSION, OpenSsl.TLS1_3_VERSION, 0);
-        if (OpenSsl.SSL_CTX_set_ciphersuites(ctx, "TLS_AES_128_GCM_SHA256") != 1)
+        // The kTLS constraints are the kernel path's, not TLS's - so they apply only when the
+        // kernel path was asked for. The default keeps OpenSSL's own defaults: TLS 1.2 and 1.3,
+        // any ciphersuite, session tickets on. This is the table in TlsOptions.KernelTx made true.
+        if (options.KernelTx)
         {
-            throw new IOException($"set_ciphersuites: {OpenSsl.LastError()}");
-        }
+            // TLS 1.3 only, one suite: kTLS needs AES-128-GCM keys and a known layout.
+            OpenSsl.SSL_CTX_ctrl(ctx, OpenSsl.SSL_CTRL_SET_MIN_PROTO_VERSION, OpenSsl.TLS1_3_VERSION, 0);
+            OpenSsl.SSL_CTX_ctrl(ctx, OpenSsl.SSL_CTRL_SET_MAX_PROTO_VERSION, OpenSsl.TLS1_3_VERSION, 0);
+            if (OpenSsl.SSL_CTX_set_ciphersuites(ctx, "TLS_AES_128_GCM_SHA256") != 1)
+            {
+                throw new IOException($"set_ciphersuites: {OpenSsl.LastError()}");
+            }
 
-        // No session tickets: they would consume record sequence numbers after the
-        // handshake and break the kTLS handoff (which programs seq = 0).
-        OpenSsl.SSL_CTX_set_num_tickets(ctx, 0);
+            // No session tickets: they would consume record sequence numbers after the
+            // handshake and break the kTLS handoff (which programs the record sequence).
+            OpenSsl.SSL_CTX_set_num_tickets(ctx, 0);
+        }
 
         if (OpenSsl.SSL_CTX_use_certificate_chain_file(ctx, options.CertificatePath) != 1)
         {
@@ -107,6 +123,7 @@ public sealed class TlsService
         GCHandle handle = GCHandle.Alloc(session);
         OpenSsl.SSL_set_ex_data(ssl, SslSessionIndex, GCHandle.ToIntPtr(handle));
         session.AttachHandle(handle);
+        session.AttachFd(conn.ClientFd);   // the teardown close_notify goes out on it, both modes
 
         try
         {
@@ -149,14 +166,15 @@ public sealed class TlsService
             // rbio - decrypt it now so the handler starts with a clean slate.
             session.DrainPending();
 
-            byte[] secret = session.ServerSecret
-                ?? throw new IOException("TLS handshake completed but no server traffic secret was captured");
-
             // Everything the handshake needed to send is flushed; from the next write on, the kernel
             // produces the records. kTLS rejects MSG_WAITALL, so switch this connection's sends to
             // plain (the reactor still loops on short sends). EnableTx zeros 'secret' once programmed.
             if (_kernelTx)
             {
+                // The keylog secret exists only on TLS 1.3, which the kTLS branch pins above - so
+                // here its absence is a real failure, not a version artifact.
+                byte[] secret = session.ServerSecret
+                    ?? throw new IOException("TLS handshake completed but no server traffic secret was captured");
                 Ktls.EnableTx(conn.ClientFd, secret);
                 conn.SendOpFlags = 0;
                 session.MarkTxEnabled(conn.ClientFd);
@@ -164,8 +182,9 @@ public sealed class TlsService
             else
             {
                 // No TLS ULP on this socket at all: OpenSSL encrypts, the reactor sends ordinary
-                // bytes, and MSG_WAITALL stays on because there is no kTLS to reject it.
-                CryptographicOperations.ZeroMemory(secret);
+                // bytes, and MSG_WAITALL stays on because there is no kTLS to reject it. The raw
+                // secrets have no further use - and a TLS 1.2 handshake never produced them.
+                session.ZeroSecrets();
             }
 
             // RX is opt-in and per connection. A partial record left in the BIO means bytes the
@@ -176,6 +195,14 @@ public sealed class TlsService
                 Ktls.EnableRx(conn.ClientFd, session.ClientSecret, (ulong)consumedRecords);
                 session.ClientSecret = null;   // EnableRx zeroed it
                 session.MarkKernelRx();
+            }
+            else if (session.ClientSecret is not null)
+            {
+                // The client secret exists only for that handoff. OpenSSL keeps its own key
+                // schedule, so on every path that did not program the kernel the raw secret is
+                // just key material sitting on the heap - scrub it now, not at GC's leisure.
+                CryptographicOperations.ZeroMemory(session.ClientSecret);
+                session.ClientSecret = null;
             }
 
             return session;

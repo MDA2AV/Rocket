@@ -21,19 +21,39 @@ using Playground.Shared;
 //  Needs: ioxide, ioxide.ngtcp2, ioxide.nghttp3
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-(string certPath, string keyPath) = QuicCert.Ensure(
-    Env.StrOrNull("PLAYGROUND_QUIC_CERT"),
-    Env.StrOrNull("PLAYGROUND_QUIC_KEY"));
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+// Edit these. That is the whole mechanism - there is no config file and nothing else to find.
+// Env.Override exists only so bench/run.sh can drive the sample from outside; delete those lines
+// when you copy this out and the literals above them are the entire configuration.
+
+ushort quicPort = 8443;                        // https://127.0.0.1:8443/ over UDP - h3 lives here
+ushort tcpPort  = 8080;                        // the TCP listener, so the process serves both
+int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+
+Env.Override(ref tcpPort, ref reactors);
+Env.OverrideQuic(ref quicPort, ref reactors);
+
+// UDP receive slots per reactor: how many datagrams the ring can have outstanding at once.
+int udpRecvSlots = 16;
+
+// QPACK dynamic table. 0 keeps every header literal, which costs bytes but never blocks a
+// stream on a table update; raise it and set QpackBlockedStreams to trade one for the other.
+long qpackCapacity = 0;
+
+// A real PEM pair, or null to generate a self-signed localhost cert on first run.
+string? certOverride = null;
+string? keyOverride  = null;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+(string certPath, string keyPath) = QuicCert.Ensure(certOverride, keyOverride);
 
 using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
 
-ushort quicPort = Env.Port("PLAYGROUND_QUIC_PORT", 8443);
-
 var config = new ServerConfig
 {
-    ReactorCount = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
-    Tcp = new TcpOptions { Port = Env.Port("PLAYGROUND_PORT", 8080) },
-    Udp = new UdpOptions { RecvSlots = Env.Int("PLAYGROUND_UDP_SLOTS", 16) },
+    ReactorCount = reactors,
+    Tcp = new TcpOptions { Port = tcpPort },
+    Udp = new UdpOptions { RecvSlots = udpRecvSlots },
     Quic = new QuicOptions
     {
         Port = quicPort,
@@ -42,7 +62,6 @@ var config = new ServerConfig
     },
 };
 
-long qpackCapacity = Env.Long("PLAYGROUND_QPACK_CAP", 0);
 var h3Options = new Nghttp3Options
 {
     QpackDynamicTableCapacity = qpackCapacity,

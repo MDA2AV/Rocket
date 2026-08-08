@@ -7,12 +7,10 @@ using ioxide.tls;
 namespace Ioxide.Tests;
 
 /// <summary>
-/// Serving TLS over pipes. The write half needs nothing - kTLS TX means plaintext goes out through
-/// the ordinary pipe - so everything here is about the read half, where plaintext has to be
-/// decrypted into somewhere owned before a PipeReader can hand it out.
-///
-/// These need kTLS for the same reason the rest of the TLS suite does: without the module,
-/// AcceptAsync cannot complete the handoff and there is no session to build a pipe over.
+/// Serving TLS over pipes. Under the default both halves are OpenSSL's: the write half encrypts
+/// before the bytes reach the slab, the read half decrypts into a Pipe it owns. Under the kTLS TX
+/// opt-in the write half is the plaintext connection's own writer. The default needs no kernel
+/// module, so these run everywhere; the opt-in round-trip is gated on it.
 /// </summary>
 internal static class TlsPipeTests
 {
@@ -22,6 +20,20 @@ internal static class TlsPipeTests
         {
             (string certPath, string keyPath) = TestCert.Ensure();
             var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
+
+            int port = TestServer.Start(PipeHandler, r => TlsService.Start(r, options));
+
+            (int status, string body) = Client.GetTls(port, "/");
+            Assert.Equal(200, status);
+            Assert.Equal("pipe-tls-ok", body);
+        });
+
+        // The composer picks the plaintext connection's own writer when kTLS TX owns the records -
+        // the one dual-pipe configuration the default no longer exercises.
+        runner.Test("tls pipe: kTLS TX opt-in through TlsConnectionDualPipe", () =>
+        {
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath, KernelTx = true };
 
             int port = TestServer.Start(PipeHandler, r => TlsService.Start(r, options));
 
@@ -54,7 +66,7 @@ internal static class TlsPipeTests
                 (int status, string body) = Client.GetTlsSplitRecords(port, "/", size);
                 Assert.Equal(200, status);
                 Assert.Equal("pipe-tls-ok", body);
-            }, skip: !ktls);
+            });
         }
 
         runner.Test("tls pipe: serving never leaves the reactor thread", () =>
@@ -88,7 +100,7 @@ internal static class TlsPipeTests
                 $"expected at least two observations, got {affinity.Checks}");
             Assert.True(affinity.Drift.Count == 0,
                 "ioxide moved the handler off its reactor: " + string.Join("; ", affinity.Drift));
-        }, skip: !ktls);
+        });
 
         runner.Test("tls pipe: garbage after the handshake faults the reader, not a clean EOF", () =>
         {
@@ -113,7 +125,7 @@ internal static class TlsPipeTests
             string reason = faulted.Task.Result;
             Assert.True(reason.Contains("TLS decrypt failed"),
                 $"expected the decrypt to fault, got: {reason}");
-        }, skip: !ktls);
+        });
     }
 
     // Same shape as PipeHandler, with an affinity observation on either side of the await that

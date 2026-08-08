@@ -8,14 +8,8 @@ using Playground.Shared;
 //  tls-httpsclient - the OTHER direction of ioxide.tls: not terminating TLS for inbound
 //  connections, but speaking it outbound so a handler can reach an https:// origin.
 //
-//      dotnet run -c Release --project Playground/Tls/HttpsClient
+//      dotnet run -c Release --project Playground/Clients/Https
 //      curl http://127.0.0.1:8080/get
-//
-//      PLAYGROUND_ORIGIN_IP=93.184.216.34   the origin to call (IPv4 literal: DNS would block
-//      PLAYGROUND_ORIGIN_NAME=example.com   the reactor). The NAME is what gets sent as SNI and
-//      PLAYGROUND_ORIGIN_PORT=443           what the certificate has to match.
-//      PLAYGROUND_CA=/path/ca.pem           trust a private CA instead of the system store
-//      PLAYGROUND_INSECURE=1                skip verification entirely (see the warning below)
 //
 //  The TLS context is built once and shared by the pool: it holds no per-connection state, so
 //  every connection opened from it gets its own SSL. The handshake rides the reactor's ring like
@@ -25,18 +19,36 @@ using Playground.Shared;
 //  runs without 'modprobe tls'. Needs: ioxide, ioxide.tls, ioxide.httpclient
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-string originIp   = Env.Str("PLAYGROUND_ORIGIN_IP", "127.0.0.1");
-string originName = Env.Str("PLAYGROUND_ORIGIN_NAME", "localhost");
-ushort originPort = Env.Port("PLAYGROUND_ORIGIN_PORT", 443);
-string? caFile    = Env.StrOrNull("PLAYGROUND_CA");
-bool insecure     = Env.Flag("PLAYGROUND_INSECURE");
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+// Edit these. That is the whole mechanism - there is no config file and nothing else to find.
+// Env.Override exists only so bench/run.sh can drive the sample from outside; delete that line
+// when you copy this out and the literals above it are the entire configuration.
+
+ushort port     = 8080;                        // http://127.0.0.1:8080/get - cleartext IN
+int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+
+Env.Override(ref port, ref reactors);
+
+// The https origin this calls OUT to. Point it somewhere real: "93.184.216.34" / "example.com"
+// / 443. The IP must be a literal - resolving a name would block the reactor - and the NAME is
+// what goes out as SNI and what the certificate has to match.
+string originIp   = "127.0.0.1";
+string originName = "localhost";
+ushort originPort = 443;
+
+// Trust a private CA instead of the system store: "/path/ca.pem".
+string? caFile = null;
+
+// Skip certificate verification entirely. Read the warning at the call site before setting it.
+bool insecure = false;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
 
 var config = new ServerConfig
 {
-    ReactorCount = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
+    ReactorCount = reactors,
     Tcp = new TcpOptions
     {
-        Port = Env.Port("PLAYGROUND_PORT", 8080),
+        Port = port,
     },
 };
 

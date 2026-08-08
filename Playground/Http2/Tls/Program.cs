@@ -43,10 +43,17 @@ string? keyOverride  = null;
 // is identical either way; this only changes how recv buffers are handed out.
 bool incrementalBuffers = false;
 
-// Hand INBOUND decryption to the kernel as well as outbound. Experimental and off for a reason:
-// a TLS 1.3 KeyUpdate cannot be read through IORING_OP_RECV, and roughly one first connection in
-// twelve fails outright. See docs/learn/tls.html.
+// Hand OUTBOUND encryption to the kernel: the handler writes plaintext and the kernel makes the
+// records. Off by default - OpenSSL both ways is the portable path, and on loopback the kernel
+// is not faster. Its real payoff is sendfile and NIC offload, which a benchmark here cannot see.
+bool kernelTx = false;
+
+// Hand INBOUND decryption to the kernel as well. Requires kernelTx - the RX handoff happens at
+// the same moment as the TX one - and is experimental for a reason: a TLS 1.3 KeyUpdate cannot be
+// read through IORING_OP_RECV, and roughly one first connection in twelve fails outright.
 bool kernelRx = false;
+
+Env.OverrideKtls(ref kernelTx, ref kernelRx);
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 (string certPath, string keyPath) = QuicCert.Ensure(certOverride, keyOverride);
@@ -77,6 +84,7 @@ for (int i = 0; i < threads.Length; i++)
 
     reactor.OnStart = r => TlsService.Start(r, new TlsOptions
     {
+        KernelTx = kernelTx,
         KernelRx = kernelRx,
         CertificatePath = certPath,
         KeyPath = keyPath,
@@ -142,8 +150,8 @@ for (int i = 0; i < threads.Length; i++)
                 while ((end = CollectionsMarshal.AsSpan(carry).IndexOf("\r\n\r\n"u8)) >= 0)
                 {
                     carry.RemoveRange(0, end + 4);
-                    if (tls.KernelTx) { conn.Write(http11Response); }
-                    else { tls.WriteEncrypted(conn, http11Response); }
+                    // Correct whichever backend the session ended up with.
+                    tls.Write(conn, http11Response);
                     wrote = true;
                 }
 
@@ -187,7 +195,8 @@ for (int i = 0; i < threads.Length; i++)
 
 Console.WriteLine($"[http2-tls] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
                 + $"ALPN h2 then http/1.1, cert {certPath}, "
-                + $"rx={(kernelRx ? "kernel" : "openssl")}, tx=kernel");
+                + $"rx={(kernelTx && kernelRx ? "kernel" : "openssl")}, "
+                + $"tx={(kernelTx ? "kernel" : "openssl")}");
 
 foreach (Thread thread in threads)
 {

@@ -18,7 +18,7 @@ using Playground.Shared;
 //  TlsConnectionDualPipe composes rather than implements. Each direction has two possible halves:
 //
 //              kernel                       OpenSSL
-//    read      TcpConnectionPipeReader      TlsPumpPipeReader
+//    read      TcpConnectionPipeReader      TlsDecryptingPipeReader
 //              (plaintext is already in     (decrypts into a Pipe
 //               ring memory - zero copy)     it owns)
 //    write     TcpConnectionPipeWriter      TlsEncryptingPipeWriter
@@ -67,8 +67,9 @@ var tlsOptions = new TlsOptions
     CertificatePath = certPath,
     KeyPath = keyPath,
 
-    // The default. The kernel encrypts outbound records; see Playground/Tls/OpenSslPipes for the
-    // same server with this line flipped.
+    // NOT the default - TLS is OpenSSL both ways unless you ask for this. The kernel encrypts
+    // outbound records while receive stays in OpenSSL, so this is the mixed mode: kTLS TX,
+    // userspace RX. See Playground/Tls/OpenSslPipes for the same server without this line.
     KernelTx = true,
 };
 

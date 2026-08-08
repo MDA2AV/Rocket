@@ -18,7 +18,7 @@ using Playground.Shared;
 //  TlsConnectionDualPipe composes rather than implements. Each direction has two possible halves:
 //
 //              kernel                       OpenSSL
-//    read      TcpConnectionPipeReader      TlsPumpPipeReader
+//    read      TcpConnectionPipeReader      TlsDecryptingPipeReader
 //              (plaintext is already in     (decrypts into a Pipe
 //               ring memory - zero copy)     it owns)
 //    write     TcpConnectionPipeWriter      TlsEncryptingPipeWriter
@@ -31,8 +31,8 @@ using Playground.Shared;
 //  userspace reader whatever the config said. TlsSession reports what actually happened.
 //
 //  Compare the raw-ring pair, Playground/Tls/Ktls and Playground/Tls/OpenSsl. Those two DO differ
-//  in the handler, because at that level the backend is visible: kTLS writes plaintext, OpenSSL
-//  calls WriteEncrypted. Over a pipe it is not. Needs: ioxide
+//  in the handler, because at that level the backend is visible: kTLS writes plaintext straight to
+//  the connection, OpenSSL goes through TlsSession.Write. Over a pipe it is not. Needs: ioxide
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 // ── Knobs ────────────────────────────────────────────────────────────────────────────────────
@@ -67,10 +67,10 @@ var tlsOptions = new TlsOptions
     CertificatePath = certPath,
     KeyPath = keyPath,
 
-    // The whole difference from Playground/Tls/KtlsPipes. No TLS ULP on the socket, so OpenSSL
-    // encrypts and decrypts and nothing here needs the 'tls' kernel module - which also gives back
-    // TLS 1.2, any ciphersuite and session resumption.
-    KernelTx = false,
+    // No KernelTx line - false is the default. No TLS ULP on the socket, so OpenSSL encrypts and
+    // decrypts and nothing here needs the 'tls' kernel module - which also keeps TLS 1.2, any
+    // ciphersuite and session resumption. Playground/Tls/KtlsPipes adds the one line that
+    // changes this.
 };
 
 byte[] body = new byte[bodyBytes];

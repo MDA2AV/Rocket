@@ -100,7 +100,7 @@ for (int i = 0; i < threads.Length; i++)
             // in ReadAsync, or the client waits on a response we never send.
             if (TryReadTarget(tls.DrainPlaintext(), out ReadOnlySpan<byte> early))
             {
-                await ProxyAsync(conn, client, Encoding.ASCII.GetString(early));
+                await ProxyAsync(conn, tls, client, Encoding.ASCII.GetString(early));
             }
 
             while (true)
@@ -126,7 +126,7 @@ for (int i = 0; i < threads.Length; i++)
 
                 if (path is not null)
                 {
-                    await ProxyAsync(conn, client, path);
+                    await ProxyAsync(conn, tls, client, path);
                 }
 
                 if (snapshot.IsClosed || tls.Closed) return;
@@ -160,7 +160,7 @@ foreach (Thread thread in threads)
 
 // One request out, one response back. Everything written here is PLAINTEXT: after the handshake
 // kTLS owns transmit, so there is nothing left for us to wrap.
-static async ValueTask ProxyAsync(TcpConnection conn, Http2ClientPool client, string path)
+static async ValueTask ProxyAsync(TcpConnection conn, TlsSession tls, Http2ClientPool client, string path)
 {
     try
     {
@@ -168,9 +168,9 @@ static async ValueTask ProxyAsync(TcpConnection conn, Http2ClientPool client, st
         // Same ring, same thread - this await resumes inline.
         using HttpClientResponse response = await client.GetAsync(path);
 
-        conn.Write(Encoding.ASCII.GetBytes(
+        tls.Write(conn, Encoding.ASCII.GetBytes(
             $"HTTP/1.1 {response.Status} OK\r\nContent-Length: {response.Body.Length}\r\n\r\n"));
-        conn.Write(response.Body.Span);   // bytes straight through, no decode
+        tls.Write(conn, response.Body.Span);   // bytes straight through, no decode
     }
     catch (Exception e)
     {
@@ -178,9 +178,9 @@ static async ValueTask ProxyAsync(TcpConnection conn, Http2ClientPool client, st
         // REFUSED CERTIFICATE arrives the same way - the handshake is part of opening the
         // connection, so a name mismatch reads like any other upstream failure.
         byte[] message = Encoding.ASCII.GetBytes($"upstream: {e.Message}");
-        conn.Write(Encoding.ASCII.GetBytes(
+        tls.Write(conn, Encoding.ASCII.GetBytes(
             $"HTTP/1.1 502 Bad Gateway\r\nContent-Length: {message.Length}\r\n\r\n"));
-        conn.Write(message);
+        tls.Write(conn, message);
     }
 
     await conn.FlushAsync();

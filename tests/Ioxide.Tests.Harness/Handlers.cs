@@ -30,10 +30,27 @@ public static class Wire
         return path;
     }
 
-    public static void Write(TcpConnection conn, int status, string body)
+    /// <summary>
+    /// Write a response, encrypting it when the connection has a TLS session that is not using
+    /// kTLS. Pass null for a plaintext connection.
+    ///
+    /// The session has to be threaded through because the correct call depends on it: with kTLS
+    /// the kernel produces the records so plaintext goes straight to the connection, and without
+    /// it a bare conn.Write puts CLEARTEXT on a socket the peer is reading as TLS.
+    /// </summary>
+    public static void Write(TcpConnection conn, int status, string body, TlsSession? tls = null)
     {
-        conn.Write(Encoding.ASCII.GetBytes(
-            $"HTTP/1.1 {status} X\r\nContent-Type: text/plain\r\nContent-Length: {body.Length}\r\n\r\n{body}"));
+        byte[] bytes = Encoding.ASCII.GetBytes(
+            $"HTTP/1.1 {status} X\r\nContent-Type: text/plain\r\nContent-Length: {body.Length}\r\n\r\n{body}");
+
+        if (tls is null)
+        {
+            conn.Write(bytes);
+        }
+        else
+        {
+            tls.Write(conn, bytes);
+        }
     }
 
     private static string ParsePath(ReadOnlySpan<byte> request)
@@ -126,7 +143,8 @@ public static class Handlers
         }
     }
 
-    // tls: kTLS handshake, then a fixed plaintext response the kernel encrypts on send.
+    // tls: the OpenSSL handshake, then a fixed response written through Wire.Write - which routes
+    // through TlsSession.Write, so this handler is correct under either TLS backend.
     public static async Task Tls(Reactor r, TcpConnection conn)
     {
         TlsSession? tls = null;
@@ -164,7 +182,7 @@ public static class Handlers
 
                 for (int i = 0; i < responded; i++)
                 {
-                    Wire.Write(conn, 200, "tls-ok");
+                    Wire.Write(conn, 200, "tls-ok", tls);
                 }
 
                 if (responded > 0)

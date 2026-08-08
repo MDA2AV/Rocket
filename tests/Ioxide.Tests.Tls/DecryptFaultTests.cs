@@ -38,7 +38,8 @@ internal static class DecryptFaultTests
             string outcome = reported.Task.Result;
             Assert.True(outcome.Contains("TLS decrypt failed"),
                 $"expected the decrypt to fault, got: {outcome}");
-        }, skip: !ktls);
+        });
+        _ = ktls;   // the default path needs no kernel module; the parameter stays for symmetry
     }
 
     // Decrypts whatever arrives and publishes the first outcome that is not "more bytes needed":

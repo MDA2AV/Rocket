@@ -17,7 +17,7 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
 {
     private readonly TcpConnection _conn;
     private readonly Reactor _reactor;
-    private readonly TlsSession? _tls;   // non-null on a kTLS-terminated connection: inbound is decrypted here
+    private readonly TlsSession? _tls;   // non-null on a TLS-terminated connection
     private readonly Pipe _inbound;    // recv pump writes; Kestrel reads (Transport.Input)
     private readonly Pipe _outbound;   // Kestrel writes (Transport.Output); send pump reads
     private readonly PipeReader _input; // Kestrel's Input - pins the first read onto the reactor thread
@@ -70,8 +70,8 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
         _sendPump = SendPumpAsync();
     }
 
-    // Reactor → inbound pipe. Copies (or, for kTLS, decrypts) each recv slice into the pipe and flushes;
-    // Kestrel reads it. kTLS has no RX offload, so inbound stays ciphertext and is decrypted here.
+    // Reactor → inbound pipe. Copies (or, for TLS, decrypts) each recv slice into the pipe and flushes;
+    // Kestrel reads it. Inbound records are decrypted in userspace by the session.
     private async Task RecvPumpAsync()
     {
         PipeWriter writer = _inbound.Writer;
@@ -145,9 +145,9 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
         writer.Advance(item.Len);
     }
 
-    // kTLS RX stays in userspace: feed the ciphertext slice through OpenSSL and write the plaintext.
-    // DecryptInto rather than Decrypt so OpenSSL writes into the pipe's own memory - Decrypt lands
-    // the plaintext in the session's buffer first and we would copy it again on the way here.
+    // Feed the ciphertext slice through OpenSSL and write the plaintext. DecryptInto rather than
+    // Decrypt so OpenSSL writes into the pipe's own memory - Decrypt lands the plaintext in the
+    // session's buffer first and we would copy it again on the way here.
     private static unsafe void DecryptSlice(in SpscRecvRing.Item item, PipeWriter writer, TlsSession tls)
         => tls.DecryptInto(item.Ptr, item.Len, writer);
 
@@ -166,9 +166,20 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
                 {
                     foreach (ReadOnlyMemory<byte> segment in buffer)
                     {
-                        Span<byte> dst = _conn.GetSpan(segment.Length);
-                        segment.Span.CopyTo(dst);
-                        _conn.Advance(segment.Length);
+                        if (_tls is null)
+                        {
+                            Span<byte> dst = _conn.GetSpan(segment.Length);
+                            segment.Span.CopyTo(dst);
+                            _conn.Advance(segment.Length);
+                        }
+                        else
+                        {
+                            // Correct in both TLS modes: under kTLS TX the plaintext goes into the
+                            // slab as-is (the kernel makes the records on send); by default OpenSSL
+                            // encrypts here. A bare slab copy would put CLEARTEXT on the wire for
+                            // every configuration that did not opt into the kernel path.
+                            _tls.Write(_conn, segment.Span);
+                        }
                     }
                     await _conn.FlushAsync();
                 }
@@ -221,8 +232,8 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
         else
         {
             // TLS: unwind the recv side FIRST so the recv pump stops touching the session, then dispose it
-            // - that sends close_notify (a raw kTLS control send, which must precede the FIN while the write
-            // side is still open) and frees the SSL - then FIN.
+            // - that sends close_notify (a raw teardown send in either backend, which must precede the FIN
+            // while the write side is still open) and frees the SSL - then FIN.
             _reactor.ScheduleOnReactor(static c => ((TcpConnection)c!).MarkClosed(), _conn);
             _inbound.Writer.CancelPendingFlush();
             try

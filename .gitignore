@@ -149,3 +149,4 @@ OpenCover/
 # MSBuild Binary and Structured Log
 *.binlog
 bench/.work/
+__pycache__/
