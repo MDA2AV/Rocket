@@ -15,7 +15,7 @@ is not the ceiling). `BENCH_SECONDS` sets the measurement window (default 8).
 | workload | server | load |
 | --- | --- | --- |
 | tcp-raw, tcp-pipe (4r + 12r) | `Playground.Tcp.Raw` / `.Pipe`, 2 B plaintext body | `wrk -t4 -c64` |
-| tls-sslstream, tls-openssl, tls-ktls | `Playground.Tls.*`, 8 KB body | `wrk` over TLS |
+| tls-sslstream, tls-openssl, tls-ktls-tx | `Playground.Tls.*`, 8 KB body | `wrk` over TLS |
 | h3-server | `Playground.Nghttp3` | `h3x -t4 -c64 -m8` |
 | client-h1 / h2 / h3 | `Bench.Clients` (4 reactors) against Tcp.Raw / nginx-h2c / Nghttp3 | itself |
 | redis, pg, file | `Playground.Redis` / `.Pg` / `.File` | `wrk -t4 -c64` |

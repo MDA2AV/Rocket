@@ -76,11 +76,12 @@ play Tls/OpenSsl PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18443 \
   && note "tls-openssl" "${R}r" "$(wrk_h1 https://127.0.0.1:18443/) req/s"
 stop_play
 if [ -d /sys/module/tls ]; then
-  play Tls/Ktls PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18443 \
-    && note "tls-ktls" "${R}r" "$(wrk_h1 https://127.0.0.1:18443/) req/s"
+  # The deployable hybrid (kernel TX, OpenSSL RX) - matches the matrix's ktls-tx cell.
+  play Tls/Hybrid PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18443 \
+    && note "tls-ktls-tx" "${R}r" "$(wrk_h1 https://127.0.0.1:18443/) req/s"
   stop_play
 else
-  note "tls-ktls" "${R}r" "SKIP (no 'tls' kernel module - sudo modprobe tls)"
+  note "tls-ktls-tx" "${R}r" "SKIP (no 'tls' kernel module - sudo modprobe tls)"
 fi
 
 # ── h3 server ───────────────────────────────────────────────────────────────────────────────

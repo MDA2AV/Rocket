@@ -6,15 +6,15 @@ using ioxide.tls;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  tls-ktls-pipes - TLS served through an IDuplexPipe, with the kernel doing the transmit
-//  crypto - the hybrid, same as Tls/Ktls; kernelRx = true is full kTLS (experimental).
+//  tls-ktls-pipes - full kernel TLS served through an IDuplexPipe, same as Tls/Ktls: both
+//  directions in the kernel (experimental); drop the KernelRx line for the hybrid.
 //
 //      sudo modprobe tls        # kTLS needs the module
 //      curl -ks https://127.0.0.1:8443/ | head -c 40
 //
 //  The read/serve loop below is byte-for-byte identical to Playground/Tls/OpenSslPipes - diff
-//  them and the only functional difference is the KernelTx line, the rest being the banner and
-//  the log tag.
+//  them and the only functional difference is the two Kernel* lines, the rest being the banner
+//  and the log tag.
 //
 //  TlsConnectionDualPipe composes rather than implements. Each direction has two possible halves:
 //
@@ -51,12 +51,6 @@ Env.Override(ref port, ref reactors, ref bodyBytes);
 string? certOverride = null;
 string? keyOverride  = null;
 
-// Hand INBOUND decryption to the kernel too. Off by default and experimental: about one first
-// connection in twelve fails outright, and a client sending a TLS 1.3 KeyUpdate loses the
-// connection. Transmit stays kernel-side either way - that is the point of this sample.
-bool kernelRx = false;
-
-Env.OverrideKtls(ref kernelRx);
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 (string certPath, string keyPath) = QuicCert.Ensure(certOverride, keyOverride);
@@ -75,12 +69,13 @@ var tlsOptions = new TlsOptions
     CertificatePath = certPath,
     KeyPath = keyPath,
 
-    // NOT the default - TLS is OpenSSL both ways unless you ask for this. As shipped this is the
-    // mixed mode, kernel TX with OpenSSL RX; Playground/Tls/OpenSslPipes is the same server
-    // without this line.
+    // NOT the default - TLS is OpenSSL both ways unless you ask for this.
+    // Playground/Tls/OpenSslPipes is the same server without these two lines.
     KernelTx = true,
 
-    KernelRx = kernelRx,
+    // Full kTLS: the kernel decrypts inbound too. Experimental - about one first connection in
+    // twelve fails outright, and a KeyUpdate is fatal. Drop this line for the hybrid.
+    KernelRx = true,
 };
 
 byte[] body = new byte[bodyBytes];
@@ -166,8 +161,7 @@ for (int i = 0; i < threads.Length; i++)
 }
 
 Console.WriteLine($"[tls-ktls-pipes] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
-                + $"{bodyBytes}-byte body, tx={(tlsOptions.KernelTx ? "kernel" : "openssl")}, "
-                + $"rx={(kernelRx ? "kernel (experimental)" : "openssl")}");
+                + $"{bodyBytes}-byte body, tx=kernel, rx=kernel (experimental)");
 
 foreach (Thread thread in threads)
 {

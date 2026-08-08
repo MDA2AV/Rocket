@@ -142,8 +142,8 @@ for pass in $(seq "$PASSES"); do
   for body in $BODIES; do
     cell h1-plaintext $B/Tcp/Raw/bin/Release/net11.0/Playground.Tcp.Raw           8080 h1  "$body"
     cell h1-openssl   $B/Tls/OpenSsl/bin/Release/net11.0/Playground.Tls.OpenSsl   8443 h1s "$body"
-    cell h1-ktls-tx   $B/Tls/Ktls/bin/Release/net11.0/Playground.Tls.Ktls         8444 h1s "$body" PLAYGROUND_KTLS_RX=0
-    cell h1-ktls      $B/Tls/Ktls/bin/Release/net11.0/Playground.Tls.Ktls         8445 h1s "$body" PLAYGROUND_KTLS_RX=1
+    cell h1-ktls-tx   $B/Tls/Hybrid/bin/Release/net11.0/Playground.Tls.Hybrid     8444 h1s "$body"
+    cell h1-ktls      $B/Tls/Ktls/bin/Release/net11.0/Playground.Tls.Ktls         8445 h1s "$body"
 
     cell h2-plaintext $B/Http2/Nghttp2/bin/Release/net11.0/Playground.Http2.Nghttp2 8081 h2c "$body"
     cell h2-openssl   $B/Http2/Tls/bin/Release/net11.0/Playground.Http2.Tls         8446 h2  "$body" PLAYGROUND_KTLS_TX=0 PLAYGROUND_KTLS_RX=0
