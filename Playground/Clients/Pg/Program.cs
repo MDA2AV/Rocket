@@ -23,22 +23,37 @@ using Playground.Shared;
 
 var config = new ServerConfig
 {
-    ReactorCount = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
+    ReactorCount   = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),  // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                                        // SQ/CQ depth per ring
+    DualStack      = false,                                                       // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                                                   // bytes per shared recv buffer
+    RecvSlots      = 4096,                                                        // shared recv buffer-ring depth
+    Incremental    = null,                                                        // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,                                                        // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                                        // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port = Env.Port("PLAYGROUND_PORT", 8080),
+        Port             = Env.Port("PLAYGROUND_PORT", 8080),
+        ExtraPorts       = [],                                                    // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                                                  // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                                             // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                                                  // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,                            // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                                                 // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                                                    // per-connection recv completion queue depth
     },
 };
 
 var pgOptions = new PgOptions
 {
-    Host = Env.Str("PLAYGROUND_PG_HOST", "127.0.0.1"),
-    Port = Env.Port("PLAYGROUND_PG_PORT", 5432),
-    User = Env.Str("PLAYGROUND_PG_USER", "bench"),
-    Password = Env.StrOrNull("PLAYGROUND_PG_PASSWORD"),
-    Database = Env.Str("PLAYGROUND_PG_DB", "bench"),
-    PoolSize = Env.Int("PLAYGROUND_PG_POOL", 4),          // per reactor, not global
-    CommandTimeoutMs = Env.Int("PLAYGROUND_PG_TIMEOUT", 30_000),
+    Host             = Env.Str("PLAYGROUND_PG_HOST", "127.0.0.1"),  // IPv4 literal - resolve names up front, DNS blocks the reactor
+    Port             = Env.Port("PLAYGROUND_PG_PORT", 5432),        // Postgres wire port
+    User             = Env.Str("PLAYGROUND_PG_USER", "bench"),      // required
+    Password         = Env.StrOrNull("PLAYGROUND_PG_PASSWORD"),     // null = trust auth; else SCRAM-SHA-256
+    Database         = Env.Str("PLAYGROUND_PG_DB", "bench"),        // required
+    PoolSize         = Env.Int("PLAYGROUND_PG_POOL", 4),            // per reactor, not global
+    MaxReceiveBytes  = 64 * 1024 * 1024,                            // ceiling on one backend message; buffer grows to this (64 MB)
+    CommandTimeoutMs = Env.Int("PLAYGROUND_PG_TIMEOUT", 30_000),    // oldest in-flight command past this -> torn down; 0 disables
 };
 
 var threads = new Thread[config.ReactorCount];

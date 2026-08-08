@@ -32,10 +32,24 @@ using Playground.Shared;
 
 var config = new ServerConfig
 {
-    ReactorCount = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
+    ReactorCount   = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
+    RingEntries    = 8192,       // SQ/CQ depth per ring
+    DualStack      = false,      // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,  // bytes per shared recv buffer
+    RecvSlots      = 4096,       // shared recv buffer-ring depth
+    Incremental    = null,       // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,       // no raw UDP sockets (TCP-only frontend)
+    Quic           = null,       // no QUIC listener; the frontend is TLS-over-TCP
     Tcp = new TcpOptions
     {
-        Port = Env.Port("PLAYGROUND_PORT", 8443),
+        Port             = Env.Port("PLAYGROUND_PORT", 8443),
+        ExtraPorts       = [],                                 // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                               // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                          // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                               // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,         // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                              // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                                 // per-connection recv completion queue depth
     },
 };
 
@@ -56,9 +70,13 @@ for (int i = 0; i < threads.Length; i++)
         // client that cannot do h2 fails ALPN rather than silently getting something else.
         TlsService.Start(r, new TlsOptions
         {
-            CertificatePath = certPath,
-            KeyPath = keyPath,
-            Alpn = ["h2"],
+            CertificatePath = certPath,  // PEM cert chain file (set exactly one of Path/Pem)
+            CertificatePem  = null,      // in-memory PEM alternative to CertificatePath
+            KeyPath         = keyPath,   // PEM private key file (set exactly one of Path/Pem)
+            KeyPem          = null,      // in-memory PEM alternative to KeyPath
+            Alpn            = ["h2"],    // protocols offered, most preferred first
+            KernelTx        = false,     // kTLS encrypt (off = OpenSSL both ways)
+            KernelRx        = false,     // kTLS decrypt; requires KernelTx, experimental
         });
 
         // Outbound: no TLS options, because QUIC has no cleartext mode - TLS 1.3 is inside the
@@ -66,10 +84,12 @@ for (int i = 0; i < threads.Length; i++)
         // this pool is what makes the reactor grow its client-side QUIC transport.
         Http3ClientPool.Start(r, new Http3ClientOptions
         {
-            Host = upstreamHost,
-            Port = upstreamPort,
-            ServerName = upstreamName,
-            PoolSize = upstreamPool,
+            Host             = upstreamHost,     // origin address (IPv4 literal; DNS would block the reactor)
+            Port             = upstreamPort,     // origin's QUIC (UDP) port
+            ServerName       = upstreamName,     // SNI / :authority, checked against the cert
+            PoolSize         = upstreamPool,     // h3 multiplexes: one connection carries many streams
+            AcquireTimeoutMs = 10_000,           // how long a request waits (handshake included)
+            MaxResponseBytes = 8 * 1024 * 1024,  // per-request ceiling for headers + body
         });
     };
 

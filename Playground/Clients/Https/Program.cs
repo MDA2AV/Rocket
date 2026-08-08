@@ -45,10 +45,24 @@ bool insecure = false;
 
 var config = new ServerConfig
 {
-    ReactorCount = reactors,
+    ReactorCount   = reactors,                          // io_uring rings/threads - one per core
+    RingEntries    = 8192,                              // SQ/CQ depth per ring
+    DualStack      = false,                             // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                         // bytes per shared recv buffer
+    RecvSlots      = 4096,                              // shared recv buffer-ring depth
+    Incremental    = null,                              // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,                              // no raw UDP sockets (TCP-only server)
+    Quic           = null,                              // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port = port,
+        Port             = port,
+        ExtraPorts       = [],                          // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                        // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                   // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                        // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,  // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                       // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                          // per-connection recv completion queue depth
     },
 };
 
@@ -66,18 +80,24 @@ for (int i = 0; i < threads.Length; i++)
         // CA belongs in CaFile, not here.
         TlsClientContext tls = TlsClientContext.Create(new TlsClientOptions
         {
-            ServerName        = originName,
-            AlpnProtocols     = ["http/1.1"],
-            CaFile            = caFile,
-            VerifyCertificate = !insecure,
+            ServerName         = originName,             // sent as SNI, checked against the cert (required)
+            AlpnProtocols      = ["http/1.1"],           // offered most-preferred first; [] offers none
+            CaFile             = caFile,                 // PEM trust anchors; null = system store
+            VerifyCertificate  = !insecure,              // off = encrypted but UNAUTHENTICATED (tests only)
+            MinimumVersion     = OpenSslVersions.Tls12,  // lowest TLS accepted; Tls13 (0x0304) = 1.3-only
+            HandshakeTimeoutMs = 10_000,                 // handshake ceiling before the connect fails
         });
 
         HttpClientPool.Start(r, new HttpClientOptions
         {
-            Host     = originIp,
-            Port     = originPort,
-            PoolSize = 2,
-            Tls      = tls,
+            Host              = originIp,         // IPv4 literal - DNS would block the reactor
+            Port              = originPort,       // origin port
+            PoolSize          = 2,                // connections to the origin, per reactor
+            MaxResponseBytes  = 8 * 1024 * 1024,  // per-request ceiling for headers + body
+            SendBufferSize    = 16 * 1024,        // per-connection send buffer
+            ReceiveBufferSize = 16 * 1024,        // per-connection recv buffer; grows to MaxResponseBytes
+            Tls               = tls,              // TLS context for https; null = cleartext
+            AcquireTimeoutMs  = 10_000,           // wait for a free connection when all are busy
         });
     };
 

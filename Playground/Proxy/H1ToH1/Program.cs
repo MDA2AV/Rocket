@@ -30,10 +30,24 @@ using Playground.Shared;
 
 var config = new ServerConfig
 {
-    ReactorCount = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
+    ReactorCount   = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
+    RingEntries    = 8192,       // SQ/CQ depth per ring
+    DualStack      = false,      // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,  // bytes per shared recv buffer
+    RecvSlots      = 4096,       // shared recv buffer-ring depth
+    Incremental    = null,       // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,       // no raw UDP sockets (TCP-only frontend)
+    Quic           = null,       // no QUIC listener; the frontend is TLS-over-TCP
     Tcp = new TcpOptions
     {
-        Port = Env.Port("PLAYGROUND_PORT", 8443),
+        Port             = Env.Port("PLAYGROUND_PORT", 8443),
+        ExtraPorts       = [],                                 // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                               // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                          // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                               // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,         // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                              // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                                 // per-connection recv completion queue depth
     },
 };
 
@@ -61,24 +75,34 @@ for (int i = 0; i < threads.Length; i++)
         // protocol, so it offers exactly one.
         TlsService.Start(r, new TlsOptions
         {
-            CertificatePath = certPath,
-            KeyPath = keyPath,
-            Alpn = ["http/1.1"],
+            CertificatePath = certPath,      // PEM cert chain file (set exactly one of Path/Pem)
+            CertificatePem  = null,          // in-memory PEM alternative to CertificatePath
+            KeyPath         = keyPath,       // PEM private key file (set exactly one of Path/Pem)
+            KeyPem          = null,          // in-memory PEM alternative to KeyPath
+            Alpn            = ["http/1.1"],  // protocols offered, most preferred first
+            KernelTx        = false,         // kTLS encrypt (off = OpenSSL both ways)
+            KernelRx        = false,         // kTLS decrypt; requires KernelTx, experimental
         });
 
         // Outbound: one context per reactor, shared by that reactor's pool - it holds no
         // per-connection state, so every connection opened from it gets its own SSL.
         HttpClientPool.Start(r, new HttpClientOptions
         {
-            Host = upstreamHost,
-            Port = upstreamPort,
-            PoolSize = upstreamPool,
+            Host              = upstreamHost,     // origin address (IPv4 literal; DNS would block the reactor)
+            Port              = upstreamPort,     // origin port
+            PoolSize          = upstreamPool,     // connections kept open; round-robin, one request each
+            MaxResponseBytes  = 8 * 1024 * 1024,  // per-request ceiling for headers + body
+            SendBufferSize    = 16 * 1024,        // per-connection send buffer
+            ReceiveBufferSize = 16 * 1024,        // per-connection recv buffer (grows to MaxResponseBytes)
+            AcquireTimeoutMs  = 10_000,           // how long a request waits for a free connection
             Tls = TlsClientContext.Create(new TlsClientOptions
             {
-                ServerName = upstreamName,
-                AlpnProtocols = ["http/1.1"],
-                CaFile = upstreamInsecure ? null : upstreamCa,
-                VerifyCertificate = !upstreamInsecure,
+                ServerName         = upstreamName,                          // sent as SNI, checked against the cert
+                AlpnProtocols      = ["http/1.1"],                          // ALPN offer, most preferred first
+                VerifyCertificate  = !upstreamInsecure,                     // off = encrypted but UNAUTHENTICATED
+                CaFile             = upstreamInsecure ? null : upstreamCa,  // PEM trust anchors; null = system store
+                MinimumVersion     = OpenSslVersions.Tls12,                 // lowest TLS accepted; Tls13 = 1.3 only
+                HandshakeTimeoutMs = 10_000,                                // handshake deadline
             }),
         });
     };

@@ -135,6 +135,12 @@
 
 var config = new ServerConfig
 {
+    ReactorCount   = Environment.ProcessorCount,  // io_uring rings/threads - one per core
+    RingEntries    = 8192,                         // SQ/CQ depth per ring
+    DualStack      = false,                         // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                    // bytes per shared recv buffer
+    RecvSlots      = 4096,                          // shared recv buffer-ring depth
+    Incremental    = null,                          // per-connection recv rings (6.12+)
     Tcp = null,                        // QUIC-only: no TCP listener at all
     Udp = new UdpOptions
     {

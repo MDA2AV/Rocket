@@ -74,8 +74,23 @@ using var engine = new QuicEngine(certPath, keyPath, cidLength, alpn: ["h3"], ma
 
 var config = new ServerConfig
 {
-    ReactorCount = reactors,
-    Tcp = new TcpOptions { Port = tcpPort },
+    ReactorCount   = reactors,
+    RingEntries    = 8192,                                  // SQ/CQ depth per ring
+    DualStack      = false,                                 // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
+    RecvSlots      = 4096,                                 // shared recv buffer-ring depth
+    Incremental    = null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Tcp = new TcpOptions
+    {
+        Port             = tcpPort,
+        ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
+    },
     Udp = new UdpOptions { RecvSlots = udpRecvSlots, Gro = gro },
     Quic = new QuicOptions
     {

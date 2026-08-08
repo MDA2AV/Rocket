@@ -202,19 +202,35 @@ const string keyPath  = &quot;key.pem&quot;;
 
 var config = new ServerConfig
 {
-    ReactorCount = reactors,
+    ReactorCount   = reactors,                             // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                 // SQ/CQ depth per ring
+    DualStack      = false,                                // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
+    RecvSlots      = 4096,                                 // shared recv buffer-ring depth
+    Incremental    = null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,                                 // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                 // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port = port,
-        ExtraPorts = [tlsPort],   // every reactor listens on both; ListenerPort says which one accepted
+        Port             = port,
+        ExtraPorts       = [tlsPort],                      // every reactor listens on both; ListenerPort says which one accepted
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
     },
 };
 
 // Default backend: OpenSSL in both directions. Only connections on the TLS door go near this.
 var tlsOptions = new TlsOptions
 {
-    CertificatePath = certPath,
-    KeyPath         = keyPath,
+    CertificatePath = certPath,                            // PEM chain file (or CertificatePem for in-memory)
+    KeyPath         = keyPath,                             // PEM key file (or KeyPem for in-memory)
+    Alpn            = [&quot;http/1.1&quot;],                        // protocols this port serves, most-preferred first
+    KernelTx        = false,                               // kTLS transmit offload (kernel makes the records)
+    KernelRx        = false,                               // kTLS receive (experimental; requires KernelTx)
 };
 
 const string bodyText = &quot;multiport-ok\n&quot;;
@@ -352,10 +368,24 @@ var certificate = X509Certificate2.CreateFromPemFile(certPath, keyPath);
 
 var config = new ServerConfig
 {
-    ReactorCount = reactors,
+    ReactorCount   = reactors,                             // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                 // SQ/CQ depth per ring
+    DualStack      = false,                                // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
+    RecvSlots      = 4096,                                 // shared recv buffer-ring depth
+    Incremental    = null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,                                 // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                 // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port = port,
+        Port             = port,
+        ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
     },
 };
 
@@ -460,13 +490,24 @@ WriteOverflowStrategy overflow = WriteOverflowStrategy.Grow;
 
 var config = new ServerConfig
 {
-    ReactorCount = reactors,
+    ReactorCount   = reactors,                             // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                 // SQ/CQ depth per ring
+    DualStack      = false,                                // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
+    RecvSlots      = 4096,                                 // shared recv buffer-ring depth
+    Incremental    = null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,                                 // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                 // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port          = port,
-        WriteSlabSize = slabSize,
-        WriteOverflow = overflow,
-        ZeroCopySend  = zeroCopy,
+        Port             = port,
+        ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = slabSize,                       // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = overflow,                       // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = zeroCopy,                       // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
     },
 };
 
@@ -549,10 +590,24 @@ int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reac
 
 var config = new ServerConfig
 {
-    ReactorCount = reactors,
+    ReactorCount   = reactors,                             // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                 // SQ/CQ depth per ring
+    DualStack      = false,                                // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
+    RecvSlots      = 4096,                                 // shared recv buffer-ring depth
+    Incremental    = null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,                                 // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                 // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port = port,
+        Port             = port,
+        ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
     },
 };
 
@@ -628,10 +683,24 @@ int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reac
 
 var config = new ServerConfig
 {
-    ReactorCount = reactors,
+    ReactorCount   = reactors,                             // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                 // SQ/CQ depth per ring
+    DualStack      = false,                                // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
+    RecvSlots      = 4096,                                 // shared recv buffer-ring depth
+    Incremental    = null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,                                 // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                 // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port = port,
+        Port             = port,
+        ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
     },
 };
 
@@ -722,10 +791,24 @@ certificate = X509CertificateLoader.LoadPkcs12(certificate.Export(X509ContentTyp
 
 var config = new ServerConfig
 {
-    ReactorCount = reactors,
+    ReactorCount   = reactors,                             // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                 // SQ/CQ depth per ring
+    DualStack      = false,                                // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
+    RecvSlots      = 4096,                                 // shared recv buffer-ring depth
+    Incremental    = null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,                                 // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                 // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port = port,
+        Port             = port,
+        ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
     },
 };
 
@@ -851,8 +934,23 @@ using var engine = new QuicEngine(certPath, keyPath, cidLength, alpn: [&quot;h3&
 
 var config = new ServerConfig
 {
-    ReactorCount = reactors,
-    Tcp = new TcpOptions { Port = tcpPort },
+    ReactorCount   = reactors,
+    RingEntries    = 8192,                                  // SQ/CQ depth per ring
+    DualStack      = false,                                 // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
+    RecvSlots      = 4096,                                 // shared recv buffer-ring depth
+    Incremental    = null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Tcp = new TcpOptions
+    {
+        Port             = tcpPort,
+        ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
+    },
     Udp = new UdpOptions { RecvSlots = udpRecvSlots, Gro = gro },
     Quic = new QuicOptions
     {
@@ -1006,14 +1104,24 @@ using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: null, m
 
 var config = new ServerConfig
 {
-    ReactorCount = reactors,
-    Tcp = null,   // QUIC-only: no TCP listener is bound
-    Udp = new UdpOptions { RecvSlots = udpRecvSlots },
+    ReactorCount   = reactors,   // one ring per reactor, one reactor per core
+    RingEntries    = 8192,       // io_uring SQ/CQ depth
+    DualStack      = false,      // IPv4-only sockets; true binds dual-stack IPv6 (::)
+    RecvBufferSize = 32 * 1024,  // bytes per slot in the shared TCP recv ring
+    RecvSlots      = 4096,       // slots in that shared recv ring
+    Incremental    = null,       // shared recv ring; non-null = per-connection rings (kernel 6.12+)
+    Tcp            = null,       // QUIC-only: no TCP listener is bound
+    Udp = new UdpOptions
+    {
+        RecvSlots = udpRecvSlots,  // multishot recv slots per reactor - datagrams the ring can hold at once
+        Gro       = true,          // UDP_GRO: coalesce a received datagram burst into one recv
+    },
     Quic = new QuicOptions
     {
-        Port = quicPort,
-        LocalCidLength = 8,
-        ConnectionFactory = engine.CreateFactory(),
+        Port              = quicPort,                // https://127.0.0.1:8443/ - UDP, not TCP
+        LocalCidLength    = 8,                       // must match the engine&#x27;s cidLength
+        IdleTimeoutMs     = 60_000,                  // close a connection idle this long (no packets)
+        ConnectionFactory = engine.CreateFactory(),  // the engine adopts each new connection
     },
 };
 
@@ -1121,10 +1229,24 @@ bool insecure = false;
 
 var config = new ServerConfig
 {
-    ReactorCount = reactors,
+    ReactorCount   = reactors,                          // io_uring rings/threads - one per core
+    RingEntries    = 8192,                              // SQ/CQ depth per ring
+    DualStack      = false,                             // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                         // bytes per shared recv buffer
+    RecvSlots      = 4096,                              // shared recv buffer-ring depth
+    Incremental    = null,                              // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,                              // no raw UDP sockets (TCP-only server)
+    Quic           = null,                              // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port = port,
+        Port             = port,
+        ExtraPorts       = [],                          // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                        // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                   // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                        // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,  // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                       // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                          // per-connection recv completion queue depth
     },
 };
 
@@ -1142,18 +1264,24 @@ for (int i = 0; i &lt; threads.Length; i++)
         // CA belongs in CaFile, not here.
         TlsClientContext tls = TlsClientContext.Create(new TlsClientOptions
         {
-            ServerName        = originName,
-            AlpnProtocols     = [&quot;http/1.1&quot;],
-            CaFile            = caFile,
-            VerifyCertificate = !insecure,
+            ServerName         = originName,             // sent as SNI, checked against the cert (required)
+            AlpnProtocols      = [&quot;http/1.1&quot;],           // offered most-preferred first; [] offers none
+            CaFile             = caFile,                 // PEM trust anchors; null = system store
+            VerifyCertificate  = !insecure,              // off = encrypted but UNAUTHENTICATED (tests only)
+            MinimumVersion     = OpenSslVersions.Tls12,  // lowest TLS accepted; Tls13 (0x0304) = 1.3-only
+            HandshakeTimeoutMs = 10_000,                 // handshake ceiling before the connect fails
         });
 
         HttpClientPool.Start(r, new HttpClientOptions
         {
-            Host     = originIp,
-            Port     = originPort,
-            PoolSize = 2,
-            Tls      = tls,
+            Host              = originIp,         // IPv4 literal - DNS would block the reactor
+            Port              = originPort,       // origin port
+            PoolSize          = 2,                // connections to the origin, per reactor
+            MaxResponseBytes  = 8 * 1024 * 1024,  // per-request ceiling for headers + body
+            SendBufferSize    = 16 * 1024,        // per-connection send buffer
+            ReceiveBufferSize = 16 * 1024,        // per-connection recv buffer; grows to MaxResponseBytes
+            Tls               = tls,              // TLS context for https; null = cleartext
+            AcquireTimeoutMs  = 10_000,           // wait for a free connection when all are busy
         });
     };
 
@@ -1562,27 +1690,42 @@ const string keyPath  = &quot;key.pem&quot;;
 
 var config = new ServerConfig
 {
-    ReactorCount = reactors,
+    ReactorCount   = reactors,                             // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                 // SQ/CQ depth per ring
+    DualStack      = false,                                // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
+    RecvSlots      = 4096,                                 // shared recv buffer-ring depth
+    Incremental    = null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,                                 // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                 // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port = port,
+        Port             = port,
+        ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
     },
 };
 
 var tlsOptions = new TlsOptions
 {
-    CertificatePath = certPath,
-    KeyPath         = keyPath,
+    CertificatePath = certPath,                            // PEM chain file (or CertificatePem for in-memory)
+    KeyPath         = keyPath,                             // PEM key file (or KeyPem for in-memory)
+    Alpn            = [&quot;http/1.1&quot;],                        // protocols this port serves, most-preferred first
 
     // NOT the default - TLS is OpenSSL both ways unless you ask for this. It is what lets the
     // handler below write PLAINTEXT to the connection: the kernel turns it into records on send.
     // Remove this line and conn.Write would put cleartext on the wire.
-    KernelTx = true,
+    KernelTx        = true,
 
     // Full kTLS: the kernel decrypts inbound too. Experimental - about one first connection in
     // twelve fails outright, and a client sending a TLS 1.3 KeyUpdate loses the connection.
     // Tls/Hybrid is this same server without this line: kernel TX, OpenSSL RX, deployable today.
-    KernelRx = true,
+    KernelRx        = true,
 };
 
 byte[] body = new byte[bodyBytes];
@@ -1763,25 +1906,40 @@ const string keyPath  = &quot;key.pem&quot;;
 
 var config = new ServerConfig
 {
-    ReactorCount = reactors,
+    ReactorCount   = reactors,                             // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                 // SQ/CQ depth per ring
+    DualStack      = false,                                // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
+    RecvSlots      = 4096,                                 // shared recv buffer-ring depth
+    Incremental    = null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,                                 // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                 // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port = port,
+        Port             = port,
+        ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
     },
 };
 
 var tlsOptions = new TlsOptions
 {
-    CertificatePath = certPath,
-    KeyPath = keyPath,
+    CertificatePath = certPath,                            // PEM chain file (or CertificatePem for in-memory)
+    KeyPath         = keyPath,                             // PEM key file (or KeyPem for in-memory)
+    Alpn            = [&quot;http/1.1&quot;],                        // protocols this port serves, most-preferred first
 
     // NOT the default - TLS is OpenSSL both ways unless you ask for this.
     // Playground/Tls/OpenSslPipes is the same server without these two lines.
-    KernelTx = true,
+    KernelTx        = true,
 
     // Full kTLS: the kernel decrypts inbound too. Experimental - about one first connection in
     // twelve fails outright, and a KeyUpdate is fatal. Drop this line for the hybrid.
-    KernelRx = true,
+    KernelRx        = true,
 };
 
 byte[] body = new byte[bodyBytes];
@@ -1903,22 +2061,39 @@ const string keyPath  = &quot;key.pem&quot;;
 
 var config = new ServerConfig
 {
-    ReactorCount = reactors,
+    ReactorCount   = reactors,                             // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                 // SQ/CQ depth per ring
+    DualStack      = false,                                // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
+    RecvSlots      = 4096,                                 // shared recv buffer-ring depth
+    Incremental    = null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,                                 // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                 // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port = port,
+        Port             = port,
+        ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
     },
 };
 
 var tlsOptions = new TlsOptions
 {
-    CertificatePath = certPath,
-    KeyPath         = keyPath,
+    CertificatePath = certPath,                            // PEM chain file (or CertificatePem for in-memory)
+    KeyPath         = keyPath,                             // PEM key file (or KeyPem for in-memory)
+    Alpn            = [&quot;http/1.1&quot;],                        // protocols this port serves, most-preferred first
 
     // NOT the default - TLS is OpenSSL both ways unless you ask for this. It is what lets the
     // handler below write PLAINTEXT to the connection: the kernel turns it into records on send.
     // Remove this line and conn.Write would put cleartext on the wire.
-    KernelTx = true,
+    KernelTx        = true,
+
+    KernelRx        = false,                               // kTLS receive (experimental; requires KernelTx)
 };
 
 byte[] body = new byte[bodyBytes];
@@ -2094,20 +2269,38 @@ const string keyPath  = &quot;key.pem&quot;;
 
 var config = new ServerConfig
 {
-    ReactorCount = reactors,
+    ReactorCount   = reactors,                             // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                 // SQ/CQ depth per ring
+    DualStack      = false,                                // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
+    RecvSlots      = 4096,                                 // shared recv buffer-ring depth
+    Incremental    = null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,                                 // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                 // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port = port,
+        Port             = port,
+        ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
     },
 };
 
 var tlsOptions = new TlsOptions
 {
-    // No KernelTx line - false is the default, so this sample IS the stock configuration: no TLS
+    CertificatePath = certPath,                            // PEM chain file (or CertificatePem for in-memory)
+    KeyPath         = keyPath,                             // PEM key file (or KeyPem for in-memory)
+    Alpn            = [&quot;http/1.1&quot;],                        // protocols this port serves, most-preferred first
+
+    // KernelTx stays false (the default), so this sample IS the stock configuration: no TLS
     // ULP on the socket, OpenSSL encrypts and decrypts, MSG_WAITALL stays on, and nothing here
     // needs the &#x27;tls&#x27; kernel module. Tls/Ktls is the sample that opts into the kernel path.
-    CertificatePath = certPath,
-    KeyPath         = keyPath,
+    KernelTx        = false,
+    KernelRx        = false,                               // kTLS receive (experimental; requires KernelTx)
 };
 
 byte[] body = new byte[bodyBytes];
@@ -2287,22 +2480,39 @@ const string keyPath  = &quot;key.pem&quot;;
 
 var config = new ServerConfig
 {
-    ReactorCount = reactors,
+    ReactorCount   = reactors,                             // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                 // SQ/CQ depth per ring
+    DualStack      = false,                                // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
+    RecvSlots      = 4096,                                 // shared recv buffer-ring depth
+    Incremental    = null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,                                 // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                 // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port = port,
+        Port             = port,
+        ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
     },
 };
 
 var tlsOptions = new TlsOptions
 {
-    CertificatePath = certPath,
-    KeyPath = keyPath,
+    CertificatePath = certPath,                            // PEM chain file (or CertificatePem for in-memory)
+    KeyPath         = keyPath,                             // PEM key file (or KeyPem for in-memory)
+    Alpn            = [&quot;http/1.1&quot;],                        // protocols this port serves, most-preferred first
 
-    // No KernelTx line - false is the default. No TLS ULP on the socket, so OpenSSL encrypts and
+    // KernelTx stays false (the default). No TLS ULP on the socket, so OpenSSL encrypts and
     // decrypts and nothing here needs the &#x27;tls&#x27; kernel module - which also keeps TLS 1.2, any
     // ciphersuite and session resumption. Playground/Tls/KtlsPipes adds the one line that
     // changes this.
+    KernelTx        = false,
+    KernelRx        = false,                               // kTLS receive (experimental; requires KernelTx)
 };
 
 byte[] body = new byte[bodyBytes];
@@ -2408,16 +2618,24 @@ using ioxide.nghttp2;
 
 var config = new ServerConfig
 {
-    ReactorCount = Environment.ProcessorCount,   // one ring per reactor, one reactor per core
-    RingEntries  = 8192,                         // io_uring SQ/CQ depth
-
-    RecvBufferSize = 32 * 1024,
-    RecvSlots      = 4096,
-
+    ReactorCount   = Environment.ProcessorCount,  // one ring per reactor, one reactor per core
+    RingEntries    = 8192,                         // io_uring SQ/CQ depth
+    DualStack      = false,                         // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                    // bytes per shared recv buffer
+    RecvSlots      = 4096,                          // shared recv buffer-ring depth
+    Incremental    = null,                          // per-connection recv rings (6.12+) - see the incremental example
+    Udp            = null,                          // no raw UDP sockets
+    Quic           = null,                          // no QUIC transport
     Tcp = new TcpOptions
     {
-        Port          = 8080,
-        WriteSlabSize = 16 * 1024,               // a batch of multiplexed responses leaves in one send
+        Port             = 8080,
+        ExtraPorts       = [],                     // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                   // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,              // a batch of multiplexed responses leaves in one send
+        PoolMax          = 1024,                   // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                  // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                     // per-connection recv completion queue depth
     },
 };
 
@@ -2473,8 +2691,25 @@ using ioxide.http2;
 
 var config = new ServerConfig
 {
-    ReactorCount = Environment.ProcessorCount,
-    Tcp = new TcpOptions { Port = 8080 },
+    ReactorCount   = Environment.ProcessorCount,  // one ring per reactor, one reactor per core
+    RingEntries    = 8192,                         // SQ/CQ depth per ring
+    DualStack      = false,                         // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                    // bytes per shared recv buffer
+    RecvSlots      = 4096,                          // shared recv buffer-ring depth
+    Incremental    = null,                          // per-connection recv rings (6.12+) - see the incremental example
+    Udp            = null,                          // no raw UDP sockets
+    Quic           = null,                          // no QUIC transport
+    Tcp = new TcpOptions
+    {
+        Port             = 8080,
+        ExtraPorts       = [],                     // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                   // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,              // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                   // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                  // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                     // per-connection recv completion queue depth
+    },
 };
 
 byte[] body = &quot;ok&quot;u8.ToArray();
@@ -2567,11 +2802,24 @@ bool kernelRx = false;
 
 var config = new ServerConfig
 {
-    ReactorCount = reactors,
-    Incremental = incrementalBuffers ? new IncrementalOptions() : null,
+    ReactorCount   = reactors,                                              // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                                  // SQ/CQ depth per ring
+    DualStack      = false,                                                 // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                                             // bytes per shared recv buffer
+    RecvSlots      = 4096,                                                  // shared recv buffer-ring depth
+    Incremental    = incrementalBuffers ? new IncrementalOptions() : null,  // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,                                                  // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                                  // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port = port,
+        Port             = port,
+        ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
     },
 };
 
@@ -2591,14 +2839,13 @@ for (int i = 0; i &lt; threads.Length; i++)
 
     reactor.OnStart = r =&gt; TlsService.Start(r, new TlsOptions
     {
-        KernelTx = kernelTx,
-        KernelRx = kernelRx,
-        CertificatePath = certPath,
-        KeyPath = keyPath,
-
-        // Most preferred first. ALPN has no weights - RFC 7301 carries a plain ordered list - so
-        // position IS the preference, and a client offering both lands on h2.
-        Alpn = [&quot;h2&quot;, &quot;http/1.1&quot;],
+        CertificatePath = certPath,                        // PEM certificate chain file (leaf first)
+        CertificatePem  = null,                            // in-memory PEM alternative - set one, not both
+        KeyPath         = keyPath,                         // PEM private key file
+        KeyPem          = null,                            // in-memory PEM alternative to KeyPath
+        Alpn            = [&quot;h2&quot;, &quot;http/1.1&quot;],              // ORDERED, most preferred first - a client offering both gets h2
+        KernelTx        = kernelTx,                        // kTLS encrypt: kernel makes the records (off = OpenSSL both ways)
+        KernelRx        = kernelRx,                        // kTLS decrypt: needs KernelTx; experimental (see the knob above)
     });
 
     reactor.TcpHandle = async (r, conn) =&gt;
@@ -2747,6 +2994,7 @@ var config = new ServerConfig
 
     RecvBufferSize = 32 * 1024,
     RecvSlots      = 4096,
+    Incremental    = null,                       // per-connection recv rings (6.12+) - see the incremental example
 
     Tcp = null,                                  // QUIC only: no TCP listener is opened
 
@@ -2823,6 +3071,7 @@ var config = new ServerConfig
 
     RecvBufferSize = 32 * 1024,
     RecvSlots      = 4096,
+    Incremental    = null,                       // per-connection recv rings (6.12+) - see the incremental example
 
     Tcp = null,                                  // QUIC only: no TCP listener is opened
 
@@ -2898,6 +3147,7 @@ var config = new ServerConfig
 
     RecvBufferSize = 32 * 1024,
     RecvSlots      = 4096,
+    Incremental    = null,                       // per-connection recv rings (6.12+) - see the incremental example
 
     Tcp = null,                                  // QUIC only: no TCP listener is opened
 
@@ -3029,10 +3279,24 @@ const string keyPath  = &quot;key.pem&quot;;
 
 var config = new ServerConfig
 {
-    ReactorCount = Environment.ProcessorCount,
+    ReactorCount   = Environment.ProcessorCount,
+    RingEntries    = 8192,       // SQ/CQ depth per ring
+    DualStack      = false,      // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,  // bytes per shared recv buffer
+    RecvSlots      = 4096,       // shared recv buffer-ring depth
+    Incremental    = null,       // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,       // no raw UDP sockets (TCP-only frontend)
+    Quic           = null,       // no QUIC listener; the frontend is TLS-over-TCP
     Tcp = new TcpOptions
     {
-        Port = 8443,
+        Port             = 8443,
+        ExtraPorts       = [],                                 // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                               // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                          // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                               // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,         // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                              // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                                 // per-connection recv completion queue depth
     },
 };
 
@@ -3060,24 +3324,34 @@ for (int i = 0; i &lt; threads.Length; i++)
         // protocol, so it offers exactly one.
         TlsService.Start(r, new TlsOptions
         {
-            CertificatePath = certPath,
-            KeyPath = keyPath,
-            Alpn = [&quot;http/1.1&quot;],
+            CertificatePath = certPath,      // PEM cert chain file (set exactly one of Path/Pem)
+            CertificatePem  = null,          // in-memory PEM alternative to CertificatePath
+            KeyPath         = keyPath,       // PEM private key file (set exactly one of Path/Pem)
+            KeyPem          = null,          // in-memory PEM alternative to KeyPath
+            Alpn            = [&quot;http/1.1&quot;],  // protocols offered, most preferred first
+            KernelTx        = false,         // kTLS encrypt (off = OpenSSL both ways)
+            KernelRx        = false,         // kTLS decrypt; requires KernelTx, experimental
         });
 
         // Outbound: one context per reactor, shared by that reactor&#x27;s pool - it holds no
         // per-connection state, so every connection opened from it gets its own SSL.
         HttpClientPool.Start(r, new HttpClientOptions
         {
-            Host = upstreamHost,
-            Port = upstreamPort,
-            PoolSize = upstreamPool,
+            Host              = upstreamHost,     // origin address (IPv4 literal; DNS would block the reactor)
+            Port              = upstreamPort,     // origin port
+            PoolSize          = upstreamPool,     // connections kept open; round-robin, one request each
+            MaxResponseBytes  = 8 * 1024 * 1024,  // per-request ceiling for headers + body
+            SendBufferSize    = 16 * 1024,        // per-connection send buffer
+            ReceiveBufferSize = 16 * 1024,        // per-connection recv buffer (grows to MaxResponseBytes)
+            AcquireTimeoutMs  = 10_000,           // how long a request waits for a free connection
             Tls = TlsClientContext.Create(new TlsClientOptions
             {
-                ServerName = upstreamName,
-                AlpnProtocols = [&quot;http/1.1&quot;],
-                CaFile = upstreamInsecure ? null : upstreamCa,
-                VerifyCertificate = !upstreamInsecure,
+                ServerName         = upstreamName,                          // sent as SNI, checked against the cert
+                AlpnProtocols      = [&quot;http/1.1&quot;],                          // ALPN offer, most preferred first
+                VerifyCertificate  = !upstreamInsecure,                     // off = encrypted but UNAUTHENTICATED
+                CaFile             = upstreamInsecure ? null : upstreamCa,  // PEM trust anchors; null = system store
+                MinimumVersion     = OpenSslVersions.Tls12,                 // lowest TLS accepted; Tls13 = 1.3 only
+                HandshakeTimeoutMs = 10_000,                                // handshake deadline
             }),
         });
     };
@@ -3224,10 +3498,24 @@ const string keyPath  = &quot;key.pem&quot;;
 
 var config = new ServerConfig
 {
-    ReactorCount = Environment.ProcessorCount,
+    ReactorCount   = Environment.ProcessorCount,
+    RingEntries    = 8192,       // SQ/CQ depth per ring
+    DualStack      = false,      // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,  // bytes per shared recv buffer
+    RecvSlots      = 4096,       // shared recv buffer-ring depth
+    Incremental    = null,       // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,       // no raw UDP sockets (TCP-only frontend)
+    Quic           = null,       // no QUIC listener; the frontend is TLS-over-TCP
     Tcp = new TcpOptions
     {
-        Port = 8443,
+        Port             = 8443,
+        ExtraPorts       = [],                                 // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                               // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                          // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                               // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,         // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                              // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                                 // per-connection recv completion queue depth
     },
 };
 
@@ -3255,24 +3543,32 @@ for (int i = 0; i &lt; threads.Length; i++)
         // protocol, so it offers exactly one.
         TlsService.Start(r, new TlsOptions
         {
-            CertificatePath = certPath,
-            KeyPath = keyPath,
-            Alpn = [&quot;http/1.1&quot;],
+            CertificatePath = certPath,      // PEM cert chain file (set exactly one of Path/Pem)
+            CertificatePem  = null,          // in-memory PEM alternative to CertificatePath
+            KeyPath         = keyPath,       // PEM private key file (set exactly one of Path/Pem)
+            KeyPem          = null,          // in-memory PEM alternative to KeyPath
+            Alpn            = [&quot;http/1.1&quot;],  // protocols offered, most preferred first
+            KernelTx        = false,         // kTLS encrypt (off = OpenSSL both ways)
+            KernelRx        = false,         // kTLS decrypt; requires KernelTx, experimental
         });
 
         // Outbound: one context per reactor, shared by that reactor&#x27;s pool - it holds no
         // per-connection state, so every connection opened from it gets its own SSL.
         Http2ClientPool.Start(r, new Http2ClientOptions
         {
-            Host = upstreamHost,
-            Port = upstreamPort,
-            PoolSize = upstreamPool,
+            Host             = upstreamHost,     // origin address (IPv4 literal; DNS would block the reactor)
+            Port             = upstreamPort,     // origin port
+            PoolSize         = upstreamPool,     // h2 multiplexes: one connection carries many streams
+            AcquireTimeoutMs = 10_000,           // how long a request waits for a usable connection
+            MaxResponseBytes = 8 * 1024 * 1024,  // per-request ceiling for headers + body
             Tls = TlsClientContext.Create(new TlsClientOptions
             {
-                ServerName = upstreamName,
-                AlpnProtocols = [&quot;h2&quot;],       // h2 over TLS is chosen by ALPN, never assumed
-                CaFile = upstreamInsecure ? null : upstreamCa,
-                VerifyCertificate = !upstreamInsecure,
+                ServerName         = upstreamName,                          // sent as SNI, checked against the cert
+                AlpnProtocols      = [&quot;h2&quot;],                                // h2 over TLS is chosen by ALPN, never assumed
+                VerifyCertificate  = !upstreamInsecure,                     // off = encrypted but UNAUTHENTICATED
+                CaFile             = upstreamInsecure ? null : upstreamCa,  // PEM trust anchors; null = system store
+                MinimumVersion     = OpenSslVersions.Tls12,                 // lowest TLS accepted; Tls13 = 1.3 only
+                HandshakeTimeoutMs = 10_000,                                // handshake deadline
             }),
         });
     };
@@ -3420,10 +3716,24 @@ const string keyPath  = &quot;key.pem&quot;;
 
 var config = new ServerConfig
 {
-    ReactorCount = Environment.ProcessorCount,
+    ReactorCount   = Environment.ProcessorCount,
+    RingEntries    = 8192,       // SQ/CQ depth per ring
+    DualStack      = false,      // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,  // bytes per shared recv buffer
+    RecvSlots      = 4096,       // shared recv buffer-ring depth
+    Incremental    = null,       // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,       // no raw UDP sockets (TCP-only frontend)
+    Quic           = null,       // no QUIC listener; the frontend is TLS-over-TCP
     Tcp = new TcpOptions
     {
-        Port = 8443,
+        Port             = 8443,
+        ExtraPorts       = [],                                 // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                               // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                          // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                               // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,         // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                              // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                                 // per-connection recv completion queue depth
     },
 };
 
@@ -3444,9 +3754,13 @@ for (int i = 0; i &lt; threads.Length; i++)
         // protocol, so it offers exactly one.
         TlsService.Start(r, new TlsOptions
         {
-            CertificatePath = certPath,
-            KeyPath = keyPath,
-            Alpn = [&quot;http/1.1&quot;],
+            CertificatePath = certPath,      // PEM cert chain file (set exactly one of Path/Pem)
+            CertificatePem  = null,          // in-memory PEM alternative to CertificatePath
+            KeyPath         = keyPath,       // PEM private key file (set exactly one of Path/Pem)
+            KeyPem          = null,          // in-memory PEM alternative to KeyPath
+            Alpn            = [&quot;http/1.1&quot;],  // protocols offered, most preferred first
+            KernelTx        = false,         // kTLS encrypt (off = OpenSSL both ways)
+            KernelRx        = false,         // kTLS decrypt; requires KernelTx, experimental
         });
 
         // Outbound: no TLS options, because QUIC has no cleartext mode - TLS 1.3 is inside the
@@ -3454,10 +3768,12 @@ for (int i = 0; i &lt; threads.Length; i++)
         // this pool is what makes the reactor grow its client-side QUIC transport.
         Http3ClientPool.Start(r, new Http3ClientOptions
         {
-            Host = upstreamHost,
-            Port = upstreamPort,
-            ServerName = upstreamName,
-            PoolSize = upstreamPool,
+            Host             = upstreamHost,     // origin address (IPv4 literal; DNS would block the reactor)
+            Port             = upstreamPort,     // origin&#x27;s QUIC (UDP) port
+            ServerName       = upstreamName,     // SNI / :authority, checked against the cert
+            PoolSize         = upstreamPool,     // h3 multiplexes: one connection carries many streams
+            AcquireTimeoutMs = 10_000,           // how long a request waits (handshake included)
+            MaxResponseBytes = 8 * 1024 * 1024,  // per-request ceiling for headers + body
         });
     };
 
@@ -3602,10 +3918,24 @@ const string keyPath  = &quot;key.pem&quot;;
 
 var config = new ServerConfig
 {
-    ReactorCount = Environment.ProcessorCount,
+    ReactorCount   = Environment.ProcessorCount,
+    RingEntries    = 8192,       // SQ/CQ depth per ring
+    DualStack      = false,      // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,  // bytes per shared recv buffer
+    RecvSlots      = 4096,       // shared recv buffer-ring depth
+    Incremental    = null,       // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,       // no raw UDP sockets (TCP-only frontend)
+    Quic           = null,       // no QUIC listener; the frontend is TLS-over-TCP
     Tcp = new TcpOptions
     {
-        Port = 8443,
+        Port             = 8443,
+        ExtraPorts       = [],                                 // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                               // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                          // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                               // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,         // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                              // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                                 // per-connection recv completion queue depth
     },
 };
 
@@ -3633,24 +3963,34 @@ for (int i = 0; i &lt; threads.Length; i++)
         // client that cannot do h2 fails ALPN rather than silently getting something else.
         TlsService.Start(r, new TlsOptions
         {
-            CertificatePath = certPath,
-            KeyPath = keyPath,
-            Alpn = [&quot;h2&quot;],
+            CertificatePath = certPath,  // PEM cert chain file (set exactly one of Path/Pem)
+            CertificatePem  = null,      // in-memory PEM alternative to CertificatePath
+            KeyPath         = keyPath,   // PEM private key file (set exactly one of Path/Pem)
+            KeyPem          = null,      // in-memory PEM alternative to KeyPath
+            Alpn            = [&quot;h2&quot;],    // protocols offered, most preferred first
+            KernelTx        = false,     // kTLS encrypt (off = OpenSSL both ways)
+            KernelRx        = false,     // kTLS decrypt; requires KernelTx, experimental
         });
 
         // Outbound: one context per reactor, shared by that reactor&#x27;s pool - it holds no
         // per-connection state, so every connection opened from it gets its own SSL.
         HttpClientPool.Start(r, new HttpClientOptions
         {
-            Host = upstreamHost,
-            Port = upstreamPort,
-            PoolSize = upstreamPool,
+            Host              = upstreamHost,     // origin address (IPv4 literal; DNS would block the reactor)
+            Port              = upstreamPort,     // origin port
+            PoolSize          = upstreamPool,     // connections kept open; round-robin, one request each
+            MaxResponseBytes  = 8 * 1024 * 1024,  // per-request ceiling for headers + body
+            SendBufferSize    = 16 * 1024,        // per-connection send buffer
+            ReceiveBufferSize = 16 * 1024,        // per-connection recv buffer (grows to MaxResponseBytes)
+            AcquireTimeoutMs  = 10_000,           // how long a request waits for a free connection
             Tls = TlsClientContext.Create(new TlsClientOptions
             {
-                ServerName = upstreamName,
-                AlpnProtocols = [&quot;http/1.1&quot;],
-                CaFile = upstreamInsecure ? null : upstreamCa,
-                VerifyCertificate = !upstreamInsecure,
+                ServerName         = upstreamName,                          // sent as SNI, checked against the cert
+                AlpnProtocols      = [&quot;http/1.1&quot;],                          // ALPN offer, most preferred first
+                VerifyCertificate  = !upstreamInsecure,                     // off = encrypted but UNAUTHENTICATED
+                CaFile             = upstreamInsecure ? null : upstreamCa,  // PEM trust anchors; null = system store
+                MinimumVersion     = OpenSslVersions.Tls12,                 // lowest TLS accepted; Tls13 = 1.3 only
+                HandshakeTimeoutMs = 10_000,                                // handshake deadline
             }),
         });
     };
@@ -3754,10 +4094,24 @@ const string keyPath  = &quot;key.pem&quot;;
 
 var config = new ServerConfig
 {
-    ReactorCount = Environment.ProcessorCount,
+    ReactorCount   = Environment.ProcessorCount,
+    RingEntries    = 8192,       // SQ/CQ depth per ring
+    DualStack      = false,      // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,  // bytes per shared recv buffer
+    RecvSlots      = 4096,       // shared recv buffer-ring depth
+    Incremental    = null,       // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,       // no raw UDP sockets (TCP-only frontend)
+    Quic           = null,       // no QUIC listener; the frontend is TLS-over-TCP
     Tcp = new TcpOptions
     {
-        Port = 8443,
+        Port             = 8443,
+        ExtraPorts       = [],                                 // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                               // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                          // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                               // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,         // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                              // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                                 // per-connection recv completion queue depth
     },
 };
 
@@ -3785,24 +4139,32 @@ for (int i = 0; i &lt; threads.Length; i++)
         // client that cannot do h2 fails ALPN rather than silently getting something else.
         TlsService.Start(r, new TlsOptions
         {
-            CertificatePath = certPath,
-            KeyPath = keyPath,
-            Alpn = [&quot;h2&quot;],
+            CertificatePath = certPath,  // PEM cert chain file (set exactly one of Path/Pem)
+            CertificatePem  = null,      // in-memory PEM alternative to CertificatePath
+            KeyPath         = keyPath,   // PEM private key file (set exactly one of Path/Pem)
+            KeyPem          = null,      // in-memory PEM alternative to KeyPath
+            Alpn            = [&quot;h2&quot;],    // protocols offered, most preferred first
+            KernelTx        = false,     // kTLS encrypt (off = OpenSSL both ways)
+            KernelRx        = false,     // kTLS decrypt; requires KernelTx, experimental
         });
 
         // Outbound: one context per reactor, shared by that reactor&#x27;s pool - it holds no
         // per-connection state, so every connection opened from it gets its own SSL.
         Http2ClientPool.Start(r, new Http2ClientOptions
         {
-            Host = upstreamHost,
-            Port = upstreamPort,
-            PoolSize = upstreamPool,
+            Host             = upstreamHost,     // origin address (IPv4 literal; DNS would block the reactor)
+            Port             = upstreamPort,     // origin port
+            PoolSize         = upstreamPool,     // h2 multiplexes: one connection carries many streams
+            AcquireTimeoutMs = 10_000,           // how long a request waits for a usable connection
+            MaxResponseBytes = 8 * 1024 * 1024,  // per-request ceiling for headers + body
             Tls = TlsClientContext.Create(new TlsClientOptions
             {
-                ServerName = upstreamName,
-                AlpnProtocols = [&quot;h2&quot;],       // h2 over TLS is chosen by ALPN, never assumed
-                CaFile = upstreamInsecure ? null : upstreamCa,
-                VerifyCertificate = !upstreamInsecure,
+                ServerName         = upstreamName,                          // sent as SNI, checked against the cert
+                AlpnProtocols      = [&quot;h2&quot;],                                // h2 over TLS is chosen by ALPN, never assumed
+                VerifyCertificate  = !upstreamInsecure,                     // off = encrypted but UNAUTHENTICATED
+                CaFile             = upstreamInsecure ? null : upstreamCa,  // PEM trust anchors; null = system store
+                MinimumVersion     = OpenSslVersions.Tls12,                 // lowest TLS accepted; Tls13 = 1.3 only
+                HandshakeTimeoutMs = 10_000,                                // handshake deadline
             }),
         });
     };
@@ -3906,10 +4268,24 @@ const string keyPath  = &quot;key.pem&quot;;
 
 var config = new ServerConfig
 {
-    ReactorCount = Environment.ProcessorCount,
+    ReactorCount   = Environment.ProcessorCount,
+    RingEntries    = 8192,       // SQ/CQ depth per ring
+    DualStack      = false,      // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,  // bytes per shared recv buffer
+    RecvSlots      = 4096,       // shared recv buffer-ring depth
+    Incremental    = null,       // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,       // no raw UDP sockets (TCP-only frontend)
+    Quic           = null,       // no QUIC listener; the frontend is TLS-over-TCP
     Tcp = new TcpOptions
     {
-        Port = 8443,
+        Port             = 8443,
+        ExtraPorts       = [],                                 // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                               // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                          // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                               // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,         // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                              // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                                 // per-connection recv completion queue depth
     },
 };
 
@@ -3930,9 +4306,13 @@ for (int i = 0; i &lt; threads.Length; i++)
         // client that cannot do h2 fails ALPN rather than silently getting something else.
         TlsService.Start(r, new TlsOptions
         {
-            CertificatePath = certPath,
-            KeyPath = keyPath,
-            Alpn = [&quot;h2&quot;],
+            CertificatePath = certPath,  // PEM cert chain file (set exactly one of Path/Pem)
+            CertificatePem  = null,      // in-memory PEM alternative to CertificatePath
+            KeyPath         = keyPath,   // PEM private key file (set exactly one of Path/Pem)
+            KeyPem          = null,      // in-memory PEM alternative to KeyPath
+            Alpn            = [&quot;h2&quot;],    // protocols offered, most preferred first
+            KernelTx        = false,     // kTLS encrypt (off = OpenSSL both ways)
+            KernelRx        = false,     // kTLS decrypt; requires KernelTx, experimental
         });
 
         // Outbound: no TLS options, because QUIC has no cleartext mode - TLS 1.3 is inside the
@@ -3940,10 +4320,12 @@ for (int i = 0; i &lt; threads.Length; i++)
         // this pool is what makes the reactor grow its client-side QUIC transport.
         Http3ClientPool.Start(r, new Http3ClientOptions
         {
-            Host = upstreamHost,
-            Port = upstreamPort,
-            ServerName = upstreamName,
-            PoolSize = upstreamPool,
+            Host             = upstreamHost,     // origin address (IPv4 literal; DNS would block the reactor)
+            Port             = upstreamPort,     // origin&#x27;s QUIC (UDP) port
+            ServerName       = upstreamName,     // SNI / :authority, checked against the cert
+            PoolSize         = upstreamPool,     // h3 multiplexes: one connection carries many streams
+            AcquireTimeoutMs = 10_000,           // how long a request waits (handshake included)
+            MaxResponseBytes = 8 * 1024 * 1024,  // per-request ceiling for headers + body
         });
     };
 
@@ -4041,18 +4423,31 @@ using ioxide.ngtcp2;
 const string certPath = &quot;cert.pem&quot;;      // any PEM pair; the sample generates one on first run
 const string keyPath  = &quot;key.pem&quot;;
 
-using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: [&quot;h3&quot;]);
+using var engine = new QuicEngine(certPath, keyPath,
+    cidLength: 8,                       // CID bytes this endpoint mints (1..20)
+    alpn: [&quot;h3&quot;],                       // the only protocol offered (else no_application_protocol)
+    maxSendRetentionBytes: 16L &lt;&lt; 20);  // per-connection send-retention high-water (default 16 MiB)
 
 var config = new ServerConfig
 {
-    ReactorCount = Environment.ProcessorCount,
-    Tcp = null,   // the proxy serves h3 only; its TCP sockets are all outbound
-    Udp = new UdpOptions { RecvSlots = 16 },
+    ReactorCount   = Environment.ProcessorCount,
+    RingEntries    = 8192,       // SQ/CQ depth per ring
+    DualStack      = false,      // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,  // bytes per shared recv buffer
+    RecvSlots      = 4096,       // shared recv buffer-ring depth
+    Incremental    = null,       // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Tcp            = null,       // the proxy serves h3 only; its TCP sockets are all outbound
+    Udp = new UdpOptions
+    {
+        RecvSlots = 16,  // multishot recv slots per reactor (datagrams in flight)
+        Gro       = true,                                 // UDP_GRO: coalesce datagrams into one recv (fewer syscalls)
+    },
     Quic = new QuicOptions
     {
-        Port = 8443,
-        LocalCidLength = 8,
-        ConnectionFactory = engine.CreateFactory(),
+        Port              = 8443,  // h3 over UDP - the QUIC listener
+        LocalCidLength    = 8,                                       // CID bytes this endpoint mints (must match the engine)
+        IdleTimeoutMs     = 60_000,                                  // transport idle backstop; 0 disables sweep eviction
+        ConnectionFactory = engine.CreateFactory(),                  // adopts new connections into the engine
     },
 };
 
@@ -4081,15 +4476,21 @@ for (int i = 0; i &lt; threads.Length; i++)
         // per-connection state, so every connection opened from it gets its own SSL.
         HttpClientPool.Start(r, new HttpClientOptions
         {
-            Host = upstreamHost,
-            Port = upstreamPort,
-            PoolSize = upstreamPool,
+            Host              = upstreamHost,     // origin address (IPv4 literal; DNS would block the reactor)
+            Port              = upstreamPort,     // origin port
+            PoolSize          = upstreamPool,     // connections kept open; round-robin, one request each
+            MaxResponseBytes  = 8 * 1024 * 1024,  // per-request ceiling for headers + body
+            SendBufferSize    = 16 * 1024,        // per-connection send buffer
+            ReceiveBufferSize = 16 * 1024,        // per-connection recv buffer (grows to MaxResponseBytes)
+            AcquireTimeoutMs  = 10_000,           // how long a request waits for a free connection
             Tls = TlsClientContext.Create(new TlsClientOptions
             {
-                ServerName = upstreamName,
-                AlpnProtocols = [&quot;http/1.1&quot;],
-                CaFile = upstreamInsecure ? null : upstreamCa,
-                VerifyCertificate = !upstreamInsecure,
+                ServerName         = upstreamName,                          // sent as SNI, checked against the cert
+                AlpnProtocols      = [&quot;http/1.1&quot;],                          // ALPN offer, most preferred first
+                VerifyCertificate  = !upstreamInsecure,                     // off = encrypted but UNAUTHENTICATED
+                CaFile             = upstreamInsecure ? null : upstreamCa,  // PEM trust anchors; null = system store
+                MinimumVersion     = OpenSslVersions.Tls12,                 // lowest TLS accepted; Tls13 = 1.3 only
+                HandshakeTimeoutMs = 10_000,                                // handshake deadline
             }),
         });
     };
@@ -4166,18 +4567,31 @@ using ioxide.ngtcp2;
 const string certPath = &quot;cert.pem&quot;;      // any PEM pair; the sample generates one on first run
 const string keyPath  = &quot;key.pem&quot;;
 
-using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: [&quot;h3&quot;]);
+using var engine = new QuicEngine(certPath, keyPath,
+    cidLength: 8,                       // CID bytes this endpoint mints (1..20)
+    alpn: [&quot;h3&quot;],                       // the only protocol offered (else no_application_protocol)
+    maxSendRetentionBytes: 16L &lt;&lt; 20);  // per-connection send-retention high-water (default 16 MiB)
 
 var config = new ServerConfig
 {
-    ReactorCount = Environment.ProcessorCount,
-    Tcp = null,   // the proxy serves h3 only; its TCP sockets are all outbound
-    Udp = new UdpOptions { RecvSlots = 16 },
+    ReactorCount   = Environment.ProcessorCount,
+    RingEntries    = 8192,       // SQ/CQ depth per ring
+    DualStack      = false,      // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,  // bytes per shared recv buffer
+    RecvSlots      = 4096,       // shared recv buffer-ring depth
+    Incremental    = null,       // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Tcp            = null,       // the proxy serves h3 only; its TCP sockets are all outbound
+    Udp = new UdpOptions
+    {
+        RecvSlots = 16,  // multishot recv slots per reactor (datagrams in flight)
+        Gro       = true,                                 // UDP_GRO: coalesce datagrams into one recv (fewer syscalls)
+    },
     Quic = new QuicOptions
     {
-        Port = 8443,
-        LocalCidLength = 8,
-        ConnectionFactory = engine.CreateFactory(),
+        Port              = 8443,  // h3 over UDP - the QUIC listener
+        LocalCidLength    = 8,                                       // CID bytes this endpoint mints (must match the engine)
+        IdleTimeoutMs     = 60_000,                                  // transport idle backstop; 0 disables sweep eviction
+        ConnectionFactory = engine.CreateFactory(),                  // adopts new connections into the engine
     },
 };
 
@@ -4206,15 +4620,19 @@ for (int i = 0; i &lt; threads.Length; i++)
         // per-connection state, so every connection opened from it gets its own SSL.
         Http2ClientPool.Start(r, new Http2ClientOptions
         {
-            Host = upstreamHost,
-            Port = upstreamPort,
-            PoolSize = upstreamPool,
+            Host             = upstreamHost,     // origin address (IPv4 literal; DNS would block the reactor)
+            Port             = upstreamPort,     // origin port
+            PoolSize         = upstreamPool,     // h2 multiplexes: one connection carries many streams
+            AcquireTimeoutMs = 10_000,           // how long a request waits for a usable connection
+            MaxResponseBytes = 8 * 1024 * 1024,  // per-request ceiling for headers + body
             Tls = TlsClientContext.Create(new TlsClientOptions
             {
-                ServerName = upstreamName,
-                AlpnProtocols = [&quot;h2&quot;],       // h2 over TLS is chosen by ALPN, never assumed
-                CaFile = upstreamInsecure ? null : upstreamCa,
-                VerifyCertificate = !upstreamInsecure,
+                ServerName         = upstreamName,                          // sent as SNI, checked against the cert
+                AlpnProtocols      = [&quot;h2&quot;],                                // h2 over TLS is chosen by ALPN, never assumed
+                VerifyCertificate  = !upstreamInsecure,                     // off = encrypted but UNAUTHENTICATED
+                CaFile             = upstreamInsecure ? null : upstreamCa,  // PEM trust anchors; null = system store
+                MinimumVersion     = OpenSslVersions.Tls12,                 // lowest TLS accepted; Tls13 = 1.3 only
+                HandshakeTimeoutMs = 10_000,                                // handshake deadline
             }),
         });
     };
@@ -4287,27 +4705,42 @@ using ioxide.ngtcp2;
 const string certPath = &quot;cert.pem&quot;;      // any PEM pair; the sample generates one on first run
 const string keyPath  = &quot;key.pem&quot;;
 
-using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: [&quot;h3&quot;]);
+using var engine = new QuicEngine(certPath, keyPath,
+    cidLength: 8,                       // CID bytes this endpoint mints (1..20)
+    alpn: [&quot;h3&quot;],                       // the only protocol offered (else no_application_protocol)
+    maxSendRetentionBytes: 16L &lt;&lt; 20);  // per-connection send-retention high-water (default 16 MiB)
 
 var config = new ServerConfig
 {
-    ReactorCount = Environment.ProcessorCount,
-    Tcp = null,   // h3 in, h3 out: nothing here speaks TCP at all
-    Udp = new UdpOptions { RecvSlots = 16 },
+    ReactorCount   = Environment.ProcessorCount,
+    RingEntries    = 8192,       // SQ/CQ depth per ring
+    DualStack      = false,      // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,  // bytes per shared recv buffer
+    RecvSlots      = 4096,       // shared recv buffer-ring depth
+    Incremental    = null,       // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Tcp            = null,       // h3 in, h3 out: nothing here speaks TCP at all
+    Udp = new UdpOptions
+    {
+        RecvSlots = 16,  // multishot recv slots per reactor (datagrams in flight)
+        Gro       = true,                                 // UDP_GRO: coalesce datagrams into one recv (fewer syscalls)
+    },
     Quic = new QuicOptions
     {
-        Port = 8443,
-        LocalCidLength = 8,
-        ConnectionFactory = engine.CreateFactory(),
+        Port              = 8443,  // h3 over UDP - the QUIC listener
+        LocalCidLength    = 8,                                       // CID bytes this endpoint mints (must match the engine)
+        IdleTimeoutMs     = 60_000,                                  // transport idle backstop; 0 disables sweep eviction
+        ConnectionFactory = engine.CreateFactory(),                  // adopts new connections into the engine
     },
 };
 
 var upstream = new Http3ClientOptions
 {
-    Host = &quot;127.0.0.1&quot;,   // IPv4 literal: DNS would block the reactor
-    Port = 8444,         // the upstream&#x27;s QUIC (UDP) port
-    ServerName = &quot;localhost&quot;,
-    PoolSize = 1,         // h3 multiplexes: one connection carries all
+    Host             = &quot;127.0.0.1&quot;,  // IPv4 literal: DNS would block the reactor
+    Port             = 8444,        // the upstream&#x27;s QUIC (UDP) port
+    ServerName       = &quot;localhost&quot;,   // SNI / :authority, checked against the cert
+    PoolSize         = 1,            // h3 multiplexes: one connection carries all
+    AcquireTimeoutMs = 10_000,                                            // how long a request waits (handshake included)
+    MaxResponseBytes = 8 * 1024 * 1024,                                   // per-request ceiling for headers + body
 };
 
 var threads = new Thread[config.ReactorCount];

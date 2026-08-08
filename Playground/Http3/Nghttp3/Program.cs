@@ -37,14 +37,34 @@ ushort quicPort = Env.Port("PLAYGROUND_QUIC_PORT", 8443);
 
 var config = new ServerConfig
 {
-    ReactorCount = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
-    Tcp = new TcpOptions { Port = Env.Port("PLAYGROUND_PORT", 8080) },
-    Udp = new UdpOptions { RecvSlots = Env.Int("PLAYGROUND_UDP_SLOTS", 16) },   // multishot recv slots
+    ReactorCount   = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),  // one ring per reactor, one reactor per core
+    RingEntries    = 8192,       // io_uring SQ/CQ depth
+    DualStack      = false,      // IPv4-only listeners; true binds dual-stack IPv6 (::)
+    RecvBufferSize = 32 * 1024,  // bytes per slot in the shared TCP recv ring
+    RecvSlots      = 4096,       // slots in that shared recv ring
+    Incremental    = null,       // shared recv ring; non-null = per-connection rings (kernel 6.12+)
+    Tcp = new TcpOptions
+    {
+        Port             = Env.Port("PLAYGROUND_PORT", 8080),  // the TCP listener, so the process serves both
+        ExtraPorts       = [],                          // extra listener ports, each bound by every reactor
+        ListenBacklog    = 1024,                        // listen() accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                   // per-connection write slab before overflow
+        PoolMax          = 1024,                        // max pooled connection objects per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,  // grow the slab; Segmented chains pooled slabs
+        ZeroCopySend     = false,                       // plain SEND; SEND_ZC only wins for large responses
+        RecvQueueEntries = 64,                          // per-connection SPSC recv queue depth (power of two)
+    },
+    Udp = new UdpOptions
+    {
+        RecvSlots = Env.Int("PLAYGROUND_UDP_SLOTS", 16),  // multishot recv slots per reactor - datagrams the ring can hold at once
+        Gro       = true,  // UDP_GRO: coalesce a received datagram burst into one recv
+    },
     Quic = new QuicOptions
     {
-        Port = quicPort,
-        LocalCidLength = 8,
-        ConnectionFactory = engine.CreateFactory(),
+        Port              = quicPort,                // https://127.0.0.1:8443/ over UDP - h3 lives here
+        LocalCidLength    = 8,                       // must match the engine's cidLength
+        IdleTimeoutMs     = 60_000,                  // close a connection idle this long (no packets)
+        ConnectionFactory = engine.CreateFactory(),  // the engine adopts each new connection
     },
 };
 
@@ -53,8 +73,8 @@ var config = new ServerConfig
 long qpackCapacity = Env.Long("PLAYGROUND_QPACK_CAP", 0);
 var h3Options = new Nghttp3Options
 {
-    QpackDynamicTableCapacity = qpackCapacity,
-    QpackBlockedStreams = qpackCapacity > 0 ? 100 : 0,
+    QpackDynamicTableCapacity = qpackCapacity,                // 0 (default) = headers stay literal
+    QpackBlockedStreams       = qpackCapacity > 0 ? 100 : 0,  // raise both together for the dynamic table
 };
 
 // THE allocation-free pattern: build the response ONCE and reuse the instance for every request.
