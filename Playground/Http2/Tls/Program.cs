@@ -1,5 +1,4 @@
 using System.IO.Pipelines;
-using System.Runtime.InteropServices;
 using System.Text;
 using ioxide;
 using ioxide.nghttp2;
@@ -121,21 +120,21 @@ for (int i = 0; i < threads.Length; i++)
             // The carry is not incidental. TLS hands back RECORDS, not requests, so a request
             // split across two records decrypts twice - and answering on "plaintext arrived"
             // would answer twice to one request. Framing is ours; ioxide does not parse HTTP.
-            var carry = new List<byte>();
+            var carry = new Carry();
 
             // The client's first request usually rides in with its Finished flight, so the
             // handshake already decrypted it and it is sitting in the session, not in any recv
             // buffer. Miss this and that request is dropped and the loop parks on bytes that
             // already arrived - which is exactly what happened here before.
-            carry.AddRange(tls.DrainPlaintext());
+            carry.Append(tls.DrainPlaintext());
 
             while (true)
             {
                 bool wrote = false;
                 int end;
-                while ((end = CollectionsMarshal.AsSpan(carry).IndexOf("\r\n\r\n"u8)) >= 0)
+                while ((end = carry.Span.IndexOf("\r\n\r\n"u8)) >= 0)
                 {
-                    carry.RemoveRange(0, end + 4);
+                    carry.Consume(end + 4);
                     // Correct whichever backend the session ended up with.
                     tls.Write(conn, http11Response);
                     wrote = true;
@@ -154,7 +153,7 @@ for (int i = 0; i < threads.Length; i++)
                     {
                         if (item.HasBuffer)
                         {
-                            carry.AddRange(tls.Decrypt(item.Ptr, item.Len));
+                            carry.Append(tls.Decrypt(item.Ptr, item.Len));
                             conn.ReturnBuffer(in item);
                         }
                     }
@@ -189,3 +188,29 @@ foreach (Thread thread in threads)
     thread.Join();
 }
 
+// Decrypted-but-unframed bytes: append at the end, consume from the front. A List<byte> pressed
+// into this job needs CollectionsMarshal to be searched and RemoveRange to be consumed; a plain
+// array does both directly.
+sealed class Carry
+{
+    private byte[] _buf = new byte[8 * 1024];
+    private int _len;
+
+    public ReadOnlySpan<byte> Span => _buf.AsSpan(0, _len);
+
+    public void Append(ReadOnlySpan<byte> bytes)
+    {
+        if (_buf.Length - _len < bytes.Length)
+        {
+            Array.Resize(ref _buf, Math.Max(_buf.Length * 2, _len + bytes.Length));
+        }
+        bytes.CopyTo(_buf.AsSpan(_len));
+        _len += bytes.Length;
+    }
+
+    public void Consume(int count)
+    {
+        _buf.AsSpan(count, _len - count).CopyTo(_buf);
+        _len -= count;
+    }
+}

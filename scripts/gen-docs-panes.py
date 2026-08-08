@@ -15,13 +15,13 @@ PANES = {
         "Tls/Ktls", "kTLS &middot; raw ring", "ioxide",
         ["sudo modprobe tls        # kTLS needs the Linux 'tls' module + OpenSSL 3",
          "curl -k https://127.0.0.1:8443/"],
-        "<b>Opt-in</b> - note the explicit <code>KernelTx = true</code>. TLS is OpenSSL in both "
-        "directions unless you ask for this, and that line is what makes the <code>conn.Write</code> "
-        "below legal: it puts PLAINTEXT into the slab and the kernel turns it into records. Without "
-        "it the same call would put <b>cleartext on the wire</b>, which is why every other sample "
-        "goes through <code>TlsSession.Write</code> - correct in either mode. Receive follows the "
-        "<code>kernelRx</code> knob: userspace by default, kernel-decrypted when you flip it "
-        "(experimental). Compare "
+        "<b>Opt-in - and as shipped, the hybrid</b>: <code>KernelTx = true</code> hands transmit to "
+        "the kernel while receive stays in OpenSSL. Full kTLS is both directions - the "
+        "<code>kernelRx</code> knob completes it (experimental). The KernelTx line is also what "
+        "makes the <code>conn.Write</code> below legal: it puts PLAINTEXT into the slab and the "
+        "kernel turns it into records. Without it the same call would put <b>cleartext on the "
+        "wire</b>, which is why every other sample goes through <code>TlsSession.Write</code> - "
+        "correct in either mode. Compare "
         "<label for=\"tab-tlsossl\" class=\"ex-jump\">openssl &middot; raw</label>."),
     "tlsossl": (
         "Tls/OpenSsl", "OpenSSL &middot; raw ring", "ioxide",
@@ -37,7 +37,7 @@ PANES = {
     "tlspipe": (
         "Tls/KtlsPipes", "kTLS &middot; pipes", "ioxide",
         ["sudo modprobe tls", "curl -k https://127.0.0.1:8443/"],
-        "The same kTLS server behind an <code>IDuplexPipe</code>, for the frameworks that serve from "
+        "The same hybrid behind an <code>IDuplexPipe</code>, for the frameworks that serve from "
         "one. Now compare <label for=\"tab-tlsosslpipe\" class=\"ex-jump\">openssl &middot; pipes</label>: "
         "its serve loop is <b>byte-identical</b> to this one. Over a pipe the backend is invisible, "
         "because <code>TlsConnectionDualPipe</code> composes its halves from the session rather than "

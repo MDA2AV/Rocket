@@ -1366,7 +1366,6 @@ foreach (Thread t in threads) t.Join();</code></pre>
 //   curl -k https://127.0.0.1:8443/
 
 using System.Text;
-using System.Runtime.InteropServices;
 using ioxide;
 using ioxide.tls;
 using ioxide.utils;
@@ -1440,7 +1439,7 @@ for (int i = 0; i &lt; threads.Length; i++)
         // request across two records and each decrypts on its own, so answering per decrypt
         // answers twice. The carry is what turns &quot;some plaintext arrived&quot; into &quot;a request
         // arrived&quot;, exactly as the plaintext samples do - ioxide does not parse HTTP for you.
-        var carry = new List&lt;byte&gt;();
+        var carry = new Carry();
 
         try
         {
@@ -1450,7 +1449,7 @@ for (int i = 0; i &lt; threads.Length; i++)
 
             // A request can ride in with the handshake&#x27;s final flight - answer it before parking
             // in ReadAsync, or the client waits on a response we never send.
-            carry.AddRange(tls.DrainPlaintext());
+            carry.Append(tls.DrainPlaintext());
             if (Answer(conn, carry, response))
             {
                 await conn.FlushAsync();
@@ -1507,19 +1506,19 @@ foreach (Thread thread in threads)
 
 // Decrypt takes a raw pointer (the buffer belongs to the ring); the pointer work stays out of the
 // async handler, which cannot contain unsafe code.
-static unsafe void Decrypt(TlsSession tls, in SpscRecvRing.Item item, List&lt;byte&gt; carry)
-    =&gt; carry.AddRange(tls.Decrypt(item.Ptr, item.Len));
+static unsafe void Decrypt(TlsSession tls, in SpscRecvRing.Item item, Carry carry)
+    =&gt; carry.Append(tls.Decrypt(item.Ptr, item.Len));
 
 // One response per COMPLETE request in the carry, and none for a partial one. Returns whether
 // anything was written, so the caller flushes once for the batch rather than once per request.
-static bool Answer(TcpConnection conn, List&lt;byte&gt; carry, ReadOnlyMemory&lt;byte&gt; response)
+static bool Answer(TcpConnection conn, Carry carry, ReadOnlyMemory&lt;byte&gt; response)
 {
     bool wrote = false;
     int end;
 
-    while ((end = CollectionsMarshal.AsSpan(carry).IndexOf(&quot;\r\n\r\n&quot;u8)) &gt;= 0)
+    while ((end = carry.Span.IndexOf(&quot;\r\n\r\n&quot;u8)) &gt;= 0)
     {
-        carry.RemoveRange(0, end + 4);
+        carry.Consume(end + 4);
 
         // PLAINTEXT into the slab - safe only because KernelTx = true above. TlsSession.Write
         // is the call that is correct either way, and is what every other sample uses; this one
@@ -1530,8 +1529,35 @@ static bool Answer(TcpConnection conn, List&lt;byte&gt; carry, ReadOnlyMemory&lt
     }
 
     return wrote;
+}
+
+// Decrypted-but-unframed bytes: append at the end, consume from the front. A List&lt;byte&gt; pressed
+// into this job needs CollectionsMarshal to be searched and RemoveRange to be consumed; a plain
+// array does both directly.
+sealed class Carry
+{
+    private byte[] _buf = new byte[8 * 1024];
+    private int _len;
+
+    public ReadOnlySpan&lt;byte&gt; Span =&gt; _buf.AsSpan(0, _len);
+
+    public void Append(ReadOnlySpan&lt;byte&gt; bytes)
+    {
+        if (_buf.Length - _len &lt; bytes.Length)
+        {
+            Array.Resize(ref _buf, Math.Max(_buf.Length * 2, _len + bytes.Length));
+        }
+        bytes.CopyTo(_buf.AsSpan(_len));
+        _len += bytes.Length;
+    }
+
+    public void Consume(int count)
+    {
+        _buf.AsSpan(count, _len - count).CopyTo(_buf);
+        _len -= count;
+    }
 }</code></pre>
-    <p class="ex-foot"><b>Opt-in</b> - note the explicit <code>KernelTx = true</code>. TLS is OpenSSL in both directions unless you ask for this, and that line is what makes the <code>conn.Write</code> below legal: it puts PLAINTEXT into the slab and the kernel turns it into records. Without it the same call would put <b>cleartext on the wire</b>, which is why every other sample goes through <code>TlsSession.Write</code> - correct in either mode. Receive follows the <code>kernelRx</code> knob: userspace by default, kernel-decrypted when you flip it (experimental). Compare <label for="tab-tlsossl" class="ex-jump">openssl &middot; raw</label>.</p>
+    <p class="ex-foot"><b>Opt-in - and as shipped, the hybrid</b>: <code>KernelTx = true</code> hands transmit to the kernel while receive stays in OpenSSL. Full kTLS is both directions - the <code>kernelRx</code> knob completes it (experimental). The KernelTx line is also what makes the <code>conn.Write</code> below legal: it puts PLAINTEXT into the slab and the kernel turns it into records. Without it the same call would put <b>cleartext on the wire</b>, which is why every other sample goes through <code>TlsSession.Write</code> - correct in either mode. Compare <label for="tab-tlsossl" class="ex-jump">openssl &middot; raw</label>.</p>
   </div>
 
   <div class="pane pane-tlspipe">
@@ -1678,7 +1704,7 @@ foreach (Thread thread in threads)
 {
     thread.Join();
 }</code></pre>
-    <p class="ex-foot">The same kTLS server behind an <code>IDuplexPipe</code>, for the frameworks that serve from one. Now compare <label for="tab-tlsosslpipe" class="ex-jump">openssl &middot; pipes</label>: its serve loop is <b>byte-identical</b> to this one. Over a pipe the backend is invisible, because <code>TlsConnectionDualPipe</code> composes its halves from the session rather than from configuration.</p>
+    <p class="ex-foot">The same hybrid behind an <code>IDuplexPipe</code>, for the frameworks that serve from one. Now compare <label for="tab-tlsosslpipe" class="ex-jump">openssl &middot; pipes</label>: its serve loop is <b>byte-identical</b> to this one. Over a pipe the backend is invisible, because <code>TlsConnectionDualPipe</code> composes its halves from the session rather than from configuration.</p>
   </div>
   <div class="pane pane-tlsossl">
     <div class="pane-head">
@@ -1689,7 +1715,6 @@ foreach (Thread thread in threads)
 //   curl -k https://127.0.0.1:8443/        # no modprobe needed
 
 using System.Text;
-using System.Runtime.InteropServices;
 using ioxide;
 using ioxide.tls;
 using ioxide.utils;
@@ -1753,7 +1778,7 @@ for (int i = 0; i &lt; threads.Length; i++)
         // request across two records and each decrypts on its own, so answering per decrypt
         // answers twice. The carry is what turns &quot;some plaintext arrived&quot; into &quot;a request
         // arrived&quot;, exactly as the plaintext samples do - ioxide does not parse HTTP for you.
-        var carry = new List&lt;byte&gt;();
+        var carry = new Carry();
 
         try
         {
@@ -1764,7 +1789,7 @@ for (int i = 0; i &lt; threads.Length; i++)
 
             // A request can ride in with the handshake&#x27;s final flight - answer it before parking
             // in ReadAsync, or the client waits on a response we never send.
-            carry.AddRange(tls.DrainPlaintext());
+            carry.Append(tls.DrainPlaintext());
             if (Answer(conn, tls, carry, response))
             {
                 await conn.FlushAsync();
@@ -1820,19 +1845,19 @@ foreach (Thread thread in threads)
 
 // Decrypt takes a raw pointer (the buffer belongs to the ring); the pointer work stays out of the
 // async handler, which cannot contain unsafe code.
-static unsafe void Decrypt(TlsSession tls, in SpscRecvRing.Item item, List&lt;byte&gt; carry)
-    =&gt; carry.AddRange(tls.Decrypt(item.Ptr, item.Len));
+static unsafe void Decrypt(TlsSession tls, in SpscRecvRing.Item item, Carry carry)
+    =&gt; carry.Append(tls.Decrypt(item.Ptr, item.Len));
 
 // One response per COMPLETE request in the carry, and none for a partial one. Returns whether
 // anything was written, so the caller flushes once for the batch rather than once per request.
-static bool Answer(TcpConnection conn, TlsSession tls, List&lt;byte&gt; carry, ReadOnlyMemory&lt;byte&gt; response)
+static bool Answer(TcpConnection conn, TlsSession tls, Carry carry, ReadOnlyMemory&lt;byte&gt; response)
 {
     bool wrote = false;
     int end;
 
-    while ((end = CollectionsMarshal.AsSpan(carry).IndexOf(&quot;\r\n\r\n&quot;u8)) &gt;= 0)
+    while ((end = carry.Span.IndexOf(&quot;\r\n\r\n&quot;u8)) &gt;= 0)
     {
-        carry.RemoveRange(0, end + 4);
+        carry.Consume(end + 4);
 
         // The one line that differs from Tls/Ktls. There, kTLS is producing the records so the
         // handler writes plaintext; here OpenSSL has to encrypt before anything reaches the slab.
@@ -1842,6 +1867,33 @@ static bool Answer(TcpConnection conn, TlsSession tls, List&lt;byte&gt; carry, R
     }
 
     return wrote;
+}
+
+// Decrypted-but-unframed bytes: append at the end, consume from the front. A List&lt;byte&gt; pressed
+// into this job needs CollectionsMarshal to be searched and RemoveRange to be consumed; a plain
+// array does both directly.
+sealed class Carry
+{
+    private byte[] _buf = new byte[8 * 1024];
+    private int _len;
+
+    public ReadOnlySpan&lt;byte&gt; Span =&gt; _buf.AsSpan(0, _len);
+
+    public void Append(ReadOnlySpan&lt;byte&gt; bytes)
+    {
+        if (_buf.Length - _len &lt; bytes.Length)
+        {
+            Array.Resize(ref _buf, Math.Max(_buf.Length * 2, _len + bytes.Length));
+        }
+        bytes.CopyTo(_buf.AsSpan(_len));
+        _len += bytes.Length;
+    }
+
+    public void Consume(int count)
+    {
+        _buf.AsSpan(count, _len - count).CopyTo(_buf);
+        _len -= count;
+    }
 }</code></pre>
     <p class="ex-foot"><b>The default.</b> No TLS ULP is attached at all - OpenSSL encrypts and decrypts, and the response goes through <code>TlsSession.Write</code>, which is correct whichever backend the session ended up with. That drops every constraint kTLS imposes: no kernel module, TLS 1.2, any ciphersuite, session resumption back, no handshake-alignment problem. What it gives up is <code>sendfile</code> and NIC offload. <b>It costs nothing measurable here</b> - against the plaintext baseline, 4 reactors, <code>wrk -t4 -c64</code>: 0.79&times; for both at a 64-byte response, 0.35&times; kTLS vs 0.44&times; OpenSSL at 64 KiB. Which backend you pick matters far less than the cost of TLS.</p>
   </div>
@@ -2121,7 +2173,6 @@ foreach (Thread t in threads) t.Join();
 //   curl -k --http2 https://127.0.0.1:8443/
 
 using System.IO.Pipelines;
-using System.Runtime.InteropServices;
 using System.Text;
 using ioxide;
 using ioxide.nghttp2;
@@ -2216,21 +2267,21 @@ for (int i = 0; i &lt; threads.Length; i++)
             // The carry is not incidental. TLS hands back RECORDS, not requests, so a request
             // split across two records decrypts twice - and answering on &quot;plaintext arrived&quot;
             // would answer twice to one request. Framing is ours; ioxide does not parse HTTP.
-            var carry = new List&lt;byte&gt;();
+            var carry = new Carry();
 
             // The client&#x27;s first request usually rides in with its Finished flight, so the
             // handshake already decrypted it and it is sitting in the session, not in any recv
             // buffer. Miss this and that request is dropped and the loop parks on bytes that
             // already arrived - which is exactly what happened here before.
-            carry.AddRange(tls.DrainPlaintext());
+            carry.Append(tls.DrainPlaintext());
 
             while (true)
             {
                 bool wrote = false;
                 int end;
-                while ((end = CollectionsMarshal.AsSpan(carry).IndexOf(&quot;\r\n\r\n&quot;u8)) &gt;= 0)
+                while ((end = carry.Span.IndexOf(&quot;\r\n\r\n&quot;u8)) &gt;= 0)
                 {
-                    carry.RemoveRange(0, end + 4);
+                    carry.Consume(end + 4);
                     // Correct whichever backend the session ended up with.
                     tls.Write(conn, http11Response);
                     wrote = true;
@@ -2249,7 +2300,7 @@ for (int i = 0; i &lt; threads.Length; i++)
                     {
                         if (item.HasBuffer)
                         {
-                            carry.AddRange(tls.Decrypt(item.Ptr, item.Len));
+                            carry.Append(tls.Decrypt(item.Ptr, item.Len));
                             conn.ReturnBuffer(in item);
                         }
                     }
@@ -2282,6 +2333,33 @@ Console.WriteLine($&quot;[http2-tls] {config.ReactorCount} reactors on :{config.
 foreach (Thread thread in threads)
 {
     thread.Join();
+}
+
+// Decrypted-but-unframed bytes: append at the end, consume from the front. A List&lt;byte&gt; pressed
+// into this job needs CollectionsMarshal to be searched and RemoveRange to be consumed; a plain
+// array does both directly.
+sealed class Carry
+{
+    private byte[] _buf = new byte[8 * 1024];
+    private int _len;
+
+    public ReadOnlySpan&lt;byte&gt; Span =&gt; _buf.AsSpan(0, _len);
+
+    public void Append(ReadOnlySpan&lt;byte&gt; bytes)
+    {
+        if (_buf.Length - _len &lt; bytes.Length)
+        {
+            Array.Resize(ref _buf, Math.Max(_buf.Length * 2, _len + bytes.Length));
+        }
+        bytes.CopyTo(_buf.AsSpan(_len));
+        _len += bytes.Length;
+    }
+
+    public void Consume(int count)
+    {
+        _buf.AsSpan(count, _len - count).CopyTo(_buf);
+        _len -= count;
+    }
 }</code></pre>
     <p class="ex-foot">How a browser actually reaches h2: over TLS, with the protocol chosen during the handshake. <code>Alpn = ["h2", "http/1.1"]</code> is an ordered preference, not a weighting - the server takes the first entry the client also offered, and this sample then branches on what was agreed, so one port serves both. That is why the h2c samples are the exception rather than the rule. TLS here is <b>OpenSSL both ways by default</b>; the <code>kernelTx</code>/<code>kernelRx</code> knobs at the top are what move either direction into the kernel.</p>
   </div>
