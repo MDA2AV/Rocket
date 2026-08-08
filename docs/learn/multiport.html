@@ -51,11 +51,24 @@
     Every reactor binds each one with SO_REUSEPORT and arms a multishot accept on it.</p>
 <pre><code class="language-csharp">var config = new ServerConfig
 {
-    ReactorCount = Environment.ProcessorCount,
+    ReactorCount   = Environment.ProcessorCount,  // io_uring rings/threads - one per core
+    RingEntries    = 8192,                         // SQ/CQ depth per ring
+    DualStack      = false,                         // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                    // bytes per shared recv buffer
+    RecvSlots      = 4096,                          // shared recv buffer-ring depth
+    Incremental    = null,                          // per-connection recv rings (6.12+)
+    Udp            = null,                          // no raw UDP sockets
+    Quic           = null,                          // no QUIC transport
     Tcp = new TcpOptions
     {
-        Port       = 8080,        // plaintext
-        ExtraPorts = [8443],      // TLS, same reactors
+        Port             = 8080,                    // plaintext
+        ExtraPorts       = [8443],                  // TLS, same reactors
+        ListenBacklog    = 1024,                     // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                // per-connection write buffer before overflow
+        PoolMax          = 1024,                      // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,  // Grow = realloc one slab; Segmented = chain + SENDMSG
+        ZeroCopySend     = false,                      // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                         // per-connection recv completion queue depth
     },
 };</code></pre>
     <p>With no <code>ExtraPorts</code>, behaviour is exactly as before - one listener, one accept.

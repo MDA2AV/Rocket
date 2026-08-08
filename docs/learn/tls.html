@@ -86,15 +86,34 @@
     <code>TlsService</code> per reactor from <code>OnStart</code> (same pattern as any client):</p>
 <pre><code class="language-csharp">var config = new ServerConfig
 {
-    ReactorCount = Environment.ProcessorCount,
-    Tcp = new TcpOptions { Port = 8080, ExtraPorts = [8443] },
+    ReactorCount   = Environment.ProcessorCount,  // io_uring rings/threads - one per core
+    RingEntries    = 8192,                         // SQ/CQ depth per ring
+    DualStack      = false,                         // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                    // bytes per shared recv buffer
+    RecvSlots      = 4096,                          // shared recv buffer-ring depth
+    Incremental    = null,                          // per-connection recv rings (6.12+)
+    Udp            = null,                          // no raw UDP sockets
+    Quic           = null,                          // no QUIC transport
+    Tcp = new TcpOptions
+    {
+        Port             = 8080,                    // plaintext
+        ExtraPorts       = [8443],                  // TLS terminates on this second listener
+        ListenBacklog    = 1024,                    // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,               // per-connection write buffer before overflow
+        PoolMax          = 1024,                     // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,  // Grow = realloc one slab; Segmented = chain + SENDMSG
+        ZeroCopySend     = false,                     // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                        // per-connection recv completion queue depth
+    },
 };
 
 var options = new TlsOptions
 {
-    CertificatePath = "/certs/server.crt",   // PEM chain
-    KeyPath         = "/certs/server.key",    // PEM private key
-    Alpn            = ["http/1.1"],           // ordered, most preferred first
+    CertificatePath = "/certs/server.crt",   // PEM chain  (or CertificatePem = "..." for in-memory)
+    KeyPath         = "/certs/server.key",    // PEM key    (or KeyPem = "..." for in-memory)
+    Alpn            = ["http/1.1"],           // protocols served, most preferred first
+    KernelTx        = false,                   // kTLS transmit offload (kernel makes the records)
+    KernelRx        = false,                   // kTLS receive (experimental; requires KernelTx)
 };
 
 reactor.OnStart = r =&gt; TlsService.Start(r, options);</code></pre>
