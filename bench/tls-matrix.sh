@@ -107,8 +107,11 @@ cell() {                     # cell <label> <bin> <port> <proto> <body> [env...]
       PLAYGROUND_REACTORS="$REACTORS" PLAYGROUND_PORT="$port" PLAYGROUND_BODY="$body" "$@" || {
     stop_server; BEST["$label|$body"]=${BEST["$label|$body"]:-0}; return; }
 
+  # A failed pass is reported, not recorded - it must not erase a number a passing pass measured.
+  # For the ktls cells this is routine, not hypothetical: kTLS-RX kills about one first connection
+  # in twelve, and one of them landing on the probe would otherwise zero a measured cell.
   if ! assert_body "$port" "$proto" "$body"; then
-    stop_server; BEST["$label|$body"]=0; return
+    stop_server; BEST["$label|$body"]=${BEST["$label|$body"]:-0}; return
   fi
 
   # One short warm pass the numbers are taken after: JIT, the pool's first slabs, and for TLS the
