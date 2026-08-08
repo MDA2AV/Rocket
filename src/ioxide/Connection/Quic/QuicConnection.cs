@@ -62,6 +62,25 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
     public abstract void SendStream(long streamId, ReadOnlySpan<byte> data, bool fin);
 
     /// <summary>
+    /// False when this connection's unacknowledged send data has reached its retention high-water:
+    /// a producer feeding a large response should pause queueing more <see cref="SendStream"/> bytes
+    /// and resume once acks drain it (the egress pump re-runs on every inbound datagram). This is
+    /// backpressure, not a hard limit - overshooting is still accepted - but a producer that ignores
+    /// it without bound eventually gets the connection closed. Base default is always true (no
+    /// backpressure); a real engine connection reports its retention state.
+    /// </summary>
+    public virtual bool CanQueueSend => true;
+
+    /// <summary>
+    /// Invoked on the reactor thread when send retention drains back below the high-water after
+    /// <see cref="CanQueueSend"/> had gone false - the signal for a paused producer (e.g. an h3
+    /// response pump) to resume queueing. Fires from the ack/timer egress path, which the read loop
+    /// does not see (a downloading peer sends only acks), so it is the only resume trigger for a
+    /// response larger than the retention window.
+    /// </summary>
+    public Action? OnSendCapacityAvailable { get; set; }
+
+    /// <summary>
     /// Open a server-initiated unidirectional stream (H3 control / QPACK); returns its id, or a
     /// negative value if the engine can't (peer allowance exhausted, or no engine). Reactor thread
     /// only.

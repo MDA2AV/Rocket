@@ -59,6 +59,11 @@ public sealed partial class Nghttp3Connection : IDisposable
     {
         _quicConnection = quicConnection;
         _options = options ?? Nghttp3Options.Default;
+
+        // A response larger than the QUIC send-retention window is drained in PumpEgress under
+        // backpressure (it stops at the high-water); this resumes it as acks free retention, since
+        // the run loop only wakes on inbound request data - not on the acks of a download.
+        _quicConnection.OnSendCapacityAvailable = PumpEgress;
     }
 
     /// <summary>Buffered, synchronous: dispatch at end-of-stream with the whole body pre-assembled

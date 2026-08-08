@@ -29,9 +29,22 @@ public unsafe partial class QuicEngineConnection
     private readonly List<long> _outPending = [];
     private long _outRetained;
 
-    // A peer that stops ACKing gets closed rather than buffered without bound (retained =
-    // sent-but-unacked + unsent, across all streams).
-    private const long OutRetainedCap = 4 << 20;
+    // Send-retention high-water (retained = sent-but-unacked + unsent, across all streams). A
+    // cooperative producer checks CanQueueSend and pauses here, so a response of any size streams
+    // through in ~this much memory. Seeded from the engine; the client ctor keeps the default.
+    private long _maxSendRetention = 16 << 20;
+
+    // Hard backstop: a producer that ignores CanQueueSend and keeps pushing gets closed rather than
+    // buffered without bound. Set well above the high-water so cooperative producers never hit it.
+    private long OutRetainedCeiling => _maxSendRetention * 2;
+
+    /// <summary>False once retained send data reaches the high-water: pause queueing more and let
+    /// acks drain it (the egress pump re-runs on every inbound datagram).</summary>
+    public override bool CanQueueSend => !_closed && _outRetained < _maxSendRetention;
+
+    // Set when a producer filled retention to the high-water; FlushEgress fires the resume callback
+    // and clears it once acks bring retention back down.
+    private bool _sendAtCapacity;
 
     /// <summary>Queue bytes on a stream and flush. streamId must come from a delivered item or
     /// <see cref="OpenUniStream"/>. fin closes the send side. Never discards: bytes are retained
@@ -64,9 +77,14 @@ public unsafe partial class QuicEngineConnection
         }
         os.Fin |= fin;
 
-        if (_outRetained > OutRetainedCap)
+        if (_outRetained >= _maxSendRetention)
         {
-            Console.Error.WriteLine("[ioxide.ngtcp2] send retention cap exceeded; closing connection.");
+            _sendAtCapacity = true;   // arms the resume: FlushEgress fires it once acks drain below
+        }
+
+        if (_outRetained > OutRetainedCeiling)
+        {
+            Console.Error.WriteLine("[ioxide.ngtcp2] send retention backstop exceeded (producer ignored backpressure); closing connection.");
             _closed = true;
             _reactor.QuicRemoveConnection(this);
             Destroy();

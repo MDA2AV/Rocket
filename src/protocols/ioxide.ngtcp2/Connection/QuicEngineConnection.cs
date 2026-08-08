@@ -56,12 +56,14 @@ public unsafe partial class QuicEngineConnection : QuicConnection
     public QuicEngineConnection(QuicEngine engine)
     {
         _engine = engine;
+        _maxSendRetention = engine.MaxSendRetentionBytes;
     }
 
     /// <summary>Client-side connection; <see cref="QuicClientEngine.Connect"/> builds these.</summary>
     public QuicEngineConnection(QuicClientEngine clientEngine)
     {
         _clientEngine = clientEngine;
+        // Client request bodies are small; the default high-water is plenty and needs no knob.
     }
 
     /// <summary>Handshake finished; safe to open server-initiated streams and send.</summary>
