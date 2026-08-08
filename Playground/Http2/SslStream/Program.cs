@@ -18,21 +18,34 @@ using Playground.Shared;
 //  over the ring directly, over kTLS, or over SslStream, without knowing which - the transport is
 //  a constructor argument, not a branch inside the protocol.
 //
-//  Compare with Playground/Http2/Tls for the kTLS version. Needs: ioxide, ioxide.nghttp2
+//  Compare with Playground/Http2/Tls for the ioxide.tls version. Needs: ioxide, ioxide.nghttp2
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-(string certPath, string keyPath) = QuicCert.Ensure(
-    Env.StrOrNull("PLAYGROUND_TLS_CERT"),
-    Env.StrOrNull("PLAYGROUND_TLS_KEY"));
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+// Edit these. That is the whole mechanism - there is no config file and nothing else to find.
+// Env.Override exists only so bench/run.sh can drive the sample from outside; delete that line
+// when you copy this out and the literals above it are the entire configuration.
+
+ushort port     = 8443;                        // https://127.0.0.1:8443/
+int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+
+Env.Override(ref port, ref reactors);
+
+// A real PEM pair, or null to generate a self-signed localhost cert on first run.
+string? certOverride = null;
+string? keyOverride  = null;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+(string certPath, string keyPath) = QuicCert.Ensure(certOverride, keyOverride);
 var certificate = X509Certificate2.CreateFromPemFile(certPath, keyPath);
 certificate = X509CertificateLoader.LoadPkcs12(certificate.Export(X509ContentType.Pfx), null);
 
 var config = new ServerConfig
 {
-    ReactorCount = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
+    ReactorCount = reactors,
     Tcp = new TcpOptions
     {
-        Port = Env.Port("PLAYGROUND_PORT", 8443),
+        Port = port,
     },
 };
 

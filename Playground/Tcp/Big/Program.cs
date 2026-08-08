@@ -9,39 +9,47 @@ using Playground.Shared;
 //      dotnet run -c Release --project Playground/Tcp/Big
 //      curl -s http://127.0.0.1:8080/ | cksum          # same checksum every run, ZC or not
 //
-//      PLAYGROUND_ZC=1         IORING_OP_SEND_ZC instead of plain SEND. FlushAsync then
-//                              completes on the F_NOTIF (kernel released the buffer), so the
-//                              slab is never recycled while the kernel still owns it.
-//      PLAYGROUND_SLAB=16384   shrink the write slab below the body to force overflow, then
-//      PLAYGROUND_OVERFLOW=    pick what overflow does: "grow" doubles the slab in place,
-//                              "seg" chains extra segments and sends them as one writev.
-//
 //  The body is a deterministic pattern (byte i = i % 251 - prime, so not 256-aligned): checksum
 //  the output and any one-byte slip between strategies shows up. Needs: ioxide
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-bool zeroCopy = Env.Flag("PLAYGROUND_ZC");
-int slabSize = Env.Int("PLAYGROUND_SLAB", 256 * 1024);
-WriteOverflowStrategy overflow = Env.Str("PLAYGROUND_OVERFLOW", "grow") switch
-{
-    "seg" => WriteOverflowStrategy.Segmented,
-    _     => WriteOverflowStrategy.Grow,
-};
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+// Edit these. That is the whole mechanism - there is no config file and nothing else to find.
+// Env.Override exists only so bench/run.sh can drive the sample from outside; delete that line
+// when you copy this out and the literals above it are the entire configuration.
+
+ushort port      = 8080;                        // http://127.0.0.1:8080/
+int    reactors  = Environment.ProcessorCount;
+int    bodyBytes = 100 * 1024;                  // well past the small-payload regime
+
+Env.Override(ref port, ref reactors, ref bodyBytes);
+
+// IORING_OP_SEND_ZC instead of plain SEND. FlushAsync then completes on the F_NOTIF (the kernel
+// released the buffer), so the slab is never recycled while the kernel still owns it. It only
+// pays off once the body is large enough that pinning beats copying.
+bool zeroCopy = false;
+
+// Drop the slab below bodyBytes (try 16 * 1024) to force the overflow path every request.
+int slabSize = 256 * 1024;
+
+// What overflow does: Grow reallocates the slab in place, Segmented chains extra segments and
+// sends them as one SENDMSG. Same bytes on the wire either way - checksum both and see.
+WriteOverflowStrategy overflow = WriteOverflowStrategy.Grow;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
 
 var config = new ServerConfig
 {
-    ReactorCount = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
+    ReactorCount = reactors,
     Tcp = new TcpOptions
     {
-        Port          = Env.Port("PLAYGROUND_PORT", 8080),
+        Port          = port,
         WriteSlabSize = slabSize,
         WriteOverflow = overflow,
         ZeroCopySend  = zeroCopy,
     },
 };
 
-// 100 KB default - well past the small-payload regime the other samples live in.
-int bodySize = Env.Int("PLAYGROUND_BODY", 100 * 1024);
+int bodySize = bodyBytes;
 byte[] head = Encoding.ASCII.GetBytes(
     $"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {bodySize}\r\n\r\n");
 byte[] response = new byte[head.Length + bodySize];

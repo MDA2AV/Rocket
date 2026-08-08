@@ -26,13 +26,23 @@
   <input type="radio" name="mode-tabs" id="tab-shared">
   <input type="radio" name="mode-tabs" id="tab-inc">
   <input type="radio" name="mode-tabs" id="tab-vs">
+  <input type="radio" name="mode-tabs" id="tab-big">
+  <input type="radio" name="mode-tabs" id="tab-hop">
+  <input type="radio" name="mode-tabs" id="tab-taskrun">
   <input type="radio" name="mode-tabs" id="tab-tls">
   <input type="radio" name="mode-tabs" id="tab-tlsossl">
   <input type="radio" name="mode-tabs" id="tab-tlspipe">
   <input type="radio" name="mode-tabs" id="tab-tlsosslpipe">
+  <input type="radio" name="mode-tabs" id="tab-tlsbcl">
+  <input type="radio" name="mode-tabs" id="tab-qpipe">
+  <input type="radio" name="mode-tabs" id="tab-qraw">
+  <input type="radio" name="mode-tabs" id="tab-quicalpn">
   <input type="radio" name="mode-tabs" id="tab-h2">
   <input type="radio" name="mode-tabs" id="tab-h2cs">
   <input type="radio" name="mode-tabs" id="tab-h2tls">
+  <input type="radio" name="mode-tabs" id="tab-h2bcl">
+  <input type="radio" name="mode-tabs" id="tab-h3">
+  <input type="radio" name="mode-tabs" id="tab-h3buf">
   <input type="radio" name="mode-tabs" id="tab-pxmatrix">
   <input type="radio" name="mode-tabs" id="tab-pxh1toh1">
   <input type="radio" name="mode-tabs" id="tab-pxh1toh2">
@@ -44,14 +54,14 @@
   <input type="radio" name="mode-tabs" id="tab-pxh3toh2">
   <input type="radio" name="mode-tabs" id="tab-pxh3toh3">
   <input type="radio" name="mode-tabs" id="tab-http">
-  <input type="radio" name="mode-tabs" id="tab-qpipe">
-  <input type="radio" name="mode-tabs" id="tab-qraw">
-  <input type="radio" name="mode-tabs" id="tab-h3">
   <input type="radio" name="mode-tabs" id="tab-pg">
   <input type="radio" name="mode-tabs" id="tab-redis">
   <input type="radio" name="mode-tabs" id="tab-files">
+  <input type="radio" name="mode-tabs" id="tab-https">
   <nav class="ex-menu" aria-label="Examples">
     <label class="ex-home" for="tab-none">overview</label>
+
+    <div class="ex-group">transport</div>
 
     <details class="ex-sect">
       <summary>tcp</summary>
@@ -59,17 +69,41 @@
       <label for="tab-shared">raw &middot; shared ring</label>
       <label for="tab-inc">raw &middot; incremental</label>
       <label for="tab-vs">shared vs incremental</label>
+      <label for="tab-big">large responses</label>
+      <label for="tab-hop">leaving the reactor</label>
+      <label for="tab-taskrun">ordinary async</label>
+    </details>
+
+    <details class="ex-sect">
+      <summary>tls</summary>
       <label for="tab-tls">ktls &middot; raw</label>
       <label for="tab-tlsossl">openssl &middot; raw</label>
       <label for="tab-tlspipe">ktls &middot; pipes</label>
       <label for="tab-tlsosslpipe">openssl &middot; pipes</label>
+      <label for="tab-tlsbcl">sslstream</label>
     </details>
+
+    <details class="ex-sect">
+      <summary>quic</summary>
+      <label for="tab-qpipe">pipes</label>
+      <label for="tab-qraw">raw</label>
+      <label for="tab-quicalpn">two protocols by alpn</label>
+    </details>
+
+    <div class="ex-group">protocols</div>
 
     <details class="ex-sect">
       <summary>http/2</summary>
       <label for="tab-h2">h2c &middot; nghttp2</label>
       <label for="tab-h2cs">h2c &middot; pure c#</label>
       <label for="tab-h2tls">h2 &middot; tls &amp; alpn</label>
+      <label for="tab-h2bcl">h2 &middot; over sslstream</label>
+    </details>
+
+    <details class="ex-sect">
+      <summary>http/3</summary>
+      <label for="tab-h3">nghttp3 &middot; streamed</label>
+      <label for="tab-h3buf">nghttp3 &middot; buffered</label>
     </details>
 
     <details class="ex-sect">
@@ -88,21 +122,11 @@
     </details>
 
     <details class="ex-sect">
-      <summary>quic</summary>
-      <label for="tab-qpipe">pipes</label>
-      <label for="tab-qraw">raw</label>
-    </details>
-
-    <details class="ex-sect">
-      <summary>http/3</summary>
-      <label for="tab-h3">nghttp3</label>
-    </details>
-
-    <details class="ex-sect">
       <summary>clients</summary>
       <label for="tab-pg">postgres</label>
       <label for="tab-redis">redis</label>
       <label for="tab-files">files</label>
+      <label for="tab-https">https origins</label>
     </details>
   </nav>
 
@@ -144,6 +168,907 @@
     </p>
 
     <p class="ex-hint">Pick an example to see the code</p>
+  </div>
+  <div class="pane pane-tlsbcl">
+    <div class="pane-head">
+      <h3>TLS &middot; SslStream</h3>
+      <span class="pane-pkg">ioxide</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+//   curl -k https://127.0.0.1:8443/
+
+using System.Net.Security;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
+using System.Text;
+using ioxide;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort port      = 8443;                        // https://127.0.0.1:8443/
+int    reactors  = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+int    bodyBytes = 8 * 1024;                    // same body as Tls.Ktls, so the two compare directly
+
+
+const string certPath = &quot;cert.pem&quot;;   // any PEM pair
+const string keyPath  = &quot;key.pem&quot;;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+var certificate = X509Certificate2.CreateFromPemFile(certPath, keyPath);
+
+var config = new ServerConfig
+{
+    ReactorCount = reactors,
+    Tcp = new TcpOptions
+    {
+        Port = port,
+    },
+};
+
+int bodySize = bodyBytes;
+byte[] body = new byte[bodySize];
+ReadOnlySpan&lt;byte&gt; fill = &quot;ioxide-sslstream-payload &quot;u8;
+for (int i = 0; i &lt; bodySize; i++)
+{
+    body[i] = fill[i % fill.Length];
+}
+byte[] response =
+[
+    .. Encoding.ASCII.GetBytes($&quot;HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {bodySize}\r\n\r\n&quot;),
+    .. body,
+];
+
+var threads = new Thread[config.ReactorCount];
+
+for (int i = 0; i &lt; threads.Length; i++)
+{
+    var reactor = new Reactor(i, config);
+
+    reactor.TcpHandle = async (r, conn) =&gt;
+    {
+        SslStream? ssl = null;
+        try
+        {
+            // The stream adapter reads from the ring and writes into the slab; SslStream never
+            // knows it isn&#x27;t a NetworkStream.
+            ssl = new SslStream(new TcpConnectionStream(conn), leaveInnerStreamOpen: false);
+            await ssl.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
+            {
+                ServerCertificate = certificate,
+                ApplicationProtocols = [SslApplicationProtocol.Http11],
+                EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+            });
+
+            var request = new byte[8192];
+            while (true)
+            {
+                int n = await ssl.ReadAsync(request);
+                if (n == 0) return;                    // peer closed
+
+                await ssl.WriteAsync(response);        // encrypted in userspace
+            }
+        }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($&quot;[tls-sslstream] connection failed: {e.Message}&quot;);
+        }
+        finally
+        {
+            ssl?.Dispose();
+            conn.DecRef();
+        }
+    };
+
+    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
+    threads[i].Start();
+}
+
+Console.WriteLine($&quot;[tls-sslstream] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
+                + $&quot;{bodySize}-byte body, cert {certPath}&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}</code></pre>
+    <p class="ex-foot">The third TLS backend, and the portable one: the BCL's <code>SslStream</code> over <code>TcpConnectionStream</code>. Fully managed, full-featured - client certificates, resumption, TLS 1.2 - and the slowest of the three, because every byte is encrypted in userspace <em>and</em> copied through a <code>Stream</code>. Reach for it when you need something OpenSSL itself cannot give you; otherwise <label for="tab-tlsossl" class="ex-jump">openssl &middot; raw</label> gets you the same features on the ring.</p>
+  </div>
+  <div class="pane pane-big">
+    <div class="pane-head">
+      <h3>TCP &middot; large responses</h3>
+      <span class="pane-pkg">ioxide</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+//   curl -s http://127.0.0.1:8080/ | wc -c
+
+using System.Text;
+using ioxide;
+using ioxide.utils;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort port      = 8080;                        // http://127.0.0.1:8080/
+int    reactors  = Environment.ProcessorCount;
+int    bodyBytes = 100 * 1024;                  // well past the small-payload regime
+
+
+// IORING_OP_SEND_ZC instead of plain SEND. FlushAsync then completes on the F_NOTIF (the kernel
+// released the buffer), so the slab is never recycled while the kernel still owns it. It only
+// pays off once the body is large enough that pinning beats copying.
+bool zeroCopy = false;
+
+// Drop the slab below bodyBytes (try 16 * 1024) to force the overflow path every request.
+int slabSize = 256 * 1024;
+
+// What overflow does: Grow reallocates the slab in place, Segmented chains extra segments and
+// sends them as one SENDMSG. Same bytes on the wire either way - checksum both and see.
+WriteOverflowStrategy overflow = WriteOverflowStrategy.Grow;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+var config = new ServerConfig
+{
+    ReactorCount = reactors,
+    Tcp = new TcpOptions
+    {
+        Port          = port,
+        WriteSlabSize = slabSize,
+        WriteOverflow = overflow,
+        ZeroCopySend  = zeroCopy,
+    },
+};
+
+int bodySize = bodyBytes;
+byte[] head = Encoding.ASCII.GetBytes(
+    $&quot;HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {bodySize}\r\n\r\n&quot;);
+byte[] response = new byte[head.Length + bodySize];
+head.CopyTo(response, 0);
+for (int i = 0; i &lt; bodySize; i++)
+{
+    response[head.Length + i] = (byte)(i % 251);
+}
+
+var threads = new Thread[config.ReactorCount];
+
+for (int i = 0; i &lt; threads.Length; i++)
+{
+    var reactor = new Reactor(i, config);
+
+    reactor.TcpHandle = async (r, conn) =&gt;
+    {
+        try
+        {
+            while (true)
+            {
+                RecvSnapshot snapshot = await conn.ReadAsync();
+
+                while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                {
+                    if (item.HasBuffer)
+                    {
+                        conn.ReturnBuffer(in item);
+                    }
+                }
+
+                // With ZC on, this await is the buffer-release notification, not just the
+                // submit - which is exactly why the next Write may safely reuse the slab.
+                conn.Write(response);
+                await conn.FlushAsync();
+
+                if (snapshot.IsClosed) return;
+                conn.ResetRead();
+            }
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    };
+
+    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
+    threads[i].Start();
+}
+
+Console.WriteLine($&quot;[big] {config.ReactorCount} reactors on :{config.Tcp!.Port}, {bodySize}-byte body, &quot;
+                + $&quot;slab={slabSize}, overflow={overflow}, zc={zeroCopy}&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}</code></pre>
+    <p class="ex-foot">The write path under a payload that does not fit the slab, and the knobs that shape it: <code>WriteSlabSize</code>, <code>WriteOverflow</code> (<code>Grow</code> reallocates, <code>Segmented</code> chains slabs into one SENDMSG) and <code>ZeroCopySend</code>, which only pays off once the response is large enough for the pinning to be worth it.</p>
+  </div>
+  <div class="pane pane-hop">
+    <div class="pane-head">
+      <h3>TCP &middot; leaving the reactor</h3>
+      <span class="pane-pkg">ioxide</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+//   curl http://127.0.0.1:8080/
+
+using ioxide;
+using ioxide.utils;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort port     = 8080;                        // http://127.0.0.1:8080/
+int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+var config = new ServerConfig
+{
+    ReactorCount = reactors,
+    Tcp = new TcpOptions
+    {
+        Port = port,
+    },
+};
+
+byte[] response = &quot;HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok&quot;u8.ToArray();
+
+var threads = new Thread[config.ReactorCount];
+
+for (int i = 0; i &lt; threads.Length; i++)
+{
+    var reactor = new Reactor(i, config);
+
+    reactor.TcpHandle = async (r, conn) =&gt;
+    {
+        try
+        {
+            while (true)
+            {
+                RecvSnapshot snapshot = await conn.ReadAsync();
+
+                // Off to the thread pool and back. Everything after this line runs on the reactor
+                // again, because the per-reactor SynchronizationContext posts it home - which is
+                // what makes it safe to touch the connection below.
+                await Task.Yield();
+
+                while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                {
+                    if (item.HasBuffer) conn.ReturnBuffer(in item);
+                }
+
+                conn.Write(response);
+                await conn.FlushAsync();
+
+                if (snapshot.IsClosed) return;
+                conn.ResetRead();
+            }
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    };
+
+    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
+    threads[i].Start();
+}
+
+Console.WriteLine($&quot;[hop] {config.ReactorCount} reactors on :{config.Tcp.Port} (every request bounces off-reactor)&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}</code></pre>
+    <p class="ex-foot">The same server as <label for="tab-shared" class="ex-jump">raw &middot; shared ring</label>, except every request deliberately bounces off the reactor thread and back. It is here as the counter-example: this is what ioxide spends its design avoiding, and having it runnable makes the cost measurable rather than asserted.</p>
+  </div>
+  <div class="pane pane-taskrun">
+    <div class="pane-head">
+      <h3>TCP &middot; ordinary async</h3>
+      <span class="pane-pkg">ioxide</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+//   curl http://127.0.0.1:8080/
+
+using System.Text;
+using System.Text.Json;
+using ioxide;
+using ioxide.utils;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort port     = 8080;                        // http://127.0.0.1:8080/
+int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+var config = new ServerConfig
+{
+    ReactorCount = reactors,
+    Tcp = new TcpOptions
+    {
+        Port = port,
+    },
+};
+
+int offReactorSeen = 0;
+
+var threads = new Thread[config.ReactorCount];
+
+for (int i = 0; i &lt; threads.Length; i++)
+{
+    var reactor = new Reactor(i, config);
+
+    reactor.TcpHandle = async (r, conn) =&gt;
+    {
+        try
+        {
+            while (true)
+            {
+                RecvSnapshot snapshot = await conn.ReadAsync();
+
+                while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                {
+                    if (item.HasBuffer) conn.ReturnBuffer(in item);
+                }
+
+                // Ordinary thread-pool work, awaited from a reactor handler.
+                string json = await Task.Run(static () =&gt; JsonSerializer.Serialize(&quot;hello world&quot;));
+
+                // We should be back on the reactor here. If not, say so once.
+                if (!r.OnReactorThread &amp;&amp; Interlocked.Exchange(ref offReactorSeen, 1) == 0)
+                {
+                    Console.WriteLine(&quot;[taskrun] continuation resumed OFF the reactor (no sync context)&quot;);
+                }
+
+                conn.Write(&quot;HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 13\r\n\r\n&quot;u8);
+                conn.Write(Encoding.UTF8.GetBytes(json));
+                await conn.FlushAsync();
+
+                if (snapshot.IsClosed) return;
+                conn.ResetRead();
+            }
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    };
+
+    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
+    threads[i].Start();
+}
+
+Console.WriteLine($&quot;[taskrun] {config.ReactorCount} reactors on :{config.Tcp.Port} (each request awaits a Task.Run)&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}</code></pre>
+    <p class="ex-foot">Proof that normal .NET async works inside a handler - <code>Task.Run</code>, <code>Task.Delay</code>, the thread pool - and that you come back to your reactor afterwards. The per-reactor <code>SynchronizationContext</code> is what makes that true, so connection and pool state stay single-threaded without a lock even when a handler wanders.</p>
+  </div>
+  <div class="pane pane-h2bcl">
+    <div class="pane-head">
+      <h3>HTTP/2 &middot; over SslStream</h3>
+      <span class="pane-pkg">ioxide + ioxide.nghttp2</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+// dotnet add package ioxide.nghttp2
+//   curl -k --http2 https://127.0.0.1:8443/
+
+using System.IO.Pipelines;
+using System.Net.Security;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
+using ioxide;
+using ioxide.nghttp2;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort port     = 8443;                        // https://127.0.0.1:8443/
+int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+
+
+const string certPath = &quot;cert.pem&quot;;   // any PEM pair
+const string keyPath  = &quot;key.pem&quot;;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+var certificate = X509Certificate2.CreateFromPemFile(certPath, keyPath);
+certificate = X509CertificateLoader.LoadPkcs12(certificate.Export(X509ContentType.Pfx), null);
+
+var config = new ServerConfig
+{
+    ReactorCount = reactors,
+    Tcp = new TcpOptions
+    {
+        Port = port,
+    },
+};
+
+byte[] body = &quot;ok&quot;u8.ToArray();
+var threads = new Thread[config.ReactorCount];
+
+for (int i = 0; i &lt; threads.Length; i++)
+{
+    var reactor = new Reactor(i, config);
+
+    reactor.TcpHandle = async (r, conn) =&gt;
+    {
+        SslStream? ssl = null;
+        try
+        {
+            ssl = new SslStream(new TcpConnectionStream(conn), leaveInnerStreamOpen: false);
+            await ssl.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
+            {
+                ServerCertificate = certificate,
+
+                // Same ordered preference as the kTLS sample: h2 wins when the client offers both.
+                ApplicationProtocols = [SslApplicationProtocol.Http2, SslApplicationProtocol.Http11],
+                EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+            });
+
+            if (ssl.NegotiatedApplicationProtocol != SslApplicationProtocol.Http2)
+            {
+                return;   // this sample only serves h2; see Playground/Http2/Tls for the fallback
+            }
+
+            await new Nghttp2Connection(new StreamDuplexPipe(ssl)).RunBufferedAsync(
+                _ =&gt; new Nghttp2Response { Status = 200, Body = body });
+        }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($&quot;[http2-sslstream] connection failed: {e.Message}&quot;);
+        }
+        finally
+        {
+            ssl?.Dispose();
+            conn.DecRef();
+        }
+    };
+
+    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
+    threads[i].Start();
+}
+
+Console.WriteLine($&quot;[http2-sslstream] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
+                + $&quot;h2 over SslStream (userspace both ways), cert {certPath}&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}
+
+/// &lt;summary&gt;
+/// Any Stream as an IDuplexPipe. The BCL already has the two halves - this only pairs them, which
+/// is the whole adapter needed to run ioxide&#x27;s HTTP/2 over something that is not a ring connection.
+/// &lt;/summary&gt;
+internal sealed class StreamDuplexPipe(Stream stream) : IDuplexPipe
+{
+    public PipeReader Input { get; } = PipeReader.Create(stream, new StreamPipeReaderOptions(leaveOpen: true));
+    public PipeWriter Output { get; } = PipeWriter.Create(stream, new StreamPipeWriterOptions(leaveOpen: true));
+}</code></pre>
+    <p class="ex-foot">HTTP/2 over the BCL's <code>SslStream</code>, and the point is the ten-line <code>Stream</code>-to-<code>IDuplexPipe</code> adapter at the bottom. <code>Nghttp2Connection</code> takes a pipe, so the same HTTP/2 code runs over the ring directly, over kTLS, or over <code>SslStream</code> - the transport is a constructor argument, not a branch inside the protocol.</p>
+  </div>
+  <div class="pane pane-h3buf">
+    <div class="pane-head">
+      <h3>HTTP/3 &middot; buffered dispatch</h3>
+      <span class="pane-pkg">ioxide + ioxide.ngtcp2 + ioxide.nghttp3</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+// dotnet add package ioxide.ngtcp2
+// dotnet add package ioxide.nghttp3
+//   curl --http3-only -k https://127.0.0.1:8443/
+
+using System.Runtime.InteropServices;
+using ioxide;
+using ioxide.nghttp3;
+using ioxide.ngtcp2;
+using ioxide.utils;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort quicPort = 8443;                        // https://127.0.0.1:8443/ over UDP - h3 lives here
+ushort tcpPort  = 8080;                        // the TCP listener, so the process serves both
+int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+
+
+// UDP receive slots per reactor: how many datagrams the ring can have outstanding at once.
+int udpRecvSlots = 16;
+
+// QPACK dynamic table. 0 keeps every header literal, which costs bytes but never blocks a
+// stream on a table update; raise it and set QpackBlockedStreams to trade one for the other.
+long qpackCapacity = 0;
+
+const string certPath = &quot;cert.pem&quot;;   // any PEM pair
+const string keyPath  = &quot;key.pem&quot;;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+
+using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: [&quot;h3&quot;]);
+
+var config = new ServerConfig
+{
+    ReactorCount = reactors,
+    Tcp = new TcpOptions { Port = tcpPort },
+    Udp = new UdpOptions { RecvSlots = udpRecvSlots },
+    Quic = new QuicOptions
+    {
+        Port = quicPort,
+        LocalCidLength = 8,
+        ConnectionFactory = engine.CreateFactory(),
+    },
+};
+
+var h3Options = new Nghttp3Options
+{
+    QpackDynamicTableCapacity = qpackCapacity,
+    QpackBlockedStreams = qpackCapacity &gt; 0 ? 100 : 0,
+};
+
+// Built once and reused for every request - the h3 layer copies it into nghttp3 at submit and never
+// retains it, so this costs zero allocations per request.
+var response = new Nghttp3Response { Body = &quot;Hello, World!&quot;u8.ToArray() };
+response.Headers.Add(&quot;content-type&quot;u8.ToArray(), &quot;text/plain&quot;u8.ToArray());
+response.Headers.Add(&quot;server&quot;u8.ToArray(), &quot;ioxide&quot;u8.ToArray());
+
+byte[] tcpResponse = &quot;HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok&quot;u8.ToArray();
+
+List&lt;(Reactor Reactor, Nghttp3Connection Connection)&gt; live = [];
+
+var threads = new Thread[config.ReactorCount];
+
+for (int i = 0; i &lt; threads.Length; i++)
+{
+    var reactor = new Reactor(i, config);
+
+    reactor.QuicHandle = (r, quicConn) =&gt;
+    {
+        var h3 = new Nghttp3Connection(quicConn, h3Options);
+        lock (live)
+        {
+            live.Add((r, h3));
+        }
+
+        // RunBufferedAsync, not RunStreamingAsync - that one call is the whole difference.
+        return h3.RunBufferedAsync(request =&gt;
+        {
+            // Dispatch waited for end-of-stream, so the body is ALREADY here: request.Body is
+            // complete and request.Body.Length is just a property read. No BodyReader, no pacing.
+            // This overload is synchronous, but the awaiting one exists too - a PgPool query or a
+            // Redis command resumes inline on this reactor, so you can await it right here.
+            _ = request.Body.Length;
+
+            // One response object, reused for every request: zero allocations on this path. To
+            // route, compare request.Path.Span - it is post-QPACK bytes, so SequenceEqual against a
+            // u8 literal beats decoding it to a string.
+            return response;
+        });
+    };
+
+    reactor.TcpHandle = async (r, conn) =&gt;
+    {
+        try
+        {
+            while (true)
+            {
+                RecvSnapshot snapshot = await conn.ReadAsync();
+                while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                {
+                    if (item.HasBuffer) conn.ReturnBuffer(in item);
+                }
+
+                conn.Write(tcpResponse);
+                await conn.FlushAsync();
+
+                if (snapshot.IsClosed) return;
+                conn.ResetRead();
+            }
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    };
+
+    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
+    threads[i].Start();
+}
+
+using var drain = PosixSignalRegistration.Create(PosixSignal.SIGTERM, context =&gt;
+{
+    context.Cancel = true;
+    Console.WriteLine(&quot;[nghttp3-buffered] SIGTERM: draining connections (GOAWAY)...&quot;);
+
+    lock (live)
+    {
+        foreach ((Reactor r, Nghttp3Connection h3) in live)
+        {
+            r.ScheduleOnReactor(static state =&gt; ((Nghttp3Connection)state!).Shutdown(), h3);
+        }
+        live.Clear();
+    }
+
+    Thread.Sleep(2000);
+    Console.WriteLine(&quot;[nghttp3-buffered] drain complete, exiting&quot;);
+    Environment.Exit(0);
+});
+
+Console.WriteLine($&quot;[nghttp3-buffered] {config.ReactorCount} reactors - tcp :{config.Tcp.Port}, &quot;
+                + $&quot;udp :{quicPort} (ngtcp2 {QuicEngine.NativeVersion()})&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}</code></pre>
+    <p class="ex-foot">The same server as <label for="tab-h3" class="ex-jump">nghttp3</label> with the other dispatch mode - one method call is the whole difference. <b>Buffered</b> waits for end-of-stream, so the body is already in <code>request.Body</code> when your handler runs; the trade is that memory holds the whole body, which suits normal requests and not hostile uploads. <b>Streamed</b> runs you while the body is still arriving and credits the peer's flow-control window as you read, so memory is bound by one window instead.</p>
+  </div>
+  <div class="pane pane-quicalpn">
+    <div class="pane-head">
+      <h3>QUIC &middot; two protocols by ALPN</h3>
+      <span class="pane-pkg">ioxide + ioxide.ngtcp2 + ioxide.nghttp3</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+// dotnet add package ioxide.ngtcp2
+// dotnet add package ioxide.nghttp3
+//   curl --http3-only -k https://127.0.0.1:8443/
+
+using System.Buffers;
+using System.Text;
+using ioxide;
+using ioxide.nghttp3;
+using ioxide.ngtcp2;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort quicPort = 8443;                        // https://127.0.0.1:8443/ - UDP, not TCP
+int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+
+
+// UDP receive slots per reactor: how many datagrams the ring can have outstanding at once.
+int udpRecvSlots = 16;
+
+const string certPath = &quot;cert.pem&quot;;   // any PEM pair
+const string keyPath  = &quot;key.pem&quot;;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+
+// Permissive ALPN (no allowlist): h3 clients negotiate &quot;h3&quot;; everything else still handshakes
+// and falls through to the echo branch.
+using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+
+var config = new ServerConfig
+{
+    ReactorCount = reactors,
+    Tcp = null,   // QUIC-only: no TCP listener is bound
+    Udp = new UdpOptions { RecvSlots = udpRecvSlots },
+    Quic = new QuicOptions
+    {
+        Port = quicPort,
+        LocalCidLength = 8,
+        ConnectionFactory = engine.CreateFactory(),
+    },
+};
+
+var threads = new Thread[config.ReactorCount];
+
+for (int i = 0; i &lt; threads.Length; i++)
+{
+    var reactor = new Reactor(i, config);
+
+    reactor.QuicHandle = async (r, conn) =&gt;
+    {
+        // Peek only - the items stay queued for whichever branch takes over.
+        await conn.ReadAsync();
+
+        if (conn.NegotiatedProtocol == &quot;h3&quot;)
+        {
+            // Owns the handler ref (DecRef on exit). Routes by byte compare - no per-request
+            // strings on the hot path.
+            await new Nghttp3Connection(conn).RunBufferedAsync(
+                static request =&gt; request.Path.Span.SequenceEqual(&quot;/plaintext&quot;u8)
+                    ? Nghttp3Response.Text(&quot;Hello, World!&quot;)
+                    : Nghttp3Response.Text(
+                        $&quot;hello {Encoding.ASCII.GetString(request.Path.Span)} over HTTP/3 via io_uring\n&quot;));
+            return;
+        }
+
+        await PipeEcho(conn);
+    };
+
+    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
+    threads[i].Start();
+}
+
+Console.WriteLine($&quot;[quic-alpn] {config.ReactorCount} reactors, quic-only on udp :{config.Quic!.Port} &quot;
+                + $&quot;(h3 -&gt; HTTP/3, other ALPN -&gt; stream echo)&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}
+
+// Raw stream echo over the dual pipe: auto-binds to the client&#x27;s first stream, echoes until the
+// peer&#x27;s fin, then Complete() half-closes with our own fin. A connection closed before the
+// handshake falls through with a completed reader and exits clean.
+static async Task PipeEcho(QuicConnection conn)
+{
+    try
+    {
+        var pipe = new QuicConnectionDualPipe(conn);
+        while (true)
+        {
+            var result = await pipe.Input.ReadAsync();
+            foreach (ReadOnlyMemory&lt;byte&gt; segment in result.Buffer)
+            {
+                pipe.Output.Write(segment.Span);
+            }
+            await pipe.Output.FlushAsync();
+            pipe.Input.AdvanceTo(result.Buffer.End);
+
+            if (result.IsCompleted) break;
+        }
+        pipe.Output.Complete();
+        pipe.Input.Complete();
+    }
+    finally
+    {
+        conn.DecRef();
+    }
+}</code></pre>
+    <p class="ex-foot">One QUIC listener serving two protocols, chosen during the handshake: connections that negotiate <code>h3</code> get the HTTP/3 loop, anything else gets raw stream echo over the dual pipe. QUIC-only - <code>Tcp = null</code>, so the process opens no TCP listener at all.</p>
+  </div>
+  <div class="pane pane-https">
+    <div class="pane-head">
+      <h3>Client &middot; https origins</h3>
+      <span class="pane-pkg">ioxide + ioxide.httpclient</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+// dotnet add package ioxide.httpclient
+//   curl http://127.0.0.1:8080/get
+
+using System.Text;
+using ioxide;
+using ioxide.httpclient;
+using ioxide.utils;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort port     = 8080;                        // http://127.0.0.1:8080/get - cleartext IN
+int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+
+
+// The https origin this calls OUT to. Point it somewhere real: &quot;93.184.216.34&quot; / &quot;example.com&quot;
+// / 443. The IP must be a literal - resolving a name would block the reactor - and the NAME is
+// what goes out as SNI and what the certificate has to match.
+string originIp   = &quot;127.0.0.1&quot;;
+string originName = &quot;localhost&quot;;
+ushort originPort = 443;
+
+// Trust a private CA instead of the system store: &quot;/path/ca.pem&quot;.
+string? caFile = null;
+
+// Skip certificate verification entirely. Read the warning at the call site before setting it.
+bool insecure = false;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+var config = new ServerConfig
+{
+    ReactorCount = reactors,
+    Tcp = new TcpOptions
+    {
+        Port = port,
+    },
+};
+
+var threads = new Thread[config.ReactorCount];
+
+for (int i = 0; i &lt; threads.Length; i++)
+{
+    var reactor = new Reactor(i, config);
+
+    reactor.OnStart = r =&gt;
+    {
+        // One context per reactor, shared by that reactor&#x27;s pool. Verification is on by default;
+        // turning it off leaves the connection encrypted but UNAUTHENTICATED, so anything in the
+        // path can present its own certificate and read or rewrite the whole exchange. A private
+        // CA belongs in CaFile, not here.
+        TlsClientContext tls = TlsClientContext.Create(new TlsClientOptions
+        {
+            ServerName        = originName,
+            AlpnProtocols     = [&quot;http/1.1&quot;],
+            CaFile            = caFile,
+            VerifyCertificate = !insecure,
+        });
+
+        HttpClientPool.Start(r, new HttpClientOptions
+        {
+            Host     = originIp,
+            Port     = originPort,
+            PoolSize = 2,
+            Tls      = tls,
+        });
+    };
+
+    reactor.TcpHandle = async (r, conn) =&gt;
+    {
+        try
+        {
+            HttpClientPool upstream = r.GetService&lt;HttpClientPool&gt;()!;
+
+            while (true)
+            {
+                RecvSnapshot snapshot = await conn.ReadAsync();
+
+                string path = &quot;/&quot;;
+                while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                {
+                    if (item.HasBuffer)
+                    {
+                        if (TryReadTarget(item.AsSpan(), out ReadOnlySpan&lt;byte&gt; target))
+                        {
+                            path = Encoding.ASCII.GetString(target);
+                        }
+                        conn.ReturnBuffer(in item);
+                    }
+                }
+
+                try
+                {
+                    // Encrypted on the way out, decrypted on the way back, and neither shows up
+                    // here: the pool hands back the same HttpClientResponse a cleartext origin
+                    // would have produced.
+                    using HttpClientResponse response = await upstream.GetAsync(path);
+
+                    conn.Write(Encoding.ASCII.GetBytes(
+                        $&quot;HTTP/1.1 200 OK\r\nContent-Length: {response.Body.Length}\r\n\r\n&quot;));
+                    conn.Write(response.Body.Span);
+                }
+                catch (Exception e)
+                {
+                    // A refused certificate arrives here like any other upstream failure - the
+                    // handshake is part of opening the connection, so the pool reports it the same
+                    // way it reports a dead origin.
+                    byte[] message = Encoding.ASCII.GetBytes($&quot;upstream: {e.Message}&quot;);
+                    conn.Write(Encoding.ASCII.GetBytes(
+                        $&quot;HTTP/1.1 502 Bad Gateway\r\nContent-Length: {message.Length}\r\n\r\n&quot;));
+                    conn.Write(message);
+                }
+
+                await conn.FlushAsync();
+
+                if (snapshot.IsClosed) return;
+                conn.ResetRead();
+            }
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    };
+
+    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
+    threads[i].Start();
+}
+
+Console.WriteLine($&quot;[tls-httpsclient] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
+                + $&quot;origin https://{originName} ({originIp}:{originPort}), &quot;
+                + $&quot;verify={(insecure ? &quot;OFF&quot; : caFile ?? &quot;system store&quot;)}&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}
+
+// &quot;GET /path?query HTTP/1.1&quot; -&gt; &quot;/path&quot;
+static bool TryReadTarget(ReadOnlySpan&lt;byte&gt; request, out ReadOnlySpan&lt;byte&gt; target)
+{
+    target = default;
+
+    int firstSpace = request.IndexOf((byte)&#x27; &#x27;);
+    if (firstSpace &lt; 0) return false;
+
+    ReadOnlySpan&lt;byte&gt; afterMethod = request[(firstSpace + 1)..];
+    int secondSpace = afterMethod.IndexOf((byte)&#x27; &#x27;);
+    if (secondSpace &lt; 0) return false;
+
+    target = afterMethod[..secondSpace];
+
+    int query = target.IndexOf((byte)&#x27;?&#x27;);
+    if (query &gt;= 0) target = target[..query];
+
+    return true;
+}</code></pre>
+    <p class="ex-foot">TLS in the other direction: not terminating it for inbound connections but speaking it outbound, so a handler can reach an <code>https://</code> origin on the same ring that accepted the request. One <code>TlsClientContext</code> per reactor, shared by that reactor's pool. Verification is on by default - turning it off leaves the hop encrypted but <em>unauthenticated</em>, and a private CA belongs in <code>CaFile</code> instead.</p>
   </div>
   <div class="pane pane-pipe">
     <div class="pane-head">
@@ -441,7 +1366,7 @@ foreach (Thread t in threads) t.Join();</code></pre>
       <h3>kTLS &middot; raw ring</h3>
       <span class="pane-pkg">ioxide</span>
     </div>
-<pre><code class="language-csharp">// dotnet add package ioxide      -- TLS ships in the core package
+<pre><code class="language-csharp">// dotnet add package ioxide
 //   sudo modprobe tls        # kTLS needs the Linux &#x27;tls&#x27; module + OpenSSL 3
 //   curl -k https://127.0.0.1:8443/
 
@@ -456,6 +1381,7 @@ using ioxide.utils;
 ushort port      = 8443;                        // https://127.0.0.1:8443/
 int    reactors  = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
 int    bodyBytes = 8 * 1024;                    // TLS cost is per-byte, so a 2-byte &quot;ok&quot; would hide it
+
 
 const string certPath = &quot;cert.pem&quot;;   // any PEM pair
 const string keyPath  = &quot;key.pem&quot;;
@@ -609,7 +1535,7 @@ static bool Answer(TcpConnection conn, List&lt;byte&gt; carry, ReadOnlyMemory&lt
       <h3>kTLS &middot; pipes</h3>
       <span class="pane-pkg">ioxide</span>
     </div>
-<pre><code class="language-csharp">// dotnet add package ioxide      -- TLS ships in the core package
+<pre><code class="language-csharp">// dotnet add package ioxide
 //   sudo modprobe tls
 //   curl -k https://127.0.0.1:8443/
 
@@ -624,6 +1550,7 @@ using ioxide.tls;
 ushort port      = 8443;                        // https://127.0.0.1:8443/
 int    reactors  = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
 int    bodyBytes = 8 * 1024;                    // TLS cost is per-byte, so a 2-byte &quot;ok&quot; would hide it
+
 
 const string certPath = &quot;cert.pem&quot;;   // any PEM pair
 const string keyPath  = &quot;key.pem&quot;;
@@ -745,7 +1672,7 @@ foreach (Thread thread in threads)
       <h3>OpenSSL &middot; raw ring</h3>
       <span class="pane-pkg">ioxide</span>
     </div>
-<pre><code class="language-csharp">// dotnet add package ioxide      -- TLS ships in the core package
+<pre><code class="language-csharp">// dotnet add package ioxide
 //   curl -k https://127.0.0.1:8443/        # no modprobe needed
 
 using System.Text;
@@ -759,6 +1686,7 @@ using ioxide.utils;
 ushort port      = 8443;                        // https://127.0.0.1:8443/
 int    reactors  = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
 int    bodyBytes = 8 * 1024;                    // TLS cost is per-byte, so a 2-byte &quot;ok&quot; would hide it
+
 
 const string certPath = &quot;cert.pem&quot;;   // any PEM pair
 const string keyPath  = &quot;key.pem&quot;;
@@ -910,7 +1838,7 @@ static bool Answer(TcpConnection conn, TlsSession tls, List&lt;byte&gt; carry, R
       <h3>OpenSSL &middot; pipes</h3>
       <span class="pane-pkg">ioxide</span>
     </div>
-<pre><code class="language-csharp">// dotnet add package ioxide      -- TLS ships in the core package
+<pre><code class="language-csharp">// dotnet add package ioxide
 //   curl -k https://127.0.0.1:8443/        # no modprobe needed
 
 using System.Buffers;
@@ -924,6 +1852,7 @@ using ioxide.tls;
 ushort port      = 8443;                        // https://127.0.0.1:8443/
 int    reactors  = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
 int    bodyBytes = 8 * 1024;                    // TLS cost is per-byte, so a 2-byte &quot;ok&quot; would hide it
+
 
 const string certPath = &quot;cert.pem&quot;;   // any PEM pair
 const string keyPath  = &quot;key.pem&quot;;
@@ -1171,41 +2100,74 @@ foreach (Thread t in threads) t.Join();
 
   <div class="pane pane-h2tls">
     <div class="pane-head">
-      <h3>HTTP/2 + TLS · ALPN</h3>
+      <h3>HTTP/2 &middot; TLS &amp; ALPN</h3>
       <span class="pane-pkg">ioxide + ioxide.nghttp2</span>
     </div>
-<pre><code class="language-csharp">// dotnet add package ioxide ioxide.nghttp2
-// Needs the Linux &#x27;tls&#x27; module (sudo modprobe tls), OpenSSL 3, and cert.pem / key.pem.
-//   curl -k --http2   https://127.0.0.1:8443/     # negotiates h2
-//   curl -k --http1.1 https://127.0.0.1:8443/     # same port, gets http/1.1
+<pre><code class="language-csharp">// dotnet add package ioxide
+// dotnet add package ioxide.nghttp2
+//   curl -k --http2 https://127.0.0.1:8443/
+
+using System.IO.Pipelines;
 using System.Runtime.InteropServices;
+using System.Text;
 using ioxide;
 using ioxide.nghttp2;
 using ioxide.tls;
 
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort port      = 8443;                        // https://127.0.0.1:8443/
+int    reactors  = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+int    bodyBytes = 2;                           // &quot;ok&quot; - this sample is about ALPN, not throughput
+
+
+const string certPath = &quot;cert.pem&quot;;   // any PEM pair
+const string keyPath  = &quot;key.pem&quot;;
+
+// Per-connection incremental buffer rings instead of the shared ring (kernel 6.12+). The h2 code
+// is identical either way; this only changes how recv buffers are handed out.
+bool incrementalBuffers = false;
+
+// Hand INBOUND decryption to the kernel as well as outbound. Experimental and off for a reason:
+// a TLS 1.3 KeyUpdate cannot be read through IORING_OP_RECV, and roughly one first connection in
+// twelve fails outright. See docs/learn/tls.html.
+bool kernelRx = false;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+
 var config = new ServerConfig
 {
-    ReactorCount = Environment.ProcessorCount,
-    Tcp = new TcpOptions { Port = 8443 },
+    ReactorCount = reactors,
+    Incremental = incrementalBuffers ? new IncrementalOptions() : null,
+    Tcp = new TcpOptions
+    {
+        Port = port,
+    },
 };
 
-byte[] body = &quot;ok&quot;u8.ToArray();
-byte[] http11 = &quot;HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok&quot;u8.ToArray();
+byte[] body = bodyBytes == 2 ? &quot;ok&quot;u8.ToArray() : [.. Enumerable.Repeat((byte)&#x27;x&#x27;, bodyBytes)];
+
+byte[] http11Response =
+[
+    .. Encoding.ASCII.GetBytes($&quot;HTTP/1.1 200 OK\r\nContent-Length: {body.Length}\r\n\r\n&quot;),
+    .. body,
+];
+
 var threads = new Thread[config.ReactorCount];
 
-for (int id = 0; id &lt; threads.Length; id++)
+for (int i = 0; i &lt; threads.Length; i++)
 {
-    var reactor = new Reactor(id, config);
+    var reactor = new Reactor(i, config);
 
     reactor.OnStart = r =&gt; TlsService.Start(r, new TlsOptions
     {
-        CertificatePath = &quot;cert.pem&quot;,
-        KeyPath         = &quot;key.pem&quot;,
+        KernelRx = kernelRx,
+        CertificatePath = certPath,
+        KeyPath = keyPath,
 
-        // An ORDERED list, most preferred first. RFC 7301 carries no weights - position IS the
-        // preference - so the server walks this list and takes the first entry the client offered.
-        // A browser offers &quot;h2,http/1.1&quot; and lands on h2; an old client lands on http/1.1.
-        Alpn            = [&quot;h2&quot;, &quot;http/1.1&quot;],
+        // Most preferred first. ALPN has no weights - RFC 7301 carries a plain ordered list - so
+        // position IS the preference, and a client offering both lands on h2.
+        Alpn = [&quot;h2&quot;, &quot;http/1.1&quot;],
     });
 
     reactor.TcpHandle = async (r, conn) =&gt;
@@ -1213,43 +2175,66 @@ for (int id = 0; id &lt; threads.Length; id++)
         TlsSession? tls = null;
         try
         {
-            // The OpenSSL handshake is driven over the ring, so it awaits like everything else.
             tls = await r.GetService&lt;TlsService&gt;()!.AcceptAsync(conn);
 
             if (tls.NegotiatedAlpn == &quot;h2&quot;)
             {
-                // TlsConnectionDualPipe decrypts on the way in; kTLS encrypts on the way out. The
-                // HTTP/2 code below is byte-for-byte the cleartext sample - it never learns that
-                // TLS is involved, because the transport is a constructor argument.
-                await using var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
-                await new Nghttp2Connection(pipe).RunBufferedAsync(request =&gt; new Nghttp2Response
+                // The decrypt lives in the pipe, so the HTTP/2 code below is identical to the
+                // cleartext sample. Two implementations of the same seam:
+                //
+                //   default   TlsConnectionDualPipe          decrypts into a Pipe it owns, fed by
+                //                                            a pump task
+                //   INPLACE=1 TlsConnectionDualPipeInPlace   decrypts inside the recv buffer and
+                //                                            hands that memory out - no pump, no
+                //                                            Pipe, backpressure is the ring
+                //
+                // Both are handed to the same Nghttp2Connection, which is the point.
+                // The two share only IDuplexPipe, which is not disposable - hence the second
+                // declaration rather than one `await using`.
+                // One type, both worlds. Which halves it uses is decided by what the handshake
+                // achieved, not by anything chosen here - see TlsConnectionDualPipe.
+                var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
+
+                await using var owner = pipe;
+
+                await new Nghttp2Connection(pipe).RunBufferedAsync(_ =&gt; new Nghttp2Response
                 {
                     Status = 200,
-                    Body   = body,
+                    Body = body,
                 });
                 return;
             }
 
-            // Anything else: HTTP/1.1 on the same port. Written as PLAINTEXT - after the handshake
-            // kernel TLS owns transmit, so there is nothing left to wrap.
-            // The first request usually rides in with the handshake's Finished flight, so it is
-            // already decrypted and sitting in the session rather than in any recv buffer.
-            var carry = new List&lt;byte&gt;(tls.DrainPlaintext().ToArray());
+            // Anything else: HTTP/1.1 on the same port, written as plaintext because kTLS is
+            // producing the records.
+            //
+            // The carry is not incidental. TLS hands back RECORDS, not requests, so a request
+            // split across two records decrypts twice - and answering on &quot;plaintext arrived&quot;
+            // would answer twice to one request. Framing is ours; ioxide does not parse HTTP.
+            var carry = new List&lt;byte&gt;();
+
+            // The client&#x27;s first request usually rides in with its Finished flight, so the
+            // handshake already decrypted it and it is sitting in the session, not in any recv
+            // buffer. Miss this and that request is dropped and the loop parks on bytes that
+            // already arrived - which is exactly what happened here before.
+            carry.AddRange(tls.DrainPlaintext());
 
             while (true)
             {
-                // One response per COMPLETE request. TLS hands back RECORDS, not requests - split
-                // one request across two records and answering per decrypt answers twice.
                 bool wrote = false;
                 int end;
                 while ((end = CollectionsMarshal.AsSpan(carry).IndexOf(&quot;\r\n\r\n&quot;u8)) &gt;= 0)
                 {
                     carry.RemoveRange(0, end + 4);
-                    conn.Write(http11);
+                    // Correct whichever backend the session ended up with.
+                    tls.Write(conn, http11Response);
                     wrote = true;
                 }
 
-                if (wrote) await conn.FlushAsync();
+                if (wrote)
+                {
+                    await conn.FlushAsync();
+                }
 
                 RecvSnapshot snapshot = await conn.ReadAsync();
 
@@ -1269,6 +2254,10 @@ for (int id = 0; id &lt; threads.Length; id++)
                 conn.ResetRead();
             }
         }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($&quot;[http2-tls] connection failed: {e.Message}&quot;);
+        }
         finally
         {
             tls?.Dispose();
@@ -1276,19 +2265,19 @@ for (int id = 0; id &lt; threads.Length; id++)
         }
     };
 
-    threads[id] = new Thread(reactor.Run) { Name = $&quot;reactor-{id}&quot; };
-    threads[id].Start();
+    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
+    threads[i].Start();
 }
 
-foreach (Thread t in threads) t.Join();</code></pre>
-    <p class="ex-foot">Two protocols on one port, chosen by the client. <code>TlsOptions.Alpn</code>
-    is the policy and <code>TlsSession.NegotiatedAlpn</code> is the outcome - that pair is all it
-    takes to run two protocol loops from one handler. No kTLS available? The same
-    <code>Nghttp2Connection</code> runs over the BCL's <code>SslStream</code> instead: wrap the
-    stream as an <code>IDuplexPipe</code> and hand it over. Fully managed, portable, and slower,
-    because every byte is then encrypted in userspace both ways -
-    <a href="https://github.com/MDA2AV/ioxide/tree/main/Playground/Http2/SslStream">Playground/Http2/SslStream</a>
-    is that version in full.</p>
+Console.WriteLine($&quot;[http2-tls] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
+                + $&quot;ALPN h2 then http/1.1, cert {certPath}, &quot;
+                + $&quot;rx={(kernelRx ? &quot;kernel&quot; : &quot;openssl&quot;)}, tx=kernel&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}</code></pre>
+    <p class="ex-foot">How a browser actually reaches h2: over TLS, with the protocol chosen during the handshake. <code>Alpn = ["h2", "http/1.1"]</code> is an ordered preference, not a weighting - the server takes the first entry the client also offered, and this sample then branches on what was agreed, so one port serves both. That is why the h2c samples are the exception rather than the rule. TLS here is <b>OpenSSL both ways by default</b>; the <code>kernelTx</code>/<code>kernelRx</code> knobs at the top are what move either direction into the kernel.</p>
   </div>
 
   <div class="pane pane-qpipe">

@@ -18,22 +18,35 @@ using Playground.Shared;
 //  the BCL slots on top - SslStream is just the most useful example. Needs: ioxide
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-(string certPath, string keyPath) = QuicCert.Ensure(
-    Env.StrOrNull("PLAYGROUND_TLS_CERT"),
-    Env.StrOrNull("PLAYGROUND_TLS_KEY"));
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+// Edit these. That is the whole mechanism - there is no config file and nothing else to find.
+// Env.Override exists only so bench/run.sh can drive the sample from outside; delete that line
+// when you copy this out and the literals above it are the entire configuration.
+
+ushort port      = 8443;                        // https://127.0.0.1:8443/
+int    reactors  = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+int    bodyBytes = 8 * 1024;                    // same body as Tls.Ktls, so the two compare directly
+
+Env.Override(ref port, ref reactors, ref bodyBytes);
+
+// A real PEM pair, or null to generate a self-signed localhost cert on first run.
+string? certOverride = null;
+string? keyOverride  = null;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+(string certPath, string keyPath) = QuicCert.Ensure(certOverride, keyOverride);
 var certificate = X509Certificate2.CreateFromPemFile(certPath, keyPath);
 
 var config = new ServerConfig
 {
-    ReactorCount = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
+    ReactorCount = reactors,
     Tcp = new TcpOptions
     {
-        Port = Env.Port("PLAYGROUND_PORT", 8443),
+        Port = port,
     },
 };
 
-// Same body shape as Tls.Ktls, so the two are directly comparable under the same client.
-int bodySize = Env.Int("PLAYGROUND_BODY", 8 * 1024);
+int bodySize = bodyBytes;
 byte[] body = new byte[bodySize];
 ReadOnlySpan<byte> fill = "ioxide-sslstream-payload "u8;
 for (int i = 0; i < bodySize; i++)

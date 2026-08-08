@@ -44,4 +44,15 @@ public static class Env
         Override(ref port, ref reactors);
         bodyBytes = Int("PLAYGROUND_BODY", bodyBytes);
     }
+
+    /// <summary>
+    /// The QUIC form of <see cref="Override(ref ushort, ref int)"/>. A QUIC port is a UDP port, so
+    /// it reads PLAYGROUND_QUIC_PORT and not PLAYGROUND_PORT - a sample that listens on both binds
+    /// two different ports and would otherwise collide with itself.
+    /// </summary>
+    public static void OverrideQuic(ref ushort quicPort, ref int reactors)
+    {
+        quicPort = Port("PLAYGROUND_QUIC_PORT", quicPort);
+        reactors = Int("PLAYGROUND_REACTORS", reactors);
+    }
 }
