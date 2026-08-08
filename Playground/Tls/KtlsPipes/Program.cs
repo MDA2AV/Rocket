@@ -67,8 +67,9 @@ var tlsOptions = new TlsOptions
     CertificatePath = certPath,
     KeyPath = keyPath,
 
-    // The default. The kernel encrypts outbound records; see Playground/Tls/OpenSslPipes for the
-    // same server with this line flipped.
+    // NOT the default - TLS is OpenSSL both ways unless you ask for this. The kernel encrypts
+    // outbound records while receive stays in OpenSSL, so this is the mixed mode: kTLS TX,
+    // userspace RX. See Playground/Tls/OpenSslPipes for the same server without this line.
     KernelTx = true,
 };
 

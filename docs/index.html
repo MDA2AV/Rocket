@@ -1579,8 +1579,9 @@ var tlsOptions = new TlsOptions
     CertificatePath = certPath,
     KeyPath = keyPath,
 
-    // The default. The kernel encrypts outbound records; see Playground/Tls/OpenSslPipes for the
-    // same server with this line flipped.
+    // NOT the default - TLS is OpenSSL both ways unless you ask for this. The kernel encrypts
+    // outbound records while receive stays in OpenSSL, so this is the mixed mode: kTLS TX,
+    // userspace RX. See Playground/Tls/OpenSslPipes for the same server without this line.
     KernelTx = true,
 };
 
@@ -1712,9 +1713,9 @@ var config = new ServerConfig
 
 var tlsOptions = new TlsOptions
 {
-    // The whole difference. No TLS ULP is attached to the socket at all, so OpenSSL encrypts and
-    // decrypts, MSG_WAITALL stays on, and nothing here needs the &#x27;tls&#x27; kernel module.
-    KernelTx = false,
+    // No KernelTx line - false is the default, so this sample IS the stock configuration: no TLS
+    // ULP on the socket, OpenSSL encrypts and decrypts, MSG_WAITALL stays on, and nothing here
+    // needs the &#x27;tls&#x27; kernel module. Tls/Ktls is the sample that opts into the kernel path.
     CertificatePath = certPath,
     KeyPath         = keyPath,
 };
@@ -1881,10 +1882,10 @@ var tlsOptions = new TlsOptions
     CertificatePath = certPath,
     KeyPath = keyPath,
 
-    // The whole difference from Playground/Tls/KtlsPipes. No TLS ULP on the socket, so OpenSSL
-    // encrypts and decrypts and nothing here needs the &#x27;tls&#x27; kernel module - which also gives back
-    // TLS 1.2, any ciphersuite and session resumption.
-    KernelTx = false,
+    // No KernelTx line - false is the default. No TLS ULP on the socket, so OpenSSL encrypts and
+    // decrypts and nothing here needs the &#x27;tls&#x27; kernel module - which also keeps TLS 1.2, any
+    // ciphersuite and session resumption. Playground/Tls/KtlsPipes adds the one line that
+    // changes this.
 };
 
 byte[] body = new byte[bodyBytes];

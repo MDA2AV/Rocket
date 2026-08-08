@@ -66,9 +66,9 @@ var config = new ServerConfig
 
 var tlsOptions = new TlsOptions
 {
-    // The whole difference. No TLS ULP is attached to the socket at all, so OpenSSL encrypts and
-    // decrypts, MSG_WAITALL stays on, and nothing here needs the 'tls' kernel module.
-    KernelTx = false,
+    // No KernelTx line - false is the default, so this sample IS the stock configuration: no TLS
+    // ULP on the socket, OpenSSL encrypts and decrypts, MSG_WAITALL stays on, and nothing here
+    // needs the 'tls' kernel module. Tls/Ktls is the sample that opts into the kernel path.
     CertificatePath = certPath,
     KeyPath         = keyPath,
 };
