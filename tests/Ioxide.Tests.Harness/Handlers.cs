@@ -143,7 +143,8 @@ public static class Handlers
         }
     }
 
-    // tls: kTLS handshake, then a fixed plaintext response the kernel encrypts on send.
+    // tls: the OpenSSL handshake, then a fixed response written through Wire.Write - which routes
+    // through TlsSession.Write, so this handler is correct under either TLS backend.
     public static async Task Tls(Reactor r, TcpConnection conn)
     {
         TlsSession? tls = null;
