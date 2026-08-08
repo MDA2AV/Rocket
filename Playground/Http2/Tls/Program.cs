@@ -24,22 +24,43 @@ using Playground.Shared;
 //  code is byte-for-byte the same as the h2c sample. Needs: ioxide, ioxide.nghttp2
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-(string certPath, string keyPath) = QuicCert.Ensure(
-    Env.StrOrNull("PLAYGROUND_TLS_CERT"),
-    Env.StrOrNull("PLAYGROUND_TLS_KEY"));
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+// Edit these. That is the whole mechanism - there is no config file and nothing else to find.
+// Env.Override exists only so bench/run.sh can drive the sample from outside; delete that line
+// when you copy this out and the literals above it are the entire configuration.
+
+ushort port      = 8443;                        // https://127.0.0.1:8443/
+int    reactors  = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+int    bodyBytes = 2;                           // "ok" - this sample is about ALPN, not throughput
+
+Env.Override(ref port, ref reactors, ref bodyBytes);
+
+// A real PEM pair, or null to generate a self-signed localhost cert on first run.
+string? certOverride = null;
+string? keyOverride  = null;
+
+// Per-connection incremental buffer rings instead of the shared ring (kernel 6.12+). The h2 code
+// is identical either way; this only changes how recv buffers are handed out.
+bool incrementalBuffers = false;
+
+// Hand INBOUND decryption to the kernel as well as outbound. Experimental and off for a reason:
+// a TLS 1.3 KeyUpdate cannot be read through IORING_OP_RECV, and roughly one first connection in
+// twelve fails outright. See docs/learn/tls.html.
+bool kernelRx = false;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+(string certPath, string keyPath) = QuicCert.Ensure(certOverride, keyOverride);
 
 var config = new ServerConfig
 {
-    ReactorCount = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
-    // PLAYGROUND_INCREMENTAL=1 switches the recv path to per-connection incremental buffer rings.
-    Incremental = Env.Flag("PLAYGROUND_INCREMENTAL") ? new IncrementalOptions() : null,
+    ReactorCount = reactors,
+    Incremental = incrementalBuffers ? new IncrementalOptions() : null,
     Tcp = new TcpOptions
     {
-        Port = Env.Port("PLAYGROUND_PORT", 8443),
+        Port = port,
     },
 };
 
-int bodyBytes = Env.Int("PLAYGROUND_BODY", 2);
 byte[] body = bodyBytes == 2 ? "ok"u8.ToArray() : [.. Enumerable.Repeat((byte)'x', bodyBytes)];
 
 byte[] http11Response =
@@ -56,8 +77,7 @@ for (int i = 0; i < threads.Length; i++)
 
     reactor.OnStart = r => TlsService.Start(r, new TlsOptions
     {
-        // PLAYGROUND_KTLS_RX=1 hands inbound decryption to the kernel as well as outbound.
-        KernelRx = Env.Flag("PLAYGROUND_KTLS_RX"),
+        KernelRx = kernelRx,
         CertificatePath = certPath,
         KeyPath = keyPath,
 
@@ -167,8 +187,7 @@ for (int i = 0; i < threads.Length; i++)
 
 Console.WriteLine($"[http2-tls] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
                 + $"ALPN h2 then http/1.1, cert {certPath}, "
-                + $"rx={(Env.Flag("PLAYGROUND_KTLS_RX") ? "kernel" : "openssl")}, "
-                + $"tx={(Env.Flag("PLAYGROUND_NO_KTLS_TX") ? "openssl" : "kernel")}");
+                + $"rx={(kernelRx ? "kernel" : "openssl")}, tx=kernel");
 
 foreach (Thread thread in threads)
 {

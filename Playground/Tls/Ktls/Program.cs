@@ -19,41 +19,48 @@ using Playground.Shared;
 //  payload, since TLS overhead only shows against real bodies). Needs: ioxide.tls
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-(string certPath, string keyPath) = QuicCert.Ensure(
-    Env.StrOrNull("PLAYGROUND_TLS_CERT"),
-    Env.StrOrNull("PLAYGROUND_TLS_KEY"));
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+// Edit these. That is the whole mechanism - there is no config file and nothing else to find.
+// Env.Override exists only so bench/run.sh can drive the sample from outside; delete that line
+// when you copy this out and the literals above it are the entire configuration.
+
+ushort port      = 8443;                        // https://127.0.0.1:8443/
+int    reactors  = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+int    bodyBytes = 8 * 1024;                    // TLS cost is per-byte, so a 2-byte "ok" would hide it
+
+Env.Override(ref port, ref reactors, ref bodyBytes);
+
+// A real PEM pair, or null to generate a self-signed localhost cert on first run.
+string? certOverride = null;
+string? keyOverride  = null;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+(string certPath, string keyPath) = QuicCert.Ensure(certOverride, keyOverride);
 
 var config = new ServerConfig
 {
-    ReactorCount = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
+    ReactorCount = reactors,
     Tcp = new TcpOptions
     {
-        Port = Env.Port("PLAYGROUND_PORT", 8443),
+        Port = port,
     },
 };
 
 var tlsOptions = new TlsOptions
 {
-    // PLAYGROUND_KTLS_RX=1 lets the kernel decrypt inbound too, so recv returns plaintext and
-    // TlsSession.Decrypt becomes a pass-through.
-    KernelRx = Env.Flag("PLAYGROUND_KTLS_RX"),
-    // PLAYGROUND_KTLS_TX=0 drops kernel TLS entirely - OpenSSL both directions.
-    KernelTx = !Env.Flag("PLAYGROUND_NO_KTLS_TX"),
     CertificatePath = certPath,
     KeyPath         = keyPath,
 };
 
-// A medium fixed response, built once. TLS cost is per-byte, so "ok" would hide it.
-int bodySize = Env.Int("PLAYGROUND_BODY", 8 * 1024);
-byte[] body = new byte[bodySize];
+byte[] body = new byte[bodyBytes];
 ReadOnlySpan<byte> fill = "ioxide-ktls-payload "u8;
-for (int i = 0; i < bodySize; i++)
+for (int i = 0; i < bodyBytes; i++)
 {
     body[i] = fill[i % fill.Length];
 }
 byte[] response =
 [
-    .. Encoding.ASCII.GetBytes($"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {bodySize}\r\n\r\n"),
+    .. Encoding.ASCII.GetBytes($"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {bodyBytes}\r\n\r\n"),
     .. body,
 ];
 
@@ -85,7 +92,7 @@ for (int i = 0; i < threads.Length; i++)
             // A request can ride in with the handshake's final flight - answer it before parking
             // in ReadAsync, or the client waits on a response we never send.
             carry.AddRange(tls.DrainPlaintext());
-            if (Answer(conn, tls, carry, response))
+            if (Answer(conn, carry, response))
             {
                 await conn.FlushAsync();
             }
@@ -104,7 +111,7 @@ for (int i = 0; i < threads.Length; i++)
                     }
                 }
 
-                if (Answer(conn, tls, carry, response))
+                if (Answer(conn, carry, response))
                 {
                     await conn.FlushAsync();   // plaintext: the kernel encrypts on send
                 }
@@ -131,7 +138,7 @@ for (int i = 0; i < threads.Length; i++)
 }
 
 Console.WriteLine($"[tls-ktls] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
-                + $"{bodySize}-byte body, cert {certPath}");
+                + $"{bodyBytes}-byte body, cert {certPath}");
 
 foreach (Thread thread in threads)
 {
@@ -145,7 +152,7 @@ static unsafe void Decrypt(TlsSession tls, in SpscRecvRing.Item item, List<byte>
 
 // One response per COMPLETE request in the carry, and none for a partial one. Returns whether
 // anything was written, so the caller flushes once for the batch rather than once per request.
-static bool Answer(TcpConnection conn, TlsSession tls, List<byte> carry, ReadOnlyMemory<byte> response)
+static bool Answer(TcpConnection conn, List<byte> carry, ReadOnlyMemory<byte> response)
 {
     bool wrote = false;
     int end;
@@ -154,16 +161,9 @@ static bool Answer(TcpConnection conn, TlsSession tls, List<byte> carry, ReadOnl
     {
         carry.RemoveRange(0, end + 4);
 
-        // With kTLS the kernel makes the records, so plaintext goes straight in. Without it,
-        // OpenSSL has to encrypt first - the one line that differs between the two worlds.
-        if (tls.KernelTx)
-        {
-            conn.Write(response.Span);
-        }
-        else
-        {
-            tls.WriteEncrypted(conn, response.Span);
-        }
+        // kTLS is producing the records, so this is PLAINTEXT going into the slab. Compare
+        // Playground/Tls/OpenSsl, where the same line is tls.WriteEncrypted(conn, ...).
+        conn.Write(response.Span);
 
         wrote = true;
     }
