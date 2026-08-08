@@ -5,13 +5,13 @@ using ioxide.utils;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  tls-ktls - FULL kernel TLS: the OpenSSL handshake runs over the ring, then both directions
-//  are handed to the kernel - the handler writes plaintext, the kernel makes the records, and
-//  recv delivers plaintext straight into ring memory. Experimental (see KernelRx below);
-//  Tls/Hybrid is the deployable drop-back - kernel TX, OpenSSL RX - and Tls/OpenSsl the default.
+//  tls-hybrid - the deployable kernel mode: the OpenSSL handshake runs over the ring, transmit
+//  is handed to KERNEL TLS (the handler writes plaintext, the kernel makes the records), and
+//  receive stays in OpenSSL. Tls/Ktls is this plus kernel receive (experimental); Tls/OpenSsl
+//  is the default, with the kernel in neither direction.
 //
 //      sudo modprobe tls                             # needs the Linux 'tls' module + OpenSSL 3
-//      dotnet run -c Release --project Playground/Tls/Ktls
+//      dotnet run -c Release --project Playground/Tls/Hybrid
 //      curl -ks https://127.0.0.1:8443/ | head -c 40
 //
 //  PLAYGROUND_TLS_CERT/_KEY point at a real PEM pair; otherwise a self-signed localhost cert is
@@ -55,15 +55,10 @@ var tlsOptions = new TlsOptions
     // handler below write PLAINTEXT to the connection: the kernel turns it into records on send.
     // Remove this line and conn.Write would put cleartext on the wire.
     KernelTx = true,
-
-    // Full kTLS: the kernel decrypts inbound too. Experimental - about one first connection in
-    // twelve fails outright, and a client sending a TLS 1.3 KeyUpdate loses the connection.
-    // Tls/Hybrid is this same server without this line: kernel TX, OpenSSL RX, deployable today.
-    KernelRx = true,
 };
 
 byte[] body = new byte[bodyBytes];
-ReadOnlySpan<byte> fill = "ioxide-ktls-payload "u8;
+ReadOnlySpan<byte> fill = "ioxide-hybrid-tls "u8;
 for (int i = 0; i < bodyBytes; i++)
 {
     body[i] = fill[i % fill.Length];
@@ -95,8 +90,6 @@ for (int i = 0; i < threads.Length; i++)
 
         try
         {
-            // The handshake reads and writes through this same connection; after it, the socket
-            // carries kTLS records the kernel en/decrypts.
             tls = await r.GetService<TlsService>().AcceptAsync(conn);
 
             // A request can ride in with the handshake's final flight - answer it before parking
@@ -123,7 +116,7 @@ for (int i = 0; i < threads.Length; i++)
 
                 if (Answer(conn, carry, response))
                 {
-                    await conn.FlushAsync();   // plaintext: the kernel encrypts on send
+                    await conn.FlushAsync();
                 }
 
                 if (snapshot.IsClosed || tls.Closed) return;
@@ -134,7 +127,7 @@ for (int i = 0; i < threads.Length; i++)
         {
             // Handlers run fire-and-forget, so a thrown handshake error would vanish silently -
             // and a missing 'tls' kernel module manifests exactly here.
-            Console.Error.WriteLine($"[tls-ktls] connection failed: {e.Message}");
+            Console.Error.WriteLine($"[tls-hybrid] connection failed: {e.Message}");
         }
         finally
         {
@@ -147,8 +140,8 @@ for (int i = 0; i < threads.Length; i++)
     threads[i].Start();
 }
 
-Console.WriteLine($"[tls-ktls] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
-                + $"{bodyBytes}-byte body, tx=kernel, rx=kernel (experimental), cert {certPath}");
+Console.WriteLine($"[tls-hybrid] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
+                + $"{bodyBytes}-byte body, tx=kernel, rx=openssl, cert {certPath}");
 
 foreach (Thread thread in threads)
 {

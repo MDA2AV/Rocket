@@ -46,6 +46,7 @@
 
   <Folder Name="/apps/playground/tls/">
     <Project Path="Playground/Tls/Ktls/Playground.Tls.Ktls.csproj" />
+    <Project Path="Playground/Tls/Hybrid/Playground.Tls.Hybrid.csproj" />
     <Project Path="Playground/Tls/KtlsPipes/Playground.Tls.KtlsPipes.csproj" />
     <Project Path="Playground/Tls/OpenSsl/Playground.Tls.OpenSsl.csproj" />
     <Project Path="Playground/Tls/OpenSslPipes/Playground.Tls.OpenSslPipes.csproj" />

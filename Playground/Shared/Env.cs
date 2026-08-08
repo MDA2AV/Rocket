@@ -79,9 +79,4 @@ public static class Env
         kernelRx = Bool("PLAYGROUND_KTLS_RX", kernelRx);
     }
 
-    /// <summary>
-    /// For the samples where transmit is kTLS by construction and only receive is a choice.
-    /// </summary>
-    public static void OverrideKtls(ref bool kernelRx)
-        => kernelRx = Bool("PLAYGROUND_KTLS_RX", kernelRx);
 }

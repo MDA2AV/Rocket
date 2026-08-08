@@ -76,9 +76,8 @@ play Tls/OpenSsl PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18443 \
   && note "tls-openssl" "${R}r" "$(wrk_h1 https://127.0.0.1:18443/) req/s"
 stop_play
 if [ -d /sys/module/tls ]; then
-  # RX pinned off: the row benches the deployable hybrid (kernel TX, OpenSSL RX), matching the
-  # matrix's ktls-tx cell - the sample's own default is full kTLS, which is experimental.
-  play Tls/Ktls PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18443 PLAYGROUND_KTLS_RX=0 \
+  # The deployable hybrid (kernel TX, OpenSSL RX) - matches the matrix's ktls-tx cell.
+  play Tls/Hybrid PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18443 \
     && note "tls-ktls-tx" "${R}r" "$(wrk_h1 https://127.0.0.1:18443/) req/s"
   stop_play
 else

@@ -15,9 +15,9 @@ PANES = {
         "Tls/Ktls", "kTLS &middot; raw ring", "ioxide",
         ["sudo modprobe tls        # kTLS needs the Linux 'tls' module + OpenSSL 3",
          "curl -k https://127.0.0.1:8443/"],
-        "<b>Opt-in - and as shipped, FULL kTLS</b>: both directions in the kernel. "
-        "<code>kernelRx = false</code> drops receive back to OpenSSL - the hybrid, the half you "
-        "would deploy today, since kernel RX is experimental. The KernelTx line is also what "
+        "<b>Opt-in - and FULL kTLS</b>: both directions in the kernel, set right on the options. "
+        "Kernel RX is experimental, so <code>Tls/Hybrid</code> in the repo is this server minus "
+        "the <code>KernelRx</code> line - the half you would deploy today. The KernelTx line is what "
         "makes the <code>conn.Write</code> below legal: it puts PLAINTEXT into the slab and the "
         "kernel turns it into records. Without it the same call would put <b>cleartext on the "
         "wire</b>, which is why every other sample goes through <code>TlsSession.Write</code> - "
