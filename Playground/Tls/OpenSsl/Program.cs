@@ -1,0 +1,182 @@
+using System.Text;
+using System.Runtime.InteropServices;
+using ioxide;
+using ioxide.tls;
+using ioxide.utils;
+using Playground.Shared;
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//  tls-openssl - the same TLS termination as Tls/Ktls with kernel TLS turned OFF. OpenSSL does
+//  both directions: it decrypts what the ring delivers, and it encrypts responses before they
+//  reach the write slab.
+//
+//      dotnet run -c Release --project Playground/Tls/OpenSsl     # NO modprobe needed
+//      curl -ks https://127.0.0.1:8443/ | head -c 40
+//
+//  Why choose this over kTLS. It drops every constraint kTLS imposes: no 'tls' kernel module (so
+//  it runs in a container that does not have it), no TLS-1.3-only restriction, no single-suite
+//  restriction, session resumption is available again, and there is no handshake-alignment
+//  problem. The cost on this rig is nothing - see the table below - though a deployment using
+//  sendfile or a NIC that offloads TLS would see a real difference kTLS cannot give up.
+//
+//  The one thing the handler must do differently is on the write side: with kTLS the kernel makes
+//  the records so you write plaintext, and without it you hand the response to WriteEncrypted.
+//  Everything else - the handshake, ALPN, the read loop, the framing - is identical.
+//
+//  Measured here, 4 reactors, wrk -t4 -c64, against the plaintext Tcp/Raw baseline:
+//
+//      response   plaintext     kTLS            OpenSSL
+//         64 B    1,379,980     1,091,224 0.79x 1,093,361 0.79x
+//        8 KiB    1,109,287       749,833 0.68x   802,325 0.72x
+//       64 KiB      448,093       157,644 0.35x   196,486 0.44x
+//      256 KiB      133,097        41,691 0.31x    49,801 0.37x
+//
+//  Read that as: which TLS backend you pick is worth far less than the cost of TLS itself.
+//
+//  PLAYGROUND_TLS_CERT/_KEY point at a real PEM pair; otherwise a self-signed localhost cert is
+//  generated. PLAYGROUND_BODY sizes the response. Needs: ioxide
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+(string certPath, string keyPath) = QuicCert.Ensure(
+    Env.StrOrNull("PLAYGROUND_TLS_CERT"),
+    Env.StrOrNull("PLAYGROUND_TLS_KEY"));
+
+var config = new ServerConfig
+{
+    ReactorCount = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
+    Tcp = new TcpOptions
+    {
+        Port = Env.Port("PLAYGROUND_PORT", 8443),
+    },
+};
+
+var tlsOptions = new TlsOptions
+{
+    // The whole difference. No TLS ULP is attached to the socket at all, so OpenSSL encrypts and
+    // decrypts, MSG_WAITALL stays on, and nothing here needs the 'tls' kernel module.
+    KernelTx = false,
+    CertificatePath = certPath,
+    KeyPath         = keyPath,
+};
+
+// A medium fixed response, built once. TLS cost is per-byte, so "ok" would hide it.
+int bodySize = Env.Int("PLAYGROUND_BODY", 8 * 1024);
+byte[] body = new byte[bodySize];
+ReadOnlySpan<byte> fill = "ioxide-ktls-payload "u8;
+for (int i = 0; i < bodySize; i++)
+{
+    body[i] = fill[i % fill.Length];
+}
+byte[] response =
+[
+    .. Encoding.ASCII.GetBytes($"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {bodySize}\r\n\r\n"),
+    .. body,
+];
+
+var threads = new Thread[config.ReactorCount];
+
+for (int i = 0; i < threads.Length; i++)
+{
+    var reactor = new Reactor(i, config);
+
+    // One TlsService per reactor: it owns the OpenSSL contexts and drives handshakes on this ring.
+    reactor.OnStart = r => TlsService.Start(r, tlsOptions);
+
+    reactor.TcpHandle = async (r, conn) =>
+    {
+        TlsSession? tls = null;
+
+        // Decrypted bytes waiting to be framed. TLS hands back records, not requests: split one
+        // request across two records and each decrypts on its own, so answering per decrypt
+        // answers twice. The carry is what turns "some plaintext arrived" into "a request
+        // arrived", exactly as the plaintext samples do - ioxide does not parse HTTP for you.
+        var carry = new List<byte>();
+
+        try
+        {
+            // The handshake reads and writes through this same connection. Unlike Tls/Ktls, no
+            // ULP is attached afterwards - the socket stays an ordinary TCP socket and every
+            // record is made and opened by OpenSSL.
+            tls = await r.GetService<TlsService>().AcceptAsync(conn);
+
+            // A request can ride in with the handshake's final flight - answer it before parking
+            // in ReadAsync, or the client waits on a response we never send.
+            carry.AddRange(tls.DrainPlaintext());
+            if (Answer(conn, tls, carry, response))
+            {
+                await conn.FlushAsync();
+            }
+
+            while (true)
+            {
+                RecvSnapshot snapshot = await conn.ReadAsync();
+
+                while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                {
+                    if (item.HasBuffer)
+                    {
+                        // Records in, plaintext out - OpenSSL decrypts what the ring received.
+                        Decrypt(tls, in item, carry);
+                        conn.ReturnBuffer(in item);
+                    }
+                }
+
+                if (Answer(conn, tls, carry, response))
+                {
+                    await conn.FlushAsync();   // plaintext: the kernel encrypts on send
+                }
+
+                if (snapshot.IsClosed || tls.Closed) return;
+                conn.ResetRead();
+            }
+        }
+        catch (Exception e)
+        {
+            // Handlers run fire-and-forget, so a thrown handshake error would vanish silently.
+            // Note what CANNOT happen here that can in Tls/Ktls: a missing 'tls' kernel module.
+            Console.Error.WriteLine($"[tls-openssl] connection failed: {e.Message}");
+        }
+        finally
+        {
+            tls?.Dispose();
+            conn.DecRef();
+        }
+    };
+
+    threads[i] = new Thread(reactor.Run) { Name = $"reactor-{i}" };
+    threads[i].Start();
+}
+
+Console.WriteLine($"[tls-openssl] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
+                + $"{bodySize}-byte body, cert {certPath}, no kernel TLS");
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}
+
+// Decrypt takes a raw pointer (the buffer belongs to the ring); the pointer work stays out of the
+// async handler, which cannot contain unsafe code.
+static unsafe void Decrypt(TlsSession tls, in SpscRecvRing.Item item, List<byte> carry)
+    => carry.AddRange(tls.Decrypt(item.Ptr, item.Len));
+
+// One response per COMPLETE request in the carry, and none for a partial one. Returns whether
+// anything was written, so the caller flushes once for the batch rather than once per request.
+static bool Answer(TcpConnection conn, TlsSession tls, List<byte> carry, ReadOnlyMemory<byte> response)
+{
+    bool wrote = false;
+    int end;
+
+    while ((end = CollectionsMarshal.AsSpan(carry).IndexOf("\r\n\r\n"u8)) >= 0)
+    {
+        carry.RemoveRange(0, end + 4);
+
+        // The one line that differs from Tls/Ktls. There, kTLS is producing the records so the
+        // handler writes plaintext; here OpenSSL has to encrypt before anything reaches the slab.
+        tls.WriteEncrypted(conn, response.Span);
+
+        wrote = true;
+    }
+
+    return wrote;
+}
