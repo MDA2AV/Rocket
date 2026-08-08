@@ -76,11 +76,13 @@ play Tls/OpenSsl PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18443 \
   && note "tls-openssl" "${R}r" "$(wrk_h1 https://127.0.0.1:18443/) req/s"
 stop_play
 if [ -d /sys/module/tls ]; then
-  play Tls/Ktls PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18443 \
-    && note "tls-ktls" "${R}r" "$(wrk_h1 https://127.0.0.1:18443/) req/s"
+  # RX pinned off: the row benches the deployable hybrid (kernel TX, OpenSSL RX), matching the
+  # matrix's ktls-tx cell - the sample's own default is full kTLS, which is experimental.
+  play Tls/Ktls PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18443 PLAYGROUND_KTLS_RX=0 \
+    && note "tls-ktls-tx" "${R}r" "$(wrk_h1 https://127.0.0.1:18443/) req/s"
   stop_play
 else
-  note "tls-ktls" "${R}r" "SKIP (no 'tls' kernel module - sudo modprobe tls)"
+  note "tls-ktls-tx" "${R}r" "SKIP (no 'tls' kernel module - sudo modprobe tls)"
 fi
 
 # ── h3 server ───────────────────────────────────────────────────────────────────────────────

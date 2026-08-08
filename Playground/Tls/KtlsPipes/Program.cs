@@ -6,8 +6,8 @@ using ioxide.tls;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  tls-ktls-pipes - TLS served through an IDuplexPipe, with the kernel doing the transmit
-//  crypto - the hybrid, same as Tls/Ktls; kernelRx = true is full kTLS (experimental).
+//  tls-ktls-pipes - full kernel TLS served through an IDuplexPipe, same as Tls/Ktls: both
+//  directions in the kernel as shipped (experimental); kernelRx = false is the hybrid.
 //
 //      sudo modprobe tls        # kTLS needs the module
 //      curl -ks https://127.0.0.1:8443/ | head -c 40
@@ -51,10 +51,10 @@ Env.Override(ref port, ref reactors, ref bodyBytes);
 string? certOverride = null;
 string? keyOverride  = null;
 
-// Hand INBOUND decryption to the kernel too. Off by default and experimental: about one first
-// connection in twelve fails outright, and a client sending a TLS 1.3 KeyUpdate loses the
-// connection. Transmit stays kernel-side either way - that is the point of this sample.
-bool kernelRx = false;
+// Full kTLS: the kernel decrypts inbound too. Experimental - about one first connection in
+// twelve fails outright, and a client sending a TLS 1.3 KeyUpdate loses the connection. Set
+// false for the hybrid (kernel TX, OpenSSL RX), the half you would actually deploy today.
+bool kernelRx = true;
 
 Env.OverrideKtls(ref kernelRx);
 // ─────────────────────────────────────────────────────────────────────────────────────────────

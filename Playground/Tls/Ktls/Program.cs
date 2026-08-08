@@ -5,10 +5,10 @@ using ioxide.utils;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  tls-ktls - the kernel TLS opt-in: the OpenSSL handshake runs over the ring, then transmit is
-//  handed to KERNEL TLS - the handler writes plaintext and the kernel produces the records, so
-//  the send path stays exactly the raw send path. As shipped this is the HYBRID - kernel TX,
-//  OpenSSL RX. Full kTLS is both directions: kernelRx = true completes it (experimental).
+//  tls-ktls - FULL kernel TLS: the OpenSSL handshake runs over the ring, then both directions
+//  are handed to the kernel - the handler writes plaintext, the kernel makes the records, and
+//  recv delivers plaintext straight into ring memory. Experimental as shipped (see the kernelRx
+//  knob); kernelRx = false is the HYBRID - kernel TX, OpenSSL RX - the deployable half.
 //
 //      sudo modprobe tls                             # needs the Linux 'tls' module + OpenSSL 3
 //      dotnet run -c Release --project Playground/Tls/Ktls
@@ -34,11 +34,12 @@ Env.Override(ref port, ref reactors, ref bodyBytes);
 string? certOverride = null;
 string? keyOverride  = null;
 
-// Hand INBOUND decryption to the kernel too, so neither direction goes through OpenSSL. Off by
-// default and experimental: a TLS 1.3 KeyUpdate cannot be read through IORING_OP_RECV, and about
-// one first connection in twelve fails outright. Transmit stays kernel-side either way - that is
-// the point of this sample and is not a knob, because the handler below writes plaintext.
-bool kernelRx = false;
+// Full kTLS: the kernel decrypts inbound too, so neither direction goes through OpenSSL. That is
+// what this sample demonstrates, and it is experimental - about one first connection in twelve
+// fails outright, and a client sending a TLS 1.3 KeyUpdate loses the connection. Set false for
+// the HYBRID (kernel TX, OpenSSL RX), the half you would actually deploy today. Transmit stays
+// kernel-side either way - the handler below writes plaintext.
+bool kernelRx = true;
 
 Env.OverrideKtls(ref kernelRx);
 // ─────────────────────────────────────────────────────────────────────────────────────────────

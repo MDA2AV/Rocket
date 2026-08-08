@@ -17,9 +17,9 @@ Run any of them with `dotnet run -c Release --project Playground/<Group>/<Name>`
 | [`Tcp.TaskRun`](Tcp/TaskRun/Program.cs) | 84 | Awaiting ordinary thread-pool work and still resuming on the reactor. | `ioxide` |
 | [`Tcp.Incremental`](Tcp/Incremental/Program.cs) | 95 | `Tcp.Raw` with the per-connection buffer-ring mode - one config block is the whole diff. Kernel 6.12+. | `ioxide` |
 | [`Tcp.Big`](Tcp/Big/Program.cs) | 101 | The write path under a 100 KB body: `SEND_ZC`, slab overflow (`grow` vs `seg`), checksum-able output. | `ioxide` |
-| [`Tls.Ktls`](Tls/Ktls/Program.cs) | 172 | The **kernel TLS** opt-in, shipped as the hybrid: kernel TX, OpenSSL RX (`kernelRx` completes full kTLS, experimental). The handler writes plaintext. `modprobe tls`. | `ioxide` |
+| [`Tls.Ktls`](Tls/Ktls/Program.cs) | 172 | **Full kernel TLS** as shipped - both directions in the kernel (experimental); `kernelRx = false` is the deployable hybrid. The handler writes plaintext. `modprobe tls`. | `ioxide` |
 | [`Tls.OpenSsl`](Tls/OpenSsl/Program.cs) | 194 | **The default**: OpenSSL both ways - no kernel module, and TLS 1.2 / any suite / resumption. | `ioxide` |
-| [`Tls.KtlsPipes`](Tls/KtlsPipes/Program.cs) | 163 | The hybrid served through an `IDuplexPipe`. | `ioxide` |
+| [`Tls.KtlsPipes`](Tls/KtlsPipes/Program.cs) | 163 | Full kTLS through an `IDuplexPipe`; `kernelRx = false` for the hybrid. | `ioxide` |
 | [`Tls.OpenSslPipes`](Tls/OpenSslPipes/Program.cs) | 164 | The same, with OpenSSL. Its serve loop is byte-identical to `Tls.KtlsPipes` - over a pipe the backend is invisible. | `ioxide` |
 | [`Tls.SslStream`](Tls/SslStream/Program.cs) | 100 | The BCL `SslStream` over `TcpConnectionStream` - portable userspace TLS, the comparison point. | `ioxide` |
 | [`Http2.Nghttp2`](Http2/Nghttp2/Program.cs) | 66 | HTTP/2 (h2c, prior knowledge) with nghttp2 doing framing, HPACK and flow control. | `ioxide.nghttp2` |

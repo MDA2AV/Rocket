@@ -15,9 +15,9 @@ PANES = {
         "Tls/Ktls", "kTLS &middot; raw ring", "ioxide",
         ["sudo modprobe tls        # kTLS needs the Linux 'tls' module + OpenSSL 3",
          "curl -k https://127.0.0.1:8443/"],
-        "<b>Opt-in - and as shipped, the hybrid</b>: <code>KernelTx = true</code> hands transmit to "
-        "the kernel while receive stays in OpenSSL. Full kTLS is both directions - the "
-        "<code>kernelRx</code> knob completes it (experimental). The KernelTx line is also what "
+        "<b>Opt-in - and as shipped, FULL kTLS</b>: both directions in the kernel. "
+        "<code>kernelRx = false</code> drops receive back to OpenSSL - the hybrid, the half you "
+        "would deploy today, since kernel RX is experimental. The KernelTx line is also what "
         "makes the <code>conn.Write</code> below legal: it puts PLAINTEXT into the slab and the "
         "kernel turns it into records. Without it the same call would put <b>cleartext on the "
         "wire</b>, which is why every other sample goes through <code>TlsSession.Write</code> - "
@@ -37,7 +37,7 @@ PANES = {
     "tlspipe": (
         "Tls/KtlsPipes", "kTLS &middot; pipes", "ioxide",
         ["sudo modprobe tls", "curl -k https://127.0.0.1:8443/"],
-        "The same hybrid behind an <code>IDuplexPipe</code>, for the frameworks that serve from "
+        "The same full-kTLS server behind an <code>IDuplexPipe</code>, for the frameworks that serve from "
         "one. Now compare <label for=\"tab-tlsosslpipe\" class=\"ex-jump\">openssl &middot; pipes</label>: "
         "its serve loop is <b>byte-identical</b> to this one. Over a pipe the backend is invisible, "
         "because <code>TlsConnectionDualPipe</code> composes its halves from the session rather than "
