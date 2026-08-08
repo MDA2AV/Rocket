@@ -7,7 +7,7 @@
 #   ktls             kernel does both.                            KernelTx=1 KernelRx=1
 #
 # There is no ktls-rx-only cell: RX is programmed at the same handoff as TX, so TlsService gates
-# it on both (src/ioxide/Tls/TlsService.cs). Asking for RX alone silently gets you openssl.
+# it on both (src/ioxide/Tls/TlsService.cs). Asking for RX alone is refused at startup.
 #
 # Everything here is LOOPBACK. That is the honest caveat on the whole table: kTLS exists to enable
 # sendfile and NIC crypto offload, and neither is reachable over lo. What this measures is the

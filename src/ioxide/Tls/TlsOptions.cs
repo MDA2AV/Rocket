@@ -23,16 +23,16 @@ public sealed class TlsOptions
     public string[] Alpn { get; init; } = ["http/1.1"];
 
     /// <summary>
-    /// Let the kernel decrypt inbound records too, not just encrypt outbound ones. Off by default.
+    /// Let the kernel decrypt inbound records too. Off by default, experimental, and it requires
+    /// <see cref="KernelTx"/>: RX is programmed at the same handoff as TX and shares the TCP_ULP
+    /// that EnableTx installs, so asking for RX alone is refused at
+    /// <see cref="TlsService.Start"/>.
     ///
-    /// TLS in ioxide is asymmetric: kTLS TX is programmed for every connection, so responses are
-    /// encrypted by the kernel on the existing send path, while inbound records are decrypted in
-    /// userspace by OpenSSL. Turning this on programs TLS_RX as well, after which an ordinary recv
-    /// returns PLAINTEXT and <see cref="TlsSession.Decrypt"/> is a no-op - plaintext then lands
-    /// directly in ring memory, so the zero-copy reader works on TLS connections exactly as it does
-    /// on cleartext ones.
+    /// With both on, an ordinary recv returns PLAINTEXT and <see cref="TlsSession.Decrypt"/> is a
+    /// no-op - plaintext then lands directly in ring memory, so the zero-copy reader works on TLS
+    /// connections exactly as it does on cleartext ones.
     ///
-    /// Two reasons it is opt-in.
+    /// Two reasons it is opt-in even where <see cref="KernelTx"/> is.
     ///
     /// The handoff must land on a record boundary. Whatever the handshake already pulled off the
     /// socket is invisible to the kernel, so the record sequence it starts at has to account for

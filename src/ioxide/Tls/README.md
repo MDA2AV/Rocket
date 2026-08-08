@@ -1,9 +1,10 @@
 # TLS
 
-TLS termination for [ioxide](https://github.com/MDA2AV/ioxide), via **kernel TLS (kTLS)**. Part of
-the `ioxide` package - there is nothing extra to install, and none of it loads unless you call it. The handshake runs through OpenSSL over the reactor's ring; the negotiated keys are
-handed to the kernel, which then encrypts everything the server sends. Handlers keep writing
-plaintext through the normal `conn.Write`/`FlushAsync` API - the encryption is invisible to them.
+TLS termination for [ioxide](https://github.com/MDA2AV/ioxide). Part of the `ioxide` package -
+there is nothing extra to install, and none of it loads unless you call it. The handshake runs
+through OpenSSL over the reactor's ring; after it, OpenSSL encrypts and decrypts in both
+directions by default. Kernel TLS transmit offload (`TlsOptions.KernelTx`) is opt-in, for the
+deployments where `sendfile` or NIC crypto pays for its constraints.
 
 ```csharp
 reactor.OnStart = r => TlsService.Start(r, new TlsOptions
@@ -16,13 +17,14 @@ reactor.Handle = async (r, conn) =>
 {
     TlsSession? tls = null;
     if (conn.ListenerPort == 8443)
-        tls = await r.GetService<TlsService>().AcceptAsync(conn);   // handshake + kTLS handoff
+        tls = await r.GetService<TlsService>().AcceptAsync(conn);   // handshake (+ kTLS handoff if opted in)
 
     // The first request can arrive with the handshake's final flight:
     if (tls != null) Feed(tls.DrainPlaintext());
 
     // ... send-first loop: respond to buffered requests before parking on a read ...
-    // outbound is plaintext (kernel encrypts); inbound decrypts via tls.Decrypt(ptr, len)
+    // outbound goes through tls.Write(conn, bytes) - correct in either backend;
+    // inbound decrypts via tls.Decrypt(ptr, len)
 };
 ```
 
@@ -31,19 +33,25 @@ the first.
 
 ## How it works
 
-- **Transmit** is offloaded to the kernel (kTLS TX): after the handshake the reactor's ordinary
-  io_uring sends carry plaintext and the kernel produces TLS records - no per-write crypto in
-  userspace, the heavy direction for an HTTP server.
-- **Receive** stays in userspace: inbound records decrypt through OpenSSL
-  (`TlsSession.Decrypt`). Requests are small, so this is cheap.
+- **By default OpenSSL owns both directions.** Responses go through `TlsSession.Write`, which
+  encrypts into the connection's write slab; inbound records decrypt through
+  `TlsSession.Decrypt`. No kernel module, TLS 1.2 and 1.3, any ciphersuite, session resumption
+  available (each reactor issues its own ticket keys, so a ticket resumes on the reactor that
+  minted it).
+- **`KernelTx = true`** hands transmit to the kernel (kTLS TX): the negotiated keys are
+  programmed into the socket and the reactor's ordinary io_uring sends carry plaintext the
+  kernel turns into records. `TlsSession.Write` stays correct - it writes plaintext straight to
+  the connection in this mode. The cost: the `tls` kernel module, TLS 1.3 only, one ciphersuite,
+  no resumption. The payoff is `sendfile` and NIC offload, not loopback throughput.
+- **`KernelRx = true`** (requires `KernelTx`, experimental) hands receive to the kernel as well;
+  see the `TlsOptions.KernelRx` doc for why it is a research toggle.
 - **The handshake** rides the ring like any other I/O: OpenSSL drives memory BIOs, the service
   pumps ciphertext through the connection's recv/send. Resumes inline on the reactor.
 
 ## Requirements
 
-- **Linux kTLS** - the `tls` kernel module (`modprobe tls`; standard on mainstream distros).
 - **OpenSSL 3** - present in the .NET runtime container images.
-- TLS 1.3 with `TLS_AES_128_GCM_SHA256`; ALPN selectable (default `http/1.1`); session tickets
-  disabled (they would desync the kTLS record sequence).
+- **Linux `tls` kernel module** - only for the kTLS opt-in (`modprobe tls`; standard on
+  mainstream distros).
 
 Ships in `ioxide`. MIT.

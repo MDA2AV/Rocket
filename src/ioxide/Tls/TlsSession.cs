@@ -1,11 +1,13 @@
 using System.IO.Pipelines;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 
 namespace ioxide.tls;
 
 /// <summary>
-/// The receive half of a TLS connection after the kTLS TX handoff: inbound bytes are still TLS
-/// records, decrypted here through OpenSSL. One session per connection, reactor-thread only.
+/// The per-connection TLS state once the handshake is done: OpenSSL decrypts inbound records and
+/// encrypts outbound ones, except for whichever direction was handed to the kernel (opt-in, see
+/// <see cref="TlsOptions.KernelTx"/>). One session per connection, reactor-thread only.
 /// </summary>
 public sealed unsafe class TlsSession : IDisposable
 {
@@ -22,7 +24,7 @@ public sealed unsafe class TlsSession : IDisposable
     private bool _disposed;
 
     private GCHandle _handle;   // roots this session so the keylog callback can reach it via SSL ex_data
-    private int _fd = -1;       // set once kTLS TX is enabled - the fd for the teardown close_notify
+    private int _fd = -1;       // the connection's fd - the teardown close_notify goes out on it
     private bool _txEnabled;
 
     /// <summary>The captured TLS 1.3 server traffic secret (set by the keylog callback during the handshake).</summary>
@@ -37,8 +39,9 @@ public sealed unsafe class TlsSession : IDisposable
     /// </summary>
     public bool KernelRx { get; private set; }
 
-    /// <summary>True when the kernel encrypts outbound records - the default. False means the
-    /// handler must go through <see cref="WriteEncrypted"/>.</summary>
+    /// <summary>True when the kernel encrypts outbound records - the opt-in, not the default.
+    /// Handlers do not branch on this: <see cref="Write"/> is correct either way, and this only
+    /// reports which path it takes.</summary>
     public bool KernelTx => _txEnabled;
 
     internal void MarkKernelRx() => KernelRx = true;
@@ -71,6 +74,8 @@ public sealed unsafe class TlsSession : IDisposable
     }
 
     internal void AttachHandle(GCHandle handle) => _handle = handle;
+
+    internal void AttachFd(int fd) => _fd = fd;
 
     internal void MarkTxEnabled(int fd)
     {
@@ -208,23 +213,30 @@ public sealed unsafe class TlsSession : IDisposable
     }
 
     /// <summary>
-    /// Encrypt <paramref name="plaintext"/> with OpenSSL and stage the records into the
-    /// connection's write slab. The counterpart to letting kTLS do it: use this when
-    /// <c>TlsOptions.KernelTx</c> is off and the socket carries no TLS ULP.
+    /// Stage <paramref name="plaintext"/> into the connection's write slab, correctly for whichever
+    /// backend this session ended up with: under kTLS TX it goes in as-is and the kernel makes the
+    /// records on send; otherwise OpenSSL encrypts here and the records go in. The one write call
+    /// that is right in both modes - handlers should not branch on <see cref="KernelTx"/>.
     /// </summary>
     /// <remarks>
-    /// This is where the extra copy the kTLS write path avoids actually lives. kTLS takes plaintext
-    /// straight into the slab and the kernel encrypts on send; here OpenSSL encrypts into its write
-    /// BIO first, and BIO_read then moves the records into the slab. Two passes over the bytes
-    /// instead of one - though BIO_read at least writes directly into the slab rather than through
-    /// an intermediate of ours.
+    /// The OpenSSL branch is where the extra copy the kTLS write path avoids actually lives:
+    /// OpenSSL encrypts into its write BIO first, and BIO_read then moves the records into the
+    /// slab. Two passes over the bytes instead of one - though BIO_read at least writes directly
+    /// into the slab rather than through an intermediate of ours.
     /// </remarks>
     public void Write(TcpConnection connection, ReadOnlySpan<byte> plaintext)
     {
-        // The one call that is correct in both modes. With kTLS the kernel makes the records, so
-        // the plaintext goes straight into the slab; without it OpenSSL has to encrypt first. A
-        // handler that picks the wrong one either sends cleartext or double-encrypts, and which is
-        // wrong depends on a flag it probably did not set - so it should not have to pick.
+        // Empty is a no-op either way. It must not reach SSL_write: zero-length is an error there,
+        // not a no-op, and a fixed over an empty span hands it a null pointer to boot.
+        if (plaintext.IsEmpty)
+        {
+            return;
+        }
+
+        // With kTLS the kernel makes the records, so the plaintext goes straight into the slab;
+        // without it OpenSSL has to encrypt first. A handler that picks the wrong one either sends
+        // cleartext or double-encrypts, and which is wrong depends on a flag it probably did not
+        // set - so it should not have to pick.
         if (KernelTx)
         {
             connection.Write(plaintext);
@@ -331,11 +343,22 @@ public sealed unsafe class TlsSession : IDisposable
         _disposed = true;
 
         // Clean server-side teardown: send close_notify so the peer can tell end-of-stream from a
-        // truncation. Skip if the peer already closed, or if kTLS TX was never enabled (no record path).
-        if (_txEnabled && !Closed)
+        // truncation, whichever backend owns the write side. Skip if the peer already closed.
+        if (!Closed && _fd >= 0)
         {
-            Ktls.SendCloseNotify(_fd);
+            if (_txEnabled)
+            {
+                Ktls.SendCloseNotify(_fd);
+            }
+            else
+            {
+                SendCloseNotifyOpenSsl();
+            }
         }
+
+        // The traffic secrets exist for the kTLS handoff; by teardown they are either programmed
+        // into the kernel (and zeroed there) or were never needed. Do not leave them on the heap.
+        ZeroSecrets();
 
         OpenSsl.SSL_free(_ssl);   // frees both BIOs
         if (_handle.IsAllocated)
@@ -343,4 +366,44 @@ public sealed unsafe class TlsSession : IDisposable
             _handle.Free();
         }
     }
+
+    internal void ZeroSecrets()
+    {
+        if (ServerSecret is not null)
+        {
+            CryptographicOperations.ZeroMemory(ServerSecret);
+            ServerSecret = null;
+        }
+        if (ClientSecret is not null)
+        {
+            CryptographicOperations.ZeroMemory(ClientSecret);
+            ClientSecret = null;
+        }
+    }
+
+    /// <summary>
+    /// Best-effort close_notify when OpenSSL owns the write side: SSL_shutdown produces the record
+    /// into the write BIO, and a plain send puts it on the wire. The mirror of
+    /// <see cref="Ktls.SendCloseNotify"/> - teardown-time, non-fatal, the peer may already be gone.
+    /// </summary>
+    private void SendCloseNotifyOpenSsl()
+    {
+        if (OpenSsl.SSL_shutdown(_ssl) < 0)
+        {
+            return;
+        }
+
+        // A TLS 1.3 close_notify record is ~24 bytes: 5 header + 2 alert + 1 inner type + 16 tag.
+        byte* record = stackalloc byte[64];
+        int n = OpenSsl.BIO_read(_wbio, record, 64);
+        if (n > 0)
+        {
+            _ = send(_fd, record, (nuint)n, MSG_NOSIGNAL);
+        }
+    }
+
+    private const int MSG_NOSIGNAL = 0x4000;   // a dead peer must not SIGPIPE the process
+
+    [DllImport("libc")]
+    private static extern nint send(int sockfd, byte* buf, nuint len, int flags);
 }

@@ -42,8 +42,9 @@
   <main class="doc">
     <h1>TLS</h1>
     <p class="lead">ioxide gives you two ways to serve TLS, with a deliberate trade-off between
-    them. <b>kTLS</b> (<code>ioxide.tls</code>) is the fast path: the handshake runs over the ring
-    and the kernel encrypts your responses, zero-copy. <b>SslStream</b> over
+    them. <b><code>ioxide.tls</code></b> is the native path: the handshake runs over the ring,
+    OpenSSL does the record crypto in both directions by default, and kernel TLS transmit offload
+    is one flag away for the deployments that can use it. <b>SslStream</b> over
     <code>ConnectionStream</code> is the portable path: fully managed, full-featured, and a bit
     slower. Both terminate on a <a href="multiport.html">dedicated port</a> and need nothing from
     the core engine beyond what is already public - and both ship <b>inside the <code>ioxide</code>
@@ -54,13 +55,13 @@
     hand-off work is in <a href="dev-tls.html">ioxide.tls internals</a>.</div>
 
     <table>
-      <tr><th></th><th>kTLS (<code>ioxide.tls</code>)</th><th>SslStream + <code>ConnectionStream</code></th></tr>
-      <tr><td>crypto</td><td>kernel transmit offload</td><td>fully managed</td></tr>
-      <tr><td>copies</td><td>zero-copy send</td><td>buffered both ways</td></tr>
-      <tr><td>TLS versions</td><td>1.3 only</td><td>1.2 and 1.3</td></tr>
-      <tr><td>features</td><td>ALPN</td><td>client certs, resumption, everything</td></tr>
-      <tr><td>dependency</td><td>Linux <code>tls</code> module + OpenSSL 3</td><td>none - portable</td></tr>
-      <tr><td>throughput</td><td>baseline</td><td>~0.65&times; of kTLS (measured)</td></tr>
+      <tr><th></th><th><code>ioxide.tls</code></th><th>SslStream + <code>ConnectionStream</code></th></tr>
+      <tr><td>crypto</td><td>OpenSSL; kernel TX offload opt-in</td><td>fully managed</td></tr>
+      <tr><td>copies</td><td>one staged copy; zero-copy send under kTLS TX</td><td>buffered both ways</td></tr>
+      <tr><td>TLS versions</td><td>1.2 and 1.3 (1.3 only under kTLS)</td><td>1.2 and 1.3</td></tr>
+      <tr><td>features</td><td>ALPN; resumption in the default mode (tickets are per-reactor)</td><td>client certs, resumption, everything</td></tr>
+      <tr><td>dependency</td><td>OpenSSL 3 (<code>tls</code> module only for kTLS)</td><td>none - portable</td></tr>
+      <tr><td>throughput</td><td>baseline</td><td>~0.65&times; (measured)</td></tr>
       <tr><td>role</td><td><b>fast path</b></td><td><b>compatibility path</b></td></tr>
     </table>
 
@@ -80,7 +81,7 @@
       small, so this is cheap; the heavy direction (responses) is the one the kernel handles.</li>
     </ul>
 
-    <h2>kTLS: setup</h2>
+    <h2>Setup</h2>
     <p>Open a TLS listener with <a href="multiport.html"><code>ExtraPorts</code></a> and start a
     <code>TlsService</code> per reactor from <code>OnStart</code> (same pattern as any client):</p>
 <pre><code class="language-csharp">var config = new ServerConfig
@@ -98,10 +99,11 @@ var options = new TlsOptions
 
 reactor.OnStart = r =&gt; TlsService.Start(r, options);</code></pre>
 
-    <h2>kTLS: the handler</h2>
-    <p>Branch on the listener port. <code>AcceptAsync</code> runs the handshake and the kTLS
-    hand-off, returning a <code>TlsSession</code> for the receive side. After that, writes are
-    plaintext (the kernel encrypts) and each inbound slice is decrypted through the session.</p>
+    <h2>The handler</h2>
+    <p>Branch on the listener port. <code>AcceptAsync</code> runs the handshake - and the kTLS
+    hand-off, where you opted in - returning a <code>TlsSession</code>. After that, responses go
+    through <code>tls.Write</code>, which is correct in either backend, and each inbound slice is
+    decrypted through the session.</p>
 <pre><code class="language-csharp">reactor.TcpHandle = async (r, conn) =&gt;
 {
     TlsSession? tls = null;
@@ -132,7 +134,8 @@ reactor.OnStart = r =&gt; TlsService.Start(r, options);</code></pre>
             // is two responses to one request. Feed() above is doing the accumulating.
             while (TakeOneRequest())
             {
-                conn.Write(response);      // plaintext in; the kernel makes the records
+                if (tls is null) conn.Write(response);   // the plaintext port
+                else tls.Write(conn, response);          // correct in either TLS backend
             }
             await conn.FlushAsync();       // ordinary io_uring send, once per batch
 
@@ -148,8 +151,9 @@ reactor.OnStart = r =&gt; TlsService.Start(r, options);</code></pre>
     parking on the next read. Second, <b>MSG_WAITALL.</b> The reactor normally sets
     <code>MSG_WAITALL</code> on sends so the kernel coalesces short writes into one completion -
     but kTLS rejects that flag (EOPNOTSUPP). <code>ioxide.tls</code> clears the connection's
-    <code>SendOpFlags</code> after the hand-off; the reactor's partial-send loop keeps correctness
-    without it. You do not have to think about either - the handler above is the whole contract.</p>
+    <code>SendOpFlags</code> when kTLS TX is opted in; the reactor's partial-send loop keeps
+    correctness without it. You do not have to think about either - the handler above is the whole
+    contract.</p>
 
     <h2>kTLS: how the hand-off works</h2>
     <p>After <code>SSL_accept</code> completes over the memory BIOs, <code>AcceptAsync</code>:</p>
