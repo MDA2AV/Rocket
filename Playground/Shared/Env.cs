@@ -23,4 +23,25 @@ public static class Env
 
     public static bool Flag(string name)
         => Environment.GetEnvironmentVariable(name) == "1";
+
+    /// <summary>
+    /// Apply the harness overrides to a sample's knobs, in one call, so the sample itself can
+    /// declare them as plain literals you edit.
+    ///
+    /// The knobs are the sample's real configuration; this exists only because bench/run.sh and
+    /// the Dockerfile drive every sample from the outside. Delete the call when you copy a sample
+    /// out - the literals above it are the whole configuration and nothing else reads these.
+    /// </summary>
+    public static void Override(ref ushort port, ref int reactors)
+    {
+        port = Port("PLAYGROUND_PORT", port);
+        reactors = Int("PLAYGROUND_REACTORS", reactors);
+    }
+
+    /// <inheritdoc cref="Override(ref ushort, ref int)"/>
+    public static void Override(ref ushort port, ref int reactors, ref int bodyBytes)
+    {
+        Override(ref port, ref reactors);
+        bodyBytes = Int("PLAYGROUND_BODY", bodyBytes);
+    }
 }

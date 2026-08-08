@@ -37,16 +37,30 @@ using Playground.Shared;
 //  generated. PLAYGROUND_BODY sizes the response. Needs: ioxide
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-(string certPath, string keyPath) = QuicCert.Ensure(
-    Env.StrOrNull("PLAYGROUND_TLS_CERT"),
-    Env.StrOrNull("PLAYGROUND_TLS_KEY"));
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+// Edit these. That is the whole mechanism - there is no config file and nothing else to find.
+// Env.Override exists only so bench/run.sh can drive the sample from outside; delete that line
+// when you copy this out and the literals above it are the entire configuration.
+
+ushort port      = 8443;                        // https://127.0.0.1:8443/
+int    reactors  = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+int    bodyBytes = 8 * 1024;                    // TLS cost is per-byte, so a 2-byte "ok" would hide it
+
+Env.Override(ref port, ref reactors, ref bodyBytes);
+
+// A real PEM pair, or null to generate a self-signed localhost cert on first run.
+string? certOverride = null;
+string? keyOverride  = null;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+(string certPath, string keyPath) = QuicCert.Ensure(certOverride, keyOverride);
 
 var config = new ServerConfig
 {
-    ReactorCount = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
+    ReactorCount = reactors,
     Tcp = new TcpOptions
     {
-        Port = Env.Port("PLAYGROUND_PORT", 8443),
+        Port = port,
     },
 };
 
@@ -59,17 +73,15 @@ var tlsOptions = new TlsOptions
     KeyPath         = keyPath,
 };
 
-// A medium fixed response, built once. TLS cost is per-byte, so "ok" would hide it.
-int bodySize = Env.Int("PLAYGROUND_BODY", 8 * 1024);
-byte[] body = new byte[bodySize];
+byte[] body = new byte[bodyBytes];
 ReadOnlySpan<byte> fill = "ioxide-ktls-payload "u8;
-for (int i = 0; i < bodySize; i++)
+for (int i = 0; i < bodyBytes; i++)
 {
     body[i] = fill[i % fill.Length];
 }
 byte[] response =
 [
-    .. Encoding.ASCII.GetBytes($"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {bodySize}\r\n\r\n"),
+    .. Encoding.ASCII.GetBytes($"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {bodyBytes}\r\n\r\n"),
     .. body,
 ];
 
@@ -148,7 +160,7 @@ for (int i = 0; i < threads.Length; i++)
 }
 
 Console.WriteLine($"[tls-openssl] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
-                + $"{bodySize}-byte body, cert {certPath}, no kernel TLS");
+                + $"{bodyBytes}-byte body, cert {certPath}, no kernel TLS");
 
 foreach (Thread thread in threads)
 {

@@ -6,15 +6,14 @@ using ioxide.tls;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  tls-pipes - TLS served through an IDuplexPipe, and the point of the sample is what ISN'T here.
+//  tls-ktls-pipes - TLS served through an IDuplexPipe, with kernel TLS doing the crypto.
 //
-//      dotnet run -c Release --project Playground/Tls/Pipes                    # kTLS
-//      PLAYGROUND_NO_KTLS_TX=1 dotnet run -c Release --project Playground/Tls/Pipes   # OpenSSL
+//      sudo modprobe tls        # kTLS needs the module
 //      curl -ks https://127.0.0.1:8443/ | head -c 40
 //
-//  Those two commands run the SAME handler code. Not similar - identical. The only difference is
-//  one TlsOptions flag, and no branch below it: no "if kernel then write plaintext else encrypt",
-//  no second pipe type, no separate loop.
+//  The read/serve loop below is byte-for-byte identical to Playground/Tls/OpenSslPipes - diff
+//  them and the only functional difference is the KernelTx line, the rest being the banner and
+//  the log tag.
 //
 //  TlsConnectionDualPipe composes rather than implements. Each direction has two possible halves:
 //
@@ -29,24 +28,37 @@ using Playground.Shared;
 //  It picks them from the SESSION, not from configuration - because the two are not the same
 //  thing. TlsOptions is intent; TlsService decides per connection at the handoff, and a handshake
 //  that left a partial record cannot hand off to kTLS RX at all, so that connection keeps the
-//  userspace reader whatever the config said. TlsSession reports what actually happened, and that
-//  is what the pipe reads.
+//  userspace reader whatever the config said. TlsSession reports what actually happened.
 //
-//  Compare Playground/Tls/Ktls and Playground/Tls/OpenSsl, which serve the same responses off the
-//  RAW ring. Those two differ in the handler, because at that level the backend is visible: kTLS
-//  writes plaintext, OpenSSL calls WriteEncrypted. Here it is not. Needs: ioxide
+//  Compare the raw-ring pair, Playground/Tls/Ktls and Playground/Tls/OpenSsl. Those two DO differ
+//  in the handler, because at that level the backend is visible: kTLS writes plaintext, OpenSSL
+//  calls WriteEncrypted. Over a pipe it is not. Needs: ioxide
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-(string certPath, string keyPath) = QuicCert.Ensure(
-    Env.StrOrNull("PLAYGROUND_TLS_CERT"),
-    Env.StrOrNull("PLAYGROUND_TLS_KEY"));
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+// Edit these. That is the whole mechanism - there is no config file and nothing else to find.
+// Env.Override exists only so bench/run.sh can drive the sample from outside; delete that line
+// when you copy this out and the literals above it are the entire configuration.
+
+ushort port      = 8443;                        // https://127.0.0.1:8443/
+int    reactors  = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+int    bodyBytes = 8 * 1024;                    // TLS cost is per-byte, so a 2-byte "ok" would hide it
+
+Env.Override(ref port, ref reactors, ref bodyBytes);
+
+// A real PEM pair, or null to generate a self-signed localhost cert on first run.
+string? certOverride = null;
+string? keyOverride  = null;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+(string certPath, string keyPath) = QuicCert.Ensure(certOverride, keyOverride);
 
 var config = new ServerConfig
 {
-    ReactorCount = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
+    ReactorCount = reactors,
     Tcp = new TcpOptions
     {
-        Port = Env.Port("PLAYGROUND_PORT", 8443),
+        Port = port,
     },
 };
 
@@ -55,21 +67,21 @@ var tlsOptions = new TlsOptions
     CertificatePath = certPath,
     KeyPath = keyPath,
 
-    // The only line that changes between the two runs above.
-    KernelTx = !Env.Flag("PLAYGROUND_NO_KTLS_TX"),
+    // The default. The kernel encrypts outbound records; see Playground/Tls/OpenSslPipes for the
+    // same server with this line flipped.
+    KernelTx = true,
 };
 
-int bodySize = Env.Int("PLAYGROUND_BODY", 8 * 1024);
-byte[] body = new byte[bodySize];
+byte[] body = new byte[bodyBytes];
 "ioxide-tls-pipes "u8.CopyTo(body);
-for (int i = "ioxide-tls-pipes "u8.Length; i < bodySize; i++)
+for (int i = "ioxide-tls-pipes "u8.Length; i < bodyBytes; i++)
 {
     body[i] = (byte)('a' + (i % 26));
 }
 
 byte[] response =
 [
-    .. Encoding.ASCII.GetBytes($"HTTP/1.1 200 OK\r\nContent-Length: {bodySize}\r\n\r\n"),
+    .. Encoding.ASCII.GetBytes($"HTTP/1.1 200 OK\r\nContent-Length: {bodyBytes}\r\n\r\n"),
     .. body,
 ];
 
@@ -129,7 +141,7 @@ for (int i = 0; i < threads.Length; i++)
         }
         catch (Exception e)
         {
-            Console.Error.WriteLine($"[tls-pipes] connection failed: {e.Message}");
+            Console.Error.WriteLine($"[tls-ktls-pipes] connection failed: {e.Message}");
         }
         finally
         {
@@ -142,8 +154,8 @@ for (int i = 0; i < threads.Length; i++)
     threads[i].Start();
 }
 
-Console.WriteLine($"[tls-pipes] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
-                + $"{bodySize}-byte body, tx={(tlsOptions.KernelTx ? "kernel" : "openssl")}");
+Console.WriteLine($"[tls-ktls-pipes] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
+                + $"{bodyBytes}-byte body, tx={(tlsOptions.KernelTx ? "kernel" : "openssl")}");
 
 foreach (Thread thread in threads)
 {

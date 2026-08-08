@@ -6,8 +6,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <RootNamespace>Playground.Tls.Pipes</RootNamespace>
-    <AssemblyName>Playground.Tls.Pipes</AssemblyName>
+    <RootNamespace>Playground.Tls.OpenSslPipes</RootNamespace>
+    <AssemblyName>Playground.Tls.OpenSslPipes</AssemblyName>
   </PropertyGroup>
 
   <ItemGroup>
