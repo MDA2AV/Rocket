@@ -66,14 +66,17 @@ var result = await pool.QueryAsync("SELECT 42");
 
 // result.Value: "42" · result.Rows: 1 · result.CommandTag: "SELECT 1"</code></pre>
 
-    <p>One <code>PgConnection</code> is one conversation - one query in flight. The pool is the
-    concurrency: <code>QueryAsync</code> rents a connection, runs the query, returns it; when all
-    are busy, requests queue and resume inline as connections free up. For multi-statement work
-    (transactions), <code>RentAsync</code>/<code>Return</code> directly.</p>
+    <p>One <code>PgConnection</code> is one ordered conversation, and commands <em>pipeline</em>
+    onto it - many in flight at once, answered in order. <code>QueryAsync</code> picks the next
+    connection round-robin; the pool is parallelism, not exclusive checkout, and there is no
+    rent/return surface. That also means a transaction must not be split across
+    <code>QueryAsync</code> calls - other handlers' queries interleave on the same connection.
+    Keep it in one SQL string (<code>BEGIN; …; COMMIT</code>), which travels as one simple-query
+    message and runs as one unit.</p>
 
     <p>Warmup is concurrent and non-blocking: <code>Start</code> fires <code>PoolSize</code>
-    ring-native connects; a request that arrives first simply waits in the rent queue until the
-    first connection lands. Total server-side connections = <code>PoolSize × ReactorCount</code>.</p>
+    ring-native connects; a request that arrives first simply queues until the first connection
+    lands. Total server-side connections = <code>PoolSize × ReactorCount</code>.</p>
 
     <h2>Failure semantics</h2>
     <table>

@@ -5,16 +5,17 @@ using ioxide.ngtcp2;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  proxy h3->h2 - an HTTP/3 front door for an HTTP/2 (h2c) upstream. The shape of Proxy.H3ToH1
+//  proxy h3->h2 - an HTTP/3 front door for an HTTP/2 upstream. The shape of Proxy.H3ToH1
 //  with the upstream pool swapped: requests multiplex onto a single HTTP/2 connection instead of
 //  taking keep-alive h1 connections, so concurrent h3 requests share one upstream socket. Both
 //  hops still live on one reactor thread, and the frontend is QUIC-only (Tcp = null).
 //
-//  h2c is cleartext HTTP/2 with prior knowledge - the upstream must already speak it, e.g.:
+//  The upstream speaks h2 over TLS - chosen by ALPN, certificate verified (the playground's own
+//  self-signed cert is trusted by default). The Http2/Tls sample makes a ready origin:
 //
-//      docker run --rm -p 8081:8081 nginx ...        # nginx.conf: listen 8081; http2 on;
+//      PLAYGROUND_PORT=8444 dotnet run -c Release --project Playground/Http2/Tls
 //      dotnet run -c Release --project Playground/Proxy/H3ToH2
-//      curl --http3-only -ks https://127.0.0.1:8443/index.html
+//      curl --http3-only -ks https://127.0.0.1:8443/
 //
 //  Needs: ioxide.ngtcp2, ioxide.nghttp3, ioxide.httpclient
 // ─────────────────────────────────────────────────────────────────────────────────────────────

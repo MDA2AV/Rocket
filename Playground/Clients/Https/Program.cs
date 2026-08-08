@@ -16,7 +16,7 @@ using Playground.Shared;
 //  every other I/O here, and the response resumes this handler inline on its own thread.
 //
 //  Unlike the server side, none of this needs kTLS - nothing is offloaded to the kernel, so it
-//  runs without 'modprobe tls'. Needs: ioxide, ioxide.tls, ioxide.httpclient
+//  runs without 'modprobe tls'. Needs: ioxide, ioxide.httpclient
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 // ── Knobs ────────────────────────────────────────────────────────────────────────────────────

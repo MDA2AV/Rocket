@@ -17,11 +17,11 @@ Run any of them with `dotnet run -c Release --project Playground/<Group>/<Name>`
 | [`Tcp.TaskRun`](Tcp/TaskRun/Program.cs) | 84 | Awaiting ordinary thread-pool work and still resuming on the reactor. | `ioxide` |
 | [`Tcp.Incremental`](Tcp/Incremental/Program.cs) | 95 | `Tcp.Raw` with the per-connection buffer-ring mode - one config block is the whole diff. Kernel 6.12+. | `ioxide` |
 | [`Tcp.Big`](Tcp/Big/Program.cs) | 101 | The write path under a 100 KB body: `SEND_ZC`, slab overflow (`grow` vs `seg`), checksum-able output. | `ioxide` |
-| [`Tls.Ktls`](Tls/Ktls/Program.cs) | 172 | OpenSSL handshake on the ring, then **kernel TLS** transmit - the handler writes plaintext. | `ioxide` |
-| [`Tls.OpenSsl`](Tls/OpenSsl/Program.cs) | 194 | The same server with kernel TLS **off**: OpenSSL both ways, no `modprobe tls`, and TLS 1.2 / any suite / resumption come back. | `ioxide` |
+| [`Tls.Ktls`](Tls/Ktls/Program.cs) | 172 | The **kernel TLS** opt-in: after the handshake the kernel owns transmit and the handler writes plaintext. `modprobe tls`. | `ioxide` |
+| [`Tls.OpenSsl`](Tls/OpenSsl/Program.cs) | 194 | **The default**: OpenSSL both ways - no kernel module, and TLS 1.2 / any suite / resumption. | `ioxide` |
 | [`Tls.KtlsPipes`](Tls/KtlsPipes/Program.cs) | 163 | kTLS served through an `IDuplexPipe`. | `ioxide` |
 | [`Tls.OpenSslPipes`](Tls/OpenSslPipes/Program.cs) | 164 | The same, with OpenSSL. Its serve loop is byte-identical to `Tls.KtlsPipes` - over a pipe the backend is invisible. | `ioxide` |
-| [`Tls.SslStream`](Tls/SslStream/Program.cs) | 100 | The BCL `SslStream` over `TcpConnectionStream` - portable userspace TLS, the kTLS comparison point. | `ioxide` |
+| [`Tls.SslStream`](Tls/SslStream/Program.cs) | 100 | The BCL `SslStream` over `TcpConnectionStream` - portable userspace TLS, the comparison point. | `ioxide` |
 | [`Http2.Nghttp2`](Http2/Nghttp2/Program.cs) | 66 | HTTP/2 (h2c, prior knowledge) with nghttp2 doing framing, HPACK and flow control. | `ioxide.nghttp2` |
 | [`Http2.Managed`](Http2/Managed/Program.cs) | 66 | The same server with **zero native code** - framing, HPACK and flow control in C#. Drop-in for the above. | `ioxide.http2` |
 | [`Http2.Tls`](Http2/Tls/Program.cs) | 132 | h2 **and** http/1.1 on one port, chosen by ALPN. The HTTP/2 code is unchanged - only the pipe differs. | `ioxide.nghttp2` |
@@ -29,12 +29,12 @@ Run any of them with `dotnet run -c Release --project Playground/<Group>/<Name>`
 | [`Http3.Nghttp3`](Http3/Nghttp3/Program.cs) | 169 | HTTP/3 with **streamed** dispatch, and a `SIGTERM` GOAWAY drain. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
 | [`Http3.Buffered`](Http3/Buffered/Program.cs) | 146 | The same server with **buffered** dispatch - one method call is the whole difference. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
 | [`Quic.Alpn`](Quic/Alpn/Program.cs) | 111 | One QUIC listener, two protocols by ALPN: h3, or raw stream echo over the dual pipe. QUIC-only - `Tcp = null`. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
-| [`Proxy.H1ToH1`](Proxy/H1ToH1/Program.cs) | 207 | TLS both hops, and the one to read first - kTLS in, `TlsClientContext` out. Everything else here is this with one type changed. | `ioxide.httpclient` |
+| [`Proxy.H1ToH1`](Proxy/H1ToH1/Program.cs) | 207 | TLS both hops, and the one to read first - ioxide TLS in, `TlsClientContext` out. Everything else here is this with one type changed. | `ioxide.httpclient` |
 | [`Proxy.H1ToH2`](Proxy/H1ToH2/Program.cs) | 208 | The same frontend, h2 upstream chosen by ALPN: `PoolSize` 1 carries every concurrent request. | `ioxide.httpclient` |
 | [`Proxy.H1ToH3`](Proxy/H1ToH3/Program.cs) | 196 | h1 in, h3 out. The upstream takes no TLS options at all - QUIC has no cleartext mode, and no `Quic` config is needed to be a client. | `ioxide.httpclient` |
 | [`Proxy.H2ToH1`](Proxy/H2ToH1/Program.cs) | 171 | The classic edge: h2 over TLS in (browsers refuse h2c), h1 origin behind. The one combination whose pool must size for concurrency. | `ioxide.nghttp2`, `ioxide.httpclient` |
 | [`Proxy.H2ToH2`](Proxy/H2ToH2/Program.cs) | 164 | h2 both sides - two sockets per reactor whatever the load. Two HPACK tables that cannot be spliced, and now two keys. | `ioxide.nghttp2`, `ioxide.httpclient` |
-| [`Proxy.H2ToH3`](Proxy/H2ToH3/Program.cs) | 150 | The protocol-translating edge: kTLS on TCP in, QUIC out, encrypted end to end by two completely different mechanisms. | `ioxide.nghttp2`, `ioxide.httpclient` |
+| [`Proxy.H2ToH3`](Proxy/H2ToH3/Program.cs) | 150 | The protocol-translating edge: TLS on TCP in, QUIC out, encrypted end to end by two completely different mechanisms. | `ioxide.nghttp2`, `ioxide.httpclient` |
 | [`Proxy.H3ToH1`](Proxy/H3ToH1/Program.cs) | 129 | HTTP/3 front door, TLS h1 upstream. `Tcp = null`, so every TCP socket the process owns is an outbound TLS one. | `ioxide.ngtcp2`, `ioxide.nghttp3`, `ioxide.httpclient` |
 | [`Proxy.H3ToH2`](Proxy/H3ToH2/Program.cs) | 127 | The same proxy with the upstream pool swapped: requests multiplex onto one h2-over-TLS connection. | `ioxide.ngtcp2`, `ioxide.nghttp3`, `ioxide.httpclient` |
 | [`Proxy.H3ToH3`](Proxy/H3ToH3/Program.cs) | 111 | The one that needed no TLS wiring at either end - QUIC has no cleartext mode, so both hops are TLS 1.3 by construction. | `ioxide.ngtcp2`, `ioxide.nghttp3`, `ioxide.httpclient` |
@@ -142,12 +142,13 @@ Nine samples, one per frontend x upstream combination: the frontend protocol is 
 pool type (`HttpClientPool`, `Http2ClientPool`, `Http3ClientPool`). Nothing else differs, which
 is the point.
 
-**Every hop is TLS.** Facing, that is kTLS for the h1 and h2 frontends (`modprobe tls`) and QUIC's
-own TLS 1.3 for the h3 ones; upstream, a `TlsClientContext` for h1 and h2 and again QUIC for h3.
-The h2 frontends offer only `h2` in ALPN, which is what makes them reachable from a browser at all.
+**Every hop is TLS.** Facing, that is ioxide's own termination for the h1 and h2 frontends -
+OpenSSL both ways by default, no kernel module - and QUIC's own TLS 1.3 for the h3 ones;
+upstream, a `TlsClientContext` for h1 and h2 and again QUIC for h3. The h2 frontends offer only
+`h2` in ALPN, which is what makes them reachable from a browser at all.
 
-Each needs a **TLS** origin to forward to on `PLAYGROUND_UPSTREAM_PORT` - `Tls.Ktls` for an h1
-upstream, `Http2.Tls` for h2, `Http3.Nghttp3` for h3. They verify its certificate against the same
+Each needs a **TLS** origin to forward to on `PLAYGROUND_UPSTREAM_PORT` - `Tls/OpenSsl` for an h1
+upstream, `Http2/Tls` for h2, `Http3/Nghttp3` for h3. They verify its certificate against the same
 self-signed cert they serve, so they work against each other out of the box. With nothing listening
 they answer `502` once the acquire timeout elapses, and a certificate that does not verify arrives
 the same way.
@@ -155,7 +156,7 @@ the same way.
 ## Docker
 
 `Playground/Dockerfile` builds one image per sample, selected with `--build-arg SAMPLE=<path>` from
-the repo root - `Tcp/Raw`, `Clients.Pg`, `Http3.Nghttp3` and so on, matching the directory layout. Publish
+the repo root - `Tcp/Raw`, `Clients/Pg`, `Http3/Nghttp3` and so on, matching the directory layout. Publish
 `8080/tcp`, and `8443/udp` as well for the HTTP/3 samples.
 
 io_uring pins memory, so a container running many reactors may need `--ulimit memlock=-1:-1`.

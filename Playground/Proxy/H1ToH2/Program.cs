@@ -18,12 +18,11 @@ using Playground.Shared;
 //      dotnet run -c Release --project Playground/Proxy/H1ToH2
 //      curl -k https://127.0.0.1:8443/
 //
-//  Two different TLS stacks are in play and they are not symmetric. INBOUND is kTLS: the OpenSSL
-//  handshake runs over the ring, then the kernel takes over transmit, so everything this handler
-//  writes is PLAINTEXT and the kernel makes the records. OUTBOUND is userspace: the pool wraps
-//  each upstream connection in its own TlsClientStream. Neither shows up in the proxying code.
+//  Two TLS stacks are in play. INBOUND is ioxide's own termination, OpenSSL in both directions
+//  by default. OUTBOUND is the client pool's: each upstream connection wraps its own
+//  TlsClientStream. Neither shows up in the proxying code.
 //
-//  Needs the Linux 'tls' module (sudo modprobe tls). Needs: ioxide, ioxide.httpclient
+//  Needs: ioxide, ioxide.httpclient
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 (string certPath, string keyPath) = QuicCert.Ensure(
@@ -92,8 +91,7 @@ for (int i = 0; i < threads.Length; i++)
 
         try
         {
-            // The handshake reads and writes through this same connection; after it, the socket
-            // carries kTLS records the kernel en/decrypts.
+            // The handshake reads and writes through this same connection.
             tls = await r.GetService<TlsService>().AcceptAsync(conn);
 
             // A request can ride in with the handshake's final flight - answer it before parking
@@ -158,8 +156,8 @@ foreach (Thread thread in threads)
     thread.Join();
 }
 
-// One request out, one response back. Everything written here is PLAINTEXT: after the handshake
-// kTLS owns transmit, so there is nothing left for us to wrap.
+// One request out, one response back. tls.Write encrypts correctly whichever backend the
+// session ended up with.
 static async ValueTask ProxyAsync(TcpConnection conn, TlsSession tls, Http2ClientPool client, string path)
 {
     try

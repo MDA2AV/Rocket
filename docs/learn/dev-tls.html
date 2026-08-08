@@ -41,17 +41,21 @@
 
   <main class="doc">
     <h1>TLS internals</h1>
-    <p class="lead"><code>ioxide.tls</code> terminates TLS 1.3 with a deliberate split: the handshake
-    and inbound records go through OpenSSL in userspace, while outbound bulk is offloaded to the kernel
-    (kTLS) so responses are encrypted inline on the io_uring send - zero-copy, no managed crypto.
-    Requests are small and responses big, so the kernel does the heavy direction.</p>
+    <p class="lead"><code>ioxide.tls</code> terminates TLS with OpenSSL in both directions by
+    default: the handshake runs over memory BIOs, inbound records decrypt in userspace, and
+    responses are encrypted before they reach the write slab. Kernel TLS is a per-direction
+    opt-in (<code>TlsOptions.KernelTx</code> / <code>KernelRx</code>) for the deployments where
+    <code>sendfile</code> or NIC offload pays for its constraints.</p>
 
     <h2>TlsService &middot; <span class="dim">TlsService.cs</span></h2>
     <p>Per-reactor TLS termination, holding one <code>SSL_CTX</code> shared across that reactor's
-    connections (created in <code>OnStart</code>). The context is TLS 1.3 only, one suite
-    (<code>TLS_AES_128_GCM_SHA256</code> - kTLS needs a known key layout), with session tickets
-    disabled (they would advance the server's record sequence after the handshake and break the kTLS
-    handoff, which programs sequence 0).</p>
+    connections (created in <code>OnStart</code>). By default the context keeps OpenSSL's own
+    posture - TLS 1.2 and 1.3, any ciphersuite, session tickets on. Only when
+    <code>KernelTx</code> opts into kTLS is it pinned to TLS 1.3 with
+    <code>TLS_AES_128_GCM_SHA256</code> and tickets disabled: the kernel needs a known key layout,
+    and a ticket would advance the record sequence after the handshake and break the handoff.
+    Asking for <code>KernelRx</code> without <code>KernelTx</code> is refused at
+    <code>Start</code> - RX shares the ULP the TX handoff installs.</p>
 
     <h3>The handshake</h3>
     <p><code>AcceptAsync</code> drives a standard memory-BIO server handshake as an ordinary reactor
@@ -80,14 +84,16 @@
 }</code></pre>
 
     <h3>Per-session secret via ex_data (no global map)</h3>
-    <p>kTLS keys are derived from the TLS 1.3 server traffic secret, which OpenSSL surfaces through a
-    keylog callback. The callback is a static function pointer with no instance, so to find the right
-    session it reads a <code>GCHandle</code> to the <code>TlsSession</code> stored on the
-    <code>SSL</code> via <code>SSL_set_ex_data</code> / <code>SSL_get_ex_data</code> (the index
-    allocated once with <code>CRYPTO_get_ex_new_index</code>). The callback parses
-    <code>SERVER_TRAFFIC_SECRET_0</code> and stores it on that session directly - no process-global,
-    recycled-pointer-keyed map, so two reactors that get the same recycled <code>SSL</code> address
-    can't collide. The handle is freed on <code>TlsSession.Dispose</code>.</p>
+    <p>kTLS keys are derived from the TLS 1.3 traffic secrets (server for TX, client for RX), which
+    OpenSSL surfaces through a keylog callback. The callback is a static function pointer with no
+    instance, so to find the right session it reads a <code>GCHandle</code> to the
+    <code>TlsSession</code> stored on the <code>SSL</code> via <code>SSL_set_ex_data</code> /
+    <code>SSL_get_ex_data</code> (the index allocated once with
+    <code>CRYPTO_get_ex_new_index</code>), and stores the secret on that session directly - no
+    process-global, recycled-pointer-keyed map, so two reactors that get the same recycled
+    <code>SSL</code> address can't collide. On every path that does not program the kernel the
+    secrets are zeroed at the handoff decision, and again on <code>TlsSession.Dispose</code>,
+    which also frees the handle.</p>
 <p class="src"><b>TlsService.cs</b> · one ex_data index, allocated once; each SSL* carries a GCHandle to its session</p>
 <pre><code class="language-csharp">private static readonly int SslSessionIndex =
     OpenSsl.CRYPTO_get_ex_new_index(OpenSsl.CRYPTO_EX_INDEX_SSL, 0, 0, 0, 0, 0);
@@ -101,7 +107,12 @@ session.AttachHandle(handle);</code></pre>
 private static void KeylogCallback(nint ssl, nint line)
 {
     string? text = Marshal.PtrToStringUTF8(line);
-    if (text == null || !text.StartsWith("SERVER_TRAFFIC_SECRET_0 ", StringComparison.Ordinal))
+    if (text == null)
+        return;
+
+    bool server = text.StartsWith("SERVER_TRAFFIC_SECRET_0 ", StringComparison.Ordinal);
+    bool client = text.StartsWith("CLIENT_TRAFFIC_SECRET_0 ", StringComparison.Ordinal);
+    if (!server &amp;&amp; !client)
         return;
 
     nint data = OpenSsl.SSL_get_ex_data(ssl, SslSessionIndex);
@@ -121,30 +132,36 @@ private static void KeylogCallback(nint ssl, nint line)
     hard-coded. The callback finds it in the client's offer list and points <code>*out</code> into the
     client buffer.</p>
 
-    <h3>The kTLS handoff</h3>
-    <p>Once the handshake is done and all server flights are flushed, <code>Ktls.EnableTx</code>
-    programs the TX keys into the socket and <code>conn.SendOpFlags = 0</code> clears
-    <code>MSG_WAITALL</code> (kTLS rejects it; the reactor's partial-send loop preserves correctness).
-    From the next write on, the handler writes <em>plaintext</em> through <code>conn.Write</code> /
-    <code>FlushAsync</code> and the kernel produces the records on the io_uring send path. Faults are
-    surfaced (a missing kernel <code>tls</code> module shows up as a logged handshake failure rather
-    than a silent drop).</p>
+    <h3>The kTLS handoff (opt-in)</h3>
+    <p>With <code>KernelTx</code> on, once the handshake is done and all server flights are
+    flushed, <code>Ktls.EnableTx</code> programs the TX keys into the socket and
+    <code>conn.SendOpFlags = 0</code> clears <code>MSG_WAITALL</code> (kTLS rejects it; the
+    reactor's partial-send loop preserves correctness). From the next write on the kernel produces
+    the records - which is what makes the kTLS samples' bare <code>conn.Write</code> legal there
+    and nowhere else. <code>TlsSession.Write</code> is correct in either mode, which is why every
+    other sample goes through it. With <code>KernelRx</code> also on, the RX keys are programmed
+    at the same moment, with the record sequence advanced past whatever the handshake already
+    consumed - and a connection whose handshake left a partial record behind silently keeps the
+    userspace reader, because those bytes are gone for the kernel.</p>
 <p class="src"><b>TlsService.cs</b> · the handoff - program TX keys, then drop MSG_WAITALL</p>
-<pre><code class="language-csharp">Ktls.EnableTx(conn.ClientFd, secret);
-conn.SendOpFlags = 0;                    // clear MSG_WAITALL - kTLS rejects it (EOPNOTSUPP)
-session.MarkTxEnabled(conn.ClientFd);
-// from here the handler writes plaintext; the kernel makes the records on the io_uring send</code></pre>
+<pre><code class="language-csharp">if (_kernelTx)
+{
+    Ktls.EnableTx(conn.ClientFd, secret);
+    conn.SendOpFlags = 0;                // clear MSG_WAITALL - kTLS rejects it (EOPNOTSUPP)
+    session.MarkTxEnabled(conn.ClientFd);
+}</code></pre>
 
     <h2>TlsSession &middot; <span class="dim">TlsSession.cs</span></h2>
-    <p>The receive half after the handoff (one per connection, reactor-thread only). Inbound bytes are
-    still TLS records, decrypted in userspace: <code>Decrypt(ciphertext, length)</code> feeds the read
-    BIO and drains <code>SSL_read</code> into a reusable plaintext buffer, returning the span (valid
-    until the next call). The buffer is bounded per-decrypt (a defensive cap; in practice one decrypt
-    processes one recv-buffer-sized slice and decryption never expands). <code>SSL_ERROR_ZERO_RETURN</code>
-    sets <code>Closed</code> (the peer's close_notify). On a clean server-side teardown,
-    <code>Dispose</code> sends a close_notify alert over kTLS (best-effort) so the peer can tell
-    end-of-stream from a truncation, then <code>SSL_free</code>s (which frees both BIOs) and releases
-    the ex_data handle.</p>
+    <p>The per-connection TLS state after the handshake (reactor-thread only).
+    <code>Decrypt(ciphertext, length)</code> feeds the read BIO and drains <code>SSL_read</code>
+    into a reusable plaintext buffer, returning the span (valid until the next call); under kTLS RX
+    it is a pass-through, since recv already delivered plaintext. <code>Write</code> is the
+    mode-aware outbound: plaintext straight to the slab under kTLS TX, encrypted through the write
+    BIO otherwise. <code>SSL_ERROR_ZERO_RETURN</code> sets <code>Closed</code> (the peer's
+    close_notify). On a clean server-side teardown, <code>Dispose</code> sends close_notify in
+    whichever mode applies - a kTLS control send, or <code>SSL_shutdown</code>'s record delivered
+    with a best-effort raw send - zeroes any remaining secrets, then <code>SSL_free</code>s (which
+    frees both BIOs) and releases the ex_data handle.</p>
 
     <h2>Ktls &middot; <span class="dim">Ktls.cs</span></h2>
     <p>The kernel-TLS transmit offload. <code>EnableTx</code> derives the record key (16B) and IV (12B)
@@ -154,6 +171,8 @@ session.MarkTxEnabled(conn.ClientFd);
     <code>setsockopt(SOL_TLS, TLS_TX, &amp;cryptoInfo)</code> installs the keys. All key material -
     the derived key/iv, the crypto-info struct, and the captured secret - is zeroed in a
     <code>finally</code> with <code>CryptographicOperations.ZeroMemory</code> once programmed.
+    <code>EnableRx</code> is the same dance for the receive keys, taking the record sequence the
+    handshake already consumed (the sequence is part of the AEAD nonce, so it cannot be guessed).
     <code>SendCloseNotify</code> sends a <code>{warning, close_notify}</code> alert as a control
     message (<code>sendmsg</code> with a <code>SOL_TLS / TLS_SET_RECORD_TYPE = alert</code> cmsg),
     best-effort.</p>
@@ -195,17 +214,21 @@ session.MarkTxEnabled(conn.ClientFd);
     <p>The minimal OpenSSL 3 P/Invoke surface (via <code>[LibraryImport]</code> source-gen): context
     setup (<code>SSL_CTX_new</code>, protocol/ciphersuite/ticket controls, cert/key file loads, the
     keylog and ALPN callback setters), the per-connection objects (<code>SSL_new</code>/<code>_free</code>,
-    <code>SSL_set_bio</code>/<code>_accept_state</code>/<code>_accept</code>/<code>_read</code>/<code>_get_error</code>),
+    <code>SSL_set_bio</code>/<code>_accept_state</code>/<code>_accept</code>/<code>_read</code>/<code>_write</code>/<code>_shutdown</code>/<code>_get_error</code>),
     the ex_data accessors, and the memory BIOs (<code>BIO_new</code>/<code>_s_mem</code>/<code>_read</code>/<code>_write</code>/<code>_ctrl_pending</code>).
     <code>LastError</code> formats the first queued error and drains the rest so the next report isn't
     stale.</p>
 
     <h2>TlsOptions &middot; <span class="dim">TlsOptions.cs</span></h2>
-    <p>The PEM certificate-chain path, the private-key path, and the ALPN protocol to advertise.</p>
+    <p>The PEM certificate-chain path, the private-key path, the ALPN protocols to advertise
+    (most preferred first), and the two kernel-offload opt-ins: <code>KernelTx</code> (kTLS
+    transmit - constrains the context to TLS 1.3, one suite, no tickets) and <code>KernelRx</code>
+    (experimental kernel receive; requires <code>KernelTx</code>).</p>
 
-    <p class="lead" style="margin-top:2rem">An alternative, fully-managed path exists with no kTLS or
-    native dependency: a BCL <code>SslStream</code> over <code>ConnectionStream</code> (everything
-    encrypted in userspace, ~0.65x kTLS throughput) - see the <code>tls-sslstream</code> example.</p>
+    <p class="lead" style="margin-top:2rem">An alternative, fully-managed path exists with no
+    native dependency: a BCL <code>SslStream</code> over <code>TcpConnectionStream</code> (~0.65x
+    the ring-native path, but the only one that does client certificates) - see the
+    <code>tls-sslstream</code> example.</p>
 
     <div class="next"><a href="dev-file.html">ioxide.file internals →</a></div>
   </main>
