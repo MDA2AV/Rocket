@@ -142,8 +142,8 @@ for (int i = 0; i < threads.Length; i++)
                 while ((end = CollectionsMarshal.AsSpan(carry).IndexOf("\r\n\r\n"u8)) >= 0)
                 {
                     carry.RemoveRange(0, end + 4);
-                    if (tls.KernelTx) { conn.Write(http11Response); }
-                    else { tls.WriteEncrypted(conn, http11Response); }
+                    // Correct whichever backend the session ended up with.
+                    tls.Write(conn, http11Response);
                     wrote = true;
                 }
 

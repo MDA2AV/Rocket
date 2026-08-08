@@ -224,7 +224,24 @@ public sealed unsafe class TlsSession : IDisposable
     /// instead of one - though BIO_read at least writes directly into the slab rather than through
     /// an intermediate of ours.
     /// </remarks>
-    public void WriteEncrypted(TcpConnection connection, ReadOnlySpan<byte> plaintext)
+    public void Write(TcpConnection connection, ReadOnlySpan<byte> plaintext)
+    {
+        // The one call that is correct in both modes. With kTLS the kernel makes the records, so
+        // the plaintext goes straight into the slab; without it OpenSSL has to encrypt first. A
+        // handler that picks the wrong one either sends cleartext or double-encrypts, and which is
+        // wrong depends on a flag it probably did not set - so it should not have to pick.
+        if (KernelTx)
+        {
+            connection.Write(plaintext);
+            return;
+        }
+
+        WriteEncrypted(connection, plaintext);
+    }
+
+    /// <summary>Encrypt unconditionally. Only <see cref="TlsEncryptingPipeWriter"/> wants this -
+    /// it is constructed solely when kTLS is off, so the mode check would always be true.</summary>
+    internal void WriteEncrypted(TcpConnection connection, ReadOnlySpan<byte> plaintext)
     {
         fixed (byte* p = plaintext)
         {

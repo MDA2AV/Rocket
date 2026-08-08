@@ -48,18 +48,25 @@ public sealed class TlsOptions
     public bool KernelRx { get; init; }
 
     /// <summary>
-    /// Let the kernel encrypt outbound records. <b>On by default</b> - this is ioxide's normal TLS
-    /// write path, and the reason handlers write plaintext.
+    /// Let the kernel encrypt outbound records. <b>Off by default</b> - TLS is OpenSSL in both
+    /// directions unless you turn this on.
     ///
-    /// Turning it off keeps everything in OpenSSL: the socket gets no TLS ULP at all, handlers must
-    /// hand responses to <see cref="TlsSession.WriteEncrypted"/> instead of writing them straight
-    /// to the connection, and <c>MSG_WAITALL</c> stays on because there is no kTLS to reject it.
+    /// It used to default on, which made ioxide's TLS asymmetric: the kernel encrypted, OpenSSL
+    /// decrypted. That asymmetry is now something you opt into rather than something you inherit,
+    /// because it is not free and it was not faster. Measured on loopback, HTTP/1.1, 4 reactors:
+    /// kTLS trails OpenSSL by roughly 20-25% on large single writes and costs about 20% more CPU
+    /// per request, while a small response shows no difference either way. What it constrains is
+    /// the part that matters: the Linux <c>tls</c> module has to be present, TLS 1.3 only, one
+    /// ciphersuite, and session resumption is disabled because a ticket would consume a record
+    /// sequence number and desynchronise the handoff.
     ///
-    /// The trade is one copy. kTLS takes plaintext into the write slab and encrypts on send; OpenSSL
-    /// encrypts into its write BIO and the records are then read into the slab. What that costs in
-    /// practice is a question worth measuring rather than assuming - and turning kTLS off also
-    /// drops its constraints: no 'tls' kernel module, no TLS-1.3-only, no single-ciphersuite limit,
-    /// and no handshake-alignment problem.
+    /// Turn it on for what it is actually for - <c>sendfile</c> and NICs that offload TLS - neither
+    /// of which those measurements exercise.
+    ///
+    /// <b>It changes what a handler must write.</b> With kTLS the kernel produces the records, so
+    /// a handler writes plaintext straight to the connection; without it OpenSSL has to encrypt
+    /// first. <see cref="TlsSession.Write"/> is correct either way and is what samples use - a bare
+    /// <c>connection.Write</c> on a session with this off puts CLEARTEXT on the wire.
     /// </summary>
-    public bool KernelTx { get; init; } = true;
+    public bool KernelTx { get; init; }
 }

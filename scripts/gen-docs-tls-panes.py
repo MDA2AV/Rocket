@@ -15,17 +15,19 @@ PANES = {
         "Tls/Ktls", "kTLS &middot; raw ring", "ioxide",
         ["sudo modprobe tls        # kTLS needs the Linux 'tls' module + OpenSSL 3",
          "curl -k https://127.0.0.1:8443/"],
-        "The default. The OpenSSL handshake runs over the ring, then <b>transmit</b> is handed to the "
-        "kernel - so <code>conn.Write</code> below is putting PLAINTEXT into the slab and the kernel "
-        "produces the records. Receive stays in userspace, which is the asymmetry the rest of the TLS "
-        "docs are about. Compare <label for=\"tab-tlsossl\" class=\"ex-jump\">openssl &middot; raw</label>: "
-        "same server, one <code>TlsOptions</code> line different, and <code>conn.Write</code> becomes "
-        "<code>tls.WriteEncrypted</code>."),
+        "<b>Opt-in</b> - note the explicit <code>KernelTx = true</code>. TLS is OpenSSL in both "
+        "directions unless you ask for this, and that line is what makes the <code>conn.Write</code> "
+        "below legal: it puts PLAINTEXT into the slab and the kernel turns it into records. Without "
+        "it the same call would put <b>cleartext on the wire</b>, which is why every other sample "
+        "goes through <code>TlsSession.Write</code> - correct in either mode. Receive stays in "
+        "userspace either way. Compare "
+        "<label for=\"tab-tlsossl\" class=\"ex-jump\">openssl &middot; raw</label>."),
     "tlsossl": (
         "Tls/OpenSsl", "OpenSSL &middot; raw ring", "ioxide",
         ["curl -k https://127.0.0.1:8443/        # no modprobe needed"],
-        "<code>KernelTx = false</code> and no TLS ULP is attached at all - OpenSSL encrypts and "
-        "decrypts. That drops every constraint kTLS imposes: no kernel module, TLS 1.2 available, any "
+        "<b>The default.</b> No TLS ULP is attached at all - OpenSSL encrypts and decrypts, and the "
+        "response goes through <code>TlsSession.Write</code>, which is correct whichever backend the "
+        "session ended up with. That drops every constraint kTLS imposes: no kernel module, TLS 1.2, any "
         "ciphersuite, session resumption back, no handshake-alignment problem. What it gives up is "
         "<code>sendfile</code> and NIC offload. "
         "<b>It costs nothing measurable here</b> - against the plaintext baseline, 4 reactors, "

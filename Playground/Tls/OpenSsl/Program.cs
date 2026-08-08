@@ -20,7 +20,7 @@ using Playground.Shared;
 //  sendfile or a NIC that offloads TLS would see a real difference kTLS cannot give up.
 //
 //  The one thing the handler must do differently is on the write side: with kTLS the kernel makes
-//  the records so you write plaintext, and without it you hand the response to WriteEncrypted.
+//  the records so you write plaintext, and without it OpenSSL has to encrypt first.
 //  Everything else - the handshake, ALPN, the read loop, the framing - is identical.
 //
 //  Measured here, 4 reactors, wrk -t4 -c64, against the plaintext Tcp/Raw baseline:
@@ -185,7 +185,7 @@ static bool Answer(TcpConnection conn, TlsSession tls, List<byte> carry, ReadOnl
 
         // The one line that differs from Tls/Ktls. There, kTLS is producing the records so the
         // handler writes plaintext; here OpenSSL has to encrypt before anything reaches the slab.
-        tls.WriteEncrypted(conn, response.Span);
+        tls.Write(conn, response.Span);
 
         wrote = true;
     }

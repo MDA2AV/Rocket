@@ -475,6 +475,11 @@ var tlsOptions = new TlsOptions
 {
     CertificatePath = certPath,
     KeyPath         = keyPath,
+
+    // NOT the default - TLS is OpenSSL both ways unless you ask for this. It is what lets the
+    // handler below write PLAINTEXT to the connection: the kernel turns it into records on send.
+    // Remove this line and conn.Write would put cleartext on the wire.
+    KernelTx = true,
 };
 
 byte[] body = new byte[bodyBytes];
@@ -586,8 +591,9 @@ static bool Answer(TcpConnection conn, List&lt;byte&gt; carry, ReadOnlyMemory&lt
     {
         carry.RemoveRange(0, end + 4);
 
-        // kTLS is producing the records, so this is PLAINTEXT going into the slab. Compare
-        // Playground/Tls/OpenSsl, where the same line is tls.WriteEncrypted(conn, ...).
+        // PLAINTEXT into the slab - safe only because KernelTx = true above. TlsSession.Write
+        // is the call that is correct either way, and is what every other sample uses; this one
+        // spells it out because demonstrating the kTLS write path is the point of the file.
         conn.Write(response.Span);
 
         wrote = true;
@@ -595,7 +601,7 @@ static bool Answer(TcpConnection conn, List&lt;byte&gt; carry, ReadOnlyMemory&lt
 
     return wrote;
 }</code></pre>
-    <p class="ex-foot">The default. The OpenSSL handshake runs over the ring, then <b>transmit</b> is handed to the kernel - so <code>conn.Write</code> below is putting PLAINTEXT into the slab and the kernel produces the records. Receive stays in userspace, which is the asymmetry the rest of the TLS docs are about. Compare <label for="tab-tlsossl" class="ex-jump">openssl &middot; raw</label>: same server, one <code>TlsOptions</code> line different, and <code>conn.Write</code> becomes <code>tls.WriteEncrypted</code>.</p>
+    <p class="ex-foot"><b>Opt-in</b> - note the explicit <code>KernelTx = true</code>. TLS is OpenSSL in both directions unless you ask for this, and that line is what makes the <code>conn.Write</code> below legal: it puts PLAINTEXT into the slab and the kernel turns it into records. Without it the same call would put <b>cleartext on the wire</b>, which is why every other sample goes through <code>TlsSession.Write</code> - correct in either mode. Receive stays in userspace either way. Compare <label for="tab-tlsossl" class="ex-jump">openssl &middot; raw</label>.</p>
   </div>
 
   <div class="pane pane-tlspipe">
@@ -889,14 +895,14 @@ static bool Answer(TcpConnection conn, TlsSession tls, List&lt;byte&gt; carry, R
 
         // The one line that differs from Tls/Ktls. There, kTLS is producing the records so the
         // handler writes plaintext; here OpenSSL has to encrypt before anything reaches the slab.
-        tls.WriteEncrypted(conn, response.Span);
+        tls.Write(conn, response.Span);
 
         wrote = true;
     }
 
     return wrote;
 }</code></pre>
-    <p class="ex-foot"><code>KernelTx = false</code> and no TLS ULP is attached at all - OpenSSL encrypts and decrypts. That drops every constraint kTLS imposes: no kernel module, TLS 1.2 available, any ciphersuite, session resumption back, no handshake-alignment problem. What it gives up is <code>sendfile</code> and NIC offload. <b>It costs nothing measurable here</b> - against the plaintext baseline, 4 reactors, <code>wrk -t4 -c64</code>: 0.79&times; for both at a 64-byte response, 0.35&times; kTLS vs 0.44&times; OpenSSL at 64 KiB. Which backend you pick matters far less than the cost of TLS.</p>
+    <p class="ex-foot"><b>The default.</b> No TLS ULP is attached at all - OpenSSL encrypts and decrypts, and the response goes through <code>TlsSession.Write</code>, which is correct whichever backend the session ended up with. That drops every constraint kTLS imposes: no kernel module, TLS 1.2, any ciphersuite, session resumption back, no handshake-alignment problem. What it gives up is <code>sendfile</code> and NIC offload. <b>It costs nothing measurable here</b> - against the plaintext baseline, 4 reactors, <code>wrk -t4 -c64</code>: 0.79&times; for both at a 64-byte response, 0.35&times; kTLS vs 0.44&times; OpenSSL at 64 KiB. Which backend you pick matters far less than the cost of TLS.</p>
   </div>
 
   <div class="pane pane-tlsosslpipe">
@@ -1657,7 +1663,7 @@ for (int i = 0; i &lt; threads.Length; i++)
             // in ReadAsync, or the client waits on a response we never send.
             if (TryReadTarget(tls.DrainPlaintext(), out ReadOnlySpan&lt;byte&gt; early))
             {
-                await ProxyAsync(conn, client, Encoding.ASCII.GetString(early));
+                await ProxyAsync(conn, tls, client, Encoding.ASCII.GetString(early));
             }
 
             while (true)
@@ -1683,7 +1689,7 @@ for (int i = 0; i &lt; threads.Length; i++)
 
                 if (path is not null)
                 {
-                    await ProxyAsync(conn, client, path);
+                    await ProxyAsync(conn, tls, client, path);
                 }
 
                 if (snapshot.IsClosed || tls.Closed) return;
@@ -1717,7 +1723,7 @@ foreach (Thread thread in threads)
 
 // One request out, one response back. Everything written here is PLAINTEXT: after the handshake
 // kTLS owns transmit, so there is nothing left for us to wrap.
-static async ValueTask ProxyAsync(TcpConnection conn, HttpClientPool client, string path)
+static async ValueTask ProxyAsync(TcpConnection conn, TlsSession tls, HttpClientPool client, string path)
 {
     try
     {
@@ -1725,9 +1731,9 @@ static async ValueTask ProxyAsync(TcpConnection conn, HttpClientPool client, str
         // owns its bytes, so dispose it when you&#x27;re done with them.
         using HttpClientResponse response = await client.GetAsync(path);
 
-        conn.Write(Encoding.ASCII.GetBytes(
+        tls.Write(conn, Encoding.ASCII.GetBytes(
             $&quot;HTTP/1.1 {response.Status} OK\r\nContent-Length: {response.Body.Length}\r\n\r\n&quot;));
-        conn.Write(response.Body.Span);   // bytes straight through, no decode
+        tls.Write(conn, response.Body.Span);   // bytes straight through, no decode
     }
     catch (Exception e)
     {
@@ -1735,9 +1741,9 @@ static async ValueTask ProxyAsync(TcpConnection conn, HttpClientPool client, str
         // REFUSED CERTIFICATE arrives the same way - the handshake is part of opening the
         // connection, so a name mismatch reads like any other upstream failure.
         byte[] message = Encoding.ASCII.GetBytes($&quot;upstream: {e.Message}&quot;);
-        conn.Write(Encoding.ASCII.GetBytes(
+        tls.Write(conn, Encoding.ASCII.GetBytes(
             $&quot;HTTP/1.1 502 Bad Gateway\r\nContent-Length: {message.Length}\r\n\r\n&quot;));
-        conn.Write(message);
+        tls.Write(conn, message);
     }
 
     await conn.FlushAsync();
@@ -1853,7 +1859,7 @@ for (int i = 0; i &lt; threads.Length; i++)
             // in ReadAsync, or the client waits on a response we never send.
             if (TryReadTarget(tls.DrainPlaintext(), out ReadOnlySpan&lt;byte&gt; early))
             {
-                await ProxyAsync(conn, client, Encoding.ASCII.GetString(early));
+                await ProxyAsync(conn, tls, client, Encoding.ASCII.GetString(early));
             }
 
             while (true)
@@ -1879,7 +1885,7 @@ for (int i = 0; i &lt; threads.Length; i++)
 
                 if (path is not null)
                 {
-                    await ProxyAsync(conn, client, path);
+                    await ProxyAsync(conn, tls, client, path);
                 }
 
                 if (snapshot.IsClosed || tls.Closed) return;
@@ -1913,7 +1919,7 @@ foreach (Thread thread in threads)
 
 // One request out, one response back. Everything written here is PLAINTEXT: after the handshake
 // kTLS owns transmit, so there is nothing left for us to wrap.
-static async ValueTask ProxyAsync(TcpConnection conn, Http2ClientPool client, string path)
+static async ValueTask ProxyAsync(TcpConnection conn, TlsSession tls, Http2ClientPool client, string path)
 {
     try
     {
@@ -1921,9 +1927,9 @@ static async ValueTask ProxyAsync(TcpConnection conn, Http2ClientPool client, st
         // Same ring, same thread - this await resumes inline.
         using HttpClientResponse response = await client.GetAsync(path);
 
-        conn.Write(Encoding.ASCII.GetBytes(
+        tls.Write(conn, Encoding.ASCII.GetBytes(
             $&quot;HTTP/1.1 {response.Status} OK\r\nContent-Length: {response.Body.Length}\r\n\r\n&quot;));
-        conn.Write(response.Body.Span);   // bytes straight through, no decode
+        tls.Write(conn, response.Body.Span);   // bytes straight through, no decode
     }
     catch (Exception e)
     {
@@ -1931,9 +1937,9 @@ static async ValueTask ProxyAsync(TcpConnection conn, Http2ClientPool client, st
         // REFUSED CERTIFICATE arrives the same way - the handshake is part of opening the
         // connection, so a name mismatch reads like any other upstream failure.
         byte[] message = Encoding.ASCII.GetBytes($&quot;upstream: {e.Message}&quot;);
-        conn.Write(Encoding.ASCII.GetBytes(
+        tls.Write(conn, Encoding.ASCII.GetBytes(
             $&quot;HTTP/1.1 502 Bad Gateway\r\nContent-Length: {message.Length}\r\n\r\n&quot;));
-        conn.Write(message);
+        tls.Write(conn, message);
     }
 
     await conn.FlushAsync();
@@ -2038,7 +2044,7 @@ for (int i = 0; i &lt; threads.Length; i++)
             // in ReadAsync, or the client waits on a response we never send.
             if (TryReadTarget(tls.DrainPlaintext(), out ReadOnlySpan&lt;byte&gt; early))
             {
-                await ProxyAsync(conn, client, Encoding.ASCII.GetString(early));
+                await ProxyAsync(conn, tls, client, Encoding.ASCII.GetString(early));
             }
 
             while (true)
@@ -2064,7 +2070,7 @@ for (int i = 0; i &lt; threads.Length; i++)
 
                 if (path is not null)
                 {
-                    await ProxyAsync(conn, client, path);
+                    await ProxyAsync(conn, tls, client, path);
                 }
 
                 if (snapshot.IsClosed || tls.Closed) return;
@@ -2097,7 +2103,7 @@ foreach (Thread thread in threads)
 
 // One request out, one response back. Everything written here is PLAINTEXT: after the handshake
 // kTLS owns transmit, so there is nothing left for us to wrap.
-static async ValueTask ProxyAsync(TcpConnection conn, Http3ClientPool client, string path)
+static async ValueTask ProxyAsync(TcpConnection conn, TlsSession tls, Http3ClientPool client, string path)
 {
     try
     {
@@ -2105,9 +2111,9 @@ static async ValueTask ProxyAsync(TcpConnection conn, Http3ClientPool client, st
         // from a TCP recv, one from a UDP recv - and both resume inline.
         using HttpClientResponse response = await client.GetAsync(path);
 
-        conn.Write(Encoding.ASCII.GetBytes(
+        tls.Write(conn, Encoding.ASCII.GetBytes(
             $&quot;HTTP/1.1 {response.Status} OK\r\nContent-Length: {response.Body.Length}\r\n\r\n&quot;));
-        conn.Write(response.Body.Span);   // bytes straight through, no decode
+        tls.Write(conn, response.Body.Span);   // bytes straight through, no decode
     }
     catch (Exception e)
     {
@@ -2115,9 +2121,9 @@ static async ValueTask ProxyAsync(TcpConnection conn, Http3ClientPool client, st
         // refused certificate arrives the same way - for QUIC the TLS handshake IS the connection
         // handshake, so it fails as a failed connect.
         byte[] message = Encoding.ASCII.GetBytes($&quot;upstream: {e.Message}&quot;);
-        conn.Write(Encoding.ASCII.GetBytes(
+        tls.Write(conn, Encoding.ASCII.GetBytes(
             $&quot;HTTP/1.1 502 Bad Gateway\r\nContent-Length: {message.Length}\r\n\r\n&quot;));
-        conn.Write(message);
+        tls.Write(conn, message);
     }
 
     await conn.FlushAsync();

@@ -228,12 +228,18 @@ if (tls.NegotiatedAlpn == "h2")
     </ul>
 
     <h2>Choosing a backend: kTLS, or OpenSSL both ways</h2>
-    <p><code>TlsOptions.KernelTx</code> is on by default and is what makes handlers write plaintext.
-    Turn it off and OpenSSL does both directions - the socket gets no TLS ULP at all, and the
-    handler hands responses to <code>TlsSession.WriteEncrypted</code> instead. Everything else,
-    including the handshake and ALPN, is identical.</p>
+    <p><b>OpenSSL is the default in both directions.</b> <code>TlsOptions.KernelTx</code> turns
+    kernel encryption on; it is off unless you ask, so the socket gets no TLS ULP and nothing
+    requires the <code>tls</code> module. Everything else - the handshake, ALPN, the read loop - is
+    identical either way.</p>
+    <p>It used to default the other way, which made ioxide's TLS asymmetric: the kernel encrypted
+    while OpenSSL decrypted. That asymmetry is now something you opt into, because it is not free
+    and it was not faster. Handlers should write through
+    <code>TlsSession.Write(connection, plaintext)</code>, which is correct in both modes - a bare
+    <code>connection.Write</code> is only safe with kTLS on, and puts <b>cleartext on the wire</b>
+    without it.</p>
     <table>
-      <tr><th></th><th>kTLS (default)</th><th><code>KernelTx = false</code></th></tr>
+      <tr><th></th><th><code>KernelTx = true</code></th><th>default (OpenSSL)</th></tr>
       <tr><td><code>tls</code> kernel module</td><td>required</td><td>not needed</td></tr>
       <tr><td>TLS versions</td><td>1.3 only</td><td>1.2 and 1.3</td></tr>
       <tr><td>ciphersuites</td><td>one (AES-128-GCM)</td><td>any</td></tr>
@@ -317,11 +323,12 @@ if (tls.NegotiatedAlpn == "h2")
     resumption or client certificates meant leaving the ring for <code>SslStream</code>. It no
     longer does: <code>KernelTx = false</code> gives those on the ring-native path.</p>
     <ul>
-      <li><b>kTLS</b> (the default) &rarr; you are on Linux 6+ with the <code>tls</code> module, TLS
-      1.3 and ALPN are enough, and you want <code>sendfile</code> or a NIC that offloads TLS.
+      <li><b>kTLS</b> (<code>KernelTx = true</code>) &rarr; you are on Linux 6+ with the
+      <code>tls</code> module, TLS 1.3 and ALPN are enough, and you want <code>sendfile</code> or a
+      NIC that offloads TLS.
       Sample: <a href="https://github.com/MDA2AV/ioxide/tree/main/Playground/Tls/Ktls">Tls/Ktls</a>.</li>
-      <li><b>OpenSSL both ways</b> (<code>KernelTx = false</code>) &rarr; no kernel module (so it runs
-      in a container that lacks it), TLS 1.2 available, any ciphersuite, resumption back, and no
+      <li><b>OpenSSL both ways</b> (the default) &rarr; no kernel module, so it runs in a container
+      that lacks one; TLS 1.2 available, any ciphersuite, resumption back, and no
       handshake-alignment constraint. Costs nothing measurable here - see the table above. Sample:
       <a href="https://github.com/MDA2AV/ioxide/tree/main/Playground/Tls/OpenSsl">Tls/OpenSsl</a>.</li>
       <li><b>SslStream</b> over <code>ConnectionStream</code> &rarr; now only for what OpenSSL itself
