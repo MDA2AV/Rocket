@@ -59,7 +59,7 @@
       <label for="tab-inc">raw &middot; incremental</label>
       <label for="tab-vs">shared vs incremental</label>
       <label for="tab-tls">ktls &middot; raw</label>
-      <label for="tab-tlspipe">ktls &middot; pipes</label>
+      <label for="tab-tlspipe">tls &middot; pipes</label>
       <label for="tab-tlsossl">tls &middot; openssl only</label>
     </details>
 
@@ -568,90 +568,107 @@ static unsafe void Decrypt(TlsSession tls, in SpscRecvRing.Item item, List&lt;by
       <span class="pane-pkg">ioxide</span>
     </div>
 <pre><code class="language-csharp">// dotnet add package ioxide      -- TLS ships in the core package
-// Needs the Linux &#x27;tls&#x27; module (sudo modprobe tls), OpenSSL 3, and cert.pem / key.pem.
+// The SAME handler serves both backends; only TlsOptions.KernelTx differs.
+//   curl -k https://127.0.0.1:8443/
+
+using System.Buffers;
 using System.IO.Pipelines;
-using System.Runtime.InteropServices;
+using System.Text;
 using ioxide;
 using ioxide.tls;
+
+const string certPath = &quot;cert.pem&quot;;      // any PEM pair; the sample generates one on first run
+const string keyPath  = &quot;key.pem&quot;;
 
 var config = new ServerConfig
 {
     ReactorCount = Environment.ProcessorCount,
-    RecvBufferSize = 32 * 1024,
-    RecvSlots      = 4096,
-    Tcp = new TcpOptions { Port = 8443 },
+    Tcp = new TcpOptions
+    {
+        Port = 8443,
+    },
 };
 
-ReadOnlyMemory&lt;byte&gt; ok = &quot;HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok&quot;u8.ToArray();
+var tlsOptions = new TlsOptions
+{
+    CertificatePath = certPath,
+    KeyPath = keyPath,
+
+    // The only line that changes between the two runs above.
+    KernelTx = !false,
+};
+
+int bodySize = 8 * 1024;
+byte[] body = new byte[bodySize];
+&quot;ioxide-tls-pipes &quot;u8.CopyTo(body);
+for (int i = &quot;ioxide-tls-pipes &quot;u8.Length; i &lt; bodySize; i++)
+{
+    body[i] = (byte)(&#x27;a&#x27; + (i % 26));
+}
+
+byte[] response =
+[
+    .. Encoding.ASCII.GetBytes($&quot;HTTP/1.1 200 OK\r\nContent-Length: {bodySize}\r\n\r\n&quot;),
+    .. body,
+];
+
 var threads = new Thread[config.ReactorCount];
 
-for (int id = 0; id &lt; threads.Length; id++)
+for (int i = 0; i &lt; threads.Length; i++)
 {
-    var reactor = new Reactor(id, config);
+    var reactor = new Reactor(i, config);
 
-    reactor.OnStart = r =&gt; TlsService.Start(r, new TlsOptions
-    {
-        CertificatePath = &quot;cert.pem&quot;,
-        KeyPath         = &quot;key.pem&quot;,
-        Alpn            = [&quot;http/1.1&quot;],   // ordered, most preferred first
-    });
+    reactor.OnStart = r =&gt; TlsService.Start(r, tlsOptions);
 
     reactor.TcpHandle = async (r, conn) =&gt;
     {
         TlsSession? tls = null;
-        var carry = new List&lt;byte&gt;();   // decrypted bytes waiting to be framed into requests
-
         try
         {
-            // The handshake first - it drives the connection directly, before the pipes attach.
             tls = await r.GetService&lt;TlsService&gt;().AcceptAsync(conn);
 
-            // Pipes attach AFTER the handshake. From here the connection is just bytes again:
-            // ciphertext arriving, plaintext leaving (kernel TLS produces the records on send).
-            var reader = new TcpConnectionPipeReader(conn);
-            var writer = new TcpConnectionPipeWriter(conn);
-
-            // A request can ride in with the handshake&#x27;s final flight - answer it first.
-            if (tls.DrainPlaintext().Length &gt; 0)
-            {
-                ok.Span.CopyTo(writer.GetSpan(ok.Length));
-                writer.Advance(ok.Length);
-                await writer.FlushAsync();
-            }
+            // From here down, nothing knows or cares which backend is in use.
+            await using var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
 
             while (true)
             {
-                ReadResult result = await reader.ReadAsync();
+                ReadResult read = await pipe.Input.ReadAsync();
 
-                // The pipe hands CIPHERTEXT - only transmit is offloaded - so decrypt each
-                // segment as it is consumed.
-                foreach (ReadOnlyMemory&lt;byte&gt; segment in result.Buffer)
-                {
-                    Decrypt(tls, segment.Span, carry);
-                }
-                reader.AdvanceTo(result.Buffer.End);
+                // Answer per REQUEST, not per read. TLS hands back RECORDS, so one request split
+                // across two records would otherwise draw two responses.
+                int answered = 0;
+                SequencePosition consumed = read.Buffer.Start;
 
-                // Answer per REQUEST, not per decrypt - a request split across two TLS records
-                // decrypts twice, and &quot;plaintext arrived&quot; would fire for each.
-                bool wrote = false;
-                int end;
-                while ((end = CollectionsMarshal.AsSpan(carry).IndexOf(&quot;\r\n\r\n&quot;u8)) &gt;= 0)
+                var reader = new SequenceReader&lt;byte&gt;(read.Buffer);
+                while (reader.TryReadTo(out ReadOnlySequence&lt;byte&gt; _, &quot;\r\n\r\n&quot;u8, advancePastDelimiter: true))
                 {
-                    carry.RemoveRange(0, end + 4);
-                    // The write side is the plain pipes path, untouched: plaintext into the
-                    // slab, one flush - the kernel encrypts on send.
-                    ok.Span.CopyTo(writer.GetSpan(ok.Length));
-                    writer.Advance(ok.Length);
-                    await writer.FlushAsync();
+                    consumed = reader.Position;
+                    answered++;
                 }
 
-                if (result.IsCompleted || tls.Closed) return;
+                // Consumed only whole requests; examined everything, so a partial head parks
+                // until more arrives instead of spinning on the same bytes.
+                pipe.Input.AdvanceTo(consumed, read.Buffer.End);
+
+                for (int n = 0; n &lt; answered; n++)
+                {
+                    pipe.Output.Write(response);
+                }
+
+                if (answered &gt; 0)
+                {
+                    await pipe.Output.FlushAsync();
+                }
+
+                if (read.IsCompleted || read.IsCanceled)
+                {
+                    return;
+                }
             }
         }
         catch (Exception e)
         {
-            // Handlers run fire-and-forget, so a missing &#x27;tls&#x27; module would vanish silently.
-            Console.Error.WriteLine($&quot;tls: {e.Message}&quot;);
+            Console.Error.WriteLine($&quot;[tls-pipes] connection failed: {e.Message}&quot;);
         }
         finally
         {
@@ -660,21 +677,19 @@ for (int id = 0; id &lt; threads.Length; id++)
         }
     };
 
-    threads[id] = new Thread(reactor.Run) { Name = $&quot;reactor-{id}&quot; };
-    threads[id].Start();
+    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
+    threads[i].Start();
 }
 
-Console.WriteLine($&quot;TLS on :{config.Tcp.Port} (kTLS transmit offload, pipes surface)&quot;);
-foreach (Thread t in threads) t.Join();
+Console.WriteLine($&quot;[tls-pipes] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
+                + $&quot;{bodySize}-byte body, tx={(tlsOptions.KernelTx ? &quot;kernel&quot; : &quot;openssl&quot;)}&quot;);
 
-static unsafe void Decrypt(TlsSession tls, ReadOnlySpan&lt;byte&gt; ciphertext, List&lt;byte&gt; carry)
+foreach (Thread thread in threads)
 {
-    fixed (byte* cipher = ciphertext)
-    {
-        carry.AddRange(tls.Decrypt(cipher, ciphertext.Length));
-    }
-}
-</code></pre>
+    thread.Join();
+}</code></pre>
+    <p class="ex-foot">Both backends run this handler <b>unchanged</b> - not similar, identical. <code>TlsConnectionDualPipe</code> composes rather than implements: it pairs <code>TcpConnectionPipeReader</code> or <code>TlsPumpPipeReader</code> with <code>TcpConnectionPipeWriter</code> or <code>TlsEncryptingPipeWriter</code>, chosen from the <em>session</em> rather than from configuration. Those differ, because a handshake that left a partial record cannot hand off to kTLS RX at all and that connection keeps the userspace reader whatever the config asked for.
+    Compare the two raw-ring samples, <label for="tab-tls" class="ex-jump">ktls &middot; raw</label> and <label for="tab-tlsossl" class="ex-jump">tls &middot; openssl only</label>: at that level the backend <em>is</em> visible, because kTLS writes plaintext and OpenSSL calls <code>WriteEncrypted</code>.</p>
   </div>
   <div class="pane pane-tlsossl">
     <div class="pane-head">
