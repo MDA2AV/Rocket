@@ -124,22 +124,40 @@
         <br><code>src/ioxide.nghttp3/*</code> + <code>libioxide_nghttp3.so</code></div></div>
     </div>
 
-    <p>Wiring it up is two lines in the host:</p>
-<pre><code class="language-csharp">var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+    <p>Wiring it up, shown with every QUIC/h3 knob at its default
+    (<code>Playground/Http3/Buffered</code> is the same as an editable reference):</p>
+<pre><code class="language-csharp">var engine = new QuicEngine(
+    certPath, keyPath,
+    cidLength: 8,                      // connection-id length this endpoint mints
+    alpn: ["h3"],                      // pin the protocol; null accepts whatever the client offers
+    maxSendRetentionBytes: 16L &lt;&lt; 20); // send-retention high-water: bounds memory so a response
+                                       // larger than the window streams instead of buffering whole
 
 var config = new ServerConfig
 {
     Tcp = null,                        // QUIC-only: no TCP listener at all
+    Udp = new UdpOptions
+    {
+        RecvSlots = 16,                // multishot recv slots per reactor
+        Gro = true,                    // UDP_GRO: coalesce received datagrams into one recv
+    },
     Quic = new QuicOptions
     {
         Port = 8443,                   // UDP port, bound automatically on every reactor
         LocalCidLength = 8,            // must match the engine's cidLength
+        IdleTimeoutMs = 60_000,        // close a connection idle this long
         ConnectionFactory = engine.CreateFactory(),
     },
 };
 
+var h3Options = new Nghttp3Options    // the HTTP/3 layer's own knobs, passed to Nghttp3Connection
+{
+    QpackDynamicTableCapacity = 0,     // 0 = headers stay literal (never blocks on a table update)
+    QpackBlockedStreams = 0,           // raise both together to trade bytes for the dynamic table
+};
+
 reactor.TcpHandle  = Handlers.Raw;
-reactor.QuicHandle = (r, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+reactor.QuicHandle = (r, conn) => new Nghttp3Connection(conn, h3Options).RunBufferedAsync(
     static req => Nghttp3Response.Text($"hello {Encoding.ASCII.GetString(req.Path.Span)}"));</code></pre>
 
     <h2>Ingress: the life of a datagram</h2>
@@ -231,8 +249,16 @@ reactor.QuicHandle = async (r, conn) =>
       <li><b>Never drop what the engine deferred.</b> When the congestion window is full,
       <code>iq_conn_write</code> takes nothing - and the layer above (nghttp3) has already
       accounted those bytes as written and will never re-emit them. The unsent tail stays in the
-      chunk chain and is replayed on every flush (each inbound ACK, each timer) until it fits.
-      A peer that stops acking hits a 4&nbsp;MB retention cap and is closed.</li>
+      chunk chain and is replayed on every flush (each inbound ACK, each timer) until it fits.</li>
+      <li><b>Retention is a backpressure high-water, not a hard cap.</b> Retained bytes
+      (sent-but-unacked plus unsent) are bounded by <code>QuicEngine</code>'s
+      <code>maxSendRetentionBytes</code> (default 16&nbsp;MiB). A producer feeding a response checks
+      <code>CanQueueSend</code> and pauses there; as acks drain retention below the mark, the
+      ack/timer egress path fires <code>OnSendCapacityAvailable</code> to resume it - the read loop
+      never sees a download's acks, so that callback is the resume. This is what lets a response of
+      any size stream out in bounded memory rather than buffering whole. The cap only <em>closes</em>
+      the connection as a backstop, at twice the high-water, when a producer ignores backpressure and
+      keeps pushing - or when a peer simply stops acking.</li>
     </ul>
     <div class="note"><b>War story.</b> Both rules exist because their violations shipped first.
     Passing <code>fixed</code> spans of reused buffers to ngtcp2 was harmless for a while - only

@@ -27,8 +27,11 @@ using Playground.Shared;
     Env.StrOrNull("PLAYGROUND_QUIC_CERT"),
     Env.StrOrNull("PLAYGROUND_QUIC_KEY"));
 
-// One engine for the whole server. ALPN pinned to h3, so nothing else negotiates.
-using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+// One engine for the whole server. ALPN pinned to h3, so nothing else negotiates. The last arg is
+// the per-connection send-retention high-water (default 16 MiB): a response larger than it streams
+// out paced by acks instead of buffering whole, so h3 serves large files in bounded memory. See
+// Playground/Http3/Buffered for the full QUIC/h3 knob set.
+using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"], maxSendRetentionBytes: 16L << 20);
 
 ushort quicPort = Env.Port("PLAYGROUND_QUIC_PORT", 8443);
 

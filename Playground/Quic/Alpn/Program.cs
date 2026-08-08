@@ -35,6 +35,10 @@ Env.OverrideQuic(ref quicPort, ref reactors);
 // UDP receive slots per reactor: how many datagrams the ring can have outstanding at once.
 int udpRecvSlots = 16;
 
+// Per-connection send-retention high-water (default 16 MiB): a response larger than it streams out
+// paced by acks instead of buffering whole. See Playground/Http3/Buffered for the full knob set.
+long maxSendRetentionBytes = 16L << 20;
+
 // A real PEM pair, or null to generate a self-signed localhost cert on first run.
 string? certOverride = null;
 string? keyOverride  = null;
@@ -44,7 +48,7 @@ string? keyOverride  = null;
 
 // Permissive ALPN (no allowlist): h3 clients negotiate "h3"; everything else still handshakes
 // and falls through to the echo branch.
-using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: null, maxSendRetentionBytes);
 
 var config = new ServerConfig
 {
