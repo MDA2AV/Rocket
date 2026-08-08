@@ -38,6 +38,7 @@ internal static unsafe partial class OpenSsl
     [LibraryImport(Ssl)] public static partial void SSL_set_bio(nint ssl, nint rbio, nint wbio);
     [LibraryImport(Ssl)] public static partial int SSL_accept(nint ssl);
     [LibraryImport(Ssl)] public static partial int SSL_read(nint ssl, byte* buf, int num);
+    [LibraryImport(Ssl)] public static partial int SSL_write(nint ssl, byte* buf, int num);
     [LibraryImport(Ssl)] public static partial int SSL_get_error(nint ssl, int ret);
 
     /// <summary>
@@ -60,6 +61,15 @@ internal static unsafe partial class OpenSsl
     [LibraryImport(Crypto)] public static partial int BIO_write(nint bio, byte* data, int dlen);
     [LibraryImport(Crypto)] public static partial int BIO_read(nint bio, byte* data, int dlen);
     [LibraryImport(Crypto)] public static partial nuint BIO_ctrl_pending(nint bio);
+
+    /// <summary>
+    /// BIO_CTRL_INFO on a memory BIO hands back a pointer to its buffer without consuming it - the
+    /// only way to inspect pending ciphertext, which kTLS RX needs in order to count how many
+    /// complete records the handshake already swallowed.
+    /// </summary>
+    public const int BIO_CTRL_INFO = 3;
+
+    [LibraryImport(Crypto)] public static partial long BIO_ctrl(nint bio, int cmd, long larg, byte** parg);
     [LibraryImport(Crypto)] public static partial ulong ERR_get_error();
     [LibraryImport(Crypto)] public static partial void ERR_error_string_n(ulong e, byte* buf, nuint len);
 

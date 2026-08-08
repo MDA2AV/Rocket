@@ -42,8 +42,6 @@ var config = new ServerConfig
 int bodyBytes = Env.Int("PLAYGROUND_BODY", 2);
 byte[] body = bodyBytes == 2 ? "ok"u8.ToArray() : [.. Enumerable.Repeat((byte)'x', bodyBytes)];
 
-// PLAYGROUND_TLSPIPE picks the inbound TLS pipe: pump (default) | inplace | direct.
-string tlsPipe = Env.Str("PLAYGROUND_TLSPIPE", "pump");
 byte[] http11Response =
 [
     .. Encoding.ASCII.GetBytes($"HTTP/1.1 200 OK\r\nContent-Length: {body.Length}\r\n\r\n"),
@@ -58,6 +56,8 @@ for (int i = 0; i < threads.Length; i++)
 
     reactor.OnStart = r => TlsService.Start(r, new TlsOptions
     {
+        // PLAYGROUND_KTLS_RX=1 hands inbound decryption to the kernel as well as outbound.
+        KernelRx = Env.Flag("PLAYGROUND_KTLS_RX"),
         CertificatePath = certPath,
         KeyPath = keyPath,
 
@@ -87,13 +87,11 @@ for (int i = 0; i < threads.Length; i++)
                 // Both are handed to the same Nghttp2Connection, which is the point.
                 // The two share only IDuplexPipe, which is not disposable - hence the second
                 // declaration rather than one `await using`.
-                IDuplexPipe pipe = tlsPipe switch
-                {
-                    "inplace" => new TlsConnectionDualPipeInPlace(conn, tls, ownsSession: false),
-                    "direct"  => new TlsConnectionDualPipeDirect(conn, tls, ownsSession: false),
-                    _         => new TlsConnectionDualPipe(conn, tls, ownsSession: false),
-                };
-                await using IAsyncDisposable owner = (IAsyncDisposable)pipe;
+                // One type, both worlds. Which halves it uses is decided by what the handshake
+                // achieved, not by anything chosen here - see TlsConnectionDualPipe.
+                var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
+
+                await using var owner = pipe;
 
                 await new Nghttp2Connection(pipe).RunBufferedAsync(_ => new Nghttp2Response
                 {
@@ -124,7 +122,8 @@ for (int i = 0; i < threads.Length; i++)
                 while ((end = CollectionsMarshal.AsSpan(carry).IndexOf("\r\n\r\n"u8)) >= 0)
                 {
                     carry.RemoveRange(0, end + 4);
-                    conn.Write(http11Response);
+                    if (tls.KernelTx) { conn.Write(http11Response); }
+                    else { tls.WriteEncrypted(conn, http11Response); }
                     wrote = true;
                 }
 
@@ -168,9 +167,11 @@ for (int i = 0; i < threads.Length; i++)
 
 Console.WriteLine($"[http2-tls] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
                 + $"ALPN h2 then http/1.1, cert {certPath}, "
-                + $"inbound={tlsPipe}");
+                + $"rx={(Env.Flag("PLAYGROUND_KTLS_RX") ? "kernel" : "openssl")}, "
+                + $"tx={(Env.Flag("PLAYGROUND_NO_KTLS_TX") ? "openssl" : "kernel")}");
 
 foreach (Thread thread in threads)
 {
     thread.Join();
 }
+

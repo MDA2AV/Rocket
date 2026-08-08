@@ -16,6 +16,7 @@ public sealed unsafe class TlsSession : IDisposable
 
     private readonly nint _ssl;
     private readonly nint _rbio;
+    private readonly nint _wbio;
     private byte[] _plain = new byte[16 * 1024];
     private int _plainLen;
     private bool _disposed;
@@ -26,6 +27,21 @@ public sealed unsafe class TlsSession : IDisposable
 
     /// <summary>The captured TLS 1.3 server traffic secret (set by the keylog callback during the handshake).</summary>
     internal byte[]? ServerSecret;
+
+    /// <summary>The client traffic secret - the RX half, needed only when kTLS decrypts inbound.</summary>
+    internal byte[]? ClientSecret;
+
+    /// <summary>
+    /// True once the kernel decrypts inbound records for this connection. Reads then arrive as
+    /// plaintext and <see cref="Decrypt"/> has nothing left to do.
+    /// </summary>
+    public bool KernelRx { get; private set; }
+
+    /// <summary>True when the kernel encrypts outbound records - the default. False means the
+    /// handler must go through <see cref="WriteEncrypted"/>.</summary>
+    public bool KernelTx => _txEnabled;
+
+    internal void MarkKernelRx() => KernelRx = true;
 
     /// <summary>True once the peer sent close_notify.</summary>
     public bool Closed { get; private set; }
@@ -47,10 +63,11 @@ public sealed unsafe class TlsSession : IDisposable
             : System.Text.Encoding.ASCII.GetString(data, (int)length);
     }
 
-    internal TlsSession(nint ssl, nint rbio)
+    internal TlsSession(nint ssl, nint rbio, nint wbio)
     {
         _ssl = ssl;
         _rbio = rbio;
+        _wbio = wbio;
     }
 
     internal void AttachHandle(GCHandle handle) => _handle = handle;
@@ -67,6 +84,13 @@ public sealed unsafe class TlsSession : IDisposable
     /// </summary>
     public ReadOnlySpan<byte> Decrypt(byte* ciphertext, int length)
     {
+        // With kTLS RX the kernel already decrypted this; recv handed us plaintext. Feeding it to
+        // OpenSSL would be feeding plaintext to a record parser.
+        if (KernelRx)
+        {
+            return new ReadOnlySpan<byte>(ciphertext, length);
+        }
+
         _plainLen = 0;
         OpenSsl.BIO_write(_rbio, ciphertext, length);
         DrainPending();
@@ -89,6 +113,13 @@ public sealed unsafe class TlsSession : IDisposable
     /// </remarks>
     public int DecryptInto(byte* ciphertext, int length, PipeWriter writer)
     {
+        if (KernelRx)
+        {
+            new ReadOnlySpan<byte>(ciphertext, length).CopyTo(writer.GetSpan(length));
+            writer.Advance(length);
+            return length;
+        }
+
         OpenSsl.BIO_write(_rbio, ciphertext, length);
 
         int total = 0;
@@ -136,6 +167,98 @@ public sealed unsafe class TlsSession : IDisposable
     /// more bytes. A corrupted stream then looked like a connection that had simply gone quiet, and
     /// a caller pumping a pipe would wait on it forever.
     /// </remarks>
+    /// <summary>
+    /// How many COMPLETE TLS records are pending in the read BIO, and whether anything is left over
+    /// beyond them. Inspects the BIO's buffer through BIO_CTRL_INFO rather than consuming it.
+    /// </summary>
+    /// <remarks>
+    /// This is what makes the kTLS RX handoff possible. Records the handshake already pulled off
+    /// the socket are invisible to the kernel, so the sequence number it starts at has to account
+    /// for them - and a PARTIAL record left behind cannot be accounted for at all, because those
+    /// bytes are gone and the kernel will never see them. Then the only safe move is to stay in
+    /// userspace for that connection.
+    /// </remarks>
+    public int CountPendingRecords(out bool trailingPartial)
+    {
+        trailingPartial = false;
+
+        byte* buffer;
+        long available = OpenSsl.BIO_ctrl(_rbio, OpenSsl.BIO_CTRL_INFO, 0, &buffer);
+        if (available <= 0 || buffer == null)
+        {
+            return 0;
+        }
+
+        int records = 0;
+        long offset = 0;
+
+        while (offset + 5 <= available)
+        {
+            // TLSCiphertext: type(1) legacy_version(2) length(2), then `length` encrypted bytes.
+            int length = (buffer[offset + 3] << 8) | buffer[offset + 4];
+            if (offset + 5 + length > available)
+            {
+                break;   // the record is not all here
+            }
+
+            records++;
+            offset += 5 + length;
+        }
+
+        trailingPartial = offset < available;
+        return records;
+    }
+
+    /// <summary>Bytes still unread in the BIO - zero means the handshake consumed exactly whole records.</summary>
+    public nuint PendingCiphertext => OpenSsl.BIO_ctrl_pending(_rbio);
+
+    /// <summary>
+    /// Encrypt <paramref name="plaintext"/> with OpenSSL and stage the records into the
+    /// connection's write slab. The counterpart to letting kTLS do it: use this when
+    /// <c>TlsOptions.KernelTx</c> is off and the socket carries no TLS ULP.
+    /// </summary>
+    /// <remarks>
+    /// This is where the extra copy the kTLS write path avoids actually lives. kTLS takes plaintext
+    /// straight into the slab and the kernel encrypts on send; here OpenSSL encrypts into its write
+    /// BIO first, and BIO_read then moves the records into the slab. Two passes over the bytes
+    /// instead of one - though BIO_read at least writes directly into the slab rather than through
+    /// an intermediate of ours.
+    /// </remarks>
+    public void WriteEncrypted(TcpConnection connection, ReadOnlySpan<byte> plaintext)
+    {
+        fixed (byte* p = plaintext)
+        {
+            if (OpenSsl.SSL_write(_ssl, p, plaintext.Length) <= 0)
+            {
+                throw new IOException($"TLS encrypt failed: {OpenSsl.LastError()}");
+            }
+        }
+
+        while (true)
+        {
+            int pending = (int)OpenSsl.BIO_ctrl_pending(_wbio);
+            if (pending <= 0)
+            {
+                return;
+            }
+
+            int chunk = Math.Min(pending, 16 * 1024);
+            Span<byte> destination = connection.GetSpan(chunk);
+
+            int n;
+            fixed (byte* d = destination)
+            {
+                n = OpenSsl.BIO_read(_wbio, d, chunk);
+            }
+
+            if (n <= 0)
+            {
+                return;
+            }
+            connection.Advance(n);
+        }
+    }
+
     private bool ShouldKeepReading(int result)
     {
         int err = OpenSsl.SSL_get_error(_ssl, result);

@@ -14,6 +14,7 @@ internal static unsafe class Ktls
     private const int TCP_ULP = 31;
     private const int SOL_TLS = 282;
     private const int TLS_TX = 1;
+    private const int TLS_RX = 2;
     private const int TLS_SET_RECORD_TYPE = 1;
     private const ushort TLS_1_3_VERSION = 0x0304;
     private const ushort TLS_CIPHER_AES_GCM_128 = 51;
@@ -58,6 +59,58 @@ internal static unsafe class Ktls
         public nint Control;
         public nuint ControlLen;
         public int Flags;
+    }
+
+    /// <summary>
+    /// Enable kTLS RX with keys derived from the TLS 1.3 <b>client</b> traffic secret, so the kernel
+    /// decrypts inbound records and an ordinary recv returns plaintext.
+    /// </summary>
+    /// <param name="recordSequence">
+    /// How many application-data records the client has already sent that OpenSSL consumed during
+    /// the handshake. This is the one thing that cannot be guessed: the sequence number is part of
+    /// the AEAD nonce, so starting the kernel at the wrong one makes every record fail to
+    /// authenticate. The client's first request routinely rides in with its Finished flight, and
+    /// those records are gone from the socket by the time we get here.
+    /// </param>
+    public static void EnableRx(int fd, byte[] clientTrafficSecret, ulong recordSequence)
+    {
+        byte[] key = ExpandLabel(clientTrafficSecret, "key", 16);
+        byte[] nonce = ExpandLabel(clientTrafficSecret, "iv", 12);
+
+        var info = new CryptoInfoAesGcm128
+        {
+            Version = TLS_1_3_VERSION,
+            CipherType = TLS_CIPHER_AES_GCM_128,
+        };
+
+        try
+        {
+            for (int i = 0; i < 16; i++) info.Key[i] = key[i];
+            for (int i = 0; i < 4; i++) info.Salt[i] = nonce[i];
+            for (int i = 0; i < 8; i++) info.Iv[i] = nonce[4 + i];
+
+            // Big-endian, like everything else on the wire.
+            for (int i = 0; i < 8; i++)
+            {
+                info.RecSeq[i] = (byte)(recordSequence >> ((7 - i) * 8));
+            }
+
+            // TCP_ULP is already set by EnableTx; setting it twice returns EEXIST, so RX assumes
+            // TX ran first. That ordering is also what the caller wants - a half-enabled socket
+            // with RX but no TX would send cleartext.
+            if (setsockopt(fd, SOL_TLS, TLS_RX, &info, (uint)sizeof(CryptoInfoAesGcm128)) != 0)
+            {
+                throw new IOException($"kTLS: TLS_RX failed (errno {Marshal.GetLastPInvokeError()})");
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(key);
+            CryptographicOperations.ZeroMemory(nonce);
+            CryptographicOperations.ZeroMemory(clientTrafficSecret);
+            CryptoInfoAesGcm128* ip = &info;
+            CryptographicOperations.ZeroMemory(new Span<byte>(ip, sizeof(CryptoInfoAesGcm128)));
+        }
     }
 
     /// <summary>Enable kTLS TX with keys derived from the TLS 1.3 server traffic secret.</summary>

@@ -227,8 +227,44 @@ if (tls.NegotiatedAlpn == "h2")
       mainstream distros) and <b>OpenSSL 3</b> (present in the .NET runtime images).</li>
     </ul>
 
+    <h2>Choosing a backend: kTLS, or OpenSSL both ways</h2>
+    <p><code>TlsOptions.KernelTx</code> is on by default and is what makes handlers write plaintext.
+    Turn it off and OpenSSL does both directions - the socket gets no TLS ULP at all, and the
+    handler hands responses to <code>TlsSession.WriteEncrypted</code> instead. Everything else,
+    including the handshake and ALPN, is identical.</p>
+    <table>
+      <tr><th></th><th>kTLS (default)</th><th><code>KernelTx = false</code></th></tr>
+      <tr><td><code>tls</code> kernel module</td><td>required</td><td>not needed</td></tr>
+      <tr><td>TLS versions</td><td>1.3 only</td><td>1.2 and 1.3</td></tr>
+      <tr><td>ciphersuites</td><td>one (AES-128-GCM)</td><td>any</td></tr>
+      <tr><td>session resumption</td><td>disabled</td><td>available</td></tr>
+      <tr><td>handshake alignment</td><td>constrains the handoff</td><td>irrelevant</td></tr>
+      <tr><td><code>sendfile</code> / NIC offload</td><td><b>yes</b></td><td>no</td></tr>
+    </table>
+    <p>That last row is the reason kTLS exists, and it is the one thing the numbers below cannot
+    see - they are loopback, with no NIC and no <code>sendfile</code> anywhere in the path.</p>
+
     <h2>kTLS: performance</h2>
-    <p>On a plaintext-equivalent workload kTLS runs at roughly two thirds of plaintext throughput.
+    <p><b>Measured against plaintext, not against each other.</b> 4 reactors,
+    <code>wrk -t4 -c64</code>, HTTP/1.1, <code>Tcp/Raw</code> as the baseline:</p>
+    <table>
+      <tr><th>response</th><th>plaintext</th><th>kTLS</th><th>OpenSSL</th></tr>
+      <tr><td>64 B</td><td>1,379,980</td><td>1,091,224 &nbsp;0.79&times;</td><td>1,093,361 &nbsp;0.79&times;</td></tr>
+      <tr><td>8 KiB</td><td>1,109,287</td><td>749,833 &nbsp;0.68&times;</td><td>802,325 &nbsp;0.72&times;</td></tr>
+      <tr><td>64 KiB</td><td>448,093</td><td>157,644 &nbsp;0.35&times;</td><td>196,486 &nbsp;0.44&times;</td></tr>
+      <tr><td>256 KiB</td><td>133,097</td><td>41,691 &nbsp;0.31&times;</td><td>49,801 &nbsp;0.37&times;</td></tr>
+    </table>
+    <p>Two things worth taking from that. <b>TLS costs far more than the choice of backend does</b> -
+    at 64 KiB you are at a third of plaintext either way, so the gap between kTLS and OpenSSL is a
+    rounding error next to the cost of encrypting at all. And <b>the ratio depends on response
+    size</b>: 0.79&times; at 64 bytes is not the same server as 0.35&times; at 64 KiB.</p>
+    <p>kTLS is behind on large <em>single</em> writes - the kernel has to split one 256 KiB write
+    into sixteen records - and level once the protocol above it already chunks. Over HTTP/2, where
+    nghttp2 frames responses into 16 KiB DATA frames before they reach the socket, the two are
+    within noise of each other at every size.</p>
+
+    <h2>kTLS: where the cost actually is</h2>
+    <p>The remainder of this section is about kTLS specifically.
     The cost is dominated by the <em>inherent</em> work of encrypting each response - which the
     kernel does, on the existing send path, with no userspace copy - plus the small fixed cost of
     decrypting each request. There is no managed-crypto tax and no extra copy on the send side,

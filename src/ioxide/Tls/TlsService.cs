@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using ioxide.utils;
 
 namespace ioxide.tls;
@@ -15,16 +16,20 @@ public sealed class TlsService
 {
     private readonly nint _ctx;
     private readonly GCHandle _alpnHandle;   // roots the ALPN wire bytes the select callback reads via its arg
+    private readonly bool _kernelRx;
+    private readonly bool _kernelTx;
 
     // A per-SSL ex_data slot holds a GCHandle to the TlsSession, so the static keylog callback can
     // find the right session for an SSL without a process-global, recycled-pointer-keyed map.
     private static readonly int SslSessionIndex =
         OpenSsl.CRYPTO_get_ex_new_index(OpenSsl.CRYPTO_EX_INDEX_SSL, 0, 0, 0, 0, 0);
 
-    private TlsService(nint ctx, GCHandle alpnHandle)
+    private TlsService(nint ctx, GCHandle alpnHandle, bool kernelRx, bool kernelTx)
     {
         _ctx = ctx;
         _alpnHandle = alpnHandle;
+        _kernelRx = kernelRx;
+        _kernelTx = kernelTx;
     }
 
     /// <summary>Create the per-reactor service and register it. Call from <c>Reactor.OnStart</c>.</summary>
@@ -71,7 +76,7 @@ public sealed class TlsService
             OpenSsl.SSL_CTX_set_alpn_select_cb(ctx, (nint)alpn, GCHandle.ToIntPtr(alpnHandle));
         }
 
-        var service = new TlsService(ctx, alpnHandle);
+        var service = new TlsService(ctx, alpnHandle, options.KernelRx, options.KernelTx);
         reactor.AddService(service);
         return service;
     }
@@ -95,7 +100,7 @@ public sealed class TlsService
         OpenSsl.SSL_set_bio(ssl, rbio, wbio);   // ssl owns both BIOs now
         OpenSsl.SSL_set_accept_state(ssl);
 
-        var session = new TlsSession(ssl, rbio);
+        var session = new TlsSession(ssl, rbio, wbio);
 
         // Associate the session with this SSL so the keylog callback writes the secret onto it
         // directly (no global map). The handle is freed in TlsSession.Dispose.
@@ -136,6 +141,10 @@ public sealed class TlsService
             // decides which protocol loop to run.
             session.CaptureAlpn();
 
+            // Count BEFORE draining: these are the records the handshake pulled off the socket, so
+            // they are invisible to the kernel and the RX sequence number has to skip past them.
+            int consumedRecords = session.CountPendingRecords(out bool partialRecord);
+
             // App data that rode in with the client's Finished is sitting in the
             // rbio - decrypt it now so the handler starts with a clean slate.
             session.DrainPending();
@@ -146,9 +155,28 @@ public sealed class TlsService
             // Everything the handshake needed to send is flushed; from the next write on, the kernel
             // produces the records. kTLS rejects MSG_WAITALL, so switch this connection's sends to
             // plain (the reactor still loops on short sends). EnableTx zeros 'secret' once programmed.
-            Ktls.EnableTx(conn.ClientFd, secret);
-            conn.SendOpFlags = 0;
-            session.MarkTxEnabled(conn.ClientFd);
+            if (_kernelTx)
+            {
+                Ktls.EnableTx(conn.ClientFd, secret);
+                conn.SendOpFlags = 0;
+                session.MarkTxEnabled(conn.ClientFd);
+            }
+            else
+            {
+                // No TLS ULP on this socket at all: OpenSSL encrypts, the reactor sends ordinary
+                // bytes, and MSG_WAITALL stays on because there is no kTLS to reject it.
+                CryptographicOperations.ZeroMemory(secret);
+            }
+
+            // RX is opt-in and per connection. A partial record left in the BIO means bytes the
+            // kernel will never see, and no sequence number recovers those - that connection stays
+            // on the userspace path rather than corrupting itself.
+            if (_kernelTx && _kernelRx && !partialRecord && session.ClientSecret is not null)
+            {
+                Ktls.EnableRx(conn.ClientFd, session.ClientSecret, (ulong)consumedRecords);
+                session.ClientSecret = null;   // EnableRx zeroed it
+                session.MarkKernelRx();
+            }
 
             return session;
         }
@@ -208,7 +236,14 @@ public sealed class TlsService
     private static void KeylogCallback(nint ssl, nint line)
     {
         string? text = Marshal.PtrToStringUTF8(line);
-        if (text == null || !text.StartsWith("SERVER_TRAFFIC_SECRET_0 ", StringComparison.Ordinal))
+        if (text == null)
+        {
+            return;
+        }
+
+        bool server = text.StartsWith("SERVER_TRAFFIC_SECRET_0 ", StringComparison.Ordinal);
+        bool client = text.StartsWith("CLIENT_TRAFFIC_SECRET_0 ", StringComparison.Ordinal);
+        if (!server && !client)
         {
             return;
         }
@@ -220,11 +255,21 @@ public sealed class TlsService
             return;
         }
 
-        // "SERVER_TRAFFIC_SECRET_0 <client_random_hex> <secret_hex>"
+        // "<SIDE>_TRAFFIC_SECRET_0 <client_random_hex> <secret_hex>"
         int lastSpace = text.LastIndexOf(' ');
-        if (lastSpace > 0)
+        if (lastSpace <= 0)
         {
-            session.ServerSecret = Convert.FromHexString(text.AsSpan(lastSpace + 1).TrimEnd());
+            return;
+        }
+
+        byte[] secret = Convert.FromHexString(text.AsSpan(lastSpace + 1).TrimEnd());
+        if (server)
+        {
+            session.ServerSecret = secret;
+        }
+        else
+        {
+            session.ClientSecret = secret;   // the RX half; only used when TlsOptions.KernelRx is on
         }
     }
 

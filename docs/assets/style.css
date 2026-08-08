@@ -210,6 +210,7 @@ nav.top .links a.gh svg { display: block; }
 #tab-inc:checked ~ .ex-menu label[for="tab-inc"],
 #tab-pipe:checked ~ .ex-menu label[for="tab-pipe"],
 #tab-vs:checked ~ .ex-menu label[for="tab-vs"],
+#tab-tlsossl:checked ~ .ex-menu label[for="tab-tlsossl"],
 #tab-h2:checked ~ .ex-menu label[for="tab-h2"],
 #tab-h2cs:checked ~ .ex-menu label[for="tab-h2cs"],
 #tab-h2tls:checked ~ .ex-menu label[for="tab-h2tls"],
@@ -308,6 +309,7 @@ nav.top .links a.gh svg { display: block; }
 #tab-inc:checked ~ .pane-inc { display: block; }
 #tab-pipe:checked ~ .pane-pipe { display: block; }
 #tab-vs:checked ~ .pane-vs { display: block; }
+#tab-tlsossl:checked ~ .pane-tlsossl { display: block; }
 #tab-h2:checked ~ .pane-h2 { display: block; }
 #tab-h2cs:checked ~ .pane-h2cs { display: block; }
 #tab-h2tls:checked ~ .pane-h2tls { display: block; }
@@ -426,6 +428,7 @@ nav.top .links a.gh svg { display: block; }
   #tab-inc:checked ~ .ex-menu label[for="tab-inc"],
   #tab-pipe:checked ~ .ex-menu label[for="tab-pipe"],
   #tab-vs:checked ~ .ex-menu label[for="tab-vs"],
+  #tab-tlsossl:checked ~ .ex-menu label[for="tab-tlsossl"],
   #tab-h2:checked ~ .ex-menu label[for="tab-h2"],
   #tab-h2cs:checked ~ .ex-menu label[for="tab-h2cs"],
   #tab-h2tls:checked ~ .ex-menu label[for="tab-h2tls"],

@@ -18,6 +18,8 @@ Run any of them with `dotnet run -c Release --project Playground/<Group>/<Name>`
 | [`Tcp.Incremental`](Tcp/Incremental/Program.cs) | 95 | `Tcp.Raw` with the per-connection buffer-ring mode - one config block is the whole diff. Kernel 6.12+. | `ioxide` |
 | [`Tcp.Big`](Tcp/Big/Program.cs) | 101 | The write path under a 100 KB body: `SEND_ZC`, slab overflow (`grow` vs `seg`), checksum-able output. | `ioxide` |
 | [`Tls.Ktls`](Tls/Ktls/Program.cs) | 133 | OpenSSL handshake on the ring, then **kernel TLS** transmit - the handler writes plaintext. | `ioxide` |
+| [`Tls.OpenSsl`](Tls/OpenSsl/Program.cs) | 181 | The same termination with **kernel TLS off** - OpenSSL both ways, no `modprobe tls`, and TLS 1.2 / resumption / any suite become available again. | `ioxide` |
+| [`Tls.Pipes`](Tls/Pipes/Program.cs) | 151 | TLS over an `IDuplexPipe`. Both backends run the **same handler code** - `TlsConnectionDualPipe` picks its halves from the session, so nothing below it branches on kTLS vs OpenSSL. | `ioxide` |
 | [`Tls.SslStream`](Tls/SslStream/Program.cs) | 100 | The BCL `SslStream` over `TcpConnectionStream` - portable userspace TLS, the kTLS comparison point. | `ioxide` |
 | [`Http2.Nghttp2`](Http2/Nghttp2/Program.cs) | 66 | HTTP/2 (h2c, prior knowledge) with nghttp2 doing framing, HPACK and flow control. | `ioxide.nghttp2` |
 | [`Http2.Managed`](Http2/Managed/Program.cs) | 66 | The same server with **zero native code** - framing, HPACK and flow control in C#. Drop-in for the above. | `ioxide.http2` |
