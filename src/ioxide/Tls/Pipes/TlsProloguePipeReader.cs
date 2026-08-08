@@ -23,6 +23,9 @@ public sealed class TlsProloguePipeReader : PipeReader
     private byte[] _carry;
     private int _length;
     private int _consumed;
+    private bool _needMore;         // the caller examined the whole carry without consuming it all
+    private bool _cancelRequested;  // CancelPendingRead arrived while the carry was live
+    private bool _awaitingInner;    // a carry-mode read is parked on the inner reader right now
     private bool _drained;      // the carry is gone; pure delegation from here
     private bool _completed;
 
@@ -52,15 +55,34 @@ public sealed class TlsProloguePipeReader : PipeReader
             return await _inner.ReadAsync(cancellationToken);
         }
 
-        // Unconsumed carry first. A caller that examined it all without consuming needs MORE than
-        // the prologue to make progress, so pull from the connection and append - otherwise the
-        // same bytes would be handed back forever.
-        if (_consumed < _length)
+        // A cancel that arrived while the carry was live is served here, not latched into the
+        // inner reader to pop out as a surprise after the carry drains.
+        if (_cancelRequested)
+        {
+            _cancelRequested = false;
+            return new ReadResult(Sequence(), isCanceled: true, isCompleted: false);
+        }
+
+        // Unconsumed carry first - unless the caller already examined it all without consuming,
+        // which per the PipeReader contract means it needs MORE bytes to make progress. Handing the
+        // identical buffer back would spin that caller hot forever.
+        if (_consumed < _length && !_needMore)
         {
             return new ReadResult(Sequence(), isCanceled: false, isCompleted: false);
         }
 
-        ReadResult next = await _inner.ReadAsync(cancellationToken);
+        ReadResult next;
+        _awaitingInner = true;
+        try
+        {
+            next = await _inner.ReadAsync(cancellationToken);
+        }
+        finally
+        {
+            _awaitingInner = false;
+        }
+
+        _needMore = false;
         Append(next.Buffer);
         _inner.AdvanceTo(next.Buffer.End);
 
@@ -74,9 +96,26 @@ public sealed class TlsProloguePipeReader : PipeReader
             return _inner.TryRead(out result);
         }
 
-        if (_consumed < _length)
+        if (_cancelRequested)
+        {
+            _cancelRequested = false;
+            result = new ReadResult(Sequence(), isCanceled: true, isCompleted: false);
+            return true;
+        }
+
+        if (_consumed < _length && !_needMore)
         {
             result = new ReadResult(Sequence(), isCanceled: false, isCompleted: false);
+            return true;
+        }
+
+        // The caller needs more than the carry; see whether the inner reader has it right now.
+        if (_inner.TryRead(out ReadResult next))
+        {
+            _needMore = false;
+            Append(next.Buffer);
+            _inner.AdvanceTo(next.Buffer.End);
+            result = new ReadResult(Sequence(), next.IsCanceled, next.IsCompleted);
             return true;
         }
 
@@ -94,8 +133,15 @@ public sealed class TlsProloguePipeReader : PipeReader
             return;
         }
 
-        // Single segment while the carry is live, so the position is the offset into it.
-        _consumed += consumed.GetInteger();
+        // Single segment while the carry is live, and its positions carry the ABSOLUTE offset into
+        // the backing array - a sequence built over carry[9..] reports Start.GetInteger() == 9, not
+        // 0 - so this is an assignment. Adding it would double-count every partial consume after
+        // the first and silently skip the bytes in between.
+        _consumed = consumed.GetInteger();
+
+        // Examined to the end without consuming everything = "wake me when there is MORE". The
+        // next read must pull from the connection and append, not replay the same bytes.
+        _needMore = _consumed < _length && examined.GetInteger() >= _length;
 
         if (_consumed < _length)
         {
@@ -109,7 +155,17 @@ public sealed class TlsProloguePipeReader : PipeReader
 
     public override void CancelPendingRead()
     {
-        _inner.CancelPendingRead();
+        // While the carry is live the next read is served here, synchronously - a cancel latched
+        // into the inner reader would not be observed until the carry drains, then surface as a
+        // wake-up nobody asked for. Only a read actually parked on the inner reader (or pure
+        // pass-through) forwards.
+        if (_drained || _awaitingInner)
+        {
+            _inner.CancelPendingRead();
+            return;
+        }
+
+        _cancelRequested = true;
     }
 
     public override void Complete(Exception? exception = null)
