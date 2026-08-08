@@ -29,27 +29,42 @@ using Playground.Shared;
     Env.StrOrNull("PLAYGROUND_QUIC_CERT"),
     Env.StrOrNull("PLAYGROUND_QUIC_KEY"));
 
-using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+using var engine = new QuicEngine(certPath, keyPath,
+    cidLength: 8,                       // CID bytes this endpoint mints (1..20)
+    alpn: ["h3"],                       // the only protocol offered (else no_application_protocol)
+    maxSendRetentionBytes: 16L << 20);  // per-connection send-retention high-water (default 16 MiB)
 
 var config = new ServerConfig
 {
-    ReactorCount = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
-    Tcp = null,   // h3 in, h3 out: nothing here speaks TCP at all
-    Udp = new UdpOptions { RecvSlots = Env.Int("PLAYGROUND_UDP_SLOTS", 16) },
+    ReactorCount   = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
+    RingEntries    = 8192,       // SQ/CQ depth per ring
+    DualStack      = false,      // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,  // bytes per shared recv buffer
+    RecvSlots      = 4096,       // shared recv buffer-ring depth
+    Incremental    = null,       // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Tcp            = null,       // h3 in, h3 out: nothing here speaks TCP at all
+    Udp = new UdpOptions
+    {
+        RecvSlots = Env.Int("PLAYGROUND_UDP_SLOTS", 16),  // multishot recv slots per reactor (datagrams in flight)
+        Gro       = true,                                 // UDP_GRO: coalesce datagrams into one recv (fewer syscalls)
+    },
     Quic = new QuicOptions
     {
-        Port = Env.Port("PLAYGROUND_QUIC_PORT", 8443),
-        LocalCidLength = 8,
-        ConnectionFactory = engine.CreateFactory(),
+        Port              = Env.Port("PLAYGROUND_QUIC_PORT", 8443),  // h3 over UDP - the QUIC listener
+        LocalCidLength    = 8,                                       // CID bytes this endpoint mints (must match the engine)
+        IdleTimeoutMs     = 60_000,                                  // transport idle backstop; 0 disables sweep eviction
+        ConnectionFactory = engine.CreateFactory(),                  // adopts new connections into the engine
     },
 };
 
 var upstream = new Http3ClientOptions
 {
-    Host = Env.Str("PLAYGROUND_UPSTREAM_HOST", "127.0.0.1"),   // IPv4 literal: DNS would block the reactor
-    Port = Env.Port("PLAYGROUND_UPSTREAM_PORT", 8444),         // the upstream's QUIC (UDP) port
-    ServerName = Env.Str("PLAYGROUND_UPSTREAM_SNI", "localhost"),
-    PoolSize = Env.Int("PLAYGROUND_UPSTREAM_POOL", 1),         // h3 multiplexes: one connection carries all
+    Host             = Env.Str("PLAYGROUND_UPSTREAM_HOST", "127.0.0.1"),  // IPv4 literal: DNS would block the reactor
+    Port             = Env.Port("PLAYGROUND_UPSTREAM_PORT", 8444),        // the upstream's QUIC (UDP) port
+    ServerName       = Env.Str("PLAYGROUND_UPSTREAM_SNI", "localhost"),   // SNI / :authority, checked against the cert
+    PoolSize         = Env.Int("PLAYGROUND_UPSTREAM_POOL", 1),            // h3 multiplexes: one connection carries all
+    AcquireTimeoutMs = 10_000,                                            // how long a request waits (handshake included)
+    MaxResponseBytes = 8 * 1024 * 1024,                                   // per-request ceiling for headers + body
 };
 
 var threads = new Thread[config.ReactorCount];

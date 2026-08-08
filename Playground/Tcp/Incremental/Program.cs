@@ -19,7 +19,11 @@ using Playground.Shared;
 
 var config = new ServerConfig
 {
-    ReactorCount = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
+    ReactorCount   = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),  // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                 // SQ/CQ depth per ring
+    DualStack      = false,                                // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
+    RecvSlots      = 4096,                                 // shared recv buffer-ring depth
 
     // Selecting the mode is setting this block. The shared-ring knobs (RecvBufferSize,
     // RecvSlots) go unused once it is set.
@@ -27,12 +31,21 @@ var config = new ServerConfig
     {
         MaxConnections = Env.Int("PLAYGROUND_INC_CONNS", 4096),      // per reactor
         RecvSlots      = Env.Int("PLAYGROUND_INC_SLOTS", 16),        // per connection
-        RecvBufferSize = Env.Int("PLAYGROUND_INC_BUFSIZE", 4096),
+        RecvBufferSize = Env.Int("PLAYGROUND_INC_BUFSIZE", 4096),    // bytes per buffer, kernel appends across recvs
     },
 
+    Udp            = null,                                 // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                 // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port = Env.Port("PLAYGROUND_PORT", 8080),
+        Port             = Env.Port("PLAYGROUND_PORT", 8080),
+        ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
     },
 };
 

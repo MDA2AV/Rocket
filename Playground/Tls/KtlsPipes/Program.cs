@@ -57,25 +57,40 @@ string? keyOverride  = null;
 
 var config = new ServerConfig
 {
-    ReactorCount = reactors,
+    ReactorCount   = reactors,                             // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                 // SQ/CQ depth per ring
+    DualStack      = false,                                // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
+    RecvSlots      = 4096,                                 // shared recv buffer-ring depth
+    Incremental    = null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,                                 // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                 // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port = port,
+        Port             = port,
+        ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
     },
 };
 
 var tlsOptions = new TlsOptions
 {
-    CertificatePath = certPath,
-    KeyPath = keyPath,
+    CertificatePath = certPath,                            // PEM chain file (or CertificatePem for in-memory)
+    KeyPath         = keyPath,                             // PEM key file (or KeyPem for in-memory)
+    Alpn            = ["http/1.1"],                        // protocols this port serves, most-preferred first
 
     // NOT the default - TLS is OpenSSL both ways unless you ask for this.
     // Playground/Tls/OpenSslPipes is the same server without these two lines.
-    KernelTx = true,
+    KernelTx        = true,
 
     // Full kTLS: the kernel decrypts inbound too. Experimental - about one first connection in
     // twelve fails outright, and a KeyUpdate is fatal. Drop this line for the hybrid.
-    KernelRx = true,
+    KernelRx        = true,
 };
 
 byte[] body = new byte[bodyBytes];

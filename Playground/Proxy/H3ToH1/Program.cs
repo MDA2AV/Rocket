@@ -21,18 +21,31 @@ using Playground.Shared;
     Env.StrOrNull("PLAYGROUND_QUIC_CERT"),
     Env.StrOrNull("PLAYGROUND_QUIC_KEY"));
 
-using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+using var engine = new QuicEngine(certPath, keyPath,
+    cidLength: 8,                       // CID bytes this endpoint mints (1..20)
+    alpn: ["h3"],                       // the only protocol offered (else no_application_protocol)
+    maxSendRetentionBytes: 16L << 20);  // per-connection send-retention high-water (default 16 MiB)
 
 var config = new ServerConfig
 {
-    ReactorCount = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
-    Tcp = null,   // the proxy serves h3 only; its TCP sockets are all outbound
-    Udp = new UdpOptions { RecvSlots = Env.Int("PLAYGROUND_UDP_SLOTS", 16) },
+    ReactorCount   = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
+    RingEntries    = 8192,       // SQ/CQ depth per ring
+    DualStack      = false,      // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,  // bytes per shared recv buffer
+    RecvSlots      = 4096,       // shared recv buffer-ring depth
+    Incremental    = null,       // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Tcp            = null,       // the proxy serves h3 only; its TCP sockets are all outbound
+    Udp = new UdpOptions
+    {
+        RecvSlots = Env.Int("PLAYGROUND_UDP_SLOTS", 16),  // multishot recv slots per reactor (datagrams in flight)
+        Gro       = true,                                 // UDP_GRO: coalesce datagrams into one recv (fewer syscalls)
+    },
     Quic = new QuicOptions
     {
-        Port = Env.Port("PLAYGROUND_QUIC_PORT", 8443),
-        LocalCidLength = 8,
-        ConnectionFactory = engine.CreateFactory(),
+        Port              = Env.Port("PLAYGROUND_QUIC_PORT", 8443),  // h3 over UDP - the QUIC listener
+        LocalCidLength    = 8,                                       // CID bytes this endpoint mints (must match the engine)
+        IdleTimeoutMs     = 60_000,                                  // transport idle backstop; 0 disables sweep eviction
+        ConnectionFactory = engine.CreateFactory(),                  // adopts new connections into the engine
     },
 };
 
@@ -61,15 +74,21 @@ for (int i = 0; i < threads.Length; i++)
         // per-connection state, so every connection opened from it gets its own SSL.
         HttpClientPool.Start(r, new HttpClientOptions
         {
-            Host = upstreamHost,
-            Port = upstreamPort,
-            PoolSize = upstreamPool,
+            Host              = upstreamHost,     // origin address (IPv4 literal; DNS would block the reactor)
+            Port              = upstreamPort,     // origin port
+            PoolSize          = upstreamPool,     // connections kept open; round-robin, one request each
+            MaxResponseBytes  = 8 * 1024 * 1024,  // per-request ceiling for headers + body
+            SendBufferSize    = 16 * 1024,        // per-connection send buffer
+            ReceiveBufferSize = 16 * 1024,        // per-connection recv buffer (grows to MaxResponseBytes)
+            AcquireTimeoutMs  = 10_000,           // how long a request waits for a free connection
             Tls = TlsClientContext.Create(new TlsClientOptions
             {
-                ServerName = upstreamName,
-                AlpnProtocols = ["http/1.1"],
-                CaFile = upstreamInsecure ? null : upstreamCa,
-                VerifyCertificate = !upstreamInsecure,
+                ServerName         = upstreamName,                          // sent as SNI, checked against the cert
+                AlpnProtocols      = ["http/1.1"],                          // ALPN offer, most preferred first
+                VerifyCertificate  = !upstreamInsecure,                     // off = encrypted but UNAUTHENTICATED
+                CaFile             = upstreamInsecure ? null : upstreamCa,  // PEM trust anchors; null = system store
+                MinimumVersion     = OpenSslVersions.Tls12,                 // lowest TLS accepted; Tls13 = 1.3 only
+                HandshakeTimeoutMs = 10_000,                                // handshake deadline
             }),
         });
     };

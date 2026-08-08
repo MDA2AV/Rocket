@@ -52,14 +52,24 @@ using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: null, m
 
 var config = new ServerConfig
 {
-    ReactorCount = reactors,
-    Tcp = null,   // QUIC-only: no TCP listener is bound
-    Udp = new UdpOptions { RecvSlots = udpRecvSlots },
+    ReactorCount   = reactors,   // one ring per reactor, one reactor per core
+    RingEntries    = 8192,       // io_uring SQ/CQ depth
+    DualStack      = false,      // IPv4-only sockets; true binds dual-stack IPv6 (::)
+    RecvBufferSize = 32 * 1024,  // bytes per slot in the shared TCP recv ring
+    RecvSlots      = 4096,       // slots in that shared recv ring
+    Incremental    = null,       // shared recv ring; non-null = per-connection rings (kernel 6.12+)
+    Tcp            = null,       // QUIC-only: no TCP listener is bound
+    Udp = new UdpOptions
+    {
+        RecvSlots = udpRecvSlots,  // multishot recv slots per reactor - datagrams the ring can hold at once
+        Gro       = true,          // UDP_GRO: coalesce a received datagram burst into one recv
+    },
     Quic = new QuicOptions
     {
-        Port = quicPort,
-        LocalCidLength = 8,
-        ConnectionFactory = engine.CreateFactory(),
+        Port              = quicPort,                // https://127.0.0.1:8443/ - UDP, not TCP
+        LocalCidLength    = 8,                       // must match the engine's cidLength
+        IdleTimeoutMs     = 60_000,                  // close a connection idle this long (no packets)
+        ConnectionFactory = engine.CreateFactory(),  // the engine adopts each new connection
     },
 };
 

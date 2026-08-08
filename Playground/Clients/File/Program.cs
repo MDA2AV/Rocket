@@ -30,14 +30,30 @@ int cacheMax = Env.Int("PLAYGROUND_CACHE_MAX", AssetCache.DefaultMaxCachedFileBy
 SampleAssets.Ensure(dir);   // writes a demo index.html + style.css if the directory is empty
 
 // Built once for the whole process, BEFORE the reactors start: every reactor shares this snapshot.
-var assets = new StaticAssets(dir, cacheMax);
+var assets = new StaticAssets(
+    dir,        // served root (PLAYGROUND_DIR); walked once into an immutable snapshot
+    cacheMax);  // maxCachedFileBytes: whole-response pin ceiling per file (0 = always ring-read)
 
 var config = new ServerConfig
 {
-    ReactorCount = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
+    ReactorCount   = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),  // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                                        // SQ/CQ depth per ring
+    DualStack      = false,                                                       // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                                                   // bytes per shared recv buffer
+    RecvSlots      = 4096,                                                        // shared recv buffer-ring depth
+    Incremental    = null,                                                        // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,                                                        // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                                        // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port = Env.Port("PLAYGROUND_PORT", 8080),
+        Port             = Env.Port("PLAYGROUND_PORT", 8080),
+        ExtraPorts       = [],                                                    // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                                                  // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                                             // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                                                  // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,                            // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                                                 // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                                                    // per-connection recv completion queue depth
     },
 };
 
@@ -51,8 +67,10 @@ for (int i = 0; i < threads.Length; i++)
 
     reactor.OnStart = r =>
     {
-        r.AddService(assets);                                          // the shared snapshot
-        AssetReader.CreatePool(r, readers: 4, bufferBytes: 1 << 20);   // per-reactor ring readers
+        r.AddService(assets);   // the shared snapshot
+        AssetReader.CreatePool(r,
+            readers:     4,         // concurrent ring reads bounded per reactor (pool size)
+            bufferBytes: 1 << 20);  // native read buffer per reader (1 MiB) - size for the largest asset
     };
 
     reactor.TcpHandle = async (r, conn) =>
