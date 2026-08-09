@@ -139,6 +139,22 @@ PANES = {
         "One QUIC listener serving two protocols, chosen during the handshake: connections that "
         "negotiate <code>h3</code> get the HTTP/3 loop, anything else gets raw stream echo over the "
         "dual pipe. QUIC-only - <code>Tcp = null</code>, so the process opens no TCP listener at all."),
+    "files": (
+        "Clients/File", "Client &middot; static files", "ioxide + ioxide.file",
+        ["curl http://127.0.0.1:8080/index.html",
+         "PLAYGROUND_FILE_TLS=ktls    # then curl -k https://127.0.0.1:8443/index.html"],
+        "Every file under the root is opened <b>once</b> and the descriptors shared across reactors, "
+        "read positionally off the ring - nothing locked, nothing cached in memory. The knob worth "
+        "reading is <code>tlsMode</code>, because it decides whether the fast path is even legal, and "
+        "the whole question is <em>what is the write slab supposed to hold when it is sent?</em> "
+        "Cleartext: the slab IS the wire. <b>kTLS</b>: the slab holds plaintext and the kernel makes "
+        "the records - so <code>ReadFileAsync</code> can still read the file straight into it and the "
+        "bytes are never copied. <b>OpenSSL</b>: the slab must hold ciphertext, so the body has to "
+        "pass through <code>TlsSession.Write</code>, which needs a source buffer - and that buffer IS "
+        "the copy. The sample refuses that combination rather than serving the file in the clear. "
+        "Measured on one saturated reactor at 4 KiB, skipping the copy is worth <b>1.22&times;</b> "
+        "cleartext and <b>1.21&times;</b> under kTLS; at 64 KiB the kernel's per-byte crypto "
+        "overtakes it and OpenSSL wins outright."),
     "https": (
         "Clients/Https", "Client &middot; https origins", "ioxide + ioxide.httpclient",
         ["curl http://127.0.0.1:8080/get"],
@@ -172,7 +188,9 @@ def inline(code: str) -> str:
         "string? certOverride = null;\n"
         "string? keyOverride  = null;\n",
         'const string certPath = "cert.pem";   // any PEM pair\nconst string keyPath  = "key.pem";\n')
-    code = re.sub(r"\(string certPath, string keyPath\) = QuicCert\.Ensure\(certOverride, keyOverride\);\n", "", code)
+    # Any spelling of the assignment, not just the bare one - a sample that only needs a cert in
+    # some modes writes it as a conditional, and the pane still wants it gone.
+    code = re.sub(r"\(string certPath, string keyPath\) =[^;]*QuicCert\.Ensure[^;]*;\n", "", code, flags=re.S)
 
     # PLAYGROUND_INCREMENTAL is a bench escape hatch (per-connection recv rings); the pane shows the
     # sample's default - the shared ring - just like the other Env knobs collapse to their literals.
