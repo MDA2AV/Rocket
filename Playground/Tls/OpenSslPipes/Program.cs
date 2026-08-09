@@ -60,7 +60,7 @@ var config = new ServerConfig
     DualStack      = false,                                // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
     RecvSlots      = 4096,                                 // shared recv buffer-ring depth
-    Incremental    = null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Incremental    = Env.Flag("PLAYGROUND_INCREMENTAL") ? new IncrementalOptions { MaxConnections = 1024, RecvSlots = 8, RecvBufferSize = 16 * 1024 } : null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
     Udp            = null,                                 // no raw UDP sockets (TCP-only server)
     Quic           = null,                                 // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions

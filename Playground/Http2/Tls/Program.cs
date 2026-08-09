@@ -38,10 +38,6 @@ Env.Override(ref port, ref reactors, ref bodyBytes);
 string? certOverride = null;
 string? keyOverride  = null;
 
-// Per-connection incremental buffer rings instead of the shared ring (kernel 6.12+). The h2 code
-// is identical either way; this only changes how recv buffers are handed out.
-bool incrementalBuffers = false;
-
 // Hand OUTBOUND encryption to the kernel: the handler writes plaintext and the kernel makes the
 // records. Off by default - OpenSSL both ways is the portable path, and on loopback the kernel
 // is not faster. Its real payoff is sendfile and NIC offload, which a benchmark here cannot see.
@@ -64,7 +60,7 @@ var config = new ServerConfig
     DualStack      = false,                                                 // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,                                             // bytes per shared recv buffer
     RecvSlots      = 4096,                                                  // shared recv buffer-ring depth
-    Incremental    = incrementalBuffers ? new IncrementalOptions() : null,  // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Incremental    = Env.Flag("PLAYGROUND_INCREMENTAL") ? new IncrementalOptions { MaxConnections = 1024, RecvSlots = 8, RecvBufferSize = 16 * 1024 } : null,  // per-connection recv rings (6.12+) - see Tcp/Incremental
     Udp            = null,                                                  // no raw UDP sockets (TCP-only server)
     Quic           = null,                                                  // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions

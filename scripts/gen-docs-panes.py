@@ -174,6 +174,10 @@ def inline(code: str) -> str:
         'const string certPath = "cert.pem";   // any PEM pair\nconst string keyPath  = "key.pem";\n')
     code = re.sub(r"\(string certPath, string keyPath\) = QuicCert\.Ensure\(certOverride, keyOverride\);\n", "", code)
 
+    # PLAYGROUND_INCREMENTAL is a bench escape hatch (per-connection recv rings); the pane shows the
+    # sample's default - the shared ring - just like the other Env knobs collapse to their literals.
+    code = re.sub(r'Env\.Flag\("PLAYGROUND_INCREMENTAL"\) \? new IncrementalOptions \{[^}]*\} : null', "null", code)
+
     code = BANNER.sub("", code)
     assert "Env." not in code and "QuicCert" not in code, \
         "harness plumbing survived: " + "; ".join(
