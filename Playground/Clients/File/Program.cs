@@ -1,6 +1,5 @@
 using System.Buffers.Text;
 using System.Runtime.InteropServices;
-using Microsoft.Win32.SafeHandles;
 using ioxide;
 using ioxide.file;
 using ioxide.utils;
@@ -12,8 +11,8 @@ using Playground.Shared;
 //  locked and nothing is cached in memory. This sample frames HTTP/1.1 around the bytes; the same
 //  file data can be handed to any protocol.
 //
-//  Every hit is revalidated against disk (size + mtime + inode), so an edit or an atomic rename is
-//  served live from the new inode rather than stale - the module reopens the changed file for you.
+//  Descriptors are trusted for the snapshot's lifetime - a deploy is picked up by reloading the
+//  snapshot (SIGHUP), which reopens the files, not by re-stat'ing every request.
 //
 //      PLAYGROUND_DIR=/srv/www dotnet run -c Release --project Playground/Clients/File
 //      curl http://127.0.0.1:8080/index.html
@@ -51,8 +50,6 @@ var config = new ServerConfig
         RecvQueueEntries = 64,                                                    // per-connection recv completion queue depth
     },
 };
-
-const int BodyChunk = 12 * 1024;   // how much native memory we push through the write slab at a time
 
 var threads = new Thread[config.ReactorCount];
 
@@ -100,19 +97,11 @@ for (int i = 0; i < threads.Length; i++)
                         }
                     }
 
-                    // TryOpenCurrent hands back the descriptor for the CURRENT bytes: the shared fd
-                    // when unchanged, or a freshly reopened one when the file changed on disk (which
-                    // we then close). Either way the sample just reads bytes and frames HTTP.
-                    if (found && AssetCache.TryOpenCurrent(asset, out int fd, out long length, out SafeFileHandle? reopened))
+                    // The fd is trusted for the snapshot's lifetime, so serving is just: read the
+                    // bytes off the ring and frame HTTP around them.
+                    if (found)
                     {
-                        try
-                        {
-                            await SendFileAsync(conn, readers, asset.Path, fd, length);
-                        }
-                        finally
-                        {
-                            reopened?.Dispose();
-                        }
+                        await SendFileAsync(conn, readers, asset.Path, asset.Fd, asset.Length);
                     }
                     else
                     {
@@ -153,8 +142,9 @@ foreach (Thread thread in threads)
     thread.Join();
 }
 
-// Stream a file off the ring, framing Content-Length up front. Files bigger than the reader's buffer
-// are read in successive chunks at advancing offsets, so they're served whole.
+// Stream a file off the ring, framing Content-Length up front. Each ring read (up to the reader's
+// buffer) is one write + one flush; files bigger than the buffer take several reads at advancing
+// offsets, so they're served whole with one flush per read rather than one per slab.
 static async Task SendFileAsync(
     TcpConnection conn, RingPool<AssetReader> readers, string path, int fd, long totalLength)
 {
@@ -169,17 +159,20 @@ static async Task SendFileAsync(
             return;
         }
 
-        // ioxide.file hands over bytes; the HTTP framing is ours.
+        // ioxide.file hands over bytes; the HTTP framing is ours. Header + first chunk go out
+        // together in one flush.
         Span<byte> header = stackalloc byte[256];
         conn.Write(header[..WriteHeader(header, path, totalLength)]);
-        await SendNativeAsync(conn, reader.Buffer, first);
+        WriteNative(conn, reader.Buffer, first);
+        await conn.FlushAsync();
 
         long offset = first;
         while (offset < totalLength)
         {
             int read = await reader.ReadAsync(fd, offset);
             if (read <= 0) break;   // EOF or mid-stream error; the response is already committed
-            await SendNativeAsync(conn, reader.Buffer, read);
+            WriteNative(conn, reader.Buffer, read);
+            await conn.FlushAsync();
             offset += read;
         }
     }
@@ -189,24 +182,9 @@ static async Task SendFileAsync(
     }
 }
 
-// Push native memory through the write slab in chunks: one flush for a small payload, a short
-// sequence for anything bigger than the slab.
-static async Task SendNativeAsync(TcpConnection conn, nint data, int length)
-{
-    int sent = 0;
-    while (true)
-    {
-        int chunk = Math.Min(length - sent, BodyChunk);
-        unsafe
-        {
-            conn.Write(new ReadOnlySpan<byte>((void*)(data + sent), chunk));
-        }
-        await conn.FlushAsync();
-        sent += chunk;
-
-        if (sent >= length) return;
-    }
-}
+// Copy native memory (a ring-read buffer) into the connection's write slab in one go.
+static unsafe void WriteNative(TcpConnection conn, nint data, int length)
+    => conn.Write(new ReadOnlySpan<byte>((void*)data, length));
 
 // Write the 200 status line + Content-Type + Content-Length for this file.
 static int WriteHeader(Span<byte> destination, string path, long bodyLength)

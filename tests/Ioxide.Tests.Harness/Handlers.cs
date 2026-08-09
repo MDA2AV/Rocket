@@ -1,6 +1,5 @@
 using System.Text;
 using System.Runtime.InteropServices;
-using Microsoft.Win32.SafeHandles;
 using ioxide;
 using ioxide.file;
 using ioxide.tls;
@@ -119,17 +118,9 @@ public static class Handlers
 
                 using (StaticAssets.Lease lease = assets.Acquire())
                 {
-                    if (lease.TryGet(path, out AssetCache.Asset asset)
-                        && AssetCache.TryOpenCurrent(asset, out int fd, out long length, out SafeFileHandle? reopened))
+                    if (lease.TryGet(path, out AssetCache.Asset asset))
                     {
-                        try
-                        {
-                            await SendAssetAsync(conn, readers, fd, (int)length);
-                        }
-                        finally
-                        {
-                            reopened?.Dispose();
-                        }
+                        await SendAssetAsync(conn, readers, asset.Fd, (int)asset.Length);
                     }
                     else
                     {

@@ -5133,7 +5133,6 @@ foreach (Thread t in threads) t.Join();</code></pre>
     </div>
 <pre><code class="language-csharp">// dotnet add package ioxide ioxide.file
 using System.Buffers.Text;
-using Microsoft.Win32.SafeHandles;
 using ioxide;
 using ioxide.file;
 using ioxide.utils;
@@ -5210,31 +5209,28 @@ for (int id = 0; id &lt; threads.Length; id++)
                         }
                     }
 
-                    // TryOpenCurrent hands back the descriptor for the CURRENT bytes: the shared fd
-                    // when unchanged, or a freshly reopened one when the file changed on disk (an
-                    // edit or atomic rename), which we then close. ioxide.file gives you bytes -
-                    // revalidated against disk (size + mtime + inode) - and the HTTP framing is yours.
-                    if (found &amp;&amp; AssetCache.TryOpenCurrent(asset, out int fd, out long length, out SafeFileHandle? reopened))
+                    // The fd is trusted for the snapshot's lifetime (reload on SIGHUP after a deploy),
+                    // so serving is just: read the bytes off the ring and frame HTTP around them.
+                    if (found)
                     {
                         AssetReader reader = await readers.RentAsync();
                         try
                         {
                             Span&lt;byte&gt; header = stackalloc byte[128];
-                            conn.Write(header[..WriteHeader(header, length)]);
+                            conn.Write(header[..WriteHeader(header, asset.Length)]);
 
                             long offset = 0;
-                            while (offset &lt; length)
+                            while (offset &lt; asset.Length)
                             {
-                                int read = await reader.ReadAsync(fd, offset);   // io_uring positional read
+                                int read = await reader.ReadAsync(asset.Fd, offset);   // io_uring positional read
                                 if (read &lt;= 0) break;
-                                await SendNativeAsync(conn, reader.Buffer, read);
+                                await SendNativeAsync(conn, reader.Buffer, read);   // one write + flush per read
                                 offset += read;
                             }
                         }
                         finally
                         {
                             readers.Return(reader);
-                            reopened?.Dispose();
                         }
                     }
                     else
@@ -5264,18 +5260,8 @@ foreach (Thread t in threads) t.Join();
 
 static async Task SendNativeAsync(TcpConnection conn, nint data, int length)
 {
-    const int Chunk = 12 * 1024;
-    int sent = 0;
-
-    while (true)
-    {
-        int take = Math.Min(length - sent, Chunk);
-        unsafe { conn.Write(new ReadOnlySpan&lt;byte&gt;((void*)(data + sent), take)); }
-        await conn.FlushAsync();
-        sent += take;
-
-        if (sent &gt;= length) return;
-    }
+    unsafe { conn.Write(new ReadOnlySpan&lt;byte&gt;((void*)data, length)); }
+    await conn.FlushAsync();
 }
 
 // ioxide.file speaks no HTTP - you frame the response. Status + Content-Length here; a real server
