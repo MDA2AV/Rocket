@@ -566,6 +566,12 @@ public sealed class Http3Connection
     // the body (with fin) in a second - the engine copies into its retention chunks either way.
     private void Submit(long streamId, Http3Response resp)
     {
+        if (resp.HeadIsValid)
+        {
+            SendSubmitted(streamId, resp, resp.EncodedHead!, resp.EncodedHeadLen);
+            return;
+        }
+
         byte[] fields = Qpack.EncodeResponseFields(resp, out int fieldsLen);
 
         bool hasContentLength = false;
@@ -609,14 +615,47 @@ public sealed class Http3Connection
         {
             w += Varint.Write(head.AsSpan(w), FrameData);
             w += Varint.Write(head.AsSpan(w), resp.Body.Length);
-            _quicConnection.SendStream(streamId, head.AsSpan(0, w), fin: false);
-            _quicConnection.SendStream(streamId, resp.Body.Span, fin: true);
         }
-        else
-        {
-            _quicConnection.SendStream(streamId, head.AsSpan(0, w), fin: true);
-        }
+
+        // Keep it: this exact byte sequence is what every later request with this response needs.
+        // Not pooled - it outlives the call by design.
+        resp.EncodedHead = head.AsSpan(0, w).ToArray();
+        resp.EncodedHeadLen = w;
+        resp.EncodedForStatus = resp.Status;
+        resp.EncodedForHeaderCount = resp.Headers.Count;
+        resp.EncodedForBodyLength = resp.Body.Length;
         ArrayPool<byte>.Shared.Return(head);
+
+        SendSubmitted(streamId, resp, resp.EncodedHead, w);
+    }
+
+    // Small bodies ride WITH the head in one send. Two SendStream calls cost two trips through
+    // the QUIC send path per response, which on a short response is a large share of the work;
+    // one extra copy of a few hundred bytes is cheaper. Large bodies still go on their own,
+    // because copying them would cost more than the second call saves.
+    private const int InlineBodyLimit = 4 * 1024;
+
+    private void SendSubmitted(long streamId, Http3Response resp, byte[] head, int headLen)
+    {
+        if (resp.Body.Length == 0)
+        {
+            _quicConnection.SendStream(streamId, head.AsSpan(0, headLen), fin: true);
+            return;
+        }
+
+        if (resp.Body.Length <= InlineBodyLimit)
+        {
+            int total = headLen + resp.Body.Length;
+            byte[] one = ArrayPool<byte>.Shared.Rent(total);
+            head.AsSpan(0, headLen).CopyTo(one);
+            resp.Body.Span.CopyTo(one.AsSpan(headLen));
+            _quicConnection.SendStream(streamId, one.AsSpan(0, total), fin: true);
+            ArrayPool<byte>.Shared.Return(one);
+            return;
+        }
+
+        _quicConnection.SendStream(streamId, head.AsSpan(0, headLen), fin: false);
+        _quicConnection.SendStream(streamId, resp.Body.Span, fin: true);
     }
 
     // --- streaming plumbing --------------------------------------------------------------------

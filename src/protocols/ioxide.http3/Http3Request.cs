@@ -102,6 +102,20 @@ public sealed class Http3Response
     public List<(ReadOnlyMemory<byte> Name, ReadOnlyMemory<byte> Value)> Headers { get; } = [];
     public ReadOnlyMemory<byte> Body { get; init; }
 
+    // The encoded HEADERS frame for this response - QPACK field section, content-length and the
+    // DATA frame header - kept because none of it can change once the response is built. A hot
+    // handler reuses one response instance for every request, so encoding it per request is pure
+    // repetition. Guarded by the shape it was built from, so a mutated response re-encodes.
+    internal byte[]? EncodedHead;
+    internal int EncodedHeadLen;
+    internal int EncodedForStatus = -1;
+    internal int EncodedForHeaderCount = -1;
+    internal int EncodedForBodyLength = -1;
+
+    internal bool HeadIsValid =>
+        EncodedHead is not null && EncodedForStatus == Status
+        && EncodedForHeaderCount == Headers.Count && EncodedForBodyLength == Body.Length;
+
     private static readonly byte[] ContentTypeName = "content-type"u8.ToArray();
     private static readonly byte[] TextPlainValue  = "text/plain; charset=utf-8"u8.ToArray();
 
