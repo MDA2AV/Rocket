@@ -37,9 +37,14 @@ Env.OverrideQuic(ref quicPort, ref reactors);
 // Multishot recv slots per reactor - datagrams the ring can hold at once. QPACK capacity 4096
 // advertises a decode-side dynamic table; 0 is static-only, nghttp3's default.
 int  udpRecvSlots  = 16;
+
+// Response body size. 13 is "Hello, World!"; anything else is that many 'x'. A buffered response
+// holds the whole body, so this is also what a streamed response is measured against.
+int  bodyBytes     = 13;
 long qpackCapacity = 0;
 
 Env.OverrideH3(ref udpRecvSlots, ref qpackCapacity);
+Env.Override(ref bodyBytes, "PLAYGROUND_BODY");
 
 // A real PEM pair, or null to generate a self-signed localhost cert on first run.
 string? certOverride = null;
@@ -99,7 +104,10 @@ var h3Options = new Nghttp3Options
 // Legal because the h3 layer copies status, headers and body into nghttp3 synchronously at submit
 // and never retains the object - unlike Nghttp3Response.Text($"..."), which encodes a fresh string
 // every time. This is what a hot path should look like.
-var response = new Nghttp3Response { Body = "Hello, World!"u8.ToArray() };
+var response = new Nghttp3Response
+{
+    Body = bodyBytes == 13 ? "Hello, World!"u8.ToArray() : [.. Enumerable.Repeat((byte)'x', bodyBytes)],
+};
 response.Headers.Add("content-type"u8.ToArray(), "text/plain"u8.ToArray());
 response.Headers.Add("server"u8.ToArray(), "ioxide"u8.ToArray());
 
