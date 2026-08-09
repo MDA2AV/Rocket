@@ -21,11 +21,34 @@ using Playground.Shared;
 //  Needs: ioxide, ioxide.ngtcp2, ioxide.nghttp3
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-// A self-signed localhost cert, unless PLAYGROUND_QUIC_CERT/_KEY point at real ones. Plain X509
-// boilerplate - see Playground/Shared/QuicCert.cs.
-(string certPath, string keyPath) = QuicCert.Ensure(
-    Env.StrOrNull("PLAYGROUND_QUIC_CERT"),
-    Env.StrOrNull("PLAYGROUND_QUIC_KEY"));
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+// Edit these. That is the whole mechanism - there is no config file and nothing else to find.
+// An Env.Override line means the value can also be set from the environment, which is how
+// bench/run.sh drives the sample; the literal is what applies otherwise. Delete those lines when
+// you copy this out and the literals above them are the entire configuration.
+
+ushort quicPort = 8443;                        // https://127.0.0.1:8443/ over UDP - h3 lives here
+ushort tcpPort  = 8080;                        // the TCP listener, so the process serves both
+int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+
+Env.Override(ref tcpPort, ref reactors);
+Env.OverrideQuic(ref quicPort, ref reactors);
+
+// Multishot recv slots per reactor - datagrams the ring can hold at once. QPACK capacity 4096
+// advertises a decode-side dynamic table; 0 is static-only, nghttp3's default.
+int  udpRecvSlots  = 16;
+long qpackCapacity = 0;
+
+Env.OverrideH3(ref udpRecvSlots, ref qpackCapacity);
+
+// A real PEM pair, or null to generate a self-signed localhost cert on first run.
+string? certOverride = null;
+string? keyOverride  = null;
+
+Env.OverrideCert(ref certOverride, ref keyOverride);
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+(string certPath, string keyPath) = QuicCert.Ensure(certOverride, keyOverride);
 
 // One engine for the whole server. ALPN pinned to h3, so nothing else negotiates. The last arg is
 // the per-connection send-retention high-water (default 16 MiB): a response larger than it streams
@@ -33,11 +56,9 @@ using Playground.Shared;
 // Playground/Http3/Buffered for the full QUIC/h3 knob set.
 using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"], maxSendRetentionBytes: 16L << 20);
 
-ushort quicPort = Env.Port("PLAYGROUND_QUIC_PORT", 8443);
-
 var config = new ServerConfig
 {
-    ReactorCount   = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),  // one ring per reactor, one reactor per core
+    ReactorCount   = reactors,  // one ring per reactor, one reactor per core
     RingEntries    = 8192,       // io_uring SQ/CQ depth
     DualStack      = false,      // IPv4-only listeners; true binds dual-stack IPv6 (::)
     RecvBufferSize = 32 * 1024,  // bytes per slot in the shared TCP recv ring
@@ -45,7 +66,7 @@ var config = new ServerConfig
     Incremental    = null,       // shared recv ring; non-null = per-connection rings (kernel 6.12+)
     Tcp = new TcpOptions
     {
-        Port             = Env.Port("PLAYGROUND_PORT", 8080),  // the TCP listener, so the process serves both
+        Port             = tcpPort,  // the TCP listener, so the process serves both
         ExtraPorts       = [],                          // extra listener ports, each bound by every reactor
         ListenBacklog    = 1024,                        // listen() accept-queue depth per SO_REUSEPORT listener
         WriteSlabSize    = 16 * 1024,                   // per-connection write slab before overflow
@@ -56,7 +77,7 @@ var config = new ServerConfig
     },
     Udp = new UdpOptions
     {
-        RecvSlots = Env.Int("PLAYGROUND_UDP_SLOTS", 16),  // multishot recv slots per reactor - datagrams the ring can hold at once
+        RecvSlots = udpRecvSlots,  // multishot recv slots per reactor - datagrams the ring can hold at once
         Gro       = true,  // UDP_GRO: coalesce a received datagram burst into one recv
     },
     Quic = new QuicOptions
@@ -68,9 +89,6 @@ var config = new ServerConfig
     },
 };
 
-// PLAYGROUND_QPACK_CAP=4096 advertises a decode-side QPACK dynamic table; 0 is static-only,
-// nghttp3's default.
-long qpackCapacity = Env.Long("PLAYGROUND_QPACK_CAP", 0);
 var h3Options = new Nghttp3Options
 {
     QpackDynamicTableCapacity = qpackCapacity,                // 0 (default) = headers stay literal

@@ -25,9 +25,34 @@ using Playground.Shared;
 //  Needs: ioxide.ngtcp2, ioxide.nghttp3, ioxide.httpclient
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-(string certPath, string keyPath) = QuicCert.Ensure(
-    Env.StrOrNull("PLAYGROUND_QUIC_CERT"),
-    Env.StrOrNull("PLAYGROUND_QUIC_KEY"));
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+// Edit these. That is the whole mechanism - there is no config file and nothing else to find.
+// Each Env.Override names the variable that can drive it instead, which is how the bench scripts
+// run this sample; the literal is what applies otherwise. Delete those lines when you copy this
+// out and the literals above them are the entire configuration.
+
+int     reactors         = Environment.ProcessorCount;
+ushort  quicPort         = 8443;
+int     udpRecvSlots     = 16;
+string  upstreamHost     = "127.0.0.1";
+ushort  upstreamPort     = 8444;
+string  upstreamSni      = "localhost";
+int     upstreamPool     = 1;
+string? certOverride     = null;   // a real PEM pair, or null to self-sign on first run
+string? keyOverride      = null;
+
+Env.Override(ref reactors, "PLAYGROUND_REACTORS");
+Env.Override(ref quicPort, "PLAYGROUND_QUIC_PORT");
+Env.Override(ref udpRecvSlots, "PLAYGROUND_UDP_SLOTS");
+Env.Override(ref upstreamHost, "PLAYGROUND_UPSTREAM_HOST");
+Env.Override(ref upstreamPort, "PLAYGROUND_UPSTREAM_PORT");
+Env.Override(ref upstreamSni, "PLAYGROUND_UPSTREAM_SNI");
+Env.Override(ref upstreamPool, "PLAYGROUND_UPSTREAM_POOL");
+Env.OverrideOptional(ref certOverride, "PLAYGROUND_QUIC_CERT");
+Env.OverrideOptional(ref keyOverride, "PLAYGROUND_QUIC_KEY");
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+(string certPath, string keyPath) = QuicCert.Ensure(certOverride, keyOverride);
 
 using var engine = new QuicEngine(certPath, keyPath,
     cidLength: 8,                       // CID bytes this endpoint mints (1..20)
@@ -36,7 +61,7 @@ using var engine = new QuicEngine(certPath, keyPath,
 
 var config = new ServerConfig
 {
-    ReactorCount   = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
+    ReactorCount   = reactors,
     RingEntries    = 8192,       // SQ/CQ depth per ring
     DualStack      = false,      // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,  // bytes per shared recv buffer
@@ -45,12 +70,12 @@ var config = new ServerConfig
     Tcp            = null,       // h3 in, h3 out: nothing here speaks TCP at all
     Udp = new UdpOptions
     {
-        RecvSlots = Env.Int("PLAYGROUND_UDP_SLOTS", 16),  // multishot recv slots per reactor (datagrams in flight)
+        RecvSlots = udpRecvSlots,  // multishot recv slots per reactor (datagrams in flight)
         Gro       = true,                                 // UDP_GRO: coalesce datagrams into one recv (fewer syscalls)
     },
     Quic = new QuicOptions
     {
-        Port              = Env.Port("PLAYGROUND_QUIC_PORT", 8443),  // h3 over UDP - the QUIC listener
+        Port              = quicPort,  // h3 over UDP - the QUIC listener
         LocalCidLength    = 8,                                       // CID bytes this endpoint mints (must match the engine)
         IdleTimeoutMs     = 60_000,                                  // transport idle backstop; 0 disables sweep eviction
         ConnectionFactory = engine.CreateFactory(),                  // adopts new connections into the engine
@@ -59,10 +84,10 @@ var config = new ServerConfig
 
 var upstream = new Http3ClientOptions
 {
-    Host             = Env.Str("PLAYGROUND_UPSTREAM_HOST", "127.0.0.1"),  // IPv4 literal: DNS would block the reactor
-    Port             = Env.Port("PLAYGROUND_UPSTREAM_PORT", 8444),        // the upstream's QUIC (UDP) port
-    ServerName       = Env.Str("PLAYGROUND_UPSTREAM_SNI", "localhost"),   // SNI / :authority, checked against the cert
-    PoolSize         = Env.Int("PLAYGROUND_UPSTREAM_POOL", 1),            // h3 multiplexes: one connection carries all
+    Host             = upstreamHost,  // IPv4 literal: DNS would block the reactor
+    Port             = upstreamPort,        // the upstream's QUIC (UDP) port
+    ServerName       = upstreamSni,   // SNI / :authority, checked against the cert
+    PoolSize         = upstreamPool,            // h3 multiplexes: one connection carries all
     AcquireTimeoutMs = 10_000,                                            // how long a request waits (handshake included)
     MaxResponseBytes = 8 * 1024 * 1024,                                   // per-request ceiling for headers + body
 };

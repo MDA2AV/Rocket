@@ -1,13 +1,15 @@
 using System.IO.Pipelines;
 using System.Text;
 using ioxide;
-using ioxide.nghttp2;
+using ioxide.http2;
 using ioxide.tls;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  http2-tls - HTTP/2 over TLS, negotiated by ALPN, alongside HTTP/1.1 on the SAME port. This is
-//  what a browser expects: it offers "h2,http/1.1" and the server chooses.
+//  http2-managed-tls - HTTP/2 over TLS in PURE C#: the same server as Playground/Http2/Tls with
+//  ioxide.http2 in place of ioxide.nghttp2. The diff is three type names and a package - no
+//  native library anywhere - because both take an IDuplexPipe and neither learns what is
+//  under it.
 //
 //      dotnet run -c Release --project Playground/Http2/Tls
 //      curl -k --http2 https://127.0.0.1:8443/          # negotiates h2
@@ -18,9 +20,9 @@ using Playground.Shared;
 //  policy. And TlsSession.NegotiatedAlpn reports what was chosen, which is what lets one handler
 //  run two different protocol loops.
 //
-//  Note what Nghttp2Connection is handed: a TlsConnectionDualPipe. It never learns that TLS is
+//  Note what Http2Connection is handed: a TlsConnectionDualPipe. It never learns that TLS is
 //  involved - the pipe decrypts on the way in and encrypts on the way out, so the protocol
-//  code is byte-for-byte the same as the h2c sample. Needs: ioxide, ioxide.nghttp2
+//  code is byte-for-byte the same as the h2c sample. Needs: ioxide, ioxide.http2
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 // ── Knobs ────────────────────────────────────────────────────────────────────────────────────
@@ -121,7 +123,7 @@ for (int i = 0; i < threads.Length; i++)
                 // achieved, not by anything chosen here.
                 await using var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
 
-                await new Nghttp2Connection(pipe).RunBufferedAsync(_ => new Nghttp2Response
+                await new Http2Connection(pipe).RunBufferedAsync(_ => new Http2Response
                 {
                     Status = 200,
                     Body = body,
@@ -179,7 +181,7 @@ for (int i = 0; i < threads.Length; i++)
         }
         catch (Exception e)
         {
-            Console.Error.WriteLine($"[http2-tls] connection failed: {e.Message}");
+            Console.Error.WriteLine($"[http2-managed-tls] connection failed: {e.Message}");
         }
         finally
         {
@@ -192,7 +194,7 @@ for (int i = 0; i < threads.Length; i++)
     threads[i].Start();
 }
 
-Console.WriteLine($"[http2-tls] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
+Console.WriteLine($"[http2-managed-tls] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
                 + $"ALPN h2 then http/1.1, cert {certPath}, "
                 + $"rx={(kernelTx && kernelRx ? "kernel" : "openssl")}, "
                 + $"tx={(kernelTx ? "kernel" : "openssl")}");

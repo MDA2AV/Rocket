@@ -41,6 +41,12 @@ string? caFile = null;
 
 // Skip certificate verification entirely. Read the warning at the call site before setting it.
 bool insecure = false;
+
+Env.Override(ref originIp, "PLAYGROUND_UPSTREAM_HOST");
+Env.Override(ref originName, "PLAYGROUND_UPSTREAM_SNI");
+Env.Override(ref originPort, "PLAYGROUND_UPSTREAM_PORT");
+Env.OverrideOptional(ref caFile, "PLAYGROUND_UPSTREAM_CA");
+Env.Override(ref insecure, "PLAYGROUND_UPSTREAM_INSECURE");
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 var config = new ServerConfig

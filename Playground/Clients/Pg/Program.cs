@@ -21,9 +21,36 @@ using Playground.Shared;
 //  Needs: ioxide, ioxide.pg
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+// Edit these. That is the whole mechanism - there is no config file and nothing else to find.
+// An Env.Override line means the value can also be set from the environment, which is how
+// bench/run.sh drives the sample; the literal is what applies otherwise. Delete those lines when
+// you copy this out and the literals above them are the entire configuration.
+
+ushort port     = 8080;                        // http://127.0.0.1:8080/
+int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+
+Env.Override(ref port, ref reactors);
+
+// The Postgres this queries. The host must be an IPv4 literal - resolving a name would block the
+// reactor - and the pool is per reactor, not global. A null password means trust auth; set one and
+// the driver does SCRAM-SHA-256. CommandTimeoutMs tears down the connection when the oldest
+// in-flight command passes it; 0 disables that.
+string  pgHost      = "127.0.0.1";
+ushort  pgPort      = 5432;
+string  pgUser      = "bench";
+string? pgPassword  = null;
+string  pgDatabase  = "bench";
+int     pgPoolSize  = 4;
+int     pgTimeoutMs = 30_000;
+
+Env.OverridePg(ref pgHost, ref pgPort, ref pgUser, ref pgPassword, ref pgDatabase,
+               ref pgPoolSize, ref pgTimeoutMs);
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
 var config = new ServerConfig
 {
-    ReactorCount   = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),  // io_uring rings/threads - one per core
+    ReactorCount   = reactors,  // io_uring rings/threads - one per core
     RingEntries    = 8192,                                                        // SQ/CQ depth per ring
     DualStack      = false,                                                       // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,                                                   // bytes per shared recv buffer
@@ -33,7 +60,7 @@ var config = new ServerConfig
     Quic           = null,                                                        // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port             = Env.Port("PLAYGROUND_PORT", 8080),
+        Port             = port,
         ExtraPorts       = [],                                                    // extra listener ports (one handler, several doors)
         ListenBacklog    = 1024,                                                  // accept-queue depth per SO_REUSEPORT listener
         WriteSlabSize    = 16 * 1024,                                             // per-connection write buffer before overflow kicks in
@@ -46,14 +73,14 @@ var config = new ServerConfig
 
 var pgOptions = new PgOptions
 {
-    Host             = Env.Str("PLAYGROUND_PG_HOST", "127.0.0.1"),  // IPv4 literal - resolve names up front, DNS blocks the reactor
-    Port             = Env.Port("PLAYGROUND_PG_PORT", 5432),        // Postgres wire port
-    User             = Env.Str("PLAYGROUND_PG_USER", "bench"),      // required
-    Password         = Env.StrOrNull("PLAYGROUND_PG_PASSWORD"),     // null = trust auth; else SCRAM-SHA-256
-    Database         = Env.Str("PLAYGROUND_PG_DB", "bench"),        // required
-    PoolSize         = Env.Int("PLAYGROUND_PG_POOL", 4),            // per reactor, not global
+    Host             = pgHost,  // IPv4 literal - resolve names up front, DNS blocks the reactor
+    Port             = pgPort,        // Postgres wire port
+    User             = pgUser,      // required
+    Password         = pgPassword,     // null = trust auth; else SCRAM-SHA-256
+    Database         = pgDatabase,        // required
+    PoolSize         = pgPoolSize,            // per reactor, not global
     MaxReceiveBytes  = 64 * 1024 * 1024,                            // ceiling on one backend message; buffer grows to this (64 MB)
-    CommandTimeoutMs = Env.Int("PLAYGROUND_PG_TIMEOUT", 30_000),    // oldest in-flight command past this -> torn down; 0 disables
+    CommandTimeoutMs = pgTimeoutMs,    // oldest in-flight command past this -> torn down; 0 disables
 };
 
 var threads = new Thread[config.ReactorCount];

@@ -17,9 +17,38 @@ using Playground.Shared;
 //  Needs: ioxide.ngtcp2, ioxide.nghttp3, ioxide.httpclient
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-(string certPath, string keyPath) = QuicCert.Ensure(
-    Env.StrOrNull("PLAYGROUND_QUIC_CERT"),
-    Env.StrOrNull("PLAYGROUND_QUIC_KEY"));
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+// Edit these. That is the whole mechanism - there is no config file and nothing else to find.
+// Each Env.Override names the variable that can drive it instead, which is how the bench scripts
+// run this sample; the literal is what applies otherwise. Delete those lines when you copy this
+// out and the literals above them are the entire configuration.
+
+int     reactors         = Environment.ProcessorCount;
+ushort  quicPort         = 8443;
+int     udpRecvSlots     = 16;
+string  upstreamHost     = "127.0.0.1";
+ushort  upstreamPort     = 8444;
+string  upstreamSni      = "localhost";
+int     upstreamPool     = 8;
+string? upstreamCa       = null;
+bool    upstreamInsecure = false;
+string? certOverride     = null;   // a real PEM pair, or null to self-sign on first run
+string? keyOverride      = null;
+
+Env.Override(ref reactors, "PLAYGROUND_REACTORS");
+Env.Override(ref quicPort, "PLAYGROUND_QUIC_PORT");
+Env.Override(ref udpRecvSlots, "PLAYGROUND_UDP_SLOTS");
+Env.Override(ref upstreamHost, "PLAYGROUND_UPSTREAM_HOST");
+Env.Override(ref upstreamPort, "PLAYGROUND_UPSTREAM_PORT");
+Env.Override(ref upstreamSni, "PLAYGROUND_UPSTREAM_SNI");
+Env.Override(ref upstreamPool, "PLAYGROUND_UPSTREAM_POOL");
+Env.OverrideOptional(ref upstreamCa, "PLAYGROUND_UPSTREAM_CA");
+Env.Override(ref upstreamInsecure, "PLAYGROUND_UPSTREAM_INSECURE");
+Env.OverrideOptional(ref certOverride, "PLAYGROUND_QUIC_CERT");
+Env.OverrideOptional(ref keyOverride, "PLAYGROUND_QUIC_KEY");
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+(string certPath, string keyPath) = QuicCert.Ensure(certOverride, keyOverride);
 
 using var engine = new QuicEngine(certPath, keyPath,
     cidLength: 8,                       // CID bytes this endpoint mints (1..20)
@@ -28,7 +57,7 @@ using var engine = new QuicEngine(certPath, keyPath,
 
 var config = new ServerConfig
 {
-    ReactorCount   = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),
+    ReactorCount   = reactors,
     RingEntries    = 8192,       // SQ/CQ depth per ring
     DualStack      = false,      // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,  // bytes per shared recv buffer
@@ -37,30 +66,25 @@ var config = new ServerConfig
     Tcp            = null,       // the proxy serves h3 only; its TCP sockets are all outbound
     Udp = new UdpOptions
     {
-        RecvSlots = Env.Int("PLAYGROUND_UDP_SLOTS", 16),  // multishot recv slots per reactor (datagrams in flight)
+        RecvSlots = udpRecvSlots,  // multishot recv slots per reactor (datagrams in flight)
         Gro       = true,                                 // UDP_GRO: coalesce datagrams into one recv (fewer syscalls)
     },
     Quic = new QuicOptions
     {
-        Port              = Env.Port("PLAYGROUND_QUIC_PORT", 8443),  // h3 over UDP - the QUIC listener
+        Port              = quicPort,  // h3 over UDP - the QUIC listener
         LocalCidLength    = 8,                                       // CID bytes this endpoint mints (must match the engine)
         IdleTimeoutMs     = 60_000,                                  // transport idle backstop; 0 disables sweep eviction
         ConnectionFactory = engine.CreateFactory(),                  // adopts new connections into the engine
     },
 };
 
-string upstreamHost = Env.Str("PLAYGROUND_UPSTREAM_HOST", "127.0.0.1");   // IPv4 literal: DNS would block the reactor
-ushort upstreamPort = Env.Port("PLAYGROUND_UPSTREAM_PORT", 8444);
-int upstreamPool = Env.Int("PLAYGROUND_UPSTREAM_POOL", 8);                // keep-alive connections per reactor
-
-string upstreamName = Env.Str("PLAYGROUND_UPSTREAM_SNI", "localhost");    // sent as SNI, checked against the cert
+string upstreamName = upstreamSni;    // sent as SNI, checked against the cert
 
 // The playground's origins use a self-signed cert, so trust that file rather than the system
 // store. PLAYGROUND_UPSTREAM_CA points at a private CA instead; PLAYGROUND_UPSTREAM_INSECURE=1
 // skips verification, which leaves the hop encrypted but UNAUTHENTICATED - anything in the path
 // can present its own certificate and rewrite the whole exchange.
-string? upstreamCa = Env.StrOrNull("PLAYGROUND_UPSTREAM_CA") ?? certPath;
-bool upstreamInsecure = Env.Flag("PLAYGROUND_UPSTREAM_INSECURE");
+upstreamCa ??= certPath;
 
 var threads = new Thread[config.ReactorCount];
 

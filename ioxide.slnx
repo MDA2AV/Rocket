@@ -58,6 +58,7 @@
     <Project Path="Playground/Http2/Nghttp2/Playground.Http2.Nghttp2.csproj" />
     <Project Path="Playground/Http2/Managed/Playground.Http2.Managed.csproj" />
     <Project Path="Playground/Http2/Tls/Playground.Http2.Tls.csproj" />
+    <Project Path="Playground/Http2/ManagedTls/Playground.Http2.ManagedTls.csproj" />
     <Project Path="Playground/Http2/SslStream/Playground.Http2.SslStream.csproj" />
   </Folder>
 
@@ -68,6 +69,8 @@
 
   <Folder Name="/apps/playground/quic/">
     <Project Path="Playground/Quic/Alpn/Playground.Quic.Alpn.csproj" />
+    <Project Path="Playground/Quic/Pipe/Playground.Quic.Pipe.csproj" />
+    <Project Path="Playground/Quic/Raw/Playground.Quic.Raw.csproj" />
   </Folder>
 
   <Folder Name="/apps/playground/proxy/">
@@ -87,6 +90,8 @@
     <Project Path="Playground/Clients/Redis/Playground.Clients.Redis.csproj" />
     <Project Path="Playground/Clients/File/Playground.Clients.File.csproj" />
     <Project Path="Playground/Clients/Https/Playground.Clients.Https.csproj" />
+    <Project Path="Playground/Clients/Http/Playground.Clients.Http.csproj" />
+    <Project Path="Playground/Clients/Quic/Playground.Clients.Quic.csproj" />
   </Folder>
 
 

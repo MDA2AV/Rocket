@@ -217,9 +217,11 @@ nav.top .links a.gh svg { display: block; }
 #tab-big:checked ~ .ex-menu label[for="tab-big"],
 #tab-hop:checked ~ .ex-menu label[for="tab-hop"],
 #tab-taskrun:checked ~ .ex-menu label[for="tab-taskrun"],
+#tab-h2cstls:checked ~ .ex-menu label[for="tab-h2cstls"],
 #tab-h2bcl:checked ~ .ex-menu label[for="tab-h2bcl"],
 #tab-h3buf:checked ~ .ex-menu label[for="tab-h3buf"],
 #tab-quicalpn:checked ~ .ex-menu label[for="tab-quicalpn"],
+#tab-qclient:checked ~ .ex-menu label[for="tab-qclient"],
 #tab-https:checked ~ .ex-menu label[for="tab-https"],
 #tab-h2:checked ~ .ex-menu label[for="tab-h2"],
 #tab-h2cs:checked ~ .ex-menu label[for="tab-h2cs"],
@@ -342,9 +344,11 @@ nav.top .links a.gh svg { display: block; }
 #tab-big:checked ~ .pane-big { display: block; }
 #tab-hop:checked ~ .pane-hop { display: block; }
 #tab-taskrun:checked ~ .pane-taskrun { display: block; }
+#tab-h2cstls:checked ~ .pane-h2cstls { display: block; }
 #tab-h2bcl:checked ~ .pane-h2bcl { display: block; }
 #tab-h3buf:checked ~ .pane-h3buf { display: block; }
 #tab-quicalpn:checked ~ .pane-quicalpn { display: block; }
+#tab-qclient:checked ~ .pane-qclient { display: block; }
 #tab-https:checked ~ .pane-https { display: block; }
 #tab-h2:checked ~ .pane-h2 { display: block; }
 #tab-h2cs:checked ~ .pane-h2cs { display: block; }
@@ -472,10 +476,12 @@ nav.top .links a.gh svg { display: block; }
   #tab-big:checked ~ .ex-menu label[for="tab-big"],
   #tab-hop:checked ~ .ex-menu label[for="tab-hop"],
   #tab-taskrun:checked ~ .ex-menu label[for="tab-taskrun"],
-  #tab-h2bcl:checked ~ .ex-menu label[for="tab-h2bcl"],
+  #tab-h2cstls:checked ~ .ex-menu label[for="tab-h2cstls"],
+#tab-h2bcl:checked ~ .ex-menu label[for="tab-h2bcl"],
   #tab-h3buf:checked ~ .ex-menu label[for="tab-h3buf"],
   #tab-quicalpn:checked ~ .ex-menu label[for="tab-quicalpn"],
-  #tab-https:checked ~ .ex-menu label[for="tab-https"],
+  #tab-qclient:checked ~ .ex-menu label[for="tab-qclient"],
+#tab-https:checked ~ .ex-menu label[for="tab-https"],
   #tab-h2:checked ~ .ex-menu label[for="tab-h2"],
   #tab-h2cs:checked ~ .ex-menu label[for="tab-h2cs"],
   #tab-h2tls:checked ~ .ex-menu label[for="tab-h2tls"],

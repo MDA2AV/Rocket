@@ -5,7 +5,9 @@ Playground.Shared indirection inlined, so what the page shows is a self-containe
 """
 import html
 import pathlib
-import re
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -116,6 +118,18 @@ PANES = {
         "are the exception rather than the rule. TLS here is "
         "<b>OpenSSL both ways by default</b>; the <code>kernelTx</code>/<code>kernelRx</code> "
         "knobs at the top are what move either direction into the kernel."),
+    "h2cstls": (
+        "Http2/ManagedTls", "HTTP/2 &middot; pure C# over TLS", "ioxide + ioxide.http2",
+        ["curl -k --http2 https://127.0.0.1:8443/"],
+        "The pure-C# HTTP/2 server behind TLS, and the diff against "
+        "<label for=\"tab-h2tls\" class=\"ex-jump\">h2 &middot; tls &amp; alpn</label> is three "
+        "type names and a package - no native library anywhere. Both take an "
+        "<code>IDuplexPipe</code>, so neither learns what is under it. "
+        "Measured on this rig at 2 reactors, 64 connections, 32 streams, a 2-byte body: pure C# "
+        "runs <b>2.46&times;</b> nghttp2 over TLS and 2.73&times; cleartext, at about a third of "
+        "the CPU per request. That ordering does <b>not</b> generalize - at 32 connections over 4 "
+        "reactors nghttp2 is ahead instead - and a 2-byte body measures framing and HPACK rather "
+        "than moving data. TLS itself costs both the same <b>0.05&micro;s per request</b>."),
     "h2bcl": (
         "Http2/SslStream", "HTTP/2 &middot; over SslStream", "ioxide + ioxide.nghttp2",
         ["curl -k --http2 https://127.0.0.1:8443/"],
@@ -155,6 +169,93 @@ PANES = {
         "Measured on one saturated reactor at 4 KiB, skipping the copy is worth <b>1.22&times;</b> "
         "cleartext and <b>1.21&times;</b> under kTLS; at 64 KiB the kernel's per-byte crypto "
         "overtakes it and OpenSSL wins outright."),
+
+    # ── the last hand-written code panes, now generated too ──────────────────────────────────
+    "pipe": (
+        "Tcp/Pipe", "TCP &middot; pipes", "ioxide",
+        ["curl http://127.0.0.1:8080/"],
+        "The <code>IDuplexPipe</code> seam over a plain TCP connection - what "
+        "<code>ioxide.Kestrel</code> and the HTTP/2 layers sit on. Compare "
+        "<label for=\"tab-shared\" class=\"ex-jump\">raw &middot; shared ring</label>: same server, "
+        "one abstraction lower."),
+    "shared": (
+        "Tcp/Raw", "TCP &middot; raw, shared recv ring", "ioxide",
+        ["curl http://127.0.0.1:8080/"],
+        "The bottom of the stack: no pipes, no protocol, just the ring. Buffers come from one "
+        "shared provided-buffer ring per reactor - the default mode. "
+        "<label for=\"tab-inc\" class=\"ex-jump\">incremental</label> hands them out per connection "
+        "instead, and <label for=\"tab-vs\" class=\"ex-jump\">shared vs incremental</label> is the "
+        "comparison."),
+    "inc": (
+        "Tcp/Incremental", "TCP &middot; raw, incremental ring", "ioxide",
+        ["curl http://127.0.0.1:8080/"],
+        "Per-connection recv buffer rings (kernel 6.12+) instead of one shared ring. The kernel "
+        "appends across recvs into the same buffer, so a request split over several reads arrives "
+        "contiguous. Costs memory per connection - see "
+        "<label for=\"tab-vs\" class=\"ex-jump\">shared vs incremental</label>."),
+    "h2": (
+        "Http2/Nghttp2", "HTTP/2 &middot; nghttp2", "ioxide + ioxide.nghttp2",
+        ["curl --http2-prior-knowledge http://127.0.0.1:8080/"],
+        'This is <b>h2c with prior knowledge</b>: the peer opens with the HTTP/2 connection preface and there is no upgrade dance. For h2 over TLS see the <label for="tab-h2tls" class="ex-jump">tls &amp; alpn</label> tab - the protocol code there is byte-for-byte identical, because <code>Nghttp2Connection</code> takes an <code>IDuplexPipe</code> and never learns what is under it.'),
+    "h2cs": (
+        "Http2/Managed", "HTTP/2 &middot; pure C#", "ioxide + ioxide.http2",
+        ["curl --http2-prior-knowledge http://127.0.0.1:8080/"],
+        "Which to take? They measure the same. Interleaved warm runs on one rig - <code>h2load -n 300000 -c 32 -m 32</code>, 4 reactors, 2-byte body - put the ratio between <b>0.98&times; and 1.09&times;</b>, and a 1 KiB body holds the same. On a small response the cost is the loop and the syscalls, not the header codec. So take <code>ioxide.http2</code> when shipping a native library is inconvenient, and <code>ioxide.nghttp2</code> when you want the reference implementation's coverage of the protocol's darker corners. The same choice exists one version up: <code>ioxide.http3</code> is the pure-C# drop-in for <code>ioxide.nghttp3</code>."),
+    "h3": (
+        "Http3/Nghttp3", "HTTP/3 &middot; nghttp3", "ioxide + ioxide.ngtcp2 + ioxide.nghttp3",
+        ["curl --http3-only -k https://127.0.0.1:8443/"],
+        "HTTP/3 over QUIC, dispatched as the body streams. Compare "
+        "<label for=\"tab-h3buf\" class=\"ex-jump\">buffered</label>, which waits for end-of-stream "
+        "instead - one method call is the whole difference."),
+    "qpipe": (
+        "Quic/Pipe", "QUIC &middot; pipes", "ioxide + ioxide.ngtcp2",
+        ["dotnet run -c Release --project Playground/Quic/Pipe"],
+        "QUIC behind an <code>IDuplexPipe</code>, the transport's twin of "
+        "<label for=\"tab-pipe\" class=\"ex-jump\">tcp &middot; pipes</label>. A "
+        "<code>PipeReader</code> is ONE byte stream, so this binds to a single QUIC stream - which "
+        "is exactly why HTTP/3 cannot use it and takes "
+        "<label for=\"tab-qraw\" class=\"ex-jump\">raw streams</label> instead. ngtcp2 + picotls "
+        "ship as one native, so TLS 1.3 is inside the transport and the certificate IS the config."),
+    "qraw": (
+        "Quic/Raw", "QUIC &middot; raw streams", "ioxide + ioxide.ngtcp2",
+        ["dotnet run -c Release --project Playground/Quic/Raw"],
+        "Every stream on the connection, not just one: each delivery names its stream id, so a "
+        "multi-stream protocol demuxes right here. This is the surface "
+        "<code>ioxide.nghttp3</code> sits on."),
+    "http": (
+        "Clients/Http", "HTTP client &middot; alt-svc", "ioxide + ioxide.httpclient",
+        ["dotnet run -c Release --project Playground/Http3/Nghttp3   # an origin advertising h3",
+         "PLAYGROUND_UPSTREAM_PORT=8080 dotnet run -c Release --project Playground/Clients/Http"],
+        "Both hops - the inbound connection and the outbound call - ride this reactor's ring and "
+        "resume inline, so a request never leaves the thread it arrived on. The knob is "
+        "<code>Policy</code>: <code>Negotiate</code> starts on HTTP/1.1 and moves to HTTP/3 once the "
+        "origin advertises it via <b>Alt-Svc</b>, so the upgrade costs nothing at the call site. The "
+        "nine <label for=\"tab-pxmatrix\" class=\"ex-jump\">proxy</label> samples pin a protocol "
+        "instead."),
+    "pg": (
+        "Clients/Pg", "Postgres", "ioxide + ioxide.pg",
+        ["curl http://127.0.0.1:8080/"],
+        "One pool per reactor, opened on the reactor thread, so a query rides the same ring that "
+        "accepted the request and resumes the handler inline. The host must be an IPv4 literal - a "
+        "DNS lookup would block the reactor."),
+    "redis": (
+        "Clients/Redis", "Redis", "ioxide + ioxide.redis",
+        ["curl http://127.0.0.1:8080/"],
+        "RESP2 with pipelining, one pool per reactor. Same shape as "
+        "<label for=\"tab-pg\" class=\"ex-jump\">postgres</label> - the client is ring-native, so "
+        "the round trip never leaves the core the request landed on."),
+    "qclient": (
+        "Clients/Quic", "QUIC &middot; client", "ioxide + ioxide.ngtcp2",
+        ["dotnet run -c Release --project Playground/Quic/Raw   # something to talk to",
+         "dotnet run -c Release --project Playground/Clients/Quic"],
+        "The client half of QUIC, and the other side of "
+        "<label for=\"tab-qraw\" class=\"ex-jump\">quic &middot; raw streams</label> - everything "
+        "else here is a server. <code>QuicClientEngine.Connect</code> needs no listener at all: it "
+        "asks the reactor for an outbound transport on an ephemeral port, which is why "
+        "<code>Tcp</code>, <code>Udp</code> and <code>Quic</code> are all null below. The handshake, "
+        "the stream and the reads ride that reactor's ring and resume inline on it, exactly as they "
+        "do server-side. It doubles as the <b>load driver</b> for the echo servers - they speak no "
+        "HTTP, so wrk and h2load cannot touch them - which is what makes them benchmarkable."),
     "https": (
         "Clients/Https", "Client &middot; https origins", "ioxide + ioxide.httpclient",
         ["curl http://127.0.0.1:8080/get"],
@@ -165,43 +266,7 @@ PANES = {
         "<em>unauthenticated</em>, and a private CA belongs in <code>CaFile</code> instead."),
 }
 
-BANNER = re.compile(r"^// ─{5,}.*?^// ─{5,}\n\n", re.S | re.M)
-KNOBS = re.compile(r"^// ── Knobs ─+\n.*?^// ─{20,}\n\n", re.S | re.M)
-
-
-def inline(code: str) -> str:
-    """Strip the harness plumbing so the pane is a program you can paste and run."""
-    code = code.replace("using Playground.Shared;\n", "")
-
-    # The knob block is the sample's configuration; keep the literals, drop the harness override
-    # and the cert indirection that only exists because QuicCert generates one.
-    code = re.sub(r"^Env\.Override\w*\([^)]*\);\n", "", code, flags=re.M)
-    code = re.sub(r"\n\n(?=// ─{20,}\n\n)", "\n", code)   # the blank the override left behind
-
-    # The "// Edit these..." paragraph explains the harness escape hatch, which the pane no longer
-    # has. Drop the whole contiguous comment run rather than named lines, so a sample rewording it
-    # does not silently leave a dangling reference to a call that is not there.
-    code = re.sub(r"^// Edit these\.[^\n]*(?:\n//[^\n]*)*\n", "", code, flags=re.M)
-
-    code = code.replace(
-        "// A real PEM pair, or null to generate a self-signed localhost cert on first run.\n"
-        "string? certOverride = null;\n"
-        "string? keyOverride  = null;\n",
-        'const string certPath = "cert.pem";   // any PEM pair\nconst string keyPath  = "key.pem";\n')
-    # Any spelling of the assignment, not just the bare one - a sample that only needs a cert in
-    # some modes writes it as a conditional, and the pane still wants it gone.
-    code = re.sub(r"\(string certPath, string keyPath\) =[^;]*QuicCert\.Ensure[^;]*;\n", "", code, flags=re.S)
-
-    # PLAYGROUND_INCREMENTAL is a bench escape hatch (per-connection recv rings); the pane shows the
-    # sample's default - the shared ring - just like the other Env knobs collapse to their literals.
-    code = re.sub(r'Env\.Flag\("PLAYGROUND_INCREMENTAL"\) \? new IncrementalOptions \{[^}]*\} : null', "null", code)
-
-    code = BANNER.sub("", code)
-    assert "Env." not in code and "QuicCert" not in code, \
-        "harness plumbing survived: " + "; ".join(
-            l.strip() for l in code.splitlines() if "Env." in l or "QuicCert" in l)
-    return code.strip()
-
+from paneinline import BANNER, ENV_DEFAULTS, inline, inline_env
 
 def build(slug: str) -> str:
     sample, title, packages, run, note = PANES[slug]

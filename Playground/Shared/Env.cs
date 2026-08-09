@@ -80,6 +80,95 @@ public static class Env
     }
 
     /// <summary>
+    /// Per-connection recv buffer rings instead of the shared ring - an A/B knob, so it has to be
+    /// drivable from outside even though no committed script sets it today.
+    /// </summary>
+    public static void OverrideIncremental(ref bool incrementalBuffers)
+        => incrementalBuffers = Bool("PLAYGROUND_INCREMENTAL", incrementalBuffers);
+
+    /// <summary>
+    /// The general form: the literal in the sample is the configuration, and the named environment
+    /// variable overrides it when set. Naming the variable at the call site is deliberate - these
+    /// samples are the benchmark regression fixtures, so what a harness can drive has to be
+    /// readable from the sample itself.
+    /// </summary>
+    public static void Override(ref string value, string name) => value = Str(name, value);
+
+    /// <summary>
+    /// The nullable-string form. It cannot be an <c>Override</c> overload: nullability is not part
+    /// of the signature, so <c>ref string?</c> and <c>ref string</c> collide.
+    /// </summary>
+    public static void OverrideOptional(ref string? value, string name) => value = StrOrNull(name) ?? value;
+
+    /// <inheritdoc cref="Override(ref string, string)"/>
+    public static void Override(ref int value, string name) => value = Int(name, value);
+
+    /// <inheritdoc cref="Override(ref string, string)"/>
+    public static void Override(ref long value, string name) => value = Long(name, value);
+
+    /// <inheritdoc cref="Override(ref string, string)"/>
+    public static void Override(ref ushort value, string name) => value = Port(name, value);
+
+    /// <inheritdoc cref="Override(ref string, string)"/>
+    public static void Override(ref bool value, string name) => value = Bool(name, value);
+
+    /// <summary>The incremental sample's ring geometry.</summary>
+    public static void OverrideIncrementalRing(ref int maxConnections, ref int recvSlots, ref int recvBufferSize)
+    {
+        maxConnections = Int("PLAYGROUND_INC_CONNS", maxConnections);
+        recvSlots = Int("PLAYGROUND_INC_SLOTS", recvSlots);
+        recvBufferSize = Int("PLAYGROUND_INC_BUFSIZE", recvBufferSize);
+    }
+
+    /// <summary>UDP and QPACK tuning for the QUIC and HTTP/3 samples.</summary>
+    public static void OverrideH3(ref int udpRecvSlots, ref long qpackCapacity)
+    {
+        udpRecvSlots = Int("PLAYGROUND_UDP_SLOTS", udpRecvSlots);
+        qpackCapacity = Long("PLAYGROUND_QPACK_CAP", qpackCapacity);
+    }
+
+    /// <summary>A PEM pair supplied from outside instead of the generated self-signed one.</summary>
+    public static void OverrideCert(ref string? certPath, ref string? keyPath)
+    {
+        certPath = StrOrNull("PLAYGROUND_QUIC_CERT") ?? certPath;
+        keyPath = StrOrNull("PLAYGROUND_QUIC_KEY") ?? keyPath;
+    }
+
+    /// <summary>The Postgres sample's connection settings.</summary>
+    public static void OverridePg(ref string host, ref ushort pgPort, ref string user,
+        ref string? password, ref string database, ref int poolSize, ref int commandTimeoutMs)
+    {
+        host = Str("PLAYGROUND_PG_HOST", host);
+        pgPort = Port("PLAYGROUND_PG_PORT", pgPort);
+        user = Str("PLAYGROUND_PG_USER", user);
+        password = StrOrNull("PLAYGROUND_PG_PASSWORD") ?? password;
+        database = Str("PLAYGROUND_PG_DB", database);
+        poolSize = Int("PLAYGROUND_PG_POOL", poolSize);
+        commandTimeoutMs = Int("PLAYGROUND_PG_TIMEOUT", commandTimeoutMs);
+    }
+
+    /// <summary>The Redis sample's connection settings.</summary>
+    public static void OverrideRedis(ref string host, ref ushort redisPort, ref string? password, ref int poolSize)
+    {
+        host = Str("PLAYGROUND_REDIS_HOST", host);
+        redisPort = Port("PLAYGROUND_REDIS_PORT", redisPort);
+        password = StrOrNull("PLAYGROUND_REDIS_PASSWORD") ?? password;
+        poolSize = Int("PLAYGROUND_REDIS_POOL", poolSize);
+    }
+
+    /// <summary>Where a proxy sample forwards to, and how it trusts the origin.</summary>
+    public static void OverrideUpstream(ref string host, ref ushort upstreamPort, ref string serverName,
+        ref int poolSize, ref string? caFile, ref bool insecure)
+    {
+        host = Str("PLAYGROUND_UPSTREAM_HOST", host);
+        upstreamPort = Port("PLAYGROUND_UPSTREAM_PORT", upstreamPort);
+        serverName = Str("PLAYGROUND_UPSTREAM_SNI", serverName);
+        poolSize = Int("PLAYGROUND_UPSTREAM_POOL", poolSize);
+        caFile = StrOrNull("PLAYGROUND_UPSTREAM_CA") ?? caFile;
+        insecure = Bool("PLAYGROUND_UPSTREAM_INSECURE", insecure);
+    }
+
+    /// <summary>
     /// The static-file sample's own knobs, so bench/file-matrix.sh can drive every arm of the
     /// slab-vs-buffer matrix from a single build instead of rebuilding per cell.
     /// </summary>
