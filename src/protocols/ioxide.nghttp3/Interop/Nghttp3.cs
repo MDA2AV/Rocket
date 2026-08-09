@@ -30,6 +30,13 @@ internal static unsafe class Nghttp3
         public delegate* unmanaged<void*, long, byte*, nuint, void>            OnData;
         public delegate* unmanaged<void*, long, void>                          OnEndStream;
         public delegate* unmanaged<void*, long, nuint, void>                   OnDeferredConsume;
+
+        /// <summary>
+        /// Pull the next chunk of a STREAMED response body. The pointer handed back must stay
+        /// valid until the stream closes - nghttp3 does not copy it - and fin marks the last
+        /// chunk. Reporting nothing (len 0, fin 0) defers the stream until ih3_resume_stream.
+        /// </summary>
+        public delegate* unmanaged<void*, long, byte**, nuint*, int*, void>    OnReadBody;
     }
 
     /// <summary>Create the server-side nghttp3 connection; request events fire through
@@ -78,6 +85,15 @@ internal static unsafe class Nghttp3
 
     /// <summary>Create the client-side nghttp3 connection; same event surface as the server one,
     /// requests out instead of responses. 0 on failure.</summary>
+    /// <summary>
+    /// Submit a response whose body arrives over time through <see cref="Callbacks.OnReadBody"/>.
+    /// Nothing is copied here, unlike <c>ih3_submit_response</c>.
+    /// </summary>
+    [DllImport(Lib)] internal static extern int ih3_submit_response_stream(nint connection, long streamId, byte* headers, nuint headersLen);
+
+    /// <summary>Undefer a stream that answered a body pull with "nothing yet".</summary>
+    [DllImport(Lib)] internal static extern int ih3_resume_stream(nint connection, long streamId);
+
     [DllImport(Lib)] internal static extern nint ih3_client_new(Callbacks callbacks, void* user);
 
     /// <summary>Submit a request on a client-opened bidi stream: packed headers, optional body
