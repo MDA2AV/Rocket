@@ -15,7 +15,7 @@ namespace ioxide.http3;
 /// Everything runs on the reactor thread; wakes for parked body reads are deferred to the end of
 /// each drain pass (the same fire-after-unwind discipline the engine uses).
 /// </summary>
-public sealed class Http3Connection
+public sealed partial class Http3Connection
 {
     private readonly QuicConnection _quicConnection;
     private bool _fatal;
@@ -488,6 +488,11 @@ public sealed class Http3Connection
                 continue;
             }
             rs.Request.Freeze();
+
+            if (TryDispatchStreamedResponse(rs.Request))
+            {
+                continue;   // the writer owns this stream now
+            }
 
             Http3Response resp;
             try
