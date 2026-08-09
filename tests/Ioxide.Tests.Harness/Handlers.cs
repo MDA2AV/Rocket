@@ -1,5 +1,6 @@
 using System.Text;
 using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 using ioxide;
 using ioxide.file;
 using ioxide.tls;
@@ -103,10 +104,11 @@ public static class Handlers
 
     // redis: /incr (RESP integer), /pipe (SET+INCR+GET in one round trip), else SET then GET.
 
-    // file: serve a baked asset by path; 404 on miss.
+    // file: read the current file off the ring by path and frame a response; 404 on miss.
     public static async Task Files(Reactor r, TcpConnection conn)
     {
         StaticAssets assets = r.GetService<StaticAssets>();
+        RingPool<AssetReader> readers = r.GetService<RingPool<AssetReader>>();
 
         try
         {
@@ -117,17 +119,24 @@ public static class Handlers
 
                 using (StaticAssets.Lease lease = assets.Acquire())
                 {
-                    if (lease.TryGet(path, out AssetCache.Asset asset) && asset.Response != 0)
+                    if (lease.TryGet(path, out AssetCache.Asset asset)
+                        && AssetCache.TryOpenCurrent(asset, out int fd, out long length, out SafeFileHandle? reopened))
                     {
-                        WriteNative(conn, asset.Response, asset.ResponseLength);
+                        try
+                        {
+                            await SendAssetAsync(conn, readers, fd, (int)length);
+                        }
+                        finally
+                        {
+                            reopened?.Dispose();
+                        }
                     }
                     else
                     {
                         Wire.Write(conn, 404, "missing");
+                        await conn.FlushAsync();
                     }
                 }
-
-                await conn.FlushAsync();
 
                 if (snapshot.IsClosed)
                 {
@@ -140,6 +149,31 @@ public static class Handlers
         finally
         {
             conn.DecRef();
+        }
+    }
+
+    // Read the whole (test-sized) file off the ring into one buffer, then frame a plain response.
+    private static async Task SendAssetAsync(TcpConnection conn, RingPool<AssetReader> readers, int fd, int length)
+    {
+        AssetReader reader = await readers.RentAsync();
+        try
+        {
+            int n = await reader.ReadAsync(fd, offset: 0);
+            if (n < 0)
+            {
+                Wire.Write(conn, 500, "read-error");
+                await conn.FlushAsync();
+                return;
+            }
+
+            conn.Write(Encoding.ASCII.GetBytes(
+                $"HTTP/1.1 200 X\r\nContent-Type: text/plain\r\nContent-Length: {n}\r\n\r\n"));
+            WriteNative(conn, reader.Buffer, n);
+            await conn.FlushAsync();
+        }
+        finally
+        {
+            readers.Return(reader);
         }
     }
 
@@ -214,7 +248,7 @@ public static class Handlers
         carry.AddRange(tls.Decrypt(item.Ptr, item.Len).ToArray());
     }
 
-    // The asset cache hands back one native response block; copy it through the write slab.
+    // Copy native memory (a ring-read buffer) through the write slab.
     private static unsafe void WriteNative(TcpConnection conn, nint data, int length)
     {
         conn.Write(new ReadOnlySpan<byte>((void*)data, length));

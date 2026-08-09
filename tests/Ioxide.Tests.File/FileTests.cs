@@ -2,7 +2,7 @@ using ioxide.file;
 
 namespace Ioxide.Tests;
 
-/// <summary>Static assets: baked responses served off the cache, and 404 on a miss.</summary>
+/// <summary>Static assets: files read off the ring by path, and 404 on a miss.</summary>
 internal static class FileTests
 {
     public static void Register(Runner runner)

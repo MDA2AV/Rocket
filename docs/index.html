@@ -5132,13 +5132,15 @@ foreach (Thread t in threads) t.Join();</code></pre>
       <span class="pane-pkg">ioxide + ioxide.file</span>
     </div>
 <pre><code class="language-csharp">// dotnet add package ioxide ioxide.file
+using System.Buffers.Text;
+using Microsoft.Win32.SafeHandles;
 using ioxide;
 using ioxide.file;
 using ioxide.utils;
 
 // Opens every file ONCE and shares the descriptors across all reactors: stable and read
-// positionally, so nothing is locked. Built before the reactors start.
-var assets = new StaticAssets(&quot;/srv/www&quot;, maxCachedFileBytes: 256 * 1024);
+// positionally off the ring, nothing cached. Built before the reactors start.
+var assets = new StaticAssets(&quot;/srv/www&quot;);
 
 var config = new ServerConfig
 {
@@ -5208,28 +5210,22 @@ for (int id = 0; id &lt; threads.Length; id++)
                         }
                     }
 
-                    // Revalidated against disk (size + mtime + inode): an edit or atomic rename
-                    // is served live from the new inode rather than stale from RAM.
-                    bool fresh = false, exists = false;
-                    if (found) fresh = AssetCache.IsFresh(asset, out exists, out _);
-
-                    if (found &amp;&amp; exists &amp;&amp; fresh &amp;&amp; asset.Response != 0)
+                    // TryOpenCurrent hands back the descriptor for the CURRENT bytes: the shared fd
+                    // when unchanged, or a freshly reopened one when the file changed on disk (an
+                    // edit or atomic rename), which we then close. ioxide.file gives you bytes -
+                    // revalidated against disk (size + mtime + inode) - and the HTTP framing is yours.
+                    if (found &amp;&amp; AssetCache.TryOpenCurrent(asset, out int fd, out long length, out SafeFileHandle? reopened))
                     {
-                        // A complete HTTP response already in native memory: no open, no read.
-                        await SendNativeAsync(conn, asset.Response, asset.ResponseLength);
-                    }
-                    else if (found &amp;&amp; exists)
-                    {
-                        AssetReader reader = await readers.RentAsync();   // too big to pin
+                        AssetReader reader = await readers.RentAsync();
                         try
                         {
-                            Span&lt;byte&gt; header = stackalloc byte[256];
-                            conn.Write(header[..AssetCache.WriteResponseHeader(header, asset.Path, (int)asset.Length)]);
+                            Span&lt;byte&gt; header = stackalloc byte[128];
+                            conn.Write(header[..WriteHeader(header, length)]);
 
                             long offset = 0;
-                            while (offset &lt; asset.Length)
+                            while (offset &lt; length)
                             {
-                                int read = await reader.ReadAsync(asset.Fd, offset);   // ring read
+                                int read = await reader.ReadAsync(fd, offset);   // io_uring positional read
                                 if (read &lt;= 0) break;
                                 await SendNativeAsync(conn, reader.Buffer, read);
                                 offset += read;
@@ -5238,6 +5234,7 @@ for (int id = 0; id &lt; threads.Length; id++)
                         finally
                         {
                             readers.Return(reader);
+                            reopened?.Dispose();
                         }
                     }
                     else
@@ -5280,6 +5277,18 @@ static async Task SendNativeAsync(TcpConnection conn, nint data, int length)
         if (sent &gt;= length) return;
     }
 }
+
+// ioxide.file speaks no HTTP - you frame the response. Status + Content-Length here; a real server
+// adds Content-Type from the file extension.
+static int WriteHeader(Span&lt;byte&gt; dst, long length)
+{
+    int h = Copy(dst, &quot;HTTP/1.1 200 OK\r\nContent-Length: &quot;u8);
+    Utf8Formatter.TryFormat(length, dst[h..], out int digits);
+    h += digits;
+    return h + Copy(dst[h..], &quot;\r\n\r\n&quot;u8);
+}
+
+static int Copy(Span&lt;byte&gt; dst, ReadOnlySpan&lt;byte&gt; src) { src.CopyTo(dst); return src.Length; }
 
 static bool TryReadTarget(ReadOnlySpan&lt;byte&gt; request, out ReadOnlySpan&lt;byte&gt; target)
 {
