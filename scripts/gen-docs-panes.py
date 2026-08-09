@@ -155,6 +155,81 @@ PANES = {
         "Measured on one saturated reactor at 4 KiB, skipping the copy is worth <b>1.22&times;</b> "
         "cleartext and <b>1.21&times;</b> under kTLS; at 64 KiB the kernel's per-byte crypto "
         "overtakes it and OpenSSL wins outright."),
+
+    # ── the last hand-written code panes, now generated too ──────────────────────────────────
+    "pipe": (
+        "Tcp/Pipe", "TCP &middot; pipes", "ioxide",
+        ["curl http://127.0.0.1:8080/"],
+        "The <code>IDuplexPipe</code> seam over a plain TCP connection - what "
+        "<code>ioxide.Kestrel</code> and the HTTP/2 layers sit on. Compare "
+        "<label for=\"tab-shared\" class=\"ex-jump\">raw &middot; shared ring</label>: same server, "
+        "one abstraction lower."),
+    "shared": (
+        "Tcp/Raw", "TCP &middot; raw, shared recv ring", "ioxide",
+        ["curl http://127.0.0.1:8080/"],
+        "The bottom of the stack: no pipes, no protocol, just the ring. Buffers come from one "
+        "shared provided-buffer ring per reactor - the default mode. "
+        "<label for=\"tab-inc\" class=\"ex-jump\">incremental</label> hands them out per connection "
+        "instead, and <label for=\"tab-vs\" class=\"ex-jump\">shared vs incremental</label> is the "
+        "comparison."),
+    "inc": (
+        "Tcp/Incremental", "TCP &middot; raw, incremental ring", "ioxide",
+        ["curl http://127.0.0.1:8080/"],
+        "Per-connection recv buffer rings (kernel 6.12+) instead of one shared ring. The kernel "
+        "appends across recvs into the same buffer, so a request split over several reads arrives "
+        "contiguous. Costs memory per connection - see "
+        "<label for=\"tab-vs\" class=\"ex-jump\">shared vs incremental</label>."),
+    "h2": (
+        "Http2/Nghttp2", "HTTP/2 &middot; nghttp2", "ioxide + ioxide.nghttp2",
+        ["curl --http2-prior-knowledge http://127.0.0.1:8080/"],
+        'This is <b>h2c with prior knowledge</b>: the peer opens with the HTTP/2 connection preface and there is no upgrade dance. For h2 over TLS see the <label for="tab-h2tls" class="ex-jump">tls &amp; alpn</label> tab - the protocol code there is byte-for-byte identical, because <code>Nghttp2Connection</code> takes an <code>IDuplexPipe</code> and never learns what is under it.'),
+    "h2cs": (
+        "Http2/Managed", "HTTP/2 &middot; pure C#", "ioxide + ioxide.http2",
+        ["curl --http2-prior-knowledge http://127.0.0.1:8080/"],
+        "Which to take? They measure the same. Interleaved warm runs on one rig - <code>h2load -n 300000 -c 32 -m 32</code>, 4 reactors, 2-byte body - put the ratio between <b>0.98&times; and 1.09&times;</b>, and a 1 KiB body holds the same. On a small response the cost is the loop and the syscalls, not the header codec. So take <code>ioxide.http2</code> when shipping a native library is inconvenient, and <code>ioxide.nghttp2</code> when you want the reference implementation's coverage of the protocol's darker corners. The same choice exists one version up: <code>ioxide.http3</code> is the pure-C# drop-in for <code>ioxide.nghttp3</code>."),
+    "h3": (
+        "Http3/Nghttp3", "HTTP/3 &middot; nghttp3", "ioxide + ioxide.ngtcp2 + ioxide.nghttp3",
+        ["curl --http3-only -k https://127.0.0.1:8443/"],
+        "HTTP/3 over QUIC, dispatched as the body streams. Compare "
+        "<label for=\"tab-h3buf\" class=\"ex-jump\">buffered</label>, which waits for end-of-stream "
+        "instead - one method call is the whole difference."),
+    "qpipe": (
+        "Quic/Pipe", "QUIC &middot; pipes", "ioxide + ioxide.ngtcp2",
+        ["dotnet run -c Release --project Playground/Quic/Pipe"],
+        "QUIC behind an <code>IDuplexPipe</code>, the transport's twin of "
+        "<label for=\"tab-pipe\" class=\"ex-jump\">tcp &middot; pipes</label>. A "
+        "<code>PipeReader</code> is ONE byte stream, so this binds to a single QUIC stream - which "
+        "is exactly why HTTP/3 cannot use it and takes "
+        "<label for=\"tab-qraw\" class=\"ex-jump\">raw streams</label> instead. ngtcp2 + picotls "
+        "ship as one native, so TLS 1.3 is inside the transport and the certificate IS the config."),
+    "qraw": (
+        "Quic/Raw", "QUIC &middot; raw streams", "ioxide + ioxide.ngtcp2",
+        ["dotnet run -c Release --project Playground/Quic/Raw"],
+        "Every stream on the connection, not just one: each delivery names its stream id, so a "
+        "multi-stream protocol demuxes right here. This is the surface "
+        "<code>ioxide.nghttp3</code> sits on."),
+    "http": (
+        "Clients/Http", "HTTP client &middot; alt-svc", "ioxide + ioxide.httpclient",
+        ["dotnet run -c Release --project Playground/Http3/Nghttp3   # an origin advertising h3",
+         "PLAYGROUND_UPSTREAM_PORT=8080 dotnet run -c Release --project Playground/Clients/Http"],
+        "Both hops - the inbound connection and the outbound call - ride this reactor's ring and "
+        "resume inline, so a request never leaves the thread it arrived on. The knob is "
+        "<code>Policy</code>: <code>Negotiate</code> starts on HTTP/1.1 and moves to HTTP/3 once the "
+        "origin advertises it via <b>Alt-Svc</b>, so the upgrade costs nothing at the call site. The "
+        "nine <label for=\"tab-pxmatrix\" class=\"ex-jump\">proxy</label> samples pin a protocol "
+        "instead."),
+    "pg": (
+        "Clients/Pg", "Postgres", "ioxide + ioxide.pg",
+        ["curl http://127.0.0.1:8080/"],
+        "One pool per reactor, opened on the reactor thread, so a query rides the same ring that "
+        "accepted the request and resumes the handler inline. The host must be an IPv4 literal - a "
+        "DNS lookup would block the reactor."),
+    "redis": (
+        "Clients/Redis", "Redis", "ioxide + ioxide.redis",
+        ["curl http://127.0.0.1:8080/"],
+        "RESP2 with pipelining, one pool per reactor. Same shape as "
+        "<label for=\"tab-pg\" class=\"ex-jump\">postgres</label> - the client is ring-native, so "
+        "the round trip never leaves the core the request landed on."),
     "https": (
         "Clients/Https", "Client &middot; https origins", "ioxide + ioxide.httpclient",
         ["curl http://127.0.0.1:8080/get"],
@@ -167,6 +242,52 @@ PANES = {
 
 BANNER = re.compile(r"^// ─{5,}.*?^// ─{5,}\n\n", re.S | re.M)
 KNOBS = re.compile(r"^// ── Knobs ─+\n.*?^// ─{20,}\n\n", re.S | re.M)
+
+
+# Env.Int("NAME", 8080) -> 8080. The default IS the sample's configuration; the lookup around it
+# only exists so bench/run.sh and the Dockerfile can drive a sample from outside, and a pane is
+# meant to be pasted and run. Samples that declare literal knobs and call Env.Override are handled
+# above; this is for the ones that still read inline, so the page can be generated from ALL of them
+# without first rewriting samples whose env names CI depends on.
+ENV_DEFAULTS = {"StrOrNull": "null", "Flag": "false"}
+
+
+def inline_env(code: str) -> str:
+    while (m := re.search(r"Env\.(\w+)\(", code)) is not None:
+        func = m.group(1)
+        # Walk to the matching close paren - a default can itself contain calls and parens, e.g.
+        # Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount).
+        depth, i = 0, m.end() - 1
+        for i in range(m.end() - 1, len(code)):
+            if code[i] == "(":
+                depth += 1
+            elif code[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+        else:
+            raise SystemExit(f"unbalanced Env.{func}( in sample")
+
+        args = code[m.end():i]
+        if func in ENV_DEFAULTS:
+            value = ENV_DEFAULTS[func]
+        else:
+            # Split on the top-level comma: everything after it is the default.
+            depth, comma = 0, -1
+            for j, ch in enumerate(args):
+                if ch in "([":
+                    depth += 1
+                elif ch in ")]":
+                    depth -= 1
+                elif ch == "," and depth == 0:
+                    comma = j
+                    break
+            if comma < 0:
+                raise SystemExit(f"Env.{func} has no default to inline: {args}")
+            value = args[comma + 1:].strip()
+
+        code = code[:m.start()] + value + code[i + 1:]
+    return code
 
 
 def inline(code: str) -> str:
@@ -183,23 +304,40 @@ def inline(code: str) -> str:
     # does not silently leave a dangling reference to a call that is not there.
     code = re.sub(r"^// Edit these\.[^\n]*(?:\n//[^\n]*)*\n", "", code, flags=re.M)
 
+    # QuicCert.Ensure only exists because the harness generates a cert on first run. Drop the
+    # override declarations wherever they appear and turn the assignment itself into the two
+    # literals, so the pane names a PEM pair the reader can point at.
     code = code.replace(
         "// A real PEM pair, or null to generate a self-signed localhost cert on first run.\n"
         "string? certOverride = null;\n"
-        "string? keyOverride  = null;\n",
-        'const string certPath = "cert.pem";   // any PEM pair\nconst string keyPath  = "key.pem";\n')
-    # Any spelling of the assignment, not just the bare one - a sample that only needs a cert in
-    # some modes writes it as a conditional, and the pane still wants it gone.
-    code = re.sub(r"\(string certPath, string keyPath\) =[^;]*QuicCert\.Ensure[^;]*;\n", "", code, flags=re.S)
+        "string? keyOverride  = null;\n", "")
+    # Any spelling of the assignment - a sample that only needs a cert in some modes writes it as
+    # a conditional, and one that never had override knobs calls Ensure inline.
+    code = re.sub(r"\(string certPath, string keyPath\) =[^;]*QuicCert\.Ensure[^;]*;\n",
+                  'const string certPath = "cert.pem";   // any PEM pair\n'
+                  'const string keyPath  = "key.pem";\n', code, flags=re.S)
 
     # PLAYGROUND_INCREMENTAL is a bench escape hatch (per-connection recv rings); the pane shows the
     # sample's default - the shared ring - just like the other Env knobs collapse to their literals.
     code = re.sub(r'Env\.Flag\("PLAYGROUND_INCREMENTAL"\) \? new IncrementalOptions \{[^}]*\} : null', "null", code)
 
+    code = inline_env(code)
+
+    # SampleAssets writes a demo index.html so the sample has something to serve on a bare
+    # machine. A pane that calls it does not compile, because the type is not in the pane.
+    code = re.sub(r"^SampleAssets\.\w+\([^;]*\);[^\n]*\n", "", code, flags=re.M)
+
+    # Comments that point at Playground.Shared describe machinery the pane does not contain.
+    code = re.sub(r"^//[^\n]*(?:QuicCert|SampleAssets|Playground\.Shared|Playground/Shared)[^\n]*\n",
+                  "", code, flags=re.M)
+
     code = BANNER.sub("", code)
-    assert "Env." not in code and "QuicCert" not in code, \
-        "harness plumbing survived: " + "; ".join(
-            l.strip() for l in code.splitlines() if "Env." in l or "QuicCert" in l)
+
+    # Everything Playground.Shared provides has to be gone, or the pane is not a program anyone
+    # can paste and run - which is the only thing a pane is for.
+    leaked = [n for n in ("Env.", "QuicCert", "SampleAssets") if n in code]
+    assert not leaked, "harness plumbing survived: " + "; ".join(
+        l.strip() for l in code.splitlines() if any(n in l for n in leaked))
     return code.strip()
 
 
