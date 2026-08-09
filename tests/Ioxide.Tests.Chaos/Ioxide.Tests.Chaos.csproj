@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net11.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>Ioxide.Tests</RootNamespace>
+    <AssemblyName>Ioxide.Tests.Chaos</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Harness carries the core reactor (TLS lives inside it) plus the ngtcp2/nghttp3 shims and the
+         shared H3TestClient, so TCP, TLS, QUIC and HTTP/3 all come through it. The managed HTTP/2
+         server is the one surface it does not, so it is referenced directly. -->
+    <ProjectReference Include="../Ioxide.Tests.Harness/Ioxide.Tests.Harness.csproj" />
+    <ProjectReference Include="../../src/protocols/ioxide.http2/ioxide.http2.csproj" />
+  </ItemGroup>
+
+</Project>
