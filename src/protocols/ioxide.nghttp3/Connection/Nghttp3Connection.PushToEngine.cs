@@ -28,6 +28,15 @@ public sealed partial class Nghttp3Connection
                 deadSink.End();   // parked body reads resume empty on this pass's FireBodyWakes
             }
 
+            // The stream is going away, so its streamed-response writer is done: hand it back to
+            // the pool. Without this the writer and its native staging block lived until the
+            // CONNECTION closed - one per response, which is what made a streamed response cost
+            // several times the memory of a buffered one.
+            if (item.Kind is not (QuicStreamEvent.Reset or QuicStreamEvent.StopSending))
+            {
+                ReleaseWriter(item.StreamId);
+            }
+
             int eventResult = item.Kind switch
             {
                 QuicStreamEvent.Reset       => Nghttp3.ih3_shutdown_stream_read(_nghttp3Handle, item.StreamId),

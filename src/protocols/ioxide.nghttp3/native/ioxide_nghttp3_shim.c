@@ -41,6 +41,11 @@ typedef struct ih3_callbacks {
     /* nghttp3 consumed bytes internally for a stream (sync-blocked case): the app must credit
      * them to QUIC flow control when it paces that stream. Optional (may be NULL). */
     void (*on_deferred_consume)(void *user, int64_t stream_id, size_t consumed);
+    /* Pull the next body chunk for a STREAMED response. Sets *buf/*len to memory that must stay
+     * valid until the stream closes (nghttp3 does not copy), and *fin when that chunk is the last.
+     * Leaving *len 0 with *fin 0 means "nothing yet" - the stream is deferred until the app calls
+     * ih3_resume_stream. Optional (may be NULL); without it no stream can be submitted streamed. */
+    void (*on_read_body)(void *user, int64_t stream_id, const uint8_t **buf, size_t *len, int *fin);
 } ih3_callbacks;
 
 /* ---- objects ---------------------------------------------------------------------------- */
@@ -48,8 +53,9 @@ typedef struct ih3_callbacks {
 /* Per-request-stream send state: the response body, copied at submit, freed at close. */
 typedef struct ih3_stream {
     int64_t             id;
-    uint8_t            *body;
+    uint8_t            *body;      /* buffered responses only: copied at submit, freed at close */
     size_t              body_len;
+    int                 streamed;  /* 1 = body is pulled from the app through on_read_body */
     struct ih3_stream  *next;
 } ih3_stream;
 
@@ -182,6 +188,44 @@ static nghttp3_ssize ih3_read_body(nghttp3_conn *conn, int64_t stream_id, nghttp
     }
     vec[0].base = s->body;
     vec[0].len  = s->body_len;
+    return 1;
+}
+
+/* The STREAMED counterpart of ih3_read_body: the body is not here, it is in the application, so
+ * ask for it. Returning WOULDBLOCK is how nghttp3 is told "not yet" - it then defers the stream
+ * and stops asking until ih3_resume_stream says otherwise, which is what keeps a slow producer
+ * from spinning the egress pump. */
+static nghttp3_ssize ih3_read_body_streamed(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec,
+                                            size_t veccnt, uint32_t *pflags, void *conn_user_data,
+                                            void *stream_user_data)
+{
+    (void)conn; (void)veccnt; (void)stream_user_data;
+    ih3_conn *c = conn_user_data;
+
+    if (c->cbs.on_read_body == NULL) {
+        *pflags |= NGHTTP3_DATA_FLAG_EOF;
+        return 0;
+    }
+
+    const uint8_t *buf = NULL;
+    size_t len = 0;
+    int fin = 0;
+    c->cbs.on_read_body(c->user, stream_id, &buf, &len, &fin);
+
+    if (len == 0 && !fin) {
+        return NGHTTP3_ERR_WOULDBLOCK;
+    }
+
+    if (fin) {
+        *pflags |= NGHTTP3_DATA_FLAG_EOF;
+    }
+
+    if (len == 0) {
+        return 0;   /* end of body with nothing left to send */
+    }
+
+    vec[0].base = (uint8_t *)buf;
+    vec[0].len  = len;
     return 1;
 }
 
@@ -344,6 +388,42 @@ int ih3_submit_response(ih3_conn *c, int64_t stream_id,
         ih3_stream_drop(c, stream_id);
     }
     return rv;
+}
+
+/* Submit a response whose body the application produces over time. Same headers path as the
+ * buffered form; the difference is which reader nghttp3 gets and that nothing is copied here -
+ * every chunk arrives later through on_read_body and must stay valid until the stream closes. */
+int ih3_submit_response_stream(ih3_conn *c, int64_t stream_id,
+                               const uint8_t *headers, size_t headers_len)
+{
+    nghttp3_nv nva[IH3_MAX_NV];
+    int nvlen = ih3_unpack_headers(headers, headers_len, nva);
+    if (nvlen < 0) {
+        return NGHTTP3_ERR_INVALID_ARGUMENT;
+    }
+
+    ih3_stream *s = calloc(1, sizeof(*s));
+    if (s == NULL) {
+        return NGHTTP3_ERR_NOMEM;
+    }
+    s->id       = stream_id;
+    s->streamed = 1;
+    s->next     = c->streams;
+    c->streams  = s;
+
+    nghttp3_data_reader dr = { .read_data = ih3_read_body_streamed };
+    int rv = nghttp3_conn_submit_response(c->conn, stream_id, nva, (size_t)nvlen, &dr);
+    if (rv != 0) {
+        ih3_stream_drop(c, stream_id);
+    }
+    return rv;
+}
+
+/* The app has more body for a stream nghttp3 deferred after a WOULDBLOCK. Undeferring is all this
+ * does - the next egress pump calls on_read_body again. */
+int ih3_resume_stream(ih3_conn *c, int64_t stream_id)
+{
+    return nghttp3_conn_resume_stream(c->conn, stream_id);
 }
 
 /* Client conn only (test drivers): a request, with an optional body served through the same

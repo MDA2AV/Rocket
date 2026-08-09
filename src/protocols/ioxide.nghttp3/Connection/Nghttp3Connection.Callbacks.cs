@@ -136,4 +136,16 @@ public sealed partial class Nghttp3Connection
             connection._quicConnection.ConsumeStreamData(streamId, (long)consumed);
         }
     }
+
+    /// <summary>
+    /// nghttp3 wants body bytes for a streamed response. Runs INSIDE its writev, so it resolves
+    /// the writer and returns - anything that would re-enter nghttp3 (a resume) is deferred.
+    /// </summary>
+    [UnmanagedCallersOnly]
+    private static unsafe void CallbackReadBody(void* user, long streamId, byte** buffer, nuint* length, int* fin)
+    {
+        Nghttp3Connection connection = From(user);
+        connection.PullStreamedBody(streamId, buffer, length, fin);
+    }
+
 }

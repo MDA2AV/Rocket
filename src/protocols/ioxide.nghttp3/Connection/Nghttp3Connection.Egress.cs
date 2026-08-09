@@ -31,11 +31,12 @@ public sealed partial class Nghttp3Connection
     }
 
     // Pump nghttp3's egress (SETTINGS, QPACK prefaces, response frames) into the QUIC engine.
-    private unsafe void PumpEgress()
+    private unsafe bool PumpEgress()
     {
+        bool producedAnything = false;
         if (_nghttp3Handle == 0)
         {
-            return;
+            return producedAnything;
         }
         fixed (byte* egressPointer = _egress)
         {
@@ -46,7 +47,7 @@ public sealed partial class Nghttp3Connection
                 // PumpEgress again on the next inbound datagram (acks drain retention), so it resumes.
                 if (!_quicConnection.CanQueueSend)
                 {
-                    return;
+                    return producedAnything;
                 }
 
                 long streamId;
@@ -56,11 +57,16 @@ public sealed partial class Nghttp3Connection
                 {
                     Console.Error.WriteLine($"[ioxide.nghttp3] writev failed: {Nghttp3.StrError((int)producedBytes)}");
                     _protocolFailed = true;
-                    return;
+                    return producedAnything;
                 }
+                if (producedBytes > 0)
+                {
+                    producedAnything = true;
+                }
+
                 if (producedBytes == 0 && streamId == -1)
                 {
-                    return;
+                    return producedAnything;
                 }
                 _quicConnection.SendStream(streamId, _egress.AsSpan(0, (int)producedBytes), fin != 0);
             }

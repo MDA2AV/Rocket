@@ -65,6 +65,7 @@
   <Folder Name="/apps/playground/http3/">
     <Project Path="Playground/Http3/Nghttp3/Playground.Http3.Nghttp3.csproj" />
     <Project Path="Playground/Http3/Buffered/Playground.Http3.Buffered.csproj" />
+    <Project Path="Playground/Http3/Streamed/Playground.Http3.Streamed.csproj" />
   </Folder>
 
   <Folder Name="/apps/playground/quic/">
