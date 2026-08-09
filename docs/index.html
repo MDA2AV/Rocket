@@ -5132,13 +5132,21 @@ foreach (Thread t in threads) t.Join();</code></pre>
       <span class="pane-pkg">ioxide + ioxide.file</span>
     </div>
 <pre><code class="language-csharp">// dotnet add package ioxide ioxide.file
+using System.Buffers.Text;
 using ioxide;
 using ioxide.file;
 using ioxide.utils;
 
 // Opens every file ONCE and shares the descriptors across all reactors: stable and read
-// positionally, so nothing is locked. Built before the reactors start.
-var assets = new StaticAssets(&quot;/srv/www&quot;, maxCachedFileBytes: 256 * 1024);
+// positionally off the ring, nothing cached. Built before the reactors start.
+var assets = new StaticAssets(&quot;/srv/www&quot;);
+
+// Two ways to move the bytes:
+//   - slab (cleartext): conn.ReadFileAsync reads the file straight into the write slab, so header
+//     + body leave in one flush - no buffer, no copy. The leanest plain path.
+//   - buffer: read into a reader buffer first. A TLS connection needs this shape - the body has to
+//     pass through tls.Write (encrypt) before the wire, so it can&#x27;t land straight in the slab.
+bool buffered = false;
 
 var config = new ServerConfig
 {
@@ -5208,37 +5216,12 @@ for (int id = 0; id &lt; threads.Length; id++)
                         }
                     }
 
-                    // Revalidated against disk (size + mtime + inode): an edit or atomic rename
-                    // is served live from the new inode rather than stale from RAM.
-                    bool fresh = false, exists = false;
-                    if (found) fresh = AssetCache.IsFresh(asset, out exists, out _);
-
-                    if (found &amp;&amp; exists &amp;&amp; fresh &amp;&amp; asset.Response != 0)
+                    // The fd is trusted for the snapshot's lifetime (reload on SIGHUP after a deploy),
+                    // so serving is just: read the bytes off the ring and frame HTTP around them.
+                    if (found)
                     {
-                        // A complete HTTP response already in native memory: no open, no read.
-                        await SendNativeAsync(conn, asset.Response, asset.ResponseLength);
-                    }
-                    else if (found &amp;&amp; exists)
-                    {
-                        AssetReader reader = await readers.RentAsync();   // too big to pin
-                        try
-                        {
-                            Span&lt;byte&gt; header = stackalloc byte[256];
-                            conn.Write(header[..AssetCache.WriteResponseHeader(header, asset.Path, (int)asset.Length)]);
-
-                            long offset = 0;
-                            while (offset &lt; asset.Length)
-                            {
-                                int read = await reader.ReadAsync(asset.Fd, offset);   // ring read
-                                if (read &lt;= 0) break;
-                                await SendNativeAsync(conn, reader.Buffer, read);
-                                offset += read;
-                            }
-                        }
-                        finally
-                        {
-                            readers.Return(reader);
-                        }
+                        if (buffered) await SendBufferedAsync(conn, readers, asset);
+                        else          await SendSlabAsync(conn, asset);
                     }
                     else
                     {
@@ -5265,21 +5248,58 @@ for (int id = 0; id &lt; threads.Length; id++)
 Console.WriteLine($&quot;serving {assets.Count} files from {assets.RootDir} on :{config.Tcp.Port}&quot;);
 foreach (Thread t in threads) t.Join();
 
-static async Task SendNativeAsync(TcpConnection conn, nint data, int length)
+// Cleartext fast path: read the whole file STRAIGHT INTO the write slab (it grows to fit), right
+// after the header, so header + body leave in one flush - no reader buffer, no copy.
+static async Task SendSlabAsync(TcpConnection conn, AssetCache.Asset asset)
 {
-    const int Chunk = 12 * 1024;
-    int sent = 0;
+    Span&lt;byte&gt; header = stackalloc byte[128];
+    conn.Write(header[..WriteHeader(header, asset.Length)]);
 
-    while (true)
+    int n = await conn.ReadFileAsync(asset.Fd, (int)asset.Length, fileOffset: 0);   // io_uring read into the slab
+    conn.AdvanceWrite(n);
+    await conn.FlushAsync();   // header + body, one send
+}
+
+// Buffer path: read into a reader buffer, then move the bytes on. The copy into the slab stands in
+// for the transform TLS does here instead - tls.Write(conn, reader.Buffer[..n]) encrypts into the slab.
+static async Task SendBufferedAsync(TcpConnection conn, RingPool&lt;AssetReader&gt; readers, AssetCache.Asset asset)
+{
+    AssetReader reader = await readers.RentAsync();
+    try
     {
-        int take = Math.Min(length - sent, Chunk);
-        unsafe { conn.Write(new ReadOnlySpan&lt;byte&gt;((void*)(data + sent), take)); }
-        await conn.FlushAsync();
-        sent += take;
+        Span&lt;byte&gt; header = stackalloc byte[128];
+        conn.Write(header[..WriteHeader(header, asset.Length)]);
 
-        if (sent &gt;= length) return;
+        long offset = 0;
+        while (offset &lt; asset.Length)
+        {
+            int read = await reader.ReadAsync(asset.Fd, offset);   // io_uring positional read
+            if (read &lt;= 0) break;
+            WriteNative(conn, reader.Buffer, read);
+            await conn.FlushAsync();   // one write + flush per read
+            offset += read;
+        }
+    }
+    finally
+    {
+        readers.Return(reader);
     }
 }
+
+static unsafe void WriteNative(TcpConnection conn, nint data, int length)
+    =&gt; conn.Write(new ReadOnlySpan&lt;byte&gt;((void*)data, length));
+
+// ioxide.file speaks no HTTP - you frame the response. Status + Content-Length here; a real server
+// adds Content-Type from the file extension.
+static int WriteHeader(Span&lt;byte&gt; dst, long length)
+{
+    int h = Copy(dst, &quot;HTTP/1.1 200 OK\r\nContent-Length: &quot;u8);
+    Utf8Formatter.TryFormat(length, dst[h..], out int digits);
+    h += digits;
+    return h + Copy(dst[h..], &quot;\r\n\r\n&quot;u8);
+}
+
+static int Copy(Span&lt;byte&gt; dst, ReadOnlySpan&lt;byte&gt; src) { src.CopyTo(dst); return src.Length; }
 
 static bool TryReadTarget(ReadOnlySpan&lt;byte&gt; request, out ReadOnlySpan&lt;byte&gt; target)
 {

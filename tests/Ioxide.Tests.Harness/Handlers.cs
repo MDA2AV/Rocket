@@ -103,8 +103,75 @@ public static class Handlers
 
     // redis: /incr (RESP integer), /pipe (SET+INCR+GET in one round trip), else SET then GET.
 
-    // file: serve a baked asset by path; 404 on miss.
+    // file: read the current file off the ring by path and frame a response; 404 on miss.
     public static async Task Files(Reactor r, TcpConnection conn)
+    {
+        StaticAssets assets = r.GetService<StaticAssets>();
+        RingPool<AssetReader> readers = r.GetService<RingPool<AssetReader>>();
+
+        try
+        {
+            while (true)
+            {
+                RecvSnapshot snapshot = await conn.ReadAsync();
+                string path = Wire.ReadPath(conn, snapshot);
+
+                using (StaticAssets.Lease lease = assets.Acquire())
+                {
+                    if (lease.TryGet(path, out AssetCache.Asset asset))
+                    {
+                        await SendAssetAsync(conn, readers, asset.Fd, (int)asset.Length);
+                    }
+                    else
+                    {
+                        Wire.Write(conn, 404, "missing");
+                        await conn.FlushAsync();
+                    }
+                }
+
+                if (snapshot.IsClosed)
+                {
+                    return;
+                }
+
+                conn.ResetRead();
+            }
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    }
+
+    // Read the whole (test-sized) file off the ring into one buffer, then frame a plain response.
+    private static async Task SendAssetAsync(TcpConnection conn, RingPool<AssetReader> readers, int fd, int length)
+    {
+        AssetReader reader = await readers.RentAsync();
+        try
+        {
+            int n = await reader.ReadAsync(fd, offset: 0);
+            if (n < 0)
+            {
+                Wire.Write(conn, 500, "read-error");
+                await conn.FlushAsync();
+                return;
+            }
+
+            conn.Write(Encoding.ASCII.GetBytes(
+                $"HTTP/1.1 200 X\r\nContent-Type: text/plain\r\nContent-Length: {n}\r\n\r\n"));
+            WriteNative(conn, reader.Buffer, n);
+            await conn.FlushAsync();
+        }
+        finally
+        {
+            readers.Return(reader);
+        }
+    }
+
+    // file (slab path): serve the same lookup, but read the file STRAIGHT INTO the write slab via the
+    // core TcpConnection.ReadFileAsync (the cleartext fast path) - no reader buffer, no pool, header +
+    // body in one flush. This is the end-to-end coverage for that core API.
+    public static async Task FilesSlab(Reactor r, TcpConnection conn)
     {
         StaticAssets assets = r.GetService<StaticAssets>();
 
@@ -117,17 +184,20 @@ public static class Handlers
 
                 using (StaticAssets.Lease lease = assets.Acquire())
                 {
-                    if (lease.TryGet(path, out AssetCache.Asset asset) && asset.Response != 0)
+                    if (lease.TryGet(path, out AssetCache.Asset asset))
                     {
-                        WriteNative(conn, asset.Response, asset.ResponseLength);
+                        conn.Write(Encoding.ASCII.GetBytes(
+                            $"HTTP/1.1 200 X\r\nContent-Type: text/plain\r\nContent-Length: {asset.Length}\r\n\r\n"));
+                        int n = await conn.ReadFileAsync(asset.Fd, (int)asset.Length, fileOffset: 0);
+                        conn.AdvanceWrite(n);
+                        await conn.FlushAsync();
                     }
                     else
                     {
                         Wire.Write(conn, 404, "missing");
+                        await conn.FlushAsync();
                     }
                 }
-
-                await conn.FlushAsync();
 
                 if (snapshot.IsClosed)
                 {
@@ -214,7 +284,7 @@ public static class Handlers
         carry.AddRange(tls.Decrypt(item.Ptr, item.Len).ToArray());
     }
 
-    // The asset cache hands back one native response block; copy it through the write slab.
+    // Copy native memory (a ring-read buffer) through the write slab.
     private static unsafe void WriteNative(TcpConnection conn, nint data, int length)
     {
         conn.Write(new ReadOnlySpan<byte>((void*)data, length));

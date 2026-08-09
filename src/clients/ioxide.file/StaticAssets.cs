@@ -7,24 +7,22 @@ namespace ioxide.file;
 /// </summary>
 /// <remarks>
 /// To serve safely across a reload, take a <see cref="Lease"/> with <see cref="Acquire"/> and hold
-/// it for the whole request (lookup → ring read → send): the old snapshot's descriptors and baked
-/// responses are freed only once every lease on it is released, so an in-flight read can never hit a
-/// closed fd or freed memory. The bare <see cref="TryGet(string, out AssetCache.Asset)"/> overloads
-/// don't hold a lease and are only safe when <see cref="Reload"/> is never called concurrently.
+/// it for the whole request (lookup → ring read → send): the old snapshot's descriptors are freed
+/// only once every lease on it is released, so an in-flight read can never hit a closed fd. The bare
+/// <see cref="TryGet(string, out AssetCache.Asset)"/> overloads don't hold a lease and are only safe
+/// when <see cref="Reload"/> is never called concurrently.
 /// </remarks>
 public sealed class StaticAssets : IDisposable
 {
     private readonly string _root;
-    private readonly int _maxCachedFileBytes;
     private readonly object _reloadLock = new();
 
     private AssetCache _cache;   // swapped atomically by Reload(), read with Volatile
 
-    public StaticAssets(string rootDir, int maxCachedFileBytes = AssetCache.DefaultMaxCachedFileBytes)
+    public StaticAssets(string rootDir)
     {
         _root = rootDir;
-        _maxCachedFileBytes = maxCachedFileBytes;
-        _cache = new AssetCache(rootDir, maxCachedFileBytes);
+        _cache = new AssetCache(rootDir);
     }
 
     public int Count => Volatile.Read(ref _cache).Count;
@@ -33,8 +31,8 @@ public sealed class StaticAssets : IDisposable
 
     /// <summary>
     /// Lease the live snapshot for the duration of a request. The snapshot it points at stays alive
-    /// (descriptors open, baked responses mapped) until the lease is disposed, even across a
-    /// concurrent <see cref="Reload"/>. Dispose it when the response has been fully sent.
+    /// (descriptors open) until the lease is disposed, even across a concurrent <see cref="Reload"/>.
+    /// Dispose it when the response has been fully sent.
     /// </summary>
     public Lease Acquire()
     {
@@ -69,7 +67,7 @@ public sealed class StaticAssets : IDisposable
             AssetCache fresh;
             try
             {
-                fresh = new AssetCache(_root, _maxCachedFileBytes);
+                fresh = new AssetCache(_root);
             }
             catch (Exception e)
             {

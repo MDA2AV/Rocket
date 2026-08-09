@@ -1,38 +1,43 @@
+using System.Buffers.Text;
 using System.Runtime.InteropServices;
-using Microsoft.Win32.SafeHandles;
 using ioxide;
 using ioxide.file;
 using ioxide.utils;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  file - a static file server, whole. The asset cache opens every file ONCE and shares the
-//  descriptors across all reactors: they are stable and read positionally, so nothing is locked.
-//  Small files are served from a pre-baked HTTP response with no I/O at all; larger ones stream
-//  off the ring through a rented reader.
+//  file - a static file server. ioxide.file opens every file under the root ONCE and shares the
+//  descriptors across all reactors - stable and read positionally off the ring, so nothing is
+//  locked and nothing is cached in memory. This sample frames HTTP/1.1 around the bytes; the same
+//  file data can be handed to any protocol.
 //
-//  Every hit is revalidated against disk (size + mtime + inode), so an edit or an atomic rename is
-//  served live from the new inode rather than stale from RAM.
+//  Two ways to move the bytes, selected by PLAYGROUND_FILE_BUFFERED:
+//    - default (cleartext): conn.ReadFileAsync reads the file STRAIGHT INTO the write slab, so the
+//      header and body leave in a single flush - no intermediate buffer, no copy. The leanest path
+//      for a plain connection.
+//    - buffered (=1): read into a reader buffer first, then hand those bytes on. This is the shape
+//      a TLS connection needs - the body has to pass through an encrypt (TlsSession.Write) before
+//      the wire, so it can't be read straight into the send slab. Here (cleartext) the buffer is
+//      just copied into the slab to mirror that structure.
 //
-//      PLAYGROUND_DIR=/srv/www dotnet run -c Release --project Playground/File
+//  Descriptors are trusted for the snapshot's lifetime - a deploy is picked up by reloading the
+//  snapshot (SIGHUP), which reopens the files, not by re-stat'ing every request.
+//
+//      PLAYGROUND_DIR=/srv/www dotnet run -c Release --project Playground/Clients/File
 //      curl http://127.0.0.1:8080/index.html
+//      PLAYGROUND_FILE_BUFFERED=1 dotnet run ...   # the buffer path (the shape TLS uses)
 //      kill -HUP <pid>        # reload the snapshot after a deploy
 //
 //  Needs: ioxide, ioxide.file
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-string dir = Env.Str("PLAYGROUND_DIR", "/tmp/ioxide-assets");
-
-// Per-file byte ceiling for pinning bodies in memory. 0 forces every request through the ring-read
-// path, which is the interesting one to benchmark.
-int cacheMax = Env.Int("PLAYGROUND_CACHE_MAX", AssetCache.DefaultMaxCachedFileBytes);
+string dir      = Env.Str("PLAYGROUND_DIR", "/tmp/ioxide-assets");
+bool   buffered = Env.Flag("PLAYGROUND_FILE_BUFFERED");   // read into a buffer (the TLS shape) vs into the slab
 
 SampleAssets.Ensure(dir);   // writes a demo index.html + style.css if the directory is empty
 
 // Built once for the whole process, BEFORE the reactors start: every reactor shares this snapshot.
-var assets = new StaticAssets(
-    dir,        // served root (PLAYGROUND_DIR); walked once into an immutable snapshot
-    cacheMax);  // maxCachedFileBytes: whole-response pin ceiling per file (0 = always ring-read)
+var assets = new StaticAssets(dir);   // served root (PLAYGROUND_DIR), walked once into a snapshot
 
 var config = new ServerConfig
 {
@@ -49,15 +54,13 @@ var config = new ServerConfig
         Port             = Env.Port("PLAYGROUND_PORT", 8080),
         ExtraPorts       = [],                                                    // extra listener ports (one handler, several doors)
         ListenBacklog    = 1024,                                                  // accept-queue depth per SO_REUSEPORT listener
-        WriteSlabSize    = 16 * 1024,                                             // per-connection write buffer before overflow kicks in
+        WriteSlabSize    = 16 * 1024,                                             // per-connection write buffer; ReadFileAsync grows it to fit a bigger file
         PoolMax          = 1024,                                                  // pooled connection objects kept per reactor
         WriteOverflow    = WriteOverflowStrategy.Grow,                            // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
         ZeroCopySend     = false,                                                 // SEND_ZC: kernel copies less, wins on large writes
         RecvQueueEntries = 64,                                                    // per-connection recv completion queue depth
     },
 };
-
-const int BodyChunk = 12 * 1024;   // how much native memory we push through the write slab at a time
 
 var threads = new Thread[config.ReactorCount];
 
@@ -68,6 +71,8 @@ for (int i = 0; i < threads.Length; i++)
     reactor.OnStart = r =>
     {
         r.AddService(assets);   // the shared snapshot
+        // The buffer path needs a pool of native read buffers; the slab path reads into the
+        // connection's own write slab and needs none, but registering it is harmless either way.
         AssetReader.CreatePool(r,
             readers:     4,         // concurrent ring reads bounded per reactor (pool size)
             bufferBytes: 1 << 20);  // native read buffer per reader (1 MiB) - size for the largest asset
@@ -85,11 +90,11 @@ for (int i = 0; i < threads.Length; i++)
                 RecvSnapshot recv = await conn.ReadAsync();
 
                 // The lease pins the snapshot for the whole request, so a concurrent Reload() can't
-                // free the fd or the baked response out from under an in-flight send.
+                // close the fd out from under an in-flight read.
                 using (StaticAssets.Lease lease = snapshot.Acquire())
                 {
-                    // Resolve the target against the cache while the recv bytes are still valid -
-                    // the lookup is span-based, so no string is ever allocated for a cache hit.
+                    // Resolve the target against the snapshot while the recv bytes are still valid -
+                    // the lookup is span-based, so no string is ever allocated for a hit.
                     bool found = false;
                     AssetCache.Asset asset = default;
 
@@ -105,38 +110,23 @@ for (int i = 0; i < threads.Length; i++)
                         }
                     }
 
-                    if (!found)
+                    // The fd is trusted for the snapshot's lifetime, so serving is just: read the
+                    // bytes off the ring and frame HTTP around them.
+                    if (found)
                     {
-                        conn.Write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"u8);
-                        await conn.FlushAsync();
-                    }
-                    else
-                    {
-                        // Is what we cached still what's on disk?
-                        bool fresh = AssetCache.IsFresh(asset, out bool exists, out long size);
-
-                        if (!exists)
+                        if (buffered)
                         {
-                            conn.Write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"u8);
-                            await conn.FlushAsync();
-                        }
-                        else if (fresh && asset.Response != 0)
-                        {
-                            // The hot path: a complete HTTP response baked at snapshot time, sitting
-                            // in native memory. No open, no read, no formatting - just send it.
-                            await SendNativeAsync(conn, asset.Response, asset.ResponseLength);
-                        }
-                        else if (fresh)
-                        {
-                            // Too big to pin: read it off the ring at advancing offsets.
-                            await SendFromDiskAsync(conn, readers, asset, asset.Fd, asset.Length);
+                            await SendBufferedAsync(conn, readers, asset);
                         }
                         else
                         {
-                            // Changed under us: open the path fresh so an atomic rename resolves to
-                            // the NEW inode, and stream that instead of serving stale bytes.
-                            await SendChangedAsync(conn, readers, asset, size);
+                            await SendSlabAsync(conn, asset);
                         }
+                    }
+                    else
+                    {
+                        conn.Write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"u8);
+                        await conn.FlushAsync();
                     }
                 }
 
@@ -165,41 +155,39 @@ using var reload = PosixSignalRegistration.Create(PosixSignal.SIGHUP, context =>
 });
 
 Console.WriteLine($"[file] {config.ReactorCount} reactors on :{config.Tcp.Port} - "
-                + $"{assets.Count} files under {assets.RootDir} (pin <= {cacheMax}B)");
+                + $"{assets.Count} files under {assets.RootDir} "
+                + $"({(buffered ? "buffer path" : "slab path")}, nothing cached)");
 
 foreach (Thread thread in threads)
 {
     thread.Join();
 }
 
-// Push native memory through the write slab in chunks: one flush for a small payload, a short
-// sequence for anything bigger than the slab.
-static async Task SendNativeAsync(TcpConnection conn, nint data, int length)
+// Cleartext fast path: read the whole file STRAIGHT INTO the write slab (it grows to fit), right
+// after the header, so header + body leave in one flush - no reader buffer, no copy. Ideal for the
+// typical multi-KB web asset; a very large file grows the slab by its full size, so stream those
+// with the buffer path instead.
+static async Task SendSlabAsync(TcpConnection conn, AssetCache.Asset asset)
 {
-    int sent = 0;
-    while (true)
-    {
-        int chunk = Math.Min(length - sent, BodyChunk);
-        unsafe
-        {
-            conn.Write(new ReadOnlySpan<byte>((void*)(data + sent), chunk));
-        }
-        await conn.FlushAsync();
-        sent += chunk;
+    Span<byte> header = stackalloc byte[256];
+    conn.Write(header[..WriteHeader(header, asset.Path, asset.Length)]);
 
-        if (sent >= length) return;
-    }
+    // io_uring positional read into the slab at the current tail; AdvanceWrite commits the bytes.
+    int n = await conn.ReadFileAsync(asset.Fd, (int)asset.Length, fileOffset: 0);
+    conn.AdvanceWrite(n);
+    await conn.FlushAsync();
 }
 
-// Stream an asset off the ring, framing Content-Length up front. Files bigger than the reader's
-// buffer are read in successive chunks at advancing offsets, so they're served whole.
-static async Task SendFromDiskAsync(
-    TcpConnection conn, RingPool<AssetReader> readers, AssetCache.Asset asset, int fd, long totalLength)
+// Buffer path: read into a reader buffer, then move those bytes on. The copy into the slab stands in
+// for the transform a TLS connection does here instead - tls.Write(conn, reader.Buffer[..n]), which
+// encrypts into the slab. Files bigger than the buffer take several reads at advancing offsets,
+// one flush each.
+static async Task SendBufferedAsync(TcpConnection conn, RingPool<AssetReader> readers, AssetCache.Asset asset)
 {
     AssetReader reader = await readers.RentAsync();
     try
     {
-        int first = await reader.ReadAsync(fd, offset: 0);   // io_uring positional read
+        int first = await reader.ReadAsync(asset.Fd, offset: 0);   // io_uring positional read
         if (first < 0)
         {
             conn.Write("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n"u8);
@@ -207,16 +195,19 @@ static async Task SendFromDiskAsync(
             return;
         }
 
+        // Header + first chunk go out together in one flush.
         Span<byte> header = stackalloc byte[256];
-        conn.Write(header[..AssetCache.WriteResponseHeader(header, asset.Path, (int)totalLength)]);
-        await SendNativeAsync(conn, reader.Buffer, first);
+        conn.Write(header[..WriteHeader(header, asset.Path, asset.Length)]);
+        WriteNative(conn, reader.Buffer, first);
+        await conn.FlushAsync();
 
         long offset = first;
-        while (offset < totalLength)
+        while (offset < asset.Length)
         {
-            int read = await reader.ReadAsync(fd, offset);
+            int read = await reader.ReadAsync(asset.Fd, offset);
             if (read <= 0) break;   // EOF or mid-stream error; the response is already committed
-            await SendNativeAsync(conn, reader.Buffer, read);
+            WriteNative(conn, reader.Buffer, read);
+            await conn.FlushAsync();
             offset += read;
         }
     }
@@ -226,30 +217,42 @@ static async Task SendFromDiskAsync(
     }
 }
 
-static async Task SendChangedAsync(
-    TcpConnection conn, RingPool<AssetReader> readers, AssetCache.Asset asset, long size)
-{
-    SafeFileHandle handle;
-    try
-    {
-        handle = File.OpenHandle(asset.Path, FileMode.Open, FileAccess.Read, FileShare.Read);
-    }
-    catch
-    {
-        conn.Write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"u8);
-        await conn.FlushAsync();
-        return;
-    }
+// Copy native memory (a ring-read buffer) into the connection's write slab in one go.
+static unsafe void WriteNative(TcpConnection conn, nint data, int length)
+    => conn.Write(new ReadOnlySpan<byte>((void*)data, length));
 
-    try
-    {
-        await SendFromDiskAsync(conn, readers, asset, (int)handle.DangerousGetHandle(), size);
-    }
-    finally
-    {
-        handle.Dispose();
-    }
+// Write the 200 status line + Content-Type + Content-Length for this file.
+static int WriteHeader(Span<byte> destination, string path, long bodyLength)
+{
+    int h = 0;
+    h += Copy(destination[h..], "HTTP/1.1 200 OK\r\nContent-Type: "u8);
+    h += Copy(destination[h..], MimeFor(path));
+    h += Copy(destination[h..], "\r\nContent-Length: "u8);
+    Utf8Formatter.TryFormat(bodyLength, destination[h..], out int digits);
+    h += digits;
+    h += Copy(destination[h..], "\r\n\r\n"u8);
+    return h;
 }
+
+static int Copy(Span<byte> destination, ReadOnlySpan<byte> source)
+{
+    source.CopyTo(destination);
+    return source.Length;
+}
+
+static ReadOnlySpan<byte> MimeFor(string path) => Path.GetExtension(path) switch
+{
+    ".html"  => "text/html"u8,
+    ".css"   => "text/css"u8,
+    ".js"    => "application/javascript"u8,
+    ".json"  => "application/json"u8,
+    ".svg"   => "image/svg+xml"u8,
+    ".png"   => "image/png"u8,
+    ".webp"  => "image/webp"u8,
+    ".woff2" => "font/woff2"u8,
+    ".txt"   => "text/plain"u8,
+    _        => "application/octet-stream"u8
+};
 
 static bool TryReadTarget(ReadOnlySpan<byte> request, out ReadOnlySpan<byte> target)
 {

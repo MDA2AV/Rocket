@@ -1,32 +1,24 @@
 using System.Buffers;
-using System.Buffers.Text;
-using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
 
 namespace ioxide.file;
 
 /// <summary>
-/// An immutable snapshot of a static-asset directory, keyed by URL path. Small files
-/// (≤ maxCachedFileBytes) get their entire HTTP response precomputed in native memory - the hot
-/// path serves them with no file I/O, no header formatting, no allocation. Large files keep a
-/// descriptor and are read off the ring. Deploys swap whole snapshots via
-/// <see cref="StaticAssets.Reload"/>. One open descriptor per file - mind RLIMIT_NOFILE.
+/// An immutable snapshot of a directory, keyed by URL path: one open descriptor plus the length per
+/// file, opened once and shared across reactors (reads are positional off the ring, so nothing is
+/// locked). No bytes are cached and no HTTP is spoken - a caller looks a path up, reads the file data
+/// off the ring, and frames it however it likes. Descriptors are trusted for the snapshot's lifetime;
+/// a deploy is picked up by rebuilding the snapshot (<see cref="StaticAssets.Reload"/>), not by
+/// re-stat'ing per request. One open descriptor per file - mind RLIMIT_NOFILE.
 /// </summary>
 public sealed class AssetCache : IDisposable
 {
-    public const int DefaultMaxCachedFileBytes = 256 * 1024;
-
-    /// <summary>
-    /// A pre-opened asset. <see cref="Response"/> is non-zero when the complete HTTP response is
-    /// precomputed in native memory (<see cref="ResponseLength"/> bytes - send it as-is);
-    /// otherwise read <see cref="Fd"/> positionally off the ring and build the response.
-    /// </summary>
-    public readonly record struct Asset(int Fd, string Path, long Length, nint Response, int ResponseLength, long MtimeSec, uint MtimeNsec, ulong Ino);
+    /// <summary>A pre-opened file: its descriptor, absolute path, and length at snapshot time.</summary>
+    public readonly record struct Asset(int Fd, string Path, long Length);
 
     private readonly Dictionary<string, Asset> _assets;
     private readonly SafeFileHandle[] _handles;
-    private readonly nint[] _responses;
     private int _disposed;
     private int _refs = 1;   // the "live" reference held by StaticAssets; leases add/drop more
 
@@ -36,7 +28,7 @@ public sealed class AssetCache : IDisposable
     /// <summary>How many files were opened.</summary>
     public int Count => _assets.Count;
 
-    public AssetCache(string rootDir, int maxCachedFileBytes = DefaultMaxCachedFileBytes)
+    public AssetCache(string rootDir)
     {
         RootDir = Path.GetFullPath(rootDir);
 
@@ -47,7 +39,6 @@ public sealed class AssetCache : IDisposable
 
         _assets = new Dictionary<string, Asset>(StringComparer.Ordinal);
         var handles = new List<SafeFileHandle>();
-        var responses = new List<nint>();
 
         // Open every file under the root, keyed by its URL path relative to the root. The managed
         // handle is held for the cache's lifetime so the raw fd stays valid.
@@ -65,142 +56,14 @@ public sealed class AssetCache : IDisposable
             SafeFileHandle handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read);
             handles.Add(handle);
 
-            long length = RandomAccess.GetLength(handle);
-
-            nint response = 0;
-            int responseLength = 0;
-            if (length <= maxCachedFileBytes)
-            {
-                (response, responseLength) = BuildResponse(handle, (int)length, path);
-                responses.Add(response);
-            }
-
             int fd = (int)handle.DangerousGetHandle();
             string key = "/" + Path.GetRelativePath(RootDir, path).Replace('\\', '/');
 
-            // Freshness baseline: a request later re-statx's this path and serves the baked response
-            // only while size + mtime + inode still match.
-            TryStat(path, out _, out long mtimeSec, out uint mtimeNsec, out ulong ino);
-
-            _assets[key] = new Asset(fd, path, length, response, responseLength, mtimeSec, mtimeNsec, ino);
+            _assets[key] = new Asset(fd, path, RandomAccess.GetLength(handle));
         }
 
         _handles = handles.ToArray();
-        _responses = responses.ToArray();
     }
-
-    // --- Revalidation (statx) -------------------------------------------------------------------
-    // A baked response is served only while the file on disk still matches what was baked (size +
-    // mtime + inode), so an in-place edit or an atomic rename is picked up live instead of serving
-    // stale RAM. The baked block is never mutated here (the cache is shared across reactors) - it
-    // only re-bakes on Reload().
-
-    private const int  AT_FDCWD          = -100;
-    private const uint STATX_BASIC_STATS = 0x000007ffU;
-
-    [DllImport("libc", EntryPoint = "statx", SetLastError = true)]
-    private static extern unsafe int statx(int dirfd, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags, uint mask, byte* buf);
-
-    /// <summary>
-    /// statx a path into (size, mtime, inode). False when the file can't be stat'd (e.g. deleted).
-    /// Offsets are from <c>struct statx</c> (linux/stat.h): ino @32, size @40, mtime.sec @112,
-    /// mtime.nsec @120.
-    /// </summary>
-    internal static unsafe bool TryStat(string path, out long size, out long mtimeSec, out uint mtimeNsec, out ulong ino)
-    {
-        byte* buf = stackalloc byte[256];
-        if (statx(AT_FDCWD, path, 0, STATX_BASIC_STATS, buf) != 0)
-        {
-            size = 0; mtimeSec = 0; mtimeNsec = 0; ino = 0;
-            return false;
-        }
-
-        ino       = *(ulong*)(buf + 32);
-        size      = (long)*(ulong*)(buf + 40);
-        mtimeSec  = *(long*)(buf + 112);
-        mtimeNsec = *(uint*)(buf + 120);
-        return true;
-    }
-
-    /// <summary>
-    /// True when <paramref name="asset"/> still matches the file on disk (size + mtime + inode).
-    /// <paramref name="exists"/> is false when the file is gone; <paramref name="currentSize"/> is
-    /// the live size, used to frame the response when serving a changed file.
-    /// </summary>
-    public static bool IsFresh(in Asset asset, out bool exists, out long currentSize)
-    {
-        exists = TryStat(asset.Path, out currentSize, out long ms, out uint mn, out ulong ino);
-        return exists
-            && currentSize == asset.Length
-            && ms == asset.MtimeSec
-            && mn == asset.MtimeNsec
-            && ino == asset.Ino;
-    }
-
-    // Bake "HTTP/1.1 200 OK ..." + body into one contiguous native block. The body is read first
-    // so a file truncated under us still yields a consistent Content-Length.
-    private static unsafe (nint Response, int Length) BuildResponse(SafeFileHandle handle, int bodyLength, string path)
-    {
-        nint scratch = (nint)NativeMemory.Alloc((nuint)Math.Max(bodyLength, 1));
-        int read = 0;
-        while (read < bodyLength)
-        {
-            int n = RandomAccess.Read(handle, new Span<byte>((void*)(scratch + read), bodyLength - read), read);
-            if (n <= 0)
-            {
-                break;
-            }
-            read += n;
-        }
-
-        Span<byte> header = stackalloc byte[256];
-        int h = WriteResponseHeader(header, path, read);
-
-        nint response = (nint)NativeMemory.Alloc((nuint)(h + read));
-        header[..h].CopyTo(new Span<byte>((void*)response, h));
-        Buffer.MemoryCopy((void*)scratch, (void*)(response + h), read, read);
-        NativeMemory.Free((void*)scratch);
-
-        return (response, h + read);
-    }
-
-    /// <summary>
-    /// Write the 200 response header for <paramref name="path"/> into
-    /// <paramref name="destination"/> (≥256 bytes); returns the bytes written. The one place
-    /// asset headers are formatted - snapshot baking and ring-read serving both use it.
-    /// </summary>
-    public static int WriteResponseHeader(Span<byte> destination, string path, int bodyLength)
-    {
-        int h = 0;
-        h += Copy(destination[h..], "HTTP/1.1 200 OK\r\nContent-Type: "u8);
-        h += Copy(destination[h..], MimeFor(path));
-        h += Copy(destination[h..], "\r\nContent-Length: "u8);
-        Utf8Formatter.TryFormat(bodyLength, destination[h..], out int digits);
-        h += digits;
-        h += Copy(destination[h..], "\r\n\r\n"u8);
-        return h;
-    }
-
-    private static int Copy(Span<byte> destination, ReadOnlySpan<byte> source)
-    {
-        source.CopyTo(destination);
-        return source.Length;
-    }
-
-    private static ReadOnlySpan<byte> MimeFor(string path) => System.IO.Path.GetExtension(path) switch
-    {
-        ".html"  => "text/html"u8,
-        ".css"   => "text/css"u8,
-        ".js"    => "application/javascript"u8,
-        ".json"  => "application/json"u8,
-        ".svg"   => "image/svg+xml"u8,
-        ".png"   => "image/png"u8,
-        ".webp"  => "image/webp"u8,
-        ".woff2" => "font/woff2"u8,
-        ".txt"   => "text/plain"u8,
-        ".bin"   => "application/octet-stream"u8,
-        _        => "application/octet-stream"u8
-    };
 
     /// <summary>Look up a pre-opened asset by URL path; false if there's no such file.</summary>
     public bool TryGet(string urlPath, out Asset asset) => _assets.TryGetValue(urlPath, out asset);
@@ -258,7 +121,7 @@ public sealed class AssetCache : IDisposable
     /// <summary>Drops the "live" reference; the snapshot frees once all outstanding leases release too.</summary>
     public void Dispose() => Release();
 
-    private unsafe void DisposeCore()
+    private void DisposeCore()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
         {
@@ -268,11 +131,6 @@ public sealed class AssetCache : IDisposable
         foreach (SafeFileHandle handle in _handles)
         {
             handle.Dispose();
-        }
-
-        foreach (nint response in _responses)
-        {
-            NativeMemory.Free((void*)response);
         }
 
         _assets.Clear();
