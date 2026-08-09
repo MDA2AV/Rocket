@@ -45,6 +45,10 @@ public static class ChaosServer
 
     public static Task Http(Reactor r, TcpConnection conn) => Serve(conn, Ok);
 
+    /// <summary>Answer every request with a fixed body - the sharding test has each reactor answer
+    /// with its own shard index so the client can see the spread.</summary>
+    public static Task RespondBody(TcpConnection conn, string body) => Serve(conn, Build(200, body));
+
     private static async Task Serve(TcpConnection conn, byte[] response)
     {
         var carry = new List<byte>();

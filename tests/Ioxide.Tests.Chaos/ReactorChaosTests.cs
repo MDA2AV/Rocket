@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 using ioxide;
 
@@ -116,5 +117,39 @@ internal static class ReactorChaosTests
 
             ChaosClient.AssertHealthy(port);
         }, skip: !TestServer.KernelAtLeast(6, 12));
+
+        runner.Test("reactor: SO_REUSEPORT shards connections across reactors", () =>
+        {
+            // Several reactors on one port, each answering with its own shard index. The kernel
+            // load-balances accepts across the SO_REUSEPORT listeners, so a healthy shard set answers
+            // every connection AND more than one shard shows up - the single-reactor Start() helpers
+            // never exercise this.
+            const int shards = 4;
+            int port = TestServer.StartSharded(shards, static (shard, r, conn) => ChaosServer.RespondBody(conn, shard.ToString()));
+
+            var seen = new ConcurrentDictionary<int, bool>();
+            var errors = new ConcurrentBag<string>();
+            Parallel.For(0, 200, _ =>
+            {
+                try
+                {
+                    (int status, string body) = Client.Get(port, "/");
+                    if (status != 200)
+                    {
+                        errors.Add($"status {status}");
+                        return;
+                    }
+                    seen[int.Parse(body)] = true;
+                }
+                catch (Exception e)
+                {
+                    errors.Add(e.Message);
+                }
+            });
+
+            Assert.True(errors.IsEmpty, $"{errors.Count}/200 requests failed under sharding: {errors.FirstOrDefault()}");
+            Assert.True(seen.Count > 1,
+                $"200 connections landed on only {seen.Count} of {shards} shards - SO_REUSEPORT did not distribute");
+        });
     }
 }

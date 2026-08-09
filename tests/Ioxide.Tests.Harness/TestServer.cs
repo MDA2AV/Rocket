@@ -124,6 +124,63 @@ public static class TestServer
         },
     };
 
+    /// <summary>
+    /// Start <paramref name="reactorCount"/> reactors sharing ONE port via SO_REUSEPORT - the
+    /// production sharding shape, which the single-reactor Start() helpers deliberately avoid. The
+    /// handler is handed its reactor's shard index so a test can see which shard served each
+    /// connection (and thus that the kernel spread connections across them).
+    ///
+    /// Readiness is gated on every shard's OnStart firing, not on a single probe: Run() opens the
+    /// listener before OnStart, so once all N have signalled, all N listeners are bound and the
+    /// kernel has the full set to load-balance across. Without that, a test racing ahead could open
+    /// every connection before the later shards bound and see a false "no distribution".
+    /// </summary>
+    public static int StartSharded(int reactorCount, Func<int, Reactor, TcpConnection, Task> handle)
+    {
+        int port = Interlocked.Increment(ref _nextPort);
+        var config = new ServerConfig
+        {
+            ReactorCount = reactorCount,
+            RecvBufferSize = 4096,
+            RecvSlots = 256,
+            Tcp = new TcpOptions
+            {
+                Port = (ushort)port,
+                WriteSlabSize = 16 * 1024,
+                PoolMax = 64,
+                RecvQueueEntries = 64,
+            },
+        };
+
+        using var ready = new CountdownEvent(reactorCount);
+
+        for (int i = 0; i < reactorCount; i++)
+        {
+            int shard = i;
+            var reactor = new Reactor(shard, config)
+            {
+                TcpHandle = (r, conn) => handle(shard, r, conn),
+                OnStart = _ => ready.Signal(),
+            };
+
+            var thread = new Thread(RunGuarded(reactor, port))
+            {
+                IsBackground = true,
+                Name = $"test-shard-{port}-{shard}",
+            };
+            thread.Start();
+        }
+
+        // All shards up - or a shard died before OnStart, in which case WaitForListen surfaces the
+        // real reason instead of a bare timeout.
+        if (!ready.Wait(10_000))
+        {
+            WaitForListen(port);
+        }
+
+        return port;
+    }
+
     /// <summary>Incremental mode (IOU_PBUF_RING_INC) needs 6.12+; tests skip below that.</summary>
     public static bool KernelAtLeast(int major, int minor)
     {
