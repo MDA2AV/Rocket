@@ -39,12 +39,36 @@ using Playground.Shared;
 //  Needs: ioxide, ioxide.file
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-string dir      = Env.Str("PLAYGROUND_DIR", "/tmp/ioxide-assets");
-bool   buffered = Env.Flag("PLAYGROUND_FILE_BUFFERED");   // read into a buffer vs straight into the slab
-string tlsMode  = Env.Str("PLAYGROUND_FILE_TLS", "none"); // none | ktls (kernel transmit) | openssl
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+// Edit these. That is the whole mechanism - there is no config file and nothing else to find.
+// Env.Override exists only so bench/file-matrix.sh can drive the sample from outside; delete
+// those lines when you copy this out and the literals above them are the entire configuration.
+
+string dir = "/tmp/ioxide-assets";   // served root, walked once into a snapshot
+
+// Which transport terminates here. This is what decides whether the slab path below is legal
+// at all - see the header. none | ktls | openssl
+string tlsMode = "none";
+
+// Read the file into a pooled buffer and copy it into the slab, instead of reading it straight
+// into the slab. Forced for openssl, which cannot use the slab path.
+bool buffered = false;
+
+int reactors = Environment.ProcessorCount;   // one ring per reactor, one reactor per core
+
+// A real PEM pair, or null to generate a self-signed localhost cert on first run.
+string? certOverride = null;
+string? keyOverride  = null;
+
+Env.OverrideFile(ref dir, ref buffered, ref tlsMode);
 
 bool tlsOn = tlsMode is "ktls" or "openssl";
 bool ktls  = tlsMode == "ktls";
+
+ushort port = tlsOn ? (ushort)8443 : (ushort)8080;
+
+Env.Override(ref port, ref reactors);
+// ─────────────────────────────────────────────────────────────────────────────────────────────
 
 // The constraint this sample exists to show, enforced instead of described: with OpenSSL owning
 // transmit the slab must hold CIPHERTEXT, so a file read straight into it would go out in the
@@ -57,7 +81,9 @@ if (tlsMode == "openssl" && !buffered)
     Environment.Exit(1);
 }
 
-(string certPath, string keyPath) = tlsOn ? QuicCert.Ensure(null, null) : (string.Empty, string.Empty);
+(string certPath, string keyPath) = tlsOn
+    ? QuicCert.Ensure(certOverride, keyOverride)
+    : (string.Empty, string.Empty);
 
 SampleAssets.Ensure(dir);   // writes a demo index.html + style.css if the directory is empty
 
@@ -66,7 +92,7 @@ var assets = new StaticAssets(dir);   // served root (PLAYGROUND_DIR), walked on
 
 var config = new ServerConfig
 {
-    ReactorCount   = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),  // io_uring rings/threads - one per core
+    ReactorCount   = reactors,                                                    // io_uring rings/threads - one per core
     RingEntries    = 8192,                                                        // SQ/CQ depth per ring
     DualStack      = false,                                                       // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,                                                   // bytes per shared recv buffer
@@ -76,7 +102,7 @@ var config = new ServerConfig
     Quic           = null,                                                        // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port             = Env.Port("PLAYGROUND_PORT", tlsOn ? (ushort)8443 : (ushort)8080),
+        Port             = port,                                                  // 8080 cleartext, 8443 with TLS
         ExtraPorts       = [],                                                    // extra listener ports (one handler, several doors)
         ListenBacklog    = 1024,                                                  // accept-queue depth per SO_REUSEPORT listener
         WriteSlabSize    = 16 * 1024,                                             // per-connection write buffer; ReadFileAsync grows it to fit a bigger file

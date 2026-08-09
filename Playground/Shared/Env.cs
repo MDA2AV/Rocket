@@ -79,4 +79,14 @@ public static class Env
         kernelRx = Bool("PLAYGROUND_KTLS_RX", kernelRx);
     }
 
+    /// <summary>
+    /// The static-file sample's own knobs, so bench/file-matrix.sh can drive every arm of the
+    /// slab-vs-buffer matrix from a single build instead of rebuilding per cell.
+    /// </summary>
+    public static void OverrideFile(ref string dir, ref bool buffered, ref string tlsMode)
+    {
+        dir = Str("PLAYGROUND_DIR", dir);
+        buffered = Bool("PLAYGROUND_FILE_BUFFERED", buffered);
+        tlsMode = Str("PLAYGROUND_FILE_TLS", tlsMode);
+    }
 }
