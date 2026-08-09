@@ -2,6 +2,7 @@ using System.Buffers.Text;
 using System.Runtime.InteropServices;
 using ioxide;
 using ioxide.file;
+using ioxide.tls;
 using ioxide.utils;
 using Playground.Shared;
 
@@ -12,27 +13,51 @@ using Playground.Shared;
 //  file data can be handed to any protocol.
 //
 //  Two ways to move the bytes, selected by PLAYGROUND_FILE_BUFFERED:
-//    - default (cleartext): conn.ReadFileAsync reads the file STRAIGHT INTO the write slab, so the
-//      header and body leave in a single flush - no intermediate buffer, no copy. The leanest path
-//      for a plain connection.
-//    - buffered (=1): read into a reader buffer first, then hand those bytes on. This is the shape
-//      a TLS connection needs - the body has to pass through an encrypt (TlsSession.Write) before
-//      the wire, so it can't be read straight into the send slab. Here (cleartext) the buffer is
-//      just copied into the slab to mirror that structure.
+//    - default: conn.ReadFileAsync reads the file STRAIGHT INTO the write slab, so the header and
+//      body leave in a single flush - no intermediate buffer, no copy.
+//    - buffered (=1): read into a reader buffer first, then copy those bytes into the slab.
+//
+//  PLAYGROUND_FILE_TLS picks the transport: none, ktls (kernel transmit) or openssl. Which paths
+//  are legal follows from ONE question - what is the write slab supposed to contain when it is sent?
+//    - none:    the slab IS the wire. Both paths legal.
+//    - ktls:    the slab holds PLAINTEXT and the kernel makes the records. Both paths legal, so the
+//               file still never gets copied. This is the pairing the sample exists for.
+//    - openssl: the slab must hold CIPHERTEXT, so the body has to pass through TlsSession.Write -
+//               which needs a source buffer to read from. That buffer IS the copy, so there is no
+//               slab path at all and the sample refuses the combination rather than serving
+//               cleartext. Choosing this backend is choosing to pay the copy.
 //
 //  Descriptors are trusted for the snapshot's lifetime - a deploy is picked up by reloading the
 //  snapshot (SIGHUP), which reopens the files, not by re-stat'ing every request.
 //
 //      PLAYGROUND_DIR=/srv/www dotnet run -c Release --project Playground/Clients/File
 //      curl http://127.0.0.1:8080/index.html
-//      PLAYGROUND_FILE_BUFFERED=1 dotnet run ...   # the buffer path (the shape TLS uses)
+//      PLAYGROUND_FILE_BUFFERED=1 dotnet run ...   # buffer path instead of the slab
+//      sudo modprobe tls && PLAYGROUND_FILE_TLS=ktls dotnet run ...  # then curl -k https://:8443/
 //      kill -HUP <pid>        # reload the snapshot after a deploy
 //
 //  Needs: ioxide, ioxide.file
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 string dir      = Env.Str("PLAYGROUND_DIR", "/tmp/ioxide-assets");
-bool   buffered = Env.Flag("PLAYGROUND_FILE_BUFFERED");   // read into a buffer (the TLS shape) vs into the slab
+bool   buffered = Env.Flag("PLAYGROUND_FILE_BUFFERED");   // read into a buffer vs straight into the slab
+string tlsMode  = Env.Str("PLAYGROUND_FILE_TLS", "none"); // none | ktls (kernel transmit) | openssl
+
+bool tlsOn = tlsMode is "ktls" or "openssl";
+bool ktls  = tlsMode == "ktls";
+
+// The constraint this sample exists to show, enforced instead of described: with OpenSSL owning
+// transmit the slab must hold CIPHERTEXT, so a file read straight into it would go out in the
+// clear. There is no slab path for that backend - refuse rather than serve cleartext.
+if (tlsMode == "openssl" && !buffered)
+{
+    Console.Error.WriteLine("[file] openssl TLS has no slab path: the slab must hold ciphertext, so "
+                          + "the body has to pass through TlsSession.Write. Use "
+                          + "PLAYGROUND_FILE_BUFFERED=1, or PLAYGROUND_FILE_TLS=ktls for the slab.");
+    Environment.Exit(1);
+}
+
+(string certPath, string keyPath) = tlsOn ? QuicCert.Ensure(null, null) : (string.Empty, string.Empty);
 
 SampleAssets.Ensure(dir);   // writes a demo index.html + style.css if the directory is empty
 
@@ -51,7 +76,7 @@ var config = new ServerConfig
     Quic           = null,                                                        // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port             = Env.Port("PLAYGROUND_PORT", 8080),
+        Port             = Env.Port("PLAYGROUND_PORT", tlsOn ? (ushort)8443 : (ushort)8080),
         ExtraPorts       = [],                                                    // extra listener ports (one handler, several doors)
         ListenBacklog    = 1024,                                                  // accept-queue depth per SO_REUSEPORT listener
         WriteSlabSize    = 16 * 1024,                                             // per-connection write buffer; ReadFileAsync grows it to fit a bigger file
@@ -76,66 +101,72 @@ for (int i = 0; i < threads.Length; i++)
         AssetReader.CreatePool(r,
             readers:     4,         // concurrent ring reads bounded per reactor (pool size)
             bufferBytes: 1 << 20);  // native read buffer per reader (1 MiB) - size for the largest asset
+
+        if (tlsOn)
+        {
+            TlsService.Start(r, new TlsOptions
+            {
+                CertificatePath = certPath,
+                KeyPath         = keyPath,
+
+                // The whole point: with transmit in the kernel the slab carries PLAINTEXT and the
+                // kernel makes the records, so ReadFileAsync may still read the file straight into
+                // it. With this false, OpenSSL encrypts and the slab must hold ciphertext - which
+                // is why the slab path is refused above. Receive is OpenSSL either way.
+                KernelTx = ktls,
+            });
+        }
     };
 
     reactor.TcpHandle = async (r, conn) =>
     {
         StaticAssets snapshot = r.GetService<StaticAssets>();
         RingPool<AssetReader> readers = r.GetService<RingPool<AssetReader>>();
+        TlsSession? tls = null;
+
+        // Request bytes waiting to be framed. Both transports go through this, so the two differ
+        // only in how bytes get IN - otherwise the plaintext arm would answer once per recv batch
+        // and the TLS arm once per record, and the two would not be comparable.
+        var carry = new Carry();
 
         try
         {
+            if (tlsOn)
+            {
+                tls = await r.GetService<TlsService>().AcceptAsync(conn);
+
+                // A request can ride in with the handshake's final flight; serve it before parking
+                // in ReadAsync or the client waits on a response that never comes.
+                carry.Append(tls.DrainPlaintext());
+                await ServeAsync(conn, tls, carry, snapshot, readers, buffered);
+            }
+
             while (true)
             {
                 RecvSnapshot recv = await conn.ReadAsync();
 
-                // The lease pins the snapshot for the whole request, so a concurrent Reload() can't
-                // close the fd out from under an in-flight read.
-                using (StaticAssets.Lease lease = snapshot.Acquire())
+                while (conn.TryGetItem(recv, out SpscRecvRing.Item item))
                 {
-                    // Resolve the target against the snapshot while the recv bytes are still valid -
-                    // the lookup is span-based, so no string is ever allocated for a hit.
-                    bool found = false;
-                    AssetCache.Asset asset = default;
-
-                    while (conn.TryGetItem(recv, out SpscRecvRing.Item item))
+                    if (item.HasBuffer)
                     {
-                        if (item.HasBuffer)
-                        {
-                            if (!found && TryReadTarget(item.AsSpan(), out ReadOnlySpan<byte> target))
-                            {
-                                found = lease.TryGet(target, out asset);
-                            }
-                            conn.ReturnBuffer(in item);
-                        }
-                    }
-
-                    // The fd is trusted for the snapshot's lifetime, so serving is just: read the
-                    // bytes off the ring and frame HTTP around them.
-                    if (found)
-                    {
-                        if (buffered)
-                        {
-                            await SendBufferedAsync(conn, readers, asset);
-                        }
-                        else
-                        {
-                            await SendSlabAsync(conn, asset);
-                        }
-                    }
-                    else
-                    {
-                        conn.Write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"u8);
-                        await conn.FlushAsync();
+                        Append(tls, in item, carry);
+                        conn.ReturnBuffer(in item);
                     }
                 }
 
-                if (recv.IsClosed) return;
+                await ServeAsync(conn, tls, carry, snapshot, readers, buffered);
+
+                if (recv.IsClosed || (tls?.Closed ?? false)) return;
                 conn.ResetRead();
             }
         }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($"[file] connection failed: {e.Message}");
+        }
         finally
         {
+            tls?.Dispose();
             conn.DecRef();
         }
     };
@@ -156,21 +187,73 @@ using var reload = PosixSignalRegistration.Create(PosixSignal.SIGHUP, context =>
 
 Console.WriteLine($"[file] {config.ReactorCount} reactors on :{config.Tcp.Port} - "
                 + $"{assets.Count} files under {assets.RootDir} "
-                + $"({(buffered ? "buffer path" : "slab path")}, nothing cached)");
+                + $"({(buffered ? "buffer path" : "slab path")}, "
+                + $"tls={tlsMode}, nothing cached)");
 
 foreach (Thread thread in threads)
 {
     thread.Join();
 }
 
+// Bytes in. Cleartext appends the ring buffer as-is; TLS decrypts it first. Decrypt takes a raw
+// pointer because the buffer belongs to the ring, and the pointer work has to stay out of the
+// async handler, which cannot contain unsafe code.
+static unsafe void Append(TlsSession? tls, in SpscRecvRing.Item item, Carry carry)
+    => carry.Append(tls is null ? item.AsSpan() : tls.Decrypt(item.Ptr, item.Len));
+
+// One response per COMPLETE request in the carry, none for a partial one. Under kTLS the response
+// bytes go into the slab as plaintext and the kernel encrypts them on send, so both the slab and
+// buffer paths below are written exactly as they are for cleartext.
+static async Task ServeAsync(TcpConnection conn, TlsSession? tls, Carry carry, StaticAssets snapshot,
+    RingPool<AssetReader> readers, bool buffered)
+{
+    int end;
+    while ((end = carry.Span.IndexOf("\r\n\r\n"u8)) >= 0)
+    {
+        bool found = false;
+        AssetCache.Asset asset = default;
+
+        // The lease pins the snapshot for the request, so a concurrent Reload() cannot close the
+        // fd out from under an in-flight read.
+        using (StaticAssets.Lease lease = snapshot.Acquire())
+        {
+            if (TryReadTarget(carry.Span[..end], out ReadOnlySpan<byte> target))
+            {
+                found = lease.TryGet(target, out asset);
+            }
+
+            carry.Consume(end + 4);
+
+            if (found)
+            {
+                if (buffered)
+                {
+                    await SendBufferedAsync(conn, tls, readers, asset);
+                }
+                else
+                {
+                    await SendSlabAsync(conn, tls, asset);
+                }
+            }
+        }
+
+        if (!found)
+        {
+            Emit(conn, tls, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"u8);
+            await conn.FlushAsync();
+        }
+    }
+}
+
+
 // Cleartext fast path: read the whole file STRAIGHT INTO the write slab (it grows to fit), right
 // after the header, so header + body leave in one flush - no reader buffer, no copy. Ideal for the
 // typical multi-KB web asset; a very large file grows the slab by its full size, so stream those
 // with the buffer path instead.
-static async Task SendSlabAsync(TcpConnection conn, AssetCache.Asset asset)
+static async Task SendSlabAsync(TcpConnection conn, TlsSession? tls, AssetCache.Asset asset)
 {
     Span<byte> header = stackalloc byte[256];
-    conn.Write(header[..WriteHeader(header, asset.Path, asset.Length)]);
+    Emit(conn, tls, header[..WriteHeader(header, asset.Path, asset.Length)]);
 
     // io_uring positional read into the slab at the current tail; AdvanceWrite commits the bytes.
     int n = await conn.ReadFileAsync(asset.Fd, (int)asset.Length, fileOffset: 0);
@@ -182,7 +265,7 @@ static async Task SendSlabAsync(TcpConnection conn, AssetCache.Asset asset)
 // for the transform a TLS connection does here instead - tls.Write(conn, reader.Buffer[..n]), which
 // encrypts into the slab. Files bigger than the buffer take several reads at advancing offsets,
 // one flush each.
-static async Task SendBufferedAsync(TcpConnection conn, RingPool<AssetReader> readers, AssetCache.Asset asset)
+static async Task SendBufferedAsync(TcpConnection conn, TlsSession? tls, RingPool<AssetReader> readers, AssetCache.Asset asset)
 {
     AssetReader reader = await readers.RentAsync();
     try
@@ -190,15 +273,15 @@ static async Task SendBufferedAsync(TcpConnection conn, RingPool<AssetReader> re
         int first = await reader.ReadAsync(asset.Fd, offset: 0);   // io_uring positional read
         if (first < 0)
         {
-            conn.Write("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n"u8);
+            Emit(conn, tls, "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n"u8);
             await conn.FlushAsync();
             return;
         }
 
         // Header + first chunk go out together in one flush.
         Span<byte> header = stackalloc byte[256];
-        conn.Write(header[..WriteHeader(header, asset.Path, asset.Length)]);
-        WriteNative(conn, reader.Buffer, first);
+        Emit(conn, tls, header[..WriteHeader(header, asset.Path, asset.Length)]);
+        WriteNative(conn, tls, reader.Buffer, first);
         await conn.FlushAsync();
 
         long offset = first;
@@ -206,7 +289,7 @@ static async Task SendBufferedAsync(TcpConnection conn, RingPool<AssetReader> re
         {
             int read = await reader.ReadAsync(asset.Fd, offset);
             if (read <= 0) break;   // EOF or mid-stream error; the response is already committed
-            WriteNative(conn, reader.Buffer, read);
+            WriteNative(conn, tls, reader.Buffer, read);
             await conn.FlushAsync();
             offset += read;
         }
@@ -218,8 +301,18 @@ static async Task SendBufferedAsync(TcpConnection conn, RingPool<AssetReader> re
 }
 
 // Copy native memory (a ring-read buffer) into the connection's write slab in one go.
-static unsafe void WriteNative(TcpConnection conn, nint data, int length)
-    => conn.Write(new ReadOnlySpan<byte>((void*)data, length));
+static unsafe void WriteNative(TcpConnection conn, TlsSession? tls, nint data, int length)
+    => Emit(conn, tls, new ReadOnlySpan<byte>((void*)data, length));
+
+// Every response byte goes through here. TlsSession.Write is correct under BOTH backends - it
+// writes plaintext to the slab when the kernel encrypts, and encrypts into the slab when OpenSSL
+// does - so no call site has to know which one is in play. A bare conn.Write would be right only
+// for cleartext and kTLS, and silently wrong for OpenSSL.
+static void Emit(TcpConnection conn, TlsSession? tls, ReadOnlySpan<byte> bytes)
+{
+    if (tls is null) conn.Write(bytes);
+    else             tls.Write(conn, bytes);
+}
 
 // Write the 200 status line + Content-Type + Content-Length for this file.
 static int WriteHeader(Span<byte> destination, string path, long bodyLength)
@@ -271,4 +364,33 @@ static bool TryReadTarget(ReadOnlySpan<byte> request, out ReadOnlySpan<byte> tar
     if (query >= 0) target = target[..query];
 
     return true;
+}
+
+// Plaintext waiting to be framed into requests. TLS hands back records, not requests: a request
+// split across two records decrypts as two pieces, so answering per decrypt answers twice.
+sealed class Carry
+{
+    private byte[] _buffer = new byte[8192];
+    private int _length;
+
+    public ReadOnlySpan<byte> Span => _buffer.AsSpan(0, _length);
+
+    public void Append(ReadOnlySpan<byte> more)
+    {
+        if (more.IsEmpty) return;
+
+        if (_length + more.Length > _buffer.Length)
+        {
+            Array.Resize(ref _buffer, Math.Max(_buffer.Length * 2, _length + more.Length));
+        }
+
+        more.CopyTo(_buffer.AsSpan(_length));
+        _length += more.Length;
+    }
+
+    public void Consume(int count)
+    {
+        _buffer.AsSpan(count, _length - count).CopyTo(_buffer);
+        _length -= count;
+    }
 }
