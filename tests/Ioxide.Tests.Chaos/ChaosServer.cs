@@ -6,7 +6,7 @@ using ioxide.utils;
 namespace Ioxide.Tests;
 
 /// <summary>
-/// The plaintext HTTP/1.1 server the TCP chaos clients attack. A minimal but CORRECT framing loop:
+/// The plaintext HTTP/1.1 server the chaos clients attack. A minimal but CORRECT framing loop:
 /// accumulate bytes across recvs, answer once per complete request (terminated by CRLFCRLF), and -
 /// crucially for chaos - refuse a request whose headers grow past a cap instead of buffering
 /// without bound. That last part is what turns a slow-loris or a never-terminated header from an
@@ -23,9 +23,25 @@ public static class ChaosServer
     /// server's request-header cap; deliberately small so tests hit it quickly).</summary>
     public const int MaxRequestBytes = 64 * 1024;
 
+    private static readonly byte[] Ok = Build(200, "ok");
+    private static readonly byte[] TooLarge = Build(431, "too large");
+
     public static int Start() => TestServer.Start(Http);
 
-    public static async Task Http(Reactor r, TcpConnection conn)
+    /// <summary>
+    /// A server whose response body is <paramref name="bodyBytes"/> bytes of 'x' - large enough to
+    /// spill past the write slab and come back through the overflow send path rather than a plain
+    /// one, so tests can check a big response is framed and sent uncorrupted.
+    /// </summary>
+    public static int StartBig(int bodyBytes)
+    {
+        byte[] response = Build(200, new string('x', bodyBytes));
+        return TestServer.Start((_, conn) => Serve(conn, response));
+    }
+
+    public static Task Http(Reactor r, TcpConnection conn) => Serve(conn, Ok);
+
+    private static async Task Serve(TcpConnection conn, byte[] response)
     {
         var carry = new List<byte>();
 
@@ -56,14 +72,14 @@ public static class ChaosServer
                 // Headers that never terminate must not grow the buffer forever - bound it.
                 if (responded == 0 && carry.Count > MaxRequestBytes)
                 {
-                    Reply(conn, 431, "too large");
+                    conn.Write(TooLarge);
                     await conn.FlushAsync();
                     return;
                 }
 
                 for (int i = 0; i < responded; i++)
                 {
-                    Reply(conn, 200, "ok");
+                    conn.Write(response);
                 }
 
                 if (responded > 0)
@@ -85,9 +101,6 @@ public static class ChaosServer
         }
     }
 
-    private static void Reply(TcpConnection conn, int status, string body)
-    {
-        conn.Write(Encoding.ASCII.GetBytes(
-            $"HTTP/1.1 {status} X\r\nContent-Type: text/plain\r\nContent-Length: {body.Length}\r\n\r\n{body}"));
-    }
+    private static byte[] Build(int status, string body) => Encoding.ASCII.GetBytes(
+        $"HTTP/1.1 {status} X\r\nContent-Type: text/plain\r\nContent-Length: {body.Length}\r\n\r\n{body}");
 }

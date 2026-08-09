@@ -16,6 +16,7 @@ internal static class Program
     {
         var runner = new Runner();
 
+        ReactorChaosTests.Register(runner);
         TcpChaosTests.Register(runner);
         TlsChaosTests.Register(runner);
         H2ChaosTests.Register(runner);
