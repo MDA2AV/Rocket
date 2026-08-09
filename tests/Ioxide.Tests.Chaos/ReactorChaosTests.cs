@@ -71,6 +71,32 @@ internal static class ReactorChaosTests
             Assert.True(body.All(c => c == 'x'), "large response corrupted through the overflow path");
         });
 
+        runner.Test("reactor: a large response survives the segmented overflow path", () =>
+        {
+            // The other overflow strategy: rather than reallocating one slab (Grow), spill the excess
+            // into a chain of pooled segments gathered into one vectored SENDMSG - a distinct send
+            // path (BuildIovec / AdvanceIov on a partial send). Same correctness bar: arrives whole.
+            const int bodyBytes = 40 * 1024;
+            var config = new ServerConfig
+            {
+                RecvBufferSize = 4096,
+                RecvSlots = 256,
+                Tcp = new TcpOptions
+                {
+                    WriteSlabSize = 16 * 1024,
+                    PoolMax = 64,
+                    RecvQueueEntries = 64,
+                    WriteOverflow = WriteOverflowStrategy.Segmented,
+                },
+            };
+            int port = TestServer.StartConfigured(ChaosServer.Big(bodyBytes), config).Port;
+
+            (int status, string body) = Client.Get(port, "/");
+            Assert.Equal(200, status);
+            Assert.Equal(bodyBytes, body.Length);
+            Assert.True(body.All(c => c == 'x'), "large response corrupted through the segmented overflow path");
+        });
+
         runner.Test("reactor: fragmentation and refusal hold on the incremental ring", () =>
         {
             // The per-connection IOU_PBUF_RING_INC path (OnTcpRecvCompletionIncremental) is separate

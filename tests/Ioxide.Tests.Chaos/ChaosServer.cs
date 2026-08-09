@@ -33,10 +33,14 @@ public static class ChaosServer
     /// spill past the write slab and come back through the overflow send path rather than a plain
     /// one, so tests can check a big response is framed and sent uncorrupted.
     /// </summary>
-    public static int StartBig(int bodyBytes)
+    public static int StartBig(int bodyBytes) => TestServer.Start(Big(bodyBytes));
+
+    /// <summary>The big-response handler on its own, so a test can start it under a custom config
+    /// (e.g. a segmented write-overflow strategy).</summary>
+    public static Func<Reactor, TcpConnection, Task> Big(int bodyBytes)
     {
         byte[] response = Build(200, new string('x', bodyBytes));
-        return TestServer.Start((_, conn) => Serve(conn, response));
+        return (_, conn) => Serve(conn, response);
     }
 
     public static Task Http(Reactor r, TcpConnection conn) => Serve(conn, Ok);
