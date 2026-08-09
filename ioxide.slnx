@@ -58,6 +58,7 @@
     <Project Path="Playground/Http2/Nghttp2/Playground.Http2.Nghttp2.csproj" />
     <Project Path="Playground/Http2/Managed/Playground.Http2.Managed.csproj" />
     <Project Path="Playground/Http2/Tls/Playground.Http2.Tls.csproj" />
+    <Project Path="Playground/Http2/ManagedTls/Playground.Http2.ManagedTls.csproj" />
     <Project Path="Playground/Http2/SslStream/Playground.Http2.SslStream.csproj" />
   </Folder>
 

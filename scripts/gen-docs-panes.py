@@ -118,6 +118,18 @@ PANES = {
         "are the exception rather than the rule. TLS here is "
         "<b>OpenSSL both ways by default</b>; the <code>kernelTx</code>/<code>kernelRx</code> "
         "knobs at the top are what move either direction into the kernel."),
+    "h2cstls": (
+        "Http2/ManagedTls", "HTTP/2 &middot; pure C# over TLS", "ioxide + ioxide.http2",
+        ["curl -k --http2 https://127.0.0.1:8443/"],
+        "The pure-C# HTTP/2 server behind TLS, and the diff against "
+        "<label for=\"tab-h2tls\" class=\"ex-jump\">h2 &middot; tls &amp; alpn</label> is three "
+        "type names and a package - no native library anywhere. Both take an "
+        "<code>IDuplexPipe</code>, so neither learns what is under it. "
+        "Measured on this rig at 2 reactors, 64 connections, 32 streams, a 2-byte body: pure C# "
+        "runs <b>2.46&times;</b> nghttp2 over TLS and 2.73&times; cleartext, at about a third of "
+        "the CPU per request. That ordering does <b>not</b> generalize - at 32 connections over 4 "
+        "reactors nghttp2 is ahead instead - and a 2-byte body measures framing and HPACK rather "
+        "than moving data. TLS itself costs both the same <b>0.05&micro;s per request</b>."),
     "h2bcl": (
         "Http2/SslStream", "HTTP/2 &middot; over SslStream", "ioxide + ioxide.nghttp2",
         ["curl -k --http2 https://127.0.0.1:8443/"],

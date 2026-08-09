@@ -37,6 +37,7 @@ Http2/Nghttp2           h2c   8080  /         -                   -
 Http2/Managed           h2c   8080  /         -                   -
 Http2/Tls               h2    8443  /         -                   -
 Http2/SslStream         h2    8443  /         -                   -
+Http2/ManagedTls        h2    8443  /         -                   -
 
 Http3/Nghttp3           h3    8443  /         -                   -
 Http3/Buffered          h3    8443  /         -                   -
