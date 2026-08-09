@@ -14,21 +14,40 @@ using Playground.Shared;
 //  against. Needs: ioxide
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+// Edit these. That is the whole mechanism - there is no config file and nothing else to find.
+// An Env.Override line means the value can also be set from the environment, which is how
+// bench/run.sh drives the sample; the literal is what applies otherwise. Delete those lines when
+// you copy this out and the literals above them are the entire configuration.
+
+ushort port      = 8080;
+int    reactors  = 12;
+int    bodyBytes = 2;
+
+Env.Override(ref port, ref reactors, ref bodyBytes);
+
+// Per-connection recv buffer rings (kernel 6.12+) instead of one shared ring per reactor. The
+// handler code is identical either way; this only changes how recv buffers are handed out.
+bool incrementalBuffers = false;
+
+Env.OverrideIncremental(ref incrementalBuffers);
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
 // The engine. Every ServerConfig + TcpOptions knob is set here at its default, so the whole tuning
 // surface is visible in one place - edit any line. One ring per reactor, one reactor per thread.
 var config = new ServerConfig
 {
-    ReactorCount   = Env.Int("PLAYGROUND_REACTORS", 12),  // io_uring rings/threads - one per core
+    ReactorCount   = reactors,  // io_uring rings/threads - one per core
     RingEntries    = 8192,                                 // SQ/CQ depth per ring
     DualStack      = false,                                 // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
     RecvSlots      = 4096,                                 // shared recv buffer-ring depth
-    Incremental    = Env.Flag("PLAYGROUND_INCREMENTAL") ? new IncrementalOptions { MaxConnections = 1024, RecvSlots = 8, RecvBufferSize = 16 * 1024 } : null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Incremental    = incrementalBuffers ? new IncrementalOptions { MaxConnections = 1024, RecvSlots = 8, RecvBufferSize = 16 * 1024 } : null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
     Udp            = null,                                 // no raw UDP sockets (TCP-only server)
     Quic           = null,                                 // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port             = Env.Port("PLAYGROUND_PORT", 8080),
+        Port             = port,
         ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
         ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
         WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
@@ -41,7 +60,6 @@ var config = new ServerConfig
 
 // One pre-encoded response, built once and written for every request. PLAYGROUND_BODY sizes the
 // body (2 = "ok"); 1024 matches the object size load-generator grids conventionally measure.
-int bodyBytes = Env.Int("PLAYGROUND_BODY", 2) is var n && n > 0 ? n : 2;
 byte[] body = bodyBytes == 2 ? "ok"u8.ToArray() : [.. Enumerable.Repeat((byte)'x', bodyBytes - 1), (byte)'\n'];
 byte[] response =
 [

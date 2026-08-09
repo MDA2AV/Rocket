@@ -6,6 +6,10 @@ Each pane is the sample's real Program.cs with the Playground.Shared indirection
 import html
 import pathlib
 import re
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from paneinline import inline
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -93,36 +97,11 @@ NOTES = {
 BANNER = re.compile(r"^// ─{5,}.*?^// ─{5,}\n\n", re.S | re.M)
 
 
-def inline_shared(code: str) -> str:
-    """Replace the Playground.Shared helpers with the literals they resolve to."""
-    code = code.replace("using Playground.Shared;\n", "")
-
-    # QuicCert.Ensure(...) spans lines; the sample writes cert.pem / key.pem on first run.
-    code = re.sub(
-        r"\(string certPath, string keyPath\) = QuicCert\.Ensure\(\n(?:.*\n)*?.*?\);\n\n",
-        'const string certPath = "cert.pem";      // any PEM pair; the sample generates one on first run\n'
-        'const string keyPath  = "key.pem";\n\n',
-        code)
-
-    # The upstream trust anchor defaults to the same self-signed cert the frontend serves, so the
-    # samples run against each other out of the box. Collapse the override to that default.
-    code = code.replace('Env.StrOrNull("PLAYGROUND_UPSTREAM_CA") ?? certPath', "certPath")
-
-    code = re.sub(r'Env\.(?:Int|Port)\("[A-Z_]+", ([^)]+)\)', r"\1", code)
-    code = re.sub(r'Env\.Str\("[A-Z_]+", ("[^"]*")\)', r"\1", code)
-    code = re.sub(r'Env\.Flag\("[A-Z_]+"\)', "false", code)
-
-    assert "Env." not in code and "QuicCert" not in code, \
-        "an indirection survived: " + "; ".join(
-            l.strip() for l in code.splitlines() if "Env." in l or "QuicCert" in l)
-    return code
-
-
 def build(slug: str) -> str:
     label, title, packages, run = COMBOS[slug]
     src = (ROOT / f"Playground/Proxy/{slug}/Program.cs").read_text()
 
-    body = inline_shared(BANNER.sub("", src)).strip()
+    body = inline(src)
 
     header = "// dotnet add package " + " ".join(packages.split(" + "))
     header += "\n" + "\n".join(f"//   {line}" for line in run)

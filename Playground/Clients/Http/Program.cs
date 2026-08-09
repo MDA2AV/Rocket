@@ -39,6 +39,10 @@ int    upstreamPool = 8;
 
 // The path every inbound request is forwarded to, whatever was asked for.
 string upstreamPath = "/";
+
+Env.Override(ref upstreamHost, "PLAYGROUND_UPSTREAM_HOST");
+Env.Override(ref upstreamPort, "PLAYGROUND_UPSTREAM_PORT");
+Env.Override(ref upstreamPool, "PLAYGROUND_UPSTREAM_POOL");
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 var config = new ServerConfig

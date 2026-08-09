@@ -22,9 +22,30 @@ using Playground.Shared;
 //  Needs: ioxide.redis
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+// Edit these. That is the whole mechanism - there is no config file and nothing else to find.
+// An Env.Override line means the value can also be set from the environment, which is how
+// bench/run.sh drives the sample; the literal is what applies otherwise. Delete those lines when
+// you copy this out and the literals above them are the entire configuration.
+
+ushort port     = 8080;                        // http://127.0.0.1:8080/
+int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+
+Env.Override(ref port, ref reactors);
+
+// The Redis this talks to. IPv4 literal for the same reason as everywhere else - a DNS lookup
+// would block the reactor - and the pool is per reactor. A null password means no AUTH.
+string  redisHost     = "127.0.0.1";
+ushort  redisPort     = 6379;
+string? redisPassword = null;
+int     redisPoolSize = 4;
+
+Env.OverrideRedis(ref redisHost, ref redisPort, ref redisPassword, ref redisPoolSize);
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
 var config = new ServerConfig
 {
-    ReactorCount   = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),  // io_uring rings/threads - one per core
+    ReactorCount   = reactors,  // io_uring rings/threads - one per core
     RingEntries    = 8192,                                                        // SQ/CQ depth per ring
     DualStack      = false,                                                       // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,                                                   // bytes per shared recv buffer
@@ -34,7 +55,7 @@ var config = new ServerConfig
     Quic           = null,                                                        // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port             = Env.Port("PLAYGROUND_PORT", 8080),
+        Port             = port,
         ExtraPorts       = [],                                                    // extra listener ports (one handler, several doors)
         ListenBacklog    = 1024,                                                  // accept-queue depth per SO_REUSEPORT listener
         WriteSlabSize    = 16 * 1024,                                             // per-connection write buffer before overflow kicks in
@@ -47,12 +68,12 @@ var config = new ServerConfig
 
 var redisOptions = new RedisOptions
 {
-    Host             = Env.Str("PLAYGROUND_REDIS_HOST", "127.0.0.1"),  // IPv4 literal - resolve names up front, DNS blocks the reactor
-    Port             = Env.Port("PLAYGROUND_REDIS_PORT", 6379),        // Redis wire port
-    Password         = Env.StrOrNull("PLAYGROUND_REDIS_PASSWORD"),     // AUTH password; null = no auth
+    Host             = redisHost,  // IPv4 literal - resolve names up front, DNS blocks the reactor
+    Port             = redisPort,        // Redis wire port
+    Password         = redisPassword,     // AUTH password; null = no auth
     User             = null,                                           // ACL username (Redis 6+); null = default user
     Database         = 0,                                              // logical DB index to SELECT on connect
-    PoolSize         = Env.Int("PLAYGROUND_REDIS_POOL", 4),            // per reactor, not global
+    PoolSize         = redisPoolSize,            // per reactor, not global
     CommandTimeoutMs = 30_000,                                         // oldest in-flight command past this -> torn down; 0 disables
 };
 

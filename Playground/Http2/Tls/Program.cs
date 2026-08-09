@@ -49,6 +49,12 @@ bool kernelTx = false;
 bool kernelRx = false;
 
 Env.OverrideKtls(ref kernelTx, ref kernelRx);
+
+// Per-connection recv buffer rings (kernel 6.12+) instead of one shared ring per reactor. The
+// handler code is identical either way; this only changes how recv buffers are handed out.
+bool incrementalBuffers = false;
+
+Env.OverrideIncremental(ref incrementalBuffers);
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 (string certPath, string keyPath) = QuicCert.Ensure(certOverride, keyOverride);
@@ -60,7 +66,7 @@ var config = new ServerConfig
     DualStack      = false,                                                 // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,                                             // bytes per shared recv buffer
     RecvSlots      = 4096,                                                  // shared recv buffer-ring depth
-    Incremental    = Env.Flag("PLAYGROUND_INCREMENTAL") ? new IncrementalOptions { MaxConnections = 1024, RecvSlots = 8, RecvBufferSize = 16 * 1024 } : null,  // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Incremental    = incrementalBuffers ? new IncrementalOptions { MaxConnections = 1024, RecvSlots = 8, RecvBufferSize = 16 * 1024 } : null,  // per-connection recv rings (6.12+) - see Tcp/Incremental
     Udp            = null,                                                  // no raw UDP sockets (TCP-only server)
     Quic           = null,                                                  // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions

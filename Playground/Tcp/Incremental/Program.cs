@@ -17,9 +17,32 @@ using Playground.Shared;
 //  it pays at high connection counts, not high request rates. Needs: ioxide
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+// Edit these. That is the whole mechanism - there is no config file and nothing else to find.
+// An Env.Override line means the value can also be set from the environment, which is how
+// bench/run.sh drives the sample; the literal is what applies otherwise. Delete those lines when
+// you copy this out and the literals above them are the entire configuration.
+
+ushort port      = 8080;                        // http://127.0.0.1:8080/
+int    reactors  = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+int    bodyBytes = 2;                           // "ok"
+
+Env.Override(ref port, ref reactors, ref bodyBytes);
+
+// The per-connection ring geometry - this block IS the mode. A connection gets its own ring of
+// incRecvSlots buffers of incRecvBufferSize each, and the kernel appends across recvs into them,
+// so a request split over several reads arrives contiguous. It costs memory per connection:
+// incMaxConnections * incRecvSlots * incRecvBufferSize per reactor.
+int incMaxConnections = 4096;   // per reactor
+int incRecvSlots      = 16;     // per connection
+int incRecvBufferSize = 4096;   // bytes per buffer
+
+Env.OverrideIncrementalRing(ref incMaxConnections, ref incRecvSlots, ref incRecvBufferSize);
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
 var config = new ServerConfig
 {
-    ReactorCount   = Env.Int("PLAYGROUND_REACTORS", Environment.ProcessorCount),  // io_uring rings/threads - one per core
+    ReactorCount   = reactors,  // io_uring rings/threads - one per core
     RingEntries    = 8192,                                 // SQ/CQ depth per ring
     DualStack      = false,                                // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
@@ -29,16 +52,16 @@ var config = new ServerConfig
     // RecvSlots) go unused once it is set.
     Incremental = new IncrementalOptions
     {
-        MaxConnections = Env.Int("PLAYGROUND_INC_CONNS", 4096),      // per reactor
-        RecvSlots      = Env.Int("PLAYGROUND_INC_SLOTS", 16),        // per connection
-        RecvBufferSize = Env.Int("PLAYGROUND_INC_BUFSIZE", 4096),    // bytes per buffer, kernel appends across recvs
+        MaxConnections = incMaxConnections,      // per reactor
+        RecvSlots      = incRecvSlots     ,        // per connection
+        RecvBufferSize = incRecvBufferSize,    // bytes per buffer, kernel appends across recvs
     },
 
     Udp            = null,                                 // no raw UDP sockets (TCP-only server)
     Quic           = null,                                 // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port             = Env.Port("PLAYGROUND_PORT", 8080),
+        Port             = port,
         ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
         ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
         WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
@@ -49,7 +72,6 @@ var config = new ServerConfig
     },
 };
 
-int bodyBytes = Env.Int("PLAYGROUND_BODY", 2) is var n && n > 0 ? n : 2;
 byte[] body = bodyBytes == 2 ? "ok"u8.ToArray() : [.. Enumerable.Repeat((byte)'x', bodyBytes - 1), (byte)'\n'];
 byte[] response =
 [

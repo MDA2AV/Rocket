@@ -59,6 +59,7 @@
   <input type="radio" name="mode-tabs" id="tab-pg">
   <input type="radio" name="mode-tabs" id="tab-redis">
   <input type="radio" name="mode-tabs" id="tab-files">
+  <input type="radio" name="mode-tabs" id="tab-qclient">
   <input type="radio" name="mode-tabs" id="tab-https">
   <nav class="ex-menu" aria-label="Examples">
     <label class="ex-home" for="tab-none">overview</label>
@@ -131,6 +132,7 @@
       <label for="tab-redis">redis</label>
       <label for="tab-files">files</label>
       <label for="tab-https">https origins</label>
+      <label for="tab-qclient">quic client</label>
     </details>
   </nav>
 
@@ -1193,6 +1195,151 @@ static async Task PipeEcho(QuicConnection conn)
 }</code></pre>
     <p class="ex-foot">One QUIC listener serving two protocols, chosen during the handshake: connections that negotiate <code>h3</code> get the HTTP/3 loop, anything else gets raw stream echo over the dual pipe. QUIC-only - <code>Tcp = null</code>, so the process opens no TCP listener at all.</p>
   </div>
+  <div class="pane pane-qclient">
+    <div class="pane-head">
+      <h3>QUIC &middot; client</h3>
+      <span class="pane-pkg">ioxide + ioxide.ngtcp2</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+// dotnet add package ioxide.ngtcp2
+//   dotnet run -c Release --project Playground/Quic/Raw   # something to talk to
+//   dotnet run -c Release --project Playground/Clients/Quic
+
+using System.Diagnostics;
+using ioxide;
+using ioxide.ngtcp2;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+string host        = &quot;127.0.0.1&quot;;   // IPv4 literal - resolving a name would block the reactor
+ushort port        = 8443;          // the echo server&#x27;s UDP port
+string serverName  = &quot;localhost&quot;;   // SNI, and what the server certificate has to match
+string alpn        = &quot;echo&quot;;        // must match what the server offers
+int    connections = 64;            // each opens one bidirectional stream
+int    seconds     = 10;            // measured seconds, after a one-second warm-up
+int    payloadSize = 64;            // bytes per round trip
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+byte[] payload = new byte[payloadSize];
+for (int i = 0; i &lt; payload.Length; i++)
+{
+    payload[i] = (byte)(&#x27;a&#x27; + i % 26);
+}
+
+long roundTrips = 0;
+var  started    = new TaskCompletionSource();
+var  deadline   = Stopwatch.StartNew();
+
+// A client needs no listener of any kind: QuicClientEngine.Connect asks the reactor for an
+// outbound transport on an ephemeral port, so Tcp, Udp and Quic all stay null here.
+var config = new ServerConfig
+{
+    ReactorCount = 1,
+    RingEntries  = 8192,
+    Tcp          = null,
+    Udp          = null,
+    Quic         = null,
+};
+
+var engine  = new QuicClientEngine(alpn);
+var reactor = new Reactor(0, config);
+
+reactor.OnStart = r =&gt;
+{
+    for (int i = 0; i &lt; connections; i++)
+    {
+        QuicEngineConnection quic;
+        try
+        {
+            quic = engine.Connect(r, host, port, serverName);
+        }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($&quot;connect failed: {e.Message}&quot;);
+            started.TrySetResult();
+            return;
+        }
+
+        // The stream cannot be opened before the handshake finishes, so the whole exchange hangs
+        // off this callback rather than running straight after Connect.
+        quic.HandshakeCompleted = () =&gt;
+        {
+            started.TrySetResult();
+            _ = EchoLoop(quic);
+        };
+    }
+};
+
+var thread = new Thread(reactor.Run) { Name = &quot;quic-echo&quot;, IsBackground = true };
+thread.Start();
+
+// Give the handshakes a moment; if none completes there is nothing to measure and saying so beats
+// reporting a zero that reads like a regression.
+Task first = await Task.WhenAny(started.Task, Task.Delay(10_000));
+if (first != started.Task)
+{
+    Console.Error.WriteLine($&quot;no QUIC handshake completed against {host}:{port} (alpn {alpn})&quot;);
+    return 1;
+}
+
+await Task.Delay(1_000);                       // warm: handshakes settle, first streams open
+Interlocked.Exchange(ref roundTrips, 0);
+deadline.Restart();
+await Task.Delay(seconds * 1000);
+
+long total = Interlocked.Read(ref roundTrips);
+double elapsed = deadline.Elapsed.TotalSeconds;
+Console.WriteLine($&quot;{total / elapsed:F2} req/s   ({total} round trips in {elapsed:F1}s, &quot;
+                + $&quot;{connections} connections, {payloadSize}-byte payload)&quot;);
+return 0;
+
+async Task EchoLoop(QuicEngineConnection quic)
+{
+    long streamId = quic.OpenBidiStream();
+    if (streamId &lt; 0)
+    {
+        return;
+    }
+
+    try
+    {
+        int outstanding = 0;
+        quic.SendStream(streamId, payload, fin: false);
+
+        while (deadline.Elapsed.TotalSeconds &lt; seconds + 12)
+        {
+            QuicRecvSnapshot snapshot = await quic.ReadAsync();
+
+            while (quic.TryGetDelivery(in snapshot, out QuicRecvRing.Delivery delivery))
+            {
+                outstanding += delivery.AsSpan().Length;
+                quic.ReturnBuffer(in delivery);
+            }
+
+            // One payload back = one completed round trip. The echo can arrive split across
+            // deliveries, so this counts bytes rather than deliveries.
+            while (outstanding &gt;= payload.Length)
+            {
+                outstanding -= payload.Length;
+                Interlocked.Increment(ref roundTrips);
+                quic.SendStream(streamId, payload, fin: false);
+            }
+
+            if (snapshot.IsClosed)
+            {
+                return;
+            }
+            quic.ResetRead();
+        }
+    }
+    catch
+    {
+        // A connection dying mid-run is not fatal to the measurement; the others keep going and
+        // the round-trip count reflects what actually completed.
+    }
+}</code></pre>
+    <p class="ex-foot">The client half of QUIC, and the other side of <label for="tab-qraw" class="ex-jump">quic &middot; raw streams</label> - everything else here is a server. <code>QuicClientEngine.Connect</code> needs no listener at all: it asks the reactor for an outbound transport on an ephemeral port, which is why <code>Tcp</code>, <code>Udp</code> and <code>Quic</code> are all null below. The handshake, the stream and the reads ride that reactor's ring and resume inline on it, exactly as they do server-side. It doubles as the <b>load driver</b> for the echo servers - they speak no HTTP, so wrk and h2load cannot touch them - which is what makes them benchmarkable.</p>
+  </div>
   <div class="pane pane-https">
     <div class="pane-head">
       <h3>Client &middot; https origins</h3>
@@ -1388,19 +1535,31 @@ using System.IO.Pipelines;
 using ioxide;
 using ioxide.utils;
 
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort port      = 8080;
+int    reactors  = Environment.ProcessorCount;
+int    bodyBytes = 2;
+
+
+// Per-connection recv buffer rings (kernel 6.12+) instead of one shared ring per reactor. The
+// handler code is identical either way; this only changes how recv buffers are handed out.
+bool incrementalBuffers = false;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
 var config = new ServerConfig
 {
-    ReactorCount   = Environment.ProcessorCount,  // io_uring rings/threads - one per core
+    ReactorCount   = reactors,  // io_uring rings/threads - one per core
     RingEntries    = 8192,                                 // SQ/CQ depth per ring
     DualStack      = false,                                // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
     RecvSlots      = 4096,                                 // shared recv buffer-ring depth
-    Incremental    = null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Incremental    = incrementalBuffers ? new IncrementalOptions { MaxConnections = 1024, RecvSlots = 8, RecvBufferSize = 16 * 1024 } : null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
     Udp            = null,                                 // no raw UDP sockets (TCP-only server)
     Quic           = null,                                 // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port             = 8080,
+        Port             = port,
         ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
         ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
         WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
@@ -1412,7 +1571,6 @@ var config = new ServerConfig
 };
 
 // PLAYGROUND_BODY sizes the body (2 = &quot;ok&quot;), matching Tcp.Raw so the two are comparable.
-int bodyBytes = 2 is var n &amp;&amp; n &gt; 0 ? n : 2;
 byte[] body = bodyBytes == 2 ? &quot;ok&quot;u8.ToArray() : [.. Enumerable.Repeat((byte)&#x27;x&#x27;, bodyBytes - 1), (byte)&#x27;\n&#x27;];
 byte[] response =
 [
@@ -1481,21 +1639,33 @@ using System.Text;
 using ioxide;
 using ioxide.utils;
 
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort port      = 8080;
+int    reactors  = 12;
+int    bodyBytes = 2;
+
+
+// Per-connection recv buffer rings (kernel 6.12+) instead of one shared ring per reactor. The
+// handler code is identical either way; this only changes how recv buffers are handed out.
+bool incrementalBuffers = false;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
 // The engine. Every ServerConfig + TcpOptions knob is set here at its default, so the whole tuning
 // surface is visible in one place - edit any line. One ring per reactor, one reactor per thread.
 var config = new ServerConfig
 {
-    ReactorCount   = 12,  // io_uring rings/threads - one per core
+    ReactorCount   = reactors,  // io_uring rings/threads - one per core
     RingEntries    = 8192,                                 // SQ/CQ depth per ring
     DualStack      = false,                                 // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
     RecvSlots      = 4096,                                 // shared recv buffer-ring depth
-    Incremental    = null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Incremental    = incrementalBuffers ? new IncrementalOptions { MaxConnections = 1024, RecvSlots = 8, RecvBufferSize = 16 * 1024 } : null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
     Udp            = null,                                 // no raw UDP sockets (TCP-only server)
     Quic           = null,                                 // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port             = 8080,
+        Port             = port,
         ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
         ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
         WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
@@ -1508,7 +1678,6 @@ var config = new ServerConfig
 
 // One pre-encoded response, built once and written for every request. PLAYGROUND_BODY sizes the
 // body (2 = &quot;ok&quot;); 1024 matches the object size load-generator grids conventionally measure.
-int bodyBytes = 2 is var n &amp;&amp; n &gt; 0 ? n : 2;
 byte[] body = bodyBytes == 2 ? &quot;ok&quot;u8.ToArray() : [.. Enumerable.Repeat((byte)&#x27;x&#x27;, bodyBytes - 1), (byte)&#x27;\n&#x27;];
 byte[] response =
 [
@@ -1582,9 +1751,25 @@ using System.Text;
 using ioxide;
 using ioxide.utils;
 
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort port      = 8080;                        // http://127.0.0.1:8080/
+int    reactors  = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+int    bodyBytes = 2;                           // &quot;ok&quot;
+
+
+// The per-connection ring geometry - this block IS the mode. A connection gets its own ring of
+// incRecvSlots buffers of incRecvBufferSize each, and the kernel appends across recvs into them,
+// so a request split over several reads arrives contiguous. It costs memory per connection:
+// incMaxConnections * incRecvSlots * incRecvBufferSize per reactor.
+int incMaxConnections = 4096;   // per reactor
+int incRecvSlots      = 16;     // per connection
+int incRecvBufferSize = 4096;   // bytes per buffer
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
 var config = new ServerConfig
 {
-    ReactorCount   = Environment.ProcessorCount,  // io_uring rings/threads - one per core
+    ReactorCount   = reactors,  // io_uring rings/threads - one per core
     RingEntries    = 8192,                                 // SQ/CQ depth per ring
     DualStack      = false,                                // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
@@ -1594,16 +1779,16 @@ var config = new ServerConfig
     // RecvSlots) go unused once it is set.
     Incremental = new IncrementalOptions
     {
-        MaxConnections = 4096,      // per reactor
-        RecvSlots      = 16,        // per connection
-        RecvBufferSize = 4096,    // bytes per buffer, kernel appends across recvs
+        MaxConnections = incMaxConnections,      // per reactor
+        RecvSlots      = incRecvSlots     ,        // per connection
+        RecvBufferSize = incRecvBufferSize,    // bytes per buffer, kernel appends across recvs
     },
 
     Udp            = null,                                 // no raw UDP sockets (TCP-only server)
     Quic           = null,                                 // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port             = 8080,
+        Port             = port,
         ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
         ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
         WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
@@ -1614,7 +1799,6 @@ var config = new ServerConfig
     },
 };
 
-int bodyBytes = 2 is var n &amp;&amp; n &gt; 0 ? n : 2;
 byte[] body = bodyBytes == 2 ? &quot;ok&quot;u8.ToArray() : [.. Enumerable.Repeat((byte)&#x27;x&#x27;, bodyBytes - 1), (byte)&#x27;\n&#x27;];
 byte[] response =
 [
@@ -2094,6 +2278,9 @@ int    reactors  = Environment.ProcessorCount;  // one ring per reactor, one rea
 int    bodyBytes = 8 * 1024;                    // TLS cost is per-byte, so a 2-byte &quot;ok&quot; would hide it
 
 
+// Per-connection recv buffer rings (kernel 6.12+) instead of one shared ring per reactor. The
+// handler code is identical either way; this only changes how recv buffers are handed out.
+bool incrementalBuffers = false;
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 const string certPath = &quot;cert.pem&quot;;   // any PEM pair
@@ -2106,7 +2293,7 @@ var config = new ServerConfig
     DualStack      = false,                                // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
     RecvSlots      = 4096,                                 // shared recv buffer-ring depth
-    Incremental    = null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Incremental    = incrementalBuffers ? new IncrementalOptions { MaxConnections = 1024, RecvSlots = 8, RecvBufferSize = 16 * 1024 } : null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
     Udp            = null,                                 // no raw UDP sockets (TCP-only server)
     Quic           = null,                                 // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
@@ -2302,6 +2489,9 @@ int    reactors  = Environment.ProcessorCount;  // one ring per reactor, one rea
 int    bodyBytes = 8 * 1024;                    // TLS cost is per-byte, so a 2-byte &quot;ok&quot; would hide it
 
 
+// Per-connection recv buffer rings (kernel 6.12+) instead of one shared ring per reactor. The
+// handler code is identical either way; this only changes how recv buffers are handed out.
+bool incrementalBuffers = false;
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 const string certPath = &quot;cert.pem&quot;;   // any PEM pair
@@ -2314,7 +2504,7 @@ var config = new ServerConfig
     DualStack      = false,                                // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
     RecvSlots      = 4096,                                 // shared recv buffer-ring depth
-    Incremental    = null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Incremental    = incrementalBuffers ? new IncrementalOptions { MaxConnections = 1024, RecvSlots = 8, RecvBufferSize = 16 * 1024 } : null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
     Udp            = null,                                 // no raw UDP sockets (TCP-only server)
     Quic           = null,                                 // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
@@ -2513,6 +2703,9 @@ int    reactors  = Environment.ProcessorCount;  // one ring per reactor, one rea
 int    bodyBytes = 8 * 1024;                    // TLS cost is per-byte, so a 2-byte &quot;ok&quot; would hide it
 
 
+// Per-connection recv buffer rings (kernel 6.12+) instead of one shared ring per reactor. The
+// handler code is identical either way; this only changes how recv buffers are handed out.
+bool incrementalBuffers = false;
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 const string certPath = &quot;cert.pem&quot;;   // any PEM pair
@@ -2525,7 +2718,7 @@ var config = new ServerConfig
     DualStack      = false,                                // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
     RecvSlots      = 4096,                                 // shared recv buffer-ring depth
-    Incremental    = null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Incremental    = incrementalBuffers ? new IncrementalOptions { MaxConnections = 1024, RecvSlots = 8, RecvBufferSize = 16 * 1024 } : null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
     Udp            = null,                                 // no raw UDP sockets (TCP-only server)
     Quic           = null,                                 // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
@@ -2659,19 +2852,31 @@ using System.Text;
 using ioxide;
 using ioxide.nghttp2;
 
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort port      = 8080;
+int    reactors  = Environment.ProcessorCount;
+int    bodyBytes = 2;
+
+
+// Per-connection recv buffer rings (kernel 6.12+) instead of one shared ring per reactor. The
+// handler code is identical either way; this only changes how recv buffers are handed out.
+bool incrementalBuffers = false;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
 var config = new ServerConfig
 {
-    ReactorCount   = Environment.ProcessorCount,  // io_uring rings/threads - one per core
+    ReactorCount   = reactors,  // io_uring rings/threads - one per core
     RingEntries    = 8192,                                                        // SQ/CQ depth per ring
     DualStack      = false,                                                       // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,                                                   // bytes per shared recv buffer
     RecvSlots      = 4096,                                                        // shared recv buffer-ring depth
-    Incremental    = null,                                                        // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Incremental    = incrementalBuffers ? new IncrementalOptions { MaxConnections = 1024, RecvSlots = 8, RecvBufferSize = 16 * 1024 } : null,                                                        // per-connection recv rings (6.12+) - see Tcp/Incremental
     Udp            = null,                                                        // no raw UDP sockets (TCP-only server)
     Quic           = null,                                                        // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port             = 8080,
+        Port             = port,
         ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
         ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
         WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
@@ -2682,7 +2887,6 @@ var config = new ServerConfig
     },
 };
 
-int bodyBytes = 2;
 byte[] body = bodyBytes == 2
     ? &quot;ok&quot;u8.ToArray()
     : [.. Enumerable.Repeat((byte)&#x27;x&#x27;, bodyBytes)];
@@ -2738,19 +2942,31 @@ using System.Text;
 using ioxide;
 using ioxide.http2;
 
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort port      = 8080;
+int    reactors  = Environment.ProcessorCount;
+int    bodyBytes = 2;
+
+
+// Per-connection recv buffer rings (kernel 6.12+) instead of one shared ring per reactor. The
+// handler code is identical either way; this only changes how recv buffers are handed out.
+bool incrementalBuffers = false;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
 var config = new ServerConfig
 {
-    ReactorCount   = Environment.ProcessorCount,  // io_uring rings/threads - one per core
+    ReactorCount   = reactors,  // io_uring rings/threads - one per core
     RingEntries    = 8192,                                                        // SQ/CQ depth per ring
     DualStack      = false,                                                       // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,                                                   // bytes per shared recv buffer
     RecvSlots      = 4096,                                                        // shared recv buffer-ring depth
-    Incremental    = null,                                                        // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Incremental    = incrementalBuffers ? new IncrementalOptions { MaxConnections = 1024, RecvSlots = 8, RecvBufferSize = 16 * 1024 } : null,                                                        // per-connection recv rings (6.12+) - see Tcp/Incremental
     Udp            = null,                                                        // no raw UDP sockets (TCP-only server)
     Quic           = null,                                                        // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port             = 8080,
+        Port             = port,
         ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
         ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
         WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
@@ -2761,7 +2977,6 @@ var config = new ServerConfig
     },
 };
 
-int bodyBytes = 2;
 byte[] body = bodyBytes == 2
     ? &quot;ok&quot;u8.ToArray()
     : [.. Enumerable.Repeat((byte)&#x27;x&#x27;, bodyBytes)];
@@ -2836,6 +3051,11 @@ bool kernelTx = false;
 // the same moment as the TX one - and is experimental for a reason: a TLS 1.3 KeyUpdate cannot be
 // read through IORING_OP_RECV, and roughly one first connection in twelve fails outright.
 bool kernelRx = false;
+
+
+// Per-connection recv buffer rings (kernel 6.12+) instead of one shared ring per reactor. The
+// handler code is identical either way; this only changes how recv buffers are handed out.
+bool incrementalBuffers = false;
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 const string certPath = &quot;cert.pem&quot;;   // any PEM pair
@@ -2848,7 +3068,7 @@ var config = new ServerConfig
     DualStack      = false,                                                 // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,                                             // bytes per shared recv buffer
     RecvSlots      = 4096,                                                  // shared recv buffer-ring depth
-    Incremental    = null,  // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Incremental    = incrementalBuffers ? new IncrementalOptions { MaxConnections = 1024, RecvSlots = 8, RecvBufferSize = 16 * 1024 } : null,  // per-connection recv rings (6.12+) - see Tcp/Incremental
     Udp            = null,                                                  // no raw UDP sockets (TCP-only server)
     Quic           = null,                                                  // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
@@ -3230,7 +3450,21 @@ using ioxide.nghttp3;
 using ioxide.ngtcp2;
 using ioxide.utils;
 
-// A self-signed localhost cert, unless PLAYGROUND_QUIC_CERT/_KEY point at real ones. Plain X509
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort quicPort = 8443;                        // https://127.0.0.1:8443/ over UDP - h3 lives here
+ushort tcpPort  = 8080;                        // the TCP listener, so the process serves both
+int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+
+
+// Multishot recv slots per reactor - datagrams the ring can hold at once. QPACK capacity 4096
+// advertises a decode-side dynamic table; 0 is static-only, nghttp3&#x27;s default.
+int  udpRecvSlots  = 16;
+long qpackCapacity = 0;
+
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
 const string certPath = &quot;cert.pem&quot;;   // any PEM pair
 const string keyPath  = &quot;key.pem&quot;;
 
@@ -3240,11 +3474,9 @@ const string keyPath  = &quot;key.pem&quot;;
 // Playground/Http3/Buffered for the full QUIC/h3 knob set.
 using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: [&quot;h3&quot;], maxSendRetentionBytes: 16L &lt;&lt; 20);
 
-ushort quicPort = 8443;
-
 var config = new ServerConfig
 {
-    ReactorCount   = Environment.ProcessorCount,  // one ring per reactor, one reactor per core
+    ReactorCount   = reactors,  // one ring per reactor, one reactor per core
     RingEntries    = 8192,       // io_uring SQ/CQ depth
     DualStack      = false,      // IPv4-only listeners; true binds dual-stack IPv6 (::)
     RecvBufferSize = 32 * 1024,  // bytes per slot in the shared TCP recv ring
@@ -3252,7 +3484,7 @@ var config = new ServerConfig
     Incremental    = null,       // shared recv ring; non-null = per-connection rings (kernel 6.12+)
     Tcp = new TcpOptions
     {
-        Port             = 8080,  // the TCP listener, so the process serves both
+        Port             = tcpPort,  // the TCP listener, so the process serves both
         ExtraPorts       = [],                          // extra listener ports, each bound by every reactor
         ListenBacklog    = 1024,                        // listen() accept-queue depth per SO_REUSEPORT listener
         WriteSlabSize    = 16 * 1024,                   // per-connection write slab before overflow
@@ -3263,7 +3495,7 @@ var config = new ServerConfig
     },
     Udp = new UdpOptions
     {
-        RecvSlots = 16,  // multishot recv slots per reactor - datagrams the ring can hold at once
+        RecvSlots = udpRecvSlots,  // multishot recv slots per reactor - datagrams the ring can hold at once
         Gro       = true,  // UDP_GRO: coalesce a received datagram burst into one recv
     },
     Quic = new QuicOptions
@@ -3275,9 +3507,6 @@ var config = new ServerConfig
     },
 };
 
-// PLAYGROUND_QPACK_CAP=4096 advertises a decode-side QPACK dynamic table; 0 is static-only,
-// nghttp3&#x27;s default.
-long qpackCapacity = 0;
 var h3Options = new Nghttp3Options
 {
     QpackDynamicTableCapacity = qpackCapacity,                // 0 (default) = headers stay literal
@@ -3468,12 +3697,26 @@ using ioxide.httpclient;
 using ioxide.tls;
 using ioxide.utils;
 
-const string certPath = &quot;cert.pem&quot;;      // any PEM pair; the sample generates one on first run
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+int     reactors         = Environment.ProcessorCount;
+ushort  port             = 8443;
+string  upstreamHost     = &quot;127.0.0.1&quot;;
+ushort  upstreamPort     = 8444;
+string  upstreamSni      = &quot;localhost&quot;;
+int     upstreamPool     = 8;
+string? upstreamCa       = null;
+bool    upstreamInsecure = false;
+string? certOverride     = null;   // a real PEM pair, or null to self-sign on first run
+string? keyOverride      = null;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+const string certPath = &quot;cert.pem&quot;;   // any PEM pair
 const string keyPath  = &quot;key.pem&quot;;
 
 var config = new ServerConfig
 {
-    ReactorCount   = Environment.ProcessorCount,
+    ReactorCount   = reactors,
     RingEntries    = 8192,       // SQ/CQ depth per ring
     DualStack      = false,      // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,  // bytes per shared recv buffer
@@ -3483,7 +3726,7 @@ var config = new ServerConfig
     Quic           = null,       // no QUIC listener; the frontend is TLS-over-TCP
     Tcp = new TcpOptions
     {
-        Port             = 8443,
+        Port             = port,
         ExtraPorts       = [],                                 // extra listener ports (one handler, several doors)
         ListenBacklog    = 1024,                               // accept-queue depth per SO_REUSEPORT listener
         WriteSlabSize    = 16 * 1024,                          // per-connection write buffer before overflow kicks in
@@ -3493,18 +3736,13 @@ var config = new ServerConfig
         RecvQueueEntries = 64,                                 // per-connection recv completion queue depth
     },
 };
-
-string upstreamHost = &quot;127.0.0.1&quot;;   // IPv4 literal: DNS would block the reactor
-ushort upstreamPort = 8444;
-string upstreamName = &quot;localhost&quot;;    // sent as SNI, checked against the cert
-int upstreamPool = 8;                // keep-alive connections per reactor
+string upstreamName = upstreamSni;    // sent as SNI, checked against the cert
 
 // The playground&#x27;s origins use a self-signed cert, so trust that file rather than the system
 // store. PLAYGROUND_UPSTREAM_CA points at a private CA instead; PLAYGROUND_UPSTREAM_INSECURE=1
 // skips verification, which leaves the hop encrypted but UNAUTHENTICATED - anything in the path
 // can present its own certificate and rewrite the whole exchange.
-string? upstreamCa = certPath;
-bool upstreamInsecure = false;
+upstreamCa ??= certPath;
 
 var threads = new Thread[config.ReactorCount];
 
@@ -3687,12 +3925,26 @@ using ioxide.httpclient;
 using ioxide.tls;
 using ioxide.utils;
 
-const string certPath = &quot;cert.pem&quot;;      // any PEM pair; the sample generates one on first run
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+int     reactors         = Environment.ProcessorCount;
+ushort  port             = 8443;
+string  upstreamHost     = &quot;127.0.0.1&quot;;
+ushort  upstreamPort     = 8444;
+string  upstreamSni      = &quot;localhost&quot;;
+int     upstreamPool     = 1;
+string? upstreamCa       = null;
+bool    upstreamInsecure = false;
+string? certOverride     = null;   // a real PEM pair, or null to self-sign on first run
+string? keyOverride      = null;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+const string certPath = &quot;cert.pem&quot;;   // any PEM pair
 const string keyPath  = &quot;key.pem&quot;;
 
 var config = new ServerConfig
 {
-    ReactorCount   = Environment.ProcessorCount,
+    ReactorCount   = reactors,
     RingEntries    = 8192,       // SQ/CQ depth per ring
     DualStack      = false,      // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,  // bytes per shared recv buffer
@@ -3702,7 +3954,7 @@ var config = new ServerConfig
     Quic           = null,       // no QUIC listener; the frontend is TLS-over-TCP
     Tcp = new TcpOptions
     {
-        Port             = 8443,
+        Port             = port,
         ExtraPorts       = [],                                 // extra listener ports (one handler, several doors)
         ListenBacklog    = 1024,                               // accept-queue depth per SO_REUSEPORT listener
         WriteSlabSize    = 16 * 1024,                          // per-connection write buffer before overflow kicks in
@@ -3712,18 +3964,13 @@ var config = new ServerConfig
         RecvQueueEntries = 64,                                 // per-connection recv completion queue depth
     },
 };
-
-string upstreamHost = &quot;127.0.0.1&quot;;   // IPv4 literal: DNS would block the reactor
-ushort upstreamPort = 8444;
-string upstreamName = &quot;localhost&quot;;    // sent as SNI, checked against the cert
-int upstreamPool = 1;                // h2 multiplexes: one connection carries all
+string upstreamName = upstreamSni;    // sent as SNI, checked against the cert
 
 // The playground&#x27;s origins use a self-signed cert, so trust that file rather than the system
 // store. PLAYGROUND_UPSTREAM_CA points at a private CA instead; PLAYGROUND_UPSTREAM_INSECURE=1
 // skips verification, which leaves the hop encrypted but UNAUTHENTICATED - anything in the path
 // can present its own certificate and rewrite the whole exchange.
-string? upstreamCa = certPath;
-bool upstreamInsecure = false;
+upstreamCa ??= certPath;
 
 var threads = new Thread[config.ReactorCount];
 
@@ -3905,12 +4152,24 @@ using ioxide.httpclient;
 using ioxide.tls;
 using ioxide.utils;
 
-const string certPath = &quot;cert.pem&quot;;      // any PEM pair; the sample generates one on first run
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+int     reactors         = Environment.ProcessorCount;
+ushort  port             = 8443;
+string  upstreamHost     = &quot;127.0.0.1&quot;;
+ushort  upstreamPort     = 8444;
+string  upstreamSni      = &quot;localhost&quot;;
+int     upstreamPool     = 1;
+string? certOverride     = null;   // a real PEM pair, or null to self-sign on first run
+string? keyOverride      = null;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+const string certPath = &quot;cert.pem&quot;;   // any PEM pair
 const string keyPath  = &quot;key.pem&quot;;
 
 var config = new ServerConfig
 {
-    ReactorCount   = Environment.ProcessorCount,
+    ReactorCount   = reactors,
     RingEntries    = 8192,       // SQ/CQ depth per ring
     DualStack      = false,      // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,  // bytes per shared recv buffer
@@ -3920,7 +4179,7 @@ var config = new ServerConfig
     Quic           = null,       // no QUIC listener; the frontend is TLS-over-TCP
     Tcp = new TcpOptions
     {
-        Port             = 8443,
+        Port             = port,
         ExtraPorts       = [],                                 // extra listener ports (one handler, several doors)
         ListenBacklog    = 1024,                               // accept-queue depth per SO_REUSEPORT listener
         WriteSlabSize    = 16 * 1024,                          // per-connection write buffer before overflow kicks in
@@ -3930,11 +4189,7 @@ var config = new ServerConfig
         RecvQueueEntries = 64,                                 // per-connection recv completion queue depth
     },
 };
-
-string upstreamHost = &quot;127.0.0.1&quot;;   // IPv4 literal: DNS would block the reactor
-ushort upstreamPort = 8444;       // the upstream&#x27;s QUIC (UDP) port
-string upstreamName = &quot;localhost&quot;;    // sent as SNI, checked against the cert
-int upstreamPool = 1;                // h3 multiplexes: one connection carries all
+string upstreamName = upstreamSni;    // sent as SNI, checked against the cert
 
 var threads = new Thread[config.ReactorCount];
 
@@ -4107,12 +4362,26 @@ using ioxide.httpclient;
 using ioxide.nghttp2;
 using ioxide.tls;
 
-const string certPath = &quot;cert.pem&quot;;      // any PEM pair; the sample generates one on first run
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+int     reactors         = Environment.ProcessorCount;
+ushort  port             = 8443;
+string  upstreamHost     = &quot;127.0.0.1&quot;;
+ushort  upstreamPort     = 8444;
+string  upstreamSni      = &quot;localhost&quot;;
+int     upstreamPool     = 32;
+string? upstreamCa       = null;
+bool    upstreamInsecure = false;
+string? certOverride     = null;   // a real PEM pair, or null to self-sign on first run
+string? keyOverride      = null;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+const string certPath = &quot;cert.pem&quot;;   // any PEM pair
 const string keyPath  = &quot;key.pem&quot;;
 
 var config = new ServerConfig
 {
-    ReactorCount   = Environment.ProcessorCount,
+    ReactorCount   = reactors,
     RingEntries    = 8192,       // SQ/CQ depth per ring
     DualStack      = false,      // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,  // bytes per shared recv buffer
@@ -4122,7 +4391,7 @@ var config = new ServerConfig
     Quic           = null,       // no QUIC listener; the frontend is TLS-over-TCP
     Tcp = new TcpOptions
     {
-        Port             = 8443,
+        Port             = port,
         ExtraPorts       = [],                                 // extra listener ports (one handler, several doors)
         ListenBacklog    = 1024,                               // accept-queue depth per SO_REUSEPORT listener
         WriteSlabSize    = 16 * 1024,                          // per-connection write buffer before overflow kicks in
@@ -4132,18 +4401,13 @@ var config = new ServerConfig
         RecvQueueEntries = 64,                                 // per-connection recv completion queue depth
     },
 };
-
-string upstreamHost = &quot;127.0.0.1&quot;;   // IPv4 literal: DNS would block the reactor
-ushort upstreamPort = 8444;
-string upstreamName = &quot;localhost&quot;;    // sent as SNI, checked against the cert
-int upstreamPool = 32;               // h1 has no multiplexing: size for concurrency
+string upstreamName = upstreamSni;    // sent as SNI, checked against the cert
 
 // The playground&#x27;s origins use a self-signed cert, so trust that file rather than the system
 // store. PLAYGROUND_UPSTREAM_CA points at a private CA instead; PLAYGROUND_UPSTREAM_INSECURE=1
 // skips verification, which leaves the hop encrypted but UNAUTHENTICATED - anything in the path
 // can present its own certificate and rewrite the whole exchange.
-string? upstreamCa = certPath;
-bool upstreamInsecure = false;
+upstreamCa ??= certPath;
 
 var threads = new Thread[config.ReactorCount];
 
@@ -4283,12 +4547,26 @@ using ioxide.httpclient;
 using ioxide.nghttp2;
 using ioxide.tls;
 
-const string certPath = &quot;cert.pem&quot;;      // any PEM pair; the sample generates one on first run
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+int     reactors         = Environment.ProcessorCount;
+ushort  port             = 8443;
+string  upstreamHost     = &quot;127.0.0.1&quot;;
+ushort  upstreamPort     = 8444;
+string  upstreamSni      = &quot;localhost&quot;;
+int     upstreamPool     = 1;
+string? upstreamCa       = null;
+bool    upstreamInsecure = false;
+string? certOverride     = null;   // a real PEM pair, or null to self-sign on first run
+string? keyOverride      = null;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+const string certPath = &quot;cert.pem&quot;;   // any PEM pair
 const string keyPath  = &quot;key.pem&quot;;
 
 var config = new ServerConfig
 {
-    ReactorCount   = Environment.ProcessorCount,
+    ReactorCount   = reactors,
     RingEntries    = 8192,       // SQ/CQ depth per ring
     DualStack      = false,      // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,  // bytes per shared recv buffer
@@ -4298,7 +4576,7 @@ var config = new ServerConfig
     Quic           = null,       // no QUIC listener; the frontend is TLS-over-TCP
     Tcp = new TcpOptions
     {
-        Port             = 8443,
+        Port             = port,
         ExtraPorts       = [],                                 // extra listener ports (one handler, several doors)
         ListenBacklog    = 1024,                               // accept-queue depth per SO_REUSEPORT listener
         WriteSlabSize    = 16 * 1024,                          // per-connection write buffer before overflow kicks in
@@ -4308,18 +4586,13 @@ var config = new ServerConfig
         RecvQueueEntries = 64,                                 // per-connection recv completion queue depth
     },
 };
-
-string upstreamHost = &quot;127.0.0.1&quot;;   // IPv4 literal: DNS would block the reactor
-ushort upstreamPort = 8444;
-string upstreamName = &quot;localhost&quot;;    // sent as SNI, checked against the cert
-int upstreamPool = 1;                // h2 multiplexes: one connection carries all
+string upstreamName = upstreamSni;    // sent as SNI, checked against the cert
 
 // The playground&#x27;s origins use a self-signed cert, so trust that file rather than the system
 // store. PLAYGROUND_UPSTREAM_CA points at a private CA instead; PLAYGROUND_UPSTREAM_INSECURE=1
 // skips verification, which leaves the hop encrypted but UNAUTHENTICATED - anything in the path
 // can present its own certificate and rewrite the whole exchange.
-string? upstreamCa = certPath;
-bool upstreamInsecure = false;
+upstreamCa ??= certPath;
 
 var threads = new Thread[config.ReactorCount];
 
@@ -4457,12 +4730,24 @@ using ioxide.httpclient;
 using ioxide.nghttp2;
 using ioxide.tls;
 
-const string certPath = &quot;cert.pem&quot;;      // any PEM pair; the sample generates one on first run
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+int     reactors         = Environment.ProcessorCount;
+ushort  port             = 8443;
+string  upstreamHost     = &quot;127.0.0.1&quot;;
+ushort  upstreamPort     = 8444;
+string  upstreamSni      = &quot;localhost&quot;;
+int     upstreamPool     = 1;
+string? certOverride     = null;   // a real PEM pair, or null to self-sign on first run
+string? keyOverride      = null;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+const string certPath = &quot;cert.pem&quot;;   // any PEM pair
 const string keyPath  = &quot;key.pem&quot;;
 
 var config = new ServerConfig
 {
-    ReactorCount   = Environment.ProcessorCount,
+    ReactorCount   = reactors,
     RingEntries    = 8192,       // SQ/CQ depth per ring
     DualStack      = false,      // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,  // bytes per shared recv buffer
@@ -4472,7 +4757,7 @@ var config = new ServerConfig
     Quic           = null,       // no QUIC listener; the frontend is TLS-over-TCP
     Tcp = new TcpOptions
     {
-        Port             = 8443,
+        Port             = port,
         ExtraPorts       = [],                                 // extra listener ports (one handler, several doors)
         ListenBacklog    = 1024,                               // accept-queue depth per SO_REUSEPORT listener
         WriteSlabSize    = 16 * 1024,                          // per-connection write buffer before overflow kicks in
@@ -4482,11 +4767,7 @@ var config = new ServerConfig
         RecvQueueEntries = 64,                                 // per-connection recv completion queue depth
     },
 };
-
-string upstreamHost = &quot;127.0.0.1&quot;;   // IPv4 literal: DNS would block the reactor
-ushort upstreamPort = 8444;       // the upstream&#x27;s QUIC (UDP) port
-string upstreamName = &quot;localhost&quot;;    // sent as SNI, checked against the cert
-int upstreamPool = 1;                // h3 multiplexes: one connection carries all
+string upstreamName = upstreamSni;    // sent as SNI, checked against the cert
 
 var threads = new Thread[config.ReactorCount];
 
@@ -4614,7 +4895,22 @@ using ioxide.httpclient;
 using ioxide.nghttp3;
 using ioxide.ngtcp2;
 
-const string certPath = &quot;cert.pem&quot;;      // any PEM pair; the sample generates one on first run
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+int     reactors         = Environment.ProcessorCount;
+ushort  quicPort         = 8443;
+int     udpRecvSlots     = 16;
+string  upstreamHost     = &quot;127.0.0.1&quot;;
+ushort  upstreamPort     = 8444;
+string  upstreamSni      = &quot;localhost&quot;;
+int     upstreamPool     = 8;
+string? upstreamCa       = null;
+bool    upstreamInsecure = false;
+string? certOverride     = null;   // a real PEM pair, or null to self-sign on first run
+string? keyOverride      = null;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+const string certPath = &quot;cert.pem&quot;;   // any PEM pair
 const string keyPath  = &quot;key.pem&quot;;
 
 using var engine = new QuicEngine(certPath, keyPath,
@@ -4624,7 +4920,7 @@ using var engine = new QuicEngine(certPath, keyPath,
 
 var config = new ServerConfig
 {
-    ReactorCount   = Environment.ProcessorCount,
+    ReactorCount   = reactors,
     RingEntries    = 8192,       // SQ/CQ depth per ring
     DualStack      = false,      // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,  // bytes per shared recv buffer
@@ -4633,30 +4929,25 @@ var config = new ServerConfig
     Tcp            = null,       // the proxy serves h3 only; its TCP sockets are all outbound
     Udp = new UdpOptions
     {
-        RecvSlots = 16,  // multishot recv slots per reactor (datagrams in flight)
+        RecvSlots = udpRecvSlots,  // multishot recv slots per reactor (datagrams in flight)
         Gro       = true,                                 // UDP_GRO: coalesce datagrams into one recv (fewer syscalls)
     },
     Quic = new QuicOptions
     {
-        Port              = 8443,  // h3 over UDP - the QUIC listener
+        Port              = quicPort,  // h3 over UDP - the QUIC listener
         LocalCidLength    = 8,                                       // CID bytes this endpoint mints (must match the engine)
         IdleTimeoutMs     = 60_000,                                  // transport idle backstop; 0 disables sweep eviction
         ConnectionFactory = engine.CreateFactory(),                  // adopts new connections into the engine
     },
 };
 
-string upstreamHost = &quot;127.0.0.1&quot;;   // IPv4 literal: DNS would block the reactor
-ushort upstreamPort = 8444;
-int upstreamPool = 8;                // keep-alive connections per reactor
-
-string upstreamName = &quot;localhost&quot;;    // sent as SNI, checked against the cert
+string upstreamName = upstreamSni;    // sent as SNI, checked against the cert
 
 // The playground&#x27;s origins use a self-signed cert, so trust that file rather than the system
 // store. PLAYGROUND_UPSTREAM_CA points at a private CA instead; PLAYGROUND_UPSTREAM_INSECURE=1
 // skips verification, which leaves the hop encrypted but UNAUTHENTICATED - anything in the path
 // can present its own certificate and rewrite the whole exchange.
-string? upstreamCa = certPath;
-bool upstreamInsecure = false;
+upstreamCa ??= certPath;
 
 var threads = new Thread[config.ReactorCount];
 
@@ -4758,7 +5049,22 @@ using ioxide.httpclient;
 using ioxide.nghttp3;
 using ioxide.ngtcp2;
 
-const string certPath = &quot;cert.pem&quot;;      // any PEM pair; the sample generates one on first run
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+int     reactors         = Environment.ProcessorCount;
+ushort  quicPort         = 8443;
+int     udpRecvSlots     = 16;
+string  upstreamHost     = &quot;127.0.0.1&quot;;
+ushort  upstreamPort     = 8444;
+string  upstreamSni      = &quot;localhost&quot;;
+int     upstreamPool     = 1;
+string? upstreamCa       = null;
+bool    upstreamInsecure = false;
+string? certOverride     = null;   // a real PEM pair, or null to self-sign on first run
+string? keyOverride      = null;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+const string certPath = &quot;cert.pem&quot;;   // any PEM pair
 const string keyPath  = &quot;key.pem&quot;;
 
 using var engine = new QuicEngine(certPath, keyPath,
@@ -4768,7 +5074,7 @@ using var engine = new QuicEngine(certPath, keyPath,
 
 var config = new ServerConfig
 {
-    ReactorCount   = Environment.ProcessorCount,
+    ReactorCount   = reactors,
     RingEntries    = 8192,       // SQ/CQ depth per ring
     DualStack      = false,      // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,  // bytes per shared recv buffer
@@ -4777,30 +5083,25 @@ var config = new ServerConfig
     Tcp            = null,       // the proxy serves h3 only; its TCP sockets are all outbound
     Udp = new UdpOptions
     {
-        RecvSlots = 16,  // multishot recv slots per reactor (datagrams in flight)
+        RecvSlots = udpRecvSlots,  // multishot recv slots per reactor (datagrams in flight)
         Gro       = true,                                 // UDP_GRO: coalesce datagrams into one recv (fewer syscalls)
     },
     Quic = new QuicOptions
     {
-        Port              = 8443,  // h3 over UDP - the QUIC listener
+        Port              = quicPort,  // h3 over UDP - the QUIC listener
         LocalCidLength    = 8,                                       // CID bytes this endpoint mints (must match the engine)
         IdleTimeoutMs     = 60_000,                                  // transport idle backstop; 0 disables sweep eviction
         ConnectionFactory = engine.CreateFactory(),                  // adopts new connections into the engine
     },
 };
 
-string upstreamHost = &quot;127.0.0.1&quot;;   // IPv4 literal: DNS would block the reactor
-ushort upstreamPort = 8444;
-int upstreamPool = 1;                // h2 multiplexes: one connection carries all
-
-string upstreamName = &quot;localhost&quot;;    // sent as SNI, checked against the cert
+string upstreamName = upstreamSni;    // sent as SNI, checked against the cert
 
 // The playground&#x27;s origins use a self-signed cert, so trust that file rather than the system
 // store. PLAYGROUND_UPSTREAM_CA points at a private CA instead; PLAYGROUND_UPSTREAM_INSECURE=1
 // skips verification, which leaves the hop encrypted but UNAUTHENTICATED - anything in the path
 // can present its own certificate and rewrite the whole exchange.
-string? upstreamCa = certPath;
-bool upstreamInsecure = false;
+upstreamCa ??= certPath;
 
 var threads = new Thread[config.ReactorCount];
 
@@ -4896,7 +5197,20 @@ using ioxide.httpclient;
 using ioxide.nghttp3;
 using ioxide.ngtcp2;
 
-const string certPath = &quot;cert.pem&quot;;      // any PEM pair; the sample generates one on first run
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+int     reactors         = Environment.ProcessorCount;
+ushort  quicPort         = 8443;
+int     udpRecvSlots     = 16;
+string  upstreamHost     = &quot;127.0.0.1&quot;;
+ushort  upstreamPort     = 8444;
+string  upstreamSni      = &quot;localhost&quot;;
+int     upstreamPool     = 1;
+string? certOverride     = null;   // a real PEM pair, or null to self-sign on first run
+string? keyOverride      = null;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+const string certPath = &quot;cert.pem&quot;;   // any PEM pair
 const string keyPath  = &quot;key.pem&quot;;
 
 using var engine = new QuicEngine(certPath, keyPath,
@@ -4906,7 +5220,7 @@ using var engine = new QuicEngine(certPath, keyPath,
 
 var config = new ServerConfig
 {
-    ReactorCount   = Environment.ProcessorCount,
+    ReactorCount   = reactors,
     RingEntries    = 8192,       // SQ/CQ depth per ring
     DualStack      = false,      // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,  // bytes per shared recv buffer
@@ -4915,12 +5229,12 @@ var config = new ServerConfig
     Tcp            = null,       // h3 in, h3 out: nothing here speaks TCP at all
     Udp = new UdpOptions
     {
-        RecvSlots = 16,  // multishot recv slots per reactor (datagrams in flight)
+        RecvSlots = udpRecvSlots,  // multishot recv slots per reactor (datagrams in flight)
         Gro       = true,                                 // UDP_GRO: coalesce datagrams into one recv (fewer syscalls)
     },
     Quic = new QuicOptions
     {
-        Port              = 8443,  // h3 over UDP - the QUIC listener
+        Port              = quicPort,  // h3 over UDP - the QUIC listener
         LocalCidLength    = 8,                                       // CID bytes this endpoint mints (must match the engine)
         IdleTimeoutMs     = 60_000,                                  // transport idle backstop; 0 disables sweep eviction
         ConnectionFactory = engine.CreateFactory(),                  // adopts new connections into the engine
@@ -4929,10 +5243,10 @@ var config = new ServerConfig
 
 var upstream = new Http3ClientOptions
 {
-    Host             = &quot;127.0.0.1&quot;,  // IPv4 literal: DNS would block the reactor
-    Port             = 8444,        // the upstream&#x27;s QUIC (UDP) port
-    ServerName       = &quot;localhost&quot;,   // SNI / :authority, checked against the cert
-    PoolSize         = 1,            // h3 multiplexes: one connection carries all
+    Host             = upstreamHost,  // IPv4 literal: DNS would block the reactor
+    Port             = upstreamPort,        // the upstream&#x27;s QUIC (UDP) port
+    ServerName       = upstreamSni,   // SNI / :authority, checked against the cert
+    PoolSize         = upstreamPool,            // h3 multiplexes: one connection carries all
     AcquireTimeoutMs = 10_000,                                            // how long a request waits (handshake included)
     MaxResponseBytes = 8 * 1024 * 1024,                                   // per-request ceiling for headers + body
 };
@@ -5144,9 +5458,28 @@ using ioxide;
 using ioxide.pg;
 using ioxide.utils;
 
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort port     = 8080;                        // http://127.0.0.1:8080/
+int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+
+
+// The Postgres this queries. The host must be an IPv4 literal - resolving a name would block the
+// reactor - and the pool is per reactor, not global. A null password means trust auth; set one and
+// the driver does SCRAM-SHA-256. CommandTimeoutMs tears down the connection when the oldest
+// in-flight command passes it; 0 disables that.
+string  pgHost      = &quot;127.0.0.1&quot;;
+ushort  pgPort      = 5432;
+string  pgUser      = &quot;bench&quot;;
+string? pgPassword  = null;
+string  pgDatabase  = &quot;bench&quot;;
+int     pgPoolSize  = 4;
+int     pgTimeoutMs = 30_000;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
 var config = new ServerConfig
 {
-    ReactorCount   = Environment.ProcessorCount,  // io_uring rings/threads - one per core
+    ReactorCount   = reactors,  // io_uring rings/threads - one per core
     RingEntries    = 8192,                                                        // SQ/CQ depth per ring
     DualStack      = false,                                                       // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,                                                   // bytes per shared recv buffer
@@ -5156,7 +5489,7 @@ var config = new ServerConfig
     Quic           = null,                                                        // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port             = 8080,
+        Port             = port,
         ExtraPorts       = [],                                                    // extra listener ports (one handler, several doors)
         ListenBacklog    = 1024,                                                  // accept-queue depth per SO_REUSEPORT listener
         WriteSlabSize    = 16 * 1024,                                             // per-connection write buffer before overflow kicks in
@@ -5169,14 +5502,14 @@ var config = new ServerConfig
 
 var pgOptions = new PgOptions
 {
-    Host             = &quot;127.0.0.1&quot;,  // IPv4 literal - resolve names up front, DNS blocks the reactor
-    Port             = 5432,        // Postgres wire port
-    User             = &quot;bench&quot;,      // required
-    Password         = null,     // null = trust auth; else SCRAM-SHA-256
-    Database         = &quot;bench&quot;,        // required
-    PoolSize         = 4,            // per reactor, not global
+    Host             = pgHost,  // IPv4 literal - resolve names up front, DNS blocks the reactor
+    Port             = pgPort,        // Postgres wire port
+    User             = pgUser,      // required
+    Password         = pgPassword,     // null = trust auth; else SCRAM-SHA-256
+    Database         = pgDatabase,        // required
+    PoolSize         = pgPoolSize,            // per reactor, not global
     MaxReceiveBytes  = 64 * 1024 * 1024,                            // ceiling on one backend message; buffer grows to this (64 MB)
-    CommandTimeoutMs = 30_000,    // oldest in-flight command past this -&gt; torn down; 0 disables
+    CommandTimeoutMs = pgTimeoutMs,    // oldest in-flight command past this -&gt; torn down; 0 disables
 };
 
 var threads = new Thread[config.ReactorCount];
@@ -5334,9 +5667,23 @@ using ioxide;
 using ioxide.redis;
 using ioxide.utils;
 
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort port     = 8080;                        // http://127.0.0.1:8080/
+int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+
+
+// The Redis this talks to. IPv4 literal for the same reason as everywhere else - a DNS lookup
+// would block the reactor - and the pool is per reactor. A null password means no AUTH.
+string  redisHost     = &quot;127.0.0.1&quot;;
+ushort  redisPort     = 6379;
+string? redisPassword = null;
+int     redisPoolSize = 4;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
 var config = new ServerConfig
 {
-    ReactorCount   = Environment.ProcessorCount,  // io_uring rings/threads - one per core
+    ReactorCount   = reactors,  // io_uring rings/threads - one per core
     RingEntries    = 8192,                                                        // SQ/CQ depth per ring
     DualStack      = false,                                                       // true = one IPv6 socket also accepts IPv4-mapped
     RecvBufferSize = 32 * 1024,                                                   // bytes per shared recv buffer
@@ -5346,7 +5693,7 @@ var config = new ServerConfig
     Quic           = null,                                                        // no QUIC transport - see Http3/* and Quic/Alpn
     Tcp = new TcpOptions
     {
-        Port             = 8080,
+        Port             = port,
         ExtraPorts       = [],                                                    // extra listener ports (one handler, several doors)
         ListenBacklog    = 1024,                                                  // accept-queue depth per SO_REUSEPORT listener
         WriteSlabSize    = 16 * 1024,                                             // per-connection write buffer before overflow kicks in
@@ -5359,12 +5706,12 @@ var config = new ServerConfig
 
 var redisOptions = new RedisOptions
 {
-    Host             = &quot;127.0.0.1&quot;,  // IPv4 literal - resolve names up front, DNS blocks the reactor
-    Port             = 6379,        // Redis wire port
-    Password         = null,     // AUTH password; null = no auth
+    Host             = redisHost,  // IPv4 literal - resolve names up front, DNS blocks the reactor
+    Port             = redisPort,        // Redis wire port
+    Password         = redisPassword,     // AUTH password; null = no auth
     User             = null,                                           // ACL username (Redis 6+); null = default user
     Database         = 0,                                              // logical DB index to SELECT on connect
-    PoolSize         = 4,            // per reactor, not global
+    PoolSize         = redisPoolSize,            // per reactor, not global
     CommandTimeoutMs = 30_000,                                         // oldest in-flight command past this -&gt; torn down; 0 disables
 };
 

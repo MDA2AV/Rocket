@@ -1,0 +1,63 @@
+# The benchmark registry: every Playground sample, and what it takes to load it.
+#
+# These samples are the regression fixtures, so this table is what makes "run any bench on any
+# playground" true - bench/any.sh reads it and needs no per-sample code. A sample missing from
+# here is a sample nobody can benchmark, which is why the file asserts full coverage.
+#
+# sample              proto   port  path      origin              extra env (space separated, or -)
+#
+# proto:  h1    plaintext HTTP/1.1 over TCP        (wrk)
+#         h1s   HTTP/1.1 over TLS                  (wrk)
+#         h2c   HTTP/2 prior-knowledge, cleartext  (h2load)
+#         h2    HTTP/2 over TLS, ALPN              (h2load)
+#         h3    HTTP/3 over QUIC                   (h3x)
+#         echo  raw stream echo, no HTTP           (Playground/Clients/Quic drives it)
+#         driver a sample that GENERATES load rather than serving it
+#         none  not a server workload
+#
+# origin: another sample started first and torn down after, for the proxy and client fixtures.
+#         Its port is passed to the sample under test as PLAYGROUND_UPSTREAM_PORT.
+
+Tcp/Raw                 h1    8080  /         -                   -
+Tcp/Pipe                h1    8080  /         -                   -
+Tcp/Incremental         h1    8080  /         -                   -
+Tcp/Big                 h1    8080  /         -                   PLAYGROUND_BODY=65536
+Tcp/Hop                 h1    8080  /         -                   -
+Tcp/TaskRun             h1    8080  /         -                   -
+
+Tls/OpenSsl             h1s   8443  /         -                   -
+Tls/Hybrid              h1s   8443  /         -                   -
+Tls/Ktls                h1s   8443  /         -                   -
+Tls/OpenSslPipes        h1s   8443  /         -                   -
+Tls/KtlsPipes           h1s   8443  /         -                   -
+Tls/SslStream           h1s   8443  /         -                   -
+Tls/MultiPort           h1    8080  /         -                   -
+
+Http2/Nghttp2           h2c   8080  /         -                   -
+Http2/Managed           h2c   8080  /         -                   -
+Http2/Tls               h2    8443  /         -                   -
+Http2/SslStream         h2    8443  /         -                   -
+
+Http3/Nghttp3           h3    8443  /         -                   -
+Http3/Buffered          h3    8443  /         -                   -
+
+Quic/Alpn               echo  8443  /         -                   -
+Quic/Pipe               echo  8443  /         -                   -
+Quic/Raw                echo  8443  /         -                   -
+
+Clients/File            h1    8080  /f.bin    -                   PLAYGROUND_DIR=/tmp/ioxide-bench-assets
+Clients/Pg              h1    8080  /         -                   -
+Clients/Redis           h1    8080  /         -                   -
+Clients/Http            h1    8090  /         Tcp/Raw             -
+Clients/Https           h1    8080  /         Tls/OpenSsl         PLAYGROUND_UPSTREAM_CA=/tmp/ioxide-playground-quic/quic.crt
+Clients/Quic            driver -    -         -                   -
+
+Proxy/H1ToH1            h1s   8443  /         Tls/OpenSsl         -
+Proxy/H1ToH2            h1s   8443  /         Http2/Tls           -
+Proxy/H1ToH3            h1s   8443  /         Http3/Nghttp3       -
+Proxy/H2ToH1            h2    8443  /         Tls/OpenSsl         -
+Proxy/H2ToH2            h2    8443  /         Http2/Tls           -
+Proxy/H2ToH3            h2    8443  /         Http3/Nghttp3       -
+Proxy/H3ToH1            h3    8443  /         Tls/OpenSsl         -
+Proxy/H3ToH2            h3    8443  /         Http2/Tls           -
+Proxy/H3ToH3            h3    8443  /         Http3/Nghttp3       -
