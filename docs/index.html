@@ -5141,6 +5141,13 @@ using ioxide.utils;
 // positionally off the ring, nothing cached. Built before the reactors start.
 var assets = new StaticAssets(&quot;/srv/www&quot;);
 
+// Two ways to move the bytes:
+//   - slab (cleartext): conn.ReadFileAsync reads the file straight into the write slab, so header
+//     + body leave in one flush - no buffer, no copy. The leanest plain path.
+//   - buffer: read into a reader buffer first. A TLS connection needs this shape - the body has to
+//     pass through tls.Write (encrypt) before the wire, so it can&#x27;t land straight in the slab.
+bool buffered = false;
+
 var config = new ServerConfig
 {
     ReactorCount = Environment.ProcessorCount,   // one ring per reactor, one reactor per core
@@ -5213,25 +5220,8 @@ for (int id = 0; id &lt; threads.Length; id++)
                     // so serving is just: read the bytes off the ring and frame HTTP around them.
                     if (found)
                     {
-                        AssetReader reader = await readers.RentAsync();
-                        try
-                        {
-                            Span&lt;byte&gt; header = stackalloc byte[128];
-                            conn.Write(header[..WriteHeader(header, asset.Length)]);
-
-                            long offset = 0;
-                            while (offset &lt; asset.Length)
-                            {
-                                int read = await reader.ReadAsync(asset.Fd, offset);   // io_uring positional read
-                                if (read &lt;= 0) break;
-                                await SendNativeAsync(conn, reader.Buffer, read);   // one write + flush per read
-                                offset += read;
-                            }
-                        }
-                        finally
-                        {
-                            readers.Return(reader);
-                        }
+                        if (buffered) await SendBufferedAsync(conn, readers, asset);
+                        else          await SendSlabAsync(conn, asset);
                     }
                     else
                     {
@@ -5258,11 +5248,46 @@ for (int id = 0; id &lt; threads.Length; id++)
 Console.WriteLine($&quot;serving {assets.Count} files from {assets.RootDir} on :{config.Tcp.Port}&quot;);
 foreach (Thread t in threads) t.Join();
 
-static async Task SendNativeAsync(TcpConnection conn, nint data, int length)
+// Cleartext fast path: read the whole file STRAIGHT INTO the write slab (it grows to fit), right
+// after the header, so header + body leave in one flush - no reader buffer, no copy.
+static async Task SendSlabAsync(TcpConnection conn, AssetCache.Asset asset)
 {
-    unsafe { conn.Write(new ReadOnlySpan&lt;byte&gt;((void*)data, length)); }
-    await conn.FlushAsync();
+    Span&lt;byte&gt; header = stackalloc byte[128];
+    conn.Write(header[..WriteHeader(header, asset.Length)]);
+
+    int n = await conn.ReadFileAsync(asset.Fd, (int)asset.Length, fileOffset: 0);   // io_uring read into the slab
+    conn.AdvanceWrite(n);
+    await conn.FlushAsync();   // header + body, one send
 }
+
+// Buffer path: read into a reader buffer, then move the bytes on. The copy into the slab stands in
+// for the transform TLS does here instead - tls.Write(conn, reader.Buffer[..n]) encrypts into the slab.
+static async Task SendBufferedAsync(TcpConnection conn, RingPool&lt;AssetReader&gt; readers, AssetCache.Asset asset)
+{
+    AssetReader reader = await readers.RentAsync();
+    try
+    {
+        Span&lt;byte&gt; header = stackalloc byte[128];
+        conn.Write(header[..WriteHeader(header, asset.Length)]);
+
+        long offset = 0;
+        while (offset &lt; asset.Length)
+        {
+            int read = await reader.ReadAsync(asset.Fd, offset);   // io_uring positional read
+            if (read &lt;= 0) break;
+            WriteNative(conn, reader.Buffer, read);
+            await conn.FlushAsync();   // one write + flush per read
+            offset += read;
+        }
+    }
+    finally
+    {
+        readers.Return(reader);
+    }
+}
+
+static unsafe void WriteNative(TcpConnection conn, nint data, int length)
+    =&gt; conn.Write(new ReadOnlySpan&lt;byte&gt;((void*)data, length));
 
 // ioxide.file speaks no HTTP - you frame the response. Status + Content-Length here; a real server
 // adds Content-Type from the file extension.

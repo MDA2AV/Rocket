@@ -11,17 +11,28 @@ using Playground.Shared;
 //  locked and nothing is cached in memory. This sample frames HTTP/1.1 around the bytes; the same
 //  file data can be handed to any protocol.
 //
+//  Two ways to move the bytes, selected by PLAYGROUND_FILE_BUFFERED:
+//    - default (cleartext): conn.ReadFileAsync reads the file STRAIGHT INTO the write slab, so the
+//      header and body leave in a single flush - no intermediate buffer, no copy. The leanest path
+//      for a plain connection.
+//    - buffered (=1): read into a reader buffer first, then hand those bytes on. This is the shape
+//      a TLS connection needs - the body has to pass through an encrypt (TlsSession.Write) before
+//      the wire, so it can't be read straight into the send slab. Here (cleartext) the buffer is
+//      just copied into the slab to mirror that structure.
+//
 //  Descriptors are trusted for the snapshot's lifetime - a deploy is picked up by reloading the
 //  snapshot (SIGHUP), which reopens the files, not by re-stat'ing every request.
 //
 //      PLAYGROUND_DIR=/srv/www dotnet run -c Release --project Playground/Clients/File
 //      curl http://127.0.0.1:8080/index.html
+//      PLAYGROUND_FILE_BUFFERED=1 dotnet run ...   # the buffer path (the shape TLS uses)
 //      kill -HUP <pid>        # reload the snapshot after a deploy
 //
 //  Needs: ioxide, ioxide.file
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-string dir = Env.Str("PLAYGROUND_DIR", "/tmp/ioxide-assets");
+string dir      = Env.Str("PLAYGROUND_DIR", "/tmp/ioxide-assets");
+bool   buffered = Env.Flag("PLAYGROUND_FILE_BUFFERED");   // read into a buffer (the TLS shape) vs into the slab
 
 SampleAssets.Ensure(dir);   // writes a demo index.html + style.css if the directory is empty
 
@@ -43,7 +54,7 @@ var config = new ServerConfig
         Port             = Env.Port("PLAYGROUND_PORT", 8080),
         ExtraPorts       = [],                                                    // extra listener ports (one handler, several doors)
         ListenBacklog    = 1024,                                                  // accept-queue depth per SO_REUSEPORT listener
-        WriteSlabSize    = 16 * 1024,                                             // per-connection write buffer before overflow kicks in
+        WriteSlabSize    = 16 * 1024,                                             // per-connection write buffer; ReadFileAsync grows it to fit a bigger file
         PoolMax          = 1024,                                                  // pooled connection objects kept per reactor
         WriteOverflow    = WriteOverflowStrategy.Grow,                            // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
         ZeroCopySend     = false,                                                 // SEND_ZC: kernel copies less, wins on large writes
@@ -60,6 +71,8 @@ for (int i = 0; i < threads.Length; i++)
     reactor.OnStart = r =>
     {
         r.AddService(assets);   // the shared snapshot
+        // The buffer path needs a pool of native read buffers; the slab path reads into the
+        // connection's own write slab and needs none, but registering it is harmless either way.
         AssetReader.CreatePool(r,
             readers:     4,         // concurrent ring reads bounded per reactor (pool size)
             bufferBytes: 1 << 20);  // native read buffer per reader (1 MiB) - size for the largest asset
@@ -101,7 +114,14 @@ for (int i = 0; i < threads.Length; i++)
                     // bytes off the ring and frame HTTP around them.
                     if (found)
                     {
-                        await SendFileAsync(conn, readers, asset.Path, asset.Fd, asset.Length);
+                        if (buffered)
+                        {
+                            await SendBufferedAsync(conn, readers, asset);
+                        }
+                        else
+                        {
+                            await SendSlabAsync(conn, asset);
+                        }
                     }
                     else
                     {
@@ -135,23 +155,39 @@ using var reload = PosixSignalRegistration.Create(PosixSignal.SIGHUP, context =>
 });
 
 Console.WriteLine($"[file] {config.ReactorCount} reactors on :{config.Tcp.Port} - "
-                + $"{assets.Count} files under {assets.RootDir} (ring reads, nothing cached)");
+                + $"{assets.Count} files under {assets.RootDir} "
+                + $"({(buffered ? "buffer path" : "slab path")}, nothing cached)");
 
 foreach (Thread thread in threads)
 {
     thread.Join();
 }
 
-// Stream a file off the ring, framing Content-Length up front. Each ring read (up to the reader's
-// buffer) is one write + one flush; files bigger than the buffer take several reads at advancing
-// offsets, so they're served whole with one flush per read rather than one per slab.
-static async Task SendFileAsync(
-    TcpConnection conn, RingPool<AssetReader> readers, string path, int fd, long totalLength)
+// Cleartext fast path: read the whole file STRAIGHT INTO the write slab (it grows to fit), right
+// after the header, so header + body leave in one flush - no reader buffer, no copy. Ideal for the
+// typical multi-KB web asset; a very large file grows the slab by its full size, so stream those
+// with the buffer path instead.
+static async Task SendSlabAsync(TcpConnection conn, AssetCache.Asset asset)
+{
+    Span<byte> header = stackalloc byte[256];
+    conn.Write(header[..WriteHeader(header, asset.Path, asset.Length)]);
+
+    // io_uring positional read into the slab at the current tail; AdvanceWrite commits the bytes.
+    int n = await conn.ReadFileAsync(asset.Fd, (int)asset.Length, fileOffset: 0);
+    conn.AdvanceWrite(n);
+    await conn.FlushAsync();
+}
+
+// Buffer path: read into a reader buffer, then move those bytes on. The copy into the slab stands in
+// for the transform a TLS connection does here instead - tls.Write(conn, reader.Buffer[..n]), which
+// encrypts into the slab. Files bigger than the buffer take several reads at advancing offsets,
+// one flush each.
+static async Task SendBufferedAsync(TcpConnection conn, RingPool<AssetReader> readers, AssetCache.Asset asset)
 {
     AssetReader reader = await readers.RentAsync();
     try
     {
-        int first = await reader.ReadAsync(fd, offset: 0);   // io_uring positional read
+        int first = await reader.ReadAsync(asset.Fd, offset: 0);   // io_uring positional read
         if (first < 0)
         {
             conn.Write("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n"u8);
@@ -159,17 +195,16 @@ static async Task SendFileAsync(
             return;
         }
 
-        // ioxide.file hands over bytes; the HTTP framing is ours. Header + first chunk go out
-        // together in one flush.
+        // Header + first chunk go out together in one flush.
         Span<byte> header = stackalloc byte[256];
-        conn.Write(header[..WriteHeader(header, path, totalLength)]);
+        conn.Write(header[..WriteHeader(header, asset.Path, asset.Length)]);
         WriteNative(conn, reader.Buffer, first);
         await conn.FlushAsync();
 
         long offset = first;
-        while (offset < totalLength)
+        while (offset < asset.Length)
         {
-            int read = await reader.ReadAsync(fd, offset);
+            int read = await reader.ReadAsync(asset.Fd, offset);
             if (read <= 0) break;   // EOF or mid-stream error; the response is already committed
             WriteNative(conn, reader.Buffer, read);
             await conn.FlushAsync();

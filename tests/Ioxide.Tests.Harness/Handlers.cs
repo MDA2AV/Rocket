@@ -168,6 +168,51 @@ public static class Handlers
         }
     }
 
+    // file (slab path): serve the same lookup, but read the file STRAIGHT INTO the write slab via the
+    // core TcpConnection.ReadFileAsync (the cleartext fast path) - no reader buffer, no pool, header +
+    // body in one flush. This is the end-to-end coverage for that core API.
+    public static async Task FilesSlab(Reactor r, TcpConnection conn)
+    {
+        StaticAssets assets = r.GetService<StaticAssets>();
+
+        try
+        {
+            while (true)
+            {
+                RecvSnapshot snapshot = await conn.ReadAsync();
+                string path = Wire.ReadPath(conn, snapshot);
+
+                using (StaticAssets.Lease lease = assets.Acquire())
+                {
+                    if (lease.TryGet(path, out AssetCache.Asset asset))
+                    {
+                        conn.Write(Encoding.ASCII.GetBytes(
+                            $"HTTP/1.1 200 X\r\nContent-Type: text/plain\r\nContent-Length: {asset.Length}\r\n\r\n"));
+                        int n = await conn.ReadFileAsync(asset.Fd, (int)asset.Length, fileOffset: 0);
+                        conn.AdvanceWrite(n);
+                        await conn.FlushAsync();
+                    }
+                    else
+                    {
+                        Wire.Write(conn, 404, "missing");
+                        await conn.FlushAsync();
+                    }
+                }
+
+                if (snapshot.IsClosed)
+                {
+                    return;
+                }
+
+                conn.ResetRead();
+            }
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    }
+
     // tls: the OpenSSL handshake, then a fixed response written through Wire.Write - which routes
     // through TlsSession.Write, so this handler is correct under either TLS backend.
     public static async Task Tls(Reactor r, TcpConnection conn)
