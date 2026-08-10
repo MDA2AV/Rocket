@@ -43,6 +43,7 @@
   <input type="radio" name="mode-tabs" id="tab-h2sresp">
   <input type="radio" name="mode-tabs" id="tab-h2sreq">
   <input type="radio" name="mode-tabs" id="tab-h2sboth">
+  <input type="radio" name="mode-tabs" id="tab-h2ng">
   <input type="radio" name="mode-tabs" id="tab-h2cstls">
   <input type="radio" name="mode-tabs" id="tab-h2bcl">
   <input type="radio" name="mode-tabs" id="tab-h3">
@@ -108,6 +109,7 @@
       <label for="tab-h2sresp">h2c &middot; response streamed</label>
       <label for="tab-h2sreq">h2c &middot; request streamed</label>
       <label for="tab-h2sboth">h2c &middot; both streamed</label>
+      <label for="tab-h2ng">h2c &middot; buffered (nghttp2)</label>
       <label for="tab-h2cstls">h2 &middot; tls &amp; alpn</label>
       <label for="tab-h2bcl">h2 &middot; over sslstream</label>
     </details>
@@ -3815,6 +3817,95 @@ foreach (Thread thread in threads)
     thread.Join();
 }</code></pre>
     <p class="ex-foot">Both at once, which is the shape a proxy needs: <code>/echo</code> reads a chunk and writes a chunk, so neither the upload nor the download is ever held whole. The two directions are separate switches - <code>StreamRequestBodies</code> for the read side, <code>RunAsync</code> with a writer for the write side - because they solve different problems and most servers want exactly one of them. Mirrors <label for="tab-h3csstream" class="ex-jump">h3 &middot; request + response streamed</label>; the difference is HTTP/2's shared connection window, which a handler that stops reading holds down for every other stream on the connection.</p>
+  </div>
+  <div class="pane pane-h2ng">
+    <div class="pane-head">
+      <h3>HTTP/2 &middot; nghttp2</h3>
+      <span class="pane-pkg">ioxide + ioxide.nghttp2</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+// dotnet add package ioxide.nghttp2
+//   curl --http2-prior-knowledge http://127.0.0.1:8080/
+
+using System.Text;
+using ioxide;
+using ioxide.nghttp2;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort port      = 8080;
+int    reactors  = Environment.ProcessorCount;
+int    bodyBytes = 2;
+
+
+// Per-connection recv buffer rings (kernel 6.12+) instead of one shared ring per reactor. The
+// handler code is identical either way; this only changes how recv buffers are handed out.
+bool incrementalBuffers = false;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+var config = new ServerConfig
+{
+    ReactorCount   = reactors,  // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                                        // SQ/CQ depth per ring
+    DualStack      = false,                                                       // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                                                   // bytes per shared recv buffer
+    RecvSlots      = 4096,                                                        // shared recv buffer-ring depth
+    Incremental    = incrementalBuffers ? new IncrementalOptions { MaxConnections = 1024, RecvSlots = 8, RecvBufferSize = 16 * 1024 } : null,                                                        // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,                                                        // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                                        // no QUIC transport - see Http3/* and Quic/Alpn
+    Tcp = new TcpOptions
+    {
+        Port             = port,
+        ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
+    },
+};
+
+byte[] body = bodyBytes == 2
+    ? &quot;ok&quot;u8.ToArray()
+    : [.. Enumerable.Repeat((byte)&#x27;x&#x27;, bodyBytes)];
+
+var threads = new Thread[config.ReactorCount];
+
+for (int i = 0; i &lt; threads.Length; i++)
+{
+    var reactor = new Reactor(i, config);
+
+    reactor.TcpHandle = async (r, conn) =&gt;
+    {
+        try
+        {
+            // The connection owns the read loop from here: it feeds nghttp2, dispatches each
+            // request once its stream ends, and drains the egress once per batch.
+            await new Nghttp2Connection(conn).RunBufferedAsync(_ =&gt; new Nghttp2Response
+            {
+                Status = 200,
+                Body = body,
+            });
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    };
+
+    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
+    threads[i].Start();
+}
+
+Console.WriteLine($&quot;[nghttp2] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
+                + $&quot;{body.Length}-byte body (h2c prior knowledge)&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}</code></pre>
+    <p class="ex-foot">The same h2c server on the <b>reference implementation</b>. Kept because being battle-tested is a property no amount of benchmarking substitutes for: nghttp2 is continuously fuzzed, patched by people whose job it is when the next HTTP/2 CVE lands, and has a decade of interop against every other stack. What it does not have is the streaming: it is <b>buffered only</b>, so there is no counterpart here to <label for="tab-h2sresp" class="ex-jump">response streamed</label> or <label for="tab-h2sreq" class="ex-jump">request streamed</label>, and its dispatch loop still waits for each handler in turn. Measured as a client on this rig, the managed stack runs <b>1.35&times;-1.39&times;</b> it. Take this one when you want the reference implementation's coverage; take <label for="tab-h2cs" class="ex-jump">buffered</label> for everything else.</p>
   </div>
 
 

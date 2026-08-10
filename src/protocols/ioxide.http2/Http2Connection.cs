@@ -12,9 +12,11 @@ namespace ioxide.http2;
 ///     new Http2Connection(conn).RunBufferedAsync(request => Http2Response.Text("hello"));
 /// </code>
 ///
-/// This is the only HTTP/2 in ioxide: the nghttp2 binding it began as an alternative to was
-/// retired once this measured level with it and then grew past it - see <c>dropped/</c>. The same
-/// framing and HPACK drive <c>ioxide.httpclient</c>'s HTTP/2 client, pointed the other way round.
+/// The default HTTP/2 here, and the one the features land on: streamed responses, streamed
+/// request bodies and non-blocking dispatch are all this side. <c>ioxide.nghttp2</c> remains as
+/// the battle-tested alternative - buffered only, and the reference implementation's coverage of
+/// the protocol's darker corners. Measured on this rig it runs 1.35x-1.39x the binding as a
+/// client; the same framing and HPACK drive <c>ioxide.httpclient</c>, pointed the other way round.
 ///
 /// It speaks to an <see cref="IDuplexPipe"/> and knows nothing about TLS: hand it a
 /// <c>TcpConnectionDualPipe</c> for h2c or a <c>TlsConnectionDualPipe</c> for h2 over TLS, and the

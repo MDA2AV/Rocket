@@ -271,6 +271,20 @@ PANES = {
         "<label for=\"tab-h3csstream\" class=\"ex-jump\">h3 &middot; request + response "
         "streamed</label>; the difference is HTTP/2's shared connection window, which a handler "
         "that stops reading holds down for every other stream on the connection."),
+    "h2ng": (
+        "Http2/Nghttp2Buffered", "HTTP/2 &middot; nghttp2", "ioxide + ioxide.nghttp2",
+        ["curl --http2-prior-knowledge http://127.0.0.1:8080/"],
+        "The same h2c server on the <b>reference implementation</b>. Kept because being battle-tested "
+        "is a property no amount of benchmarking substitutes for: nghttp2 is continuously fuzzed, "
+        "patched by people whose job it is when the next HTTP/2 CVE lands, and has a decade of "
+        "interop against every other stack. "
+        "What it does not have is the streaming: it is <b>buffered only</b>, so there is no "
+        "counterpart here to <label for=\"tab-h2sresp\" class=\"ex-jump\">response streamed</label> "
+        "or <label for=\"tab-h2sreq\" class=\"ex-jump\">request streamed</label>, and its dispatch "
+        "loop still waits for each handler in turn. Measured as a client on this rig, the managed "
+        "stack runs <b>1.35&times;-1.39&times;</b> it. Take this one when you want the reference "
+        "implementation's coverage; take "
+        "<label for=\"tab-h2cs\" class=\"ex-jump\">buffered</label> for everything else."),
     "h3": (
         "Http3/Nghttp3Request", "HTTP/3 &middot; request streamed (nghttp3)", "ioxide + ioxide.ngtcp2 + ioxide.nghttp3",
         ["curl --http3-only -k https://127.0.0.1:8443/"],

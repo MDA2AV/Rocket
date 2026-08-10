@@ -6,8 +6,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <RootNamespace>Playground.Http2.Nghttp2</RootNamespace>
-    <AssemblyName>Playground.Http2.Nghttp2</AssemblyName>
+    <RootNamespace>Playground.Http2.Nghttp2Buffered</RootNamespace>
+    <AssemblyName>Playground.Http2.Nghttp2Buffered</AssemblyName>
   </PropertyGroup>
 
   <ItemGroup>

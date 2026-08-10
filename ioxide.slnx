@@ -5,6 +5,7 @@
   <!-- Protocol layers, native-bundled or pure C#. -->
   <Folder Name="/protocols/">
     <Project Path="src/protocols/ioxide.nghttp3/ioxide.nghttp3.csproj" />
+    <Project Path="src/protocols/ioxide.nghttp2/ioxide.nghttp2.csproj" />
     <Project Path="src/protocols/ioxide.http2/ioxide.http2.csproj" />
     <Project Path="src/protocols/ioxide.http3/ioxide.http3.csproj" />
     <Project Path="src/protocols/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
@@ -55,6 +56,7 @@
 
   <Folder Name="/apps/playground/http2/">
     <Project Path="Playground/Http2/Buffered/Playground.Http2.Buffered.csproj" />
+    <Project Path="Playground/Http2/Nghttp2Buffered/Playground.Http2.Nghttp2Buffered.csproj" />
     <Project Path="Playground/Http2/StreamedResponse/Playground.Http2.StreamedResponse.csproj" />
     <Project Path="Playground/Http2/StreamedRequest/Playground.Http2.StreamedRequest.csproj" />
     <Project Path="Playground/Http2/StreamedBoth/Playground.Http2.StreamedBoth.csproj" />
@@ -123,6 +125,7 @@
   <!-- Not built by the solution; here so the native bundle scripts are findable from the IDE. -->
   <Folder Name="/build/">
     <File Path="scripts/build-ngtcp2-native.sh" />
+    <File Path="scripts/build-nghttp2-native.sh" />
     <File Path="scripts/build-nghttp3-native.sh" />
   </Folder>
 </Solution>
