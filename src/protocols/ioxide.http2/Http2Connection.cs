@@ -122,8 +122,14 @@ public sealed partial class Http2Connection : IDisposable
 
                 if (received)
                 {
+                    // A streamed writer that finishes inside this window needs no write of its own:
+                    // the flush below carries it out together with every other response the pass
+                    // produced. That coalescing is the whole reason buffered h2 is fast, and there
+                    // is no reason a streamed response cannot share it.
+                    _passFlushPending = true;
                     ParseAvailable();
                     await DispatchReadyAsync(handler);
+                    _passFlushPending = false;
                     await FlushAsync();
                 }
 

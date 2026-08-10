@@ -167,7 +167,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
             _connection.SendStreamedData(_streamId, ReadOnlySpan<byte>.Empty, endStream: true);
         }
 
-        await _connection.FlushOutboundAsync();
+        await _connection.MaybeFlushAsync();
     }
 
     private void EnsureStaging(int sizeHint)

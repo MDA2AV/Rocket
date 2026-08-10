@@ -136,6 +136,47 @@ public sealed partial class Http2Connection
     /// <summary>Push whatever is staged out to the transport.</summary>
     internal ValueTask FlushOutboundAsync() => FlushAsync();
 
+    /// <summary>
+    /// True while the read loop still owes a flush. A streamed writer checks this to decide whether
+    /// to write for itself: inside a pass the answer is no, and skipping that write is what lets
+    /// many responses leave on ONE transport write.
+    ///
+    /// It matters because the cost here is per-write, not per-byte - a streamed response measured
+    /// the same whether it carried 2 bytes or 8 KiB, which is the shape of a syscall rather than of
+    /// work. Buffered spread one write across every stream in flight; streamed paid one each, and
+    /// that alone was the 12.8x.
+    /// </summary>
+    internal bool PassFlushPending => _passFlushPending;
+
+    private bool _passFlushPending;
+    private int _stagedBytes;
+
+    /// <summary>
+    /// Write only when nothing else will. A handler that parked - on credit, on a timer, on a
+    /// database - resumes after the pass flush has gone by, so its bytes would otherwise sit staged
+    /// until the peer happened to send something, which for an endless response is never.
+    /// </summary>
+    internal ValueTask MaybeFlushAsync()
+    {
+        // Coalescing has to stay BOUNDED, and not for memory reasons. A producer that loops without
+        // awaiting anything of its own - generating as fast as it can - has no yield point except
+        // this write, so skipping it unconditionally spins the reactor and the response never moves
+        // at all. Past the limit the write happens for real, which both drains the staging and
+        // hands the thread back.
+        //
+        // A PACED producer (an SSE feed waiting on an event) never reaches the limit: it parks, the
+        // pass flush carries its chunk out immediately, and it resumes outside the pass where this
+        // returns a real flush. So latency stays tight where it matters, and only a bandwidth-bound
+        // producer trades a little of it for throughput.
+        if (!_passFlushPending || _stagedBytes >= CoalesceLimit)
+        {
+            return FlushAsync();
+        }
+        return ValueTask.CompletedTask;
+    }
+
+    private const int CoalesceLimit = 16 * 1024;
+
     /// <summary>Completes when this stream has credit again, or the connection gives up.</summary>
     internal Task WaitForSendCreditAsync(int streamId)
     {

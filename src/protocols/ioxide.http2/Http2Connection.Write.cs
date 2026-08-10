@@ -15,6 +15,7 @@ public sealed partial class Http2Connection
     private void Stage(ReadOnlySpan<byte> bytes)
     {
         _pipe.Output.Write(bytes);
+        _stagedBytes += bytes.Length;
         _staged = true;
     }
 
@@ -25,6 +26,7 @@ public sealed partial class Http2Connection
             return;
         }
         _staged = false;
+        _stagedBytes = 0;
         await _pipe.Output.FlushAsync();
     }
 
