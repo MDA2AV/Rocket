@@ -126,7 +126,44 @@ public sealed partial class Nghttp3Connection
     /// back to ReadAsync between chunks would wait for a packet that only our own output will
     /// provoke, so the response would stall after its first chunk.
     /// </summary>
+    // True while DrainStreamed is on the stack. A writer that flushes from inside it may park and
+    // be resumed by the loop; one that flushes from anywhere else has to drive the drain itself,
+    // because no loop is running to do it.
+    private bool _inStreamedDrain;
+
     private void DrainStreamed()
+    {
+        if (_inStreamedDrain)
+        {
+            return;   // already draining; the loop below picks up whatever was just staged
+        }
+
+        _inStreamedDrain = true;
+        try
+        {
+            DrainStreamedCore();
+        }
+        finally
+        {
+            _inStreamedDrain = false;
+        }
+    }
+
+    /// <summary>
+    /// Drive egress for a writer that resumed OUTSIDE the read pass - after a file read, a database
+    /// call, an upstream response. Inside the pass this does nothing, because the drain loop is
+    /// already running and will pump what was just staged; that path stays exactly as it was, which
+    /// is what keeps a one-chunk response from paying a reactor round trip it does not need.
+    /// </summary>
+    internal void PumpIfOutsidePass()
+    {
+        if (!_inStreamedDrain && !_protocolFailed)
+        {
+            DrainStreamed();
+        }
+    }
+
+    private void DrainStreamedCore()
     {
         while (!_protocolFailed)
         {
@@ -279,6 +316,16 @@ public sealed partial class Nghttp3Connection
     {
         if (IsFailed)
         {
+            return Task.CompletedTask;
+        }
+
+        // Outside the drain loop there is nobody to release a pass waiter: the loop only runs while
+        // the peer is sending, and a peer waiting for our response sends nothing. Parking here is
+        // what made a handler that awaits anything - a file read, a query, an upstream - stall on
+        // its first chunk and hang on its second. Drive the drain instead and carry on.
+        if (!_inStreamedDrain)
+        {
+            DrainStreamed();
             return Task.CompletedTask;
         }
 

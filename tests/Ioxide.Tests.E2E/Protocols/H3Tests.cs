@@ -79,6 +79,48 @@ internal static class H3Tests
             Assert.Equal("got 600000", text);
         });
 
+        runner.Test("h3: a streamed response whose handler awaits between chunks still arrives", () =>
+        {
+            // Every other streamed test writes its chunks in a tight loop, so the handler never
+            // leaves the pass that dispatched it and DrainStreamed resumes it inline. A REAL
+            // handler awaits something first - a file read, a query, an upstream - and comes back
+            // outside that pass. There the flush used to park on a pass waiter that only inbound
+            // packets release, while the peer sat waiting for the response that would have
+            // provoked them: first chunk stalled, second hung outright.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunStreamedResponseAsync(
+                    static async (_, writer) =>
+                    {
+                        writer.WriteHeaders(new Nghttp3Response { Status = 200 });
+
+                        for (int i = 0; i < 4; i++)
+                        {
+                            // The point of the test. Task.Yield is the cheapest way to leave the
+                            // dispatch pass; a file read or a database call lands in the same place.
+                            await Task.Yield();
+
+                            "chunk"u8.CopyTo(writer.GetSpan(5));
+                            writer.Advance(5);
+                            await writer.FlushAsync();
+                        }
+
+                        await writer.CompleteAsync();
+                    }));
+
+            using var client = new H3TestClient("127.0.0.1", udpPort);
+            client.Connect();
+            Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");
+
+            (int status, string body) = client.Get("/streamed", timeoutMs: 10_000);
+            Assert.Equal(200, status);
+            Assert.Equal("chunkchunkchunkchunk", body);
+        });
+
         runner.Test("h3: buffered-async handler (whole body in req.Body, handler may await)", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
