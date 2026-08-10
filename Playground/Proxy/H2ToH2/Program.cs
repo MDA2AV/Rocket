@@ -1,7 +1,7 @@
 using System.Text;
 using ioxide;
 using ioxide.httpclient;
-using ioxide.nghttp2;
+using ioxide.http2;
 using ioxide.tls;
 using Playground.Shared;
 
@@ -13,7 +13,7 @@ using Playground.Shared;
 //  ALPN carries h2 in both directions - offered by the server on the way in, offered by the
 //  client on the way out. Neither side ever assumes it.
 //
-//  Two different nghttp2 sessions are involved and they share nothing. The inbound one decodes
+//  Two different HTTP/2 sessions are involved and they share nothing. The inbound one decodes
 //  HPACK against the client's dynamic table; the outbound one re-encodes against the origin's.
 //  Header state is per-connection in HTTP/2 and cannot be forwarded - a proxy always re-encodes,
 //  which is why "just splice the frames" is not a shortcut that exists. TLS makes that doubly
@@ -24,7 +24,7 @@ using Playground.Shared;
 //      dotnet run -c Release --project Playground/Proxy/H2ToH2
 //      curl -k --http2 https://127.0.0.1:8443/
 //
-//  Needs: ioxide, ioxide.nghttp2, ioxide.httpclient
+//  Needs: ioxide, ioxide.http2, ioxide.httpclient
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 // ── Knobs ────────────────────────────────────────────────────────────────────────────────────
@@ -145,7 +145,7 @@ for (int i = 0; i < threads.Length; i++)
 
             // Buffered + async: each stream dispatches with its body assembled, and the handler
             // may await - the upstream round trip resumes inline on this reactor.
-            await new Nghttp2Connection(pipe).RunBufferedAsync(async request =>
+            await new Http2Connection(pipe).RunBufferedAsync(async request =>
             {
                 try
                 {
@@ -154,11 +154,11 @@ for (int i = 0; i < threads.Length; i++)
                     using HttpClientResponse response = await client.SendAsync(new HttpClientRequest(
                         request.Method, request.Path) { Body = request.Body });
 
-                    // Copy before Dispose: the response arena is freed then, and nghttp2 copies
-                    // the h2 response only AFTER this handler returns. A real proxy would also
+                    // Copy before Dispose: the response arena is freed then, and the h2 response
+                    // is framed only AFTER this handler returns. A real proxy would also
                     // drop hop-by-hop headers - Connection, Keep-Alive, Transfer-Encoding are all
                     // illegal in h2 and would be a protocol error to forward.
-                    var proxied = new Nghttp2Response
+                    var proxied = new Http2Response
                     {
                         Status = response.Status,
                         Body = response.Body.ToArray(),
@@ -174,7 +174,7 @@ for (int i = 0; i < threads.Length; i++)
                     // Upstream down is a gateway error on this stream, not a dead h2 connection:
                     // every other stream on it keeps working. A refused certificate arrives the
                     // same way - the handshake is part of opening the upstream connection.
-                    return new Nghttp2Response
+                    return new Http2Response
                     {
                         Status = 502,
                         Body = Encoding.ASCII.GetBytes($"upstream failed: {e.Message}\n"),

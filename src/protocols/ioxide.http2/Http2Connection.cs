@@ -12,14 +12,13 @@ namespace ioxide.http2;
 ///     new Http2Connection(conn).RunBufferedAsync(request => Http2Response.Text("hello"));
 /// </code>
 ///
-/// A drop-in alternative to <c>Nghttp2Connection</c> - same shape, same request and response
-/// surface - the way <c>ioxide.http3</c> is for <c>ioxide.nghttp3</c>. Take this one when shipping
-/// a native library is inconvenient; take nghttp2 when you want the reference implementation's
-/// coverage of the protocol's darker corners.
+/// This is the only HTTP/2 in ioxide: the nghttp2 binding it began as an alternative to was
+/// retired once this measured level with it and then grew past it - see <c>dropped/</c>. The same
+/// framing and HPACK drive <c>ioxide.httpclient</c>'s HTTP/2 client, pointed the other way round.
 ///
-/// Like its nghttp2 counterpart it speaks to an <see cref="IDuplexPipe"/> and knows nothing about
-/// TLS: hand it a <c>TcpConnectionDualPipe</c> for h2c or a <c>TlsConnectionDualPipe</c> for h2
-/// over TLS, and the protocol code is identical either way.
+/// It speaks to an <see cref="IDuplexPipe"/> and knows nothing about TLS: hand it a
+/// <c>TcpConnectionDualPipe</c> for h2c or a <c>TlsConnectionDualPipe</c> for h2 over TLS, and the
+/// protocol code is identical either way.
 /// </summary>
 /// <remarks>Reactor thread only.</remarks>
 public sealed partial class Http2Connection : IDisposable

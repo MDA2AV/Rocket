@@ -3,7 +3,7 @@ using System.Net.Security;
 using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using ioxide;
-using ioxide.nghttp2;
+using ioxide.http2;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -13,12 +13,12 @@ using Playground.Shared;
 //      dotnet run -c Release --project Playground/Http2/SslStream
 //      curl -k --http2 https://127.0.0.1:8443/
 //
-//  The point of this sample is what it demonstrates about the shape: Nghttp2Connection takes an
+//  The point of this sample is what it demonstrates about the shape: Http2Connection takes an
 //  IDuplexPipe, and a Stream can be one in about ten lines (below). So the same HTTP/2 code runs
 //  over the ring directly, over kTLS, or over SslStream, without knowing which - the transport is
 //  a constructor argument, not a branch inside the protocol.
 //
-//  Compare with Playground/Http2/Tls for the ioxide.tls version. Needs: ioxide, ioxide.nghttp2
+//  Compare with Playground/Http2/Tls for the ioxide.tls version. Needs: ioxide, ioxide.http2
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 // ── Knobs ────────────────────────────────────────────────────────────────────────────────────
@@ -90,8 +90,8 @@ for (int i = 0; i < threads.Length; i++)
                 return;   // this sample only serves h2; see Playground/Http2/Tls for the fallback
             }
 
-            await new Nghttp2Connection(new StreamDuplexPipe(ssl)).RunBufferedAsync(
-                _ => new Nghttp2Response { Status = 200, Body = body });
+            await new Http2Connection(new StreamDuplexPipe(ssl)).RunBufferedAsync(
+                _ => new Http2Response { Status = 200, Body = body });
         }
         catch (Exception e)
         {

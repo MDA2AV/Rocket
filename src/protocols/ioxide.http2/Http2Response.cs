@@ -3,8 +3,8 @@ namespace ioxide.http2;
 /// <summary>
 /// One HTTP/2 response: status, headers, and an in-memory body - bytes throughout, mirroring
 /// <see cref="Http2Request"/>. Header names must be ASCII (they're lowercased as they're packed);
-/// values are raw octets. Everything is copied into nghttp2 synchronously at submit, so the
-/// memories can be pooled, stackallocated behind, or static.
+/// values are raw octets. Everything is framed into the connection's write buffer synchronously
+/// when the handler returns, so the memories can be pooled, stackallocated behind, or static.
 /// </summary>
 public sealed class Http2Response
 {

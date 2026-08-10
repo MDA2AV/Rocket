@@ -71,8 +71,8 @@ for (int i = 0; i < threads.Length; i++)
     {
         try
         {
-            // The connection owns the read loop from here: it feeds nghttp2, dispatches each
-            // request once its stream ends, and drains the egress once per batch.
+            // The connection owns the read loop from here: it parses frames, dispatches each
+            // request once its stream ends, and flushes the batch in one write.
             await new Http2Connection(conn).RunBufferedAsync(_ => new Http2Response
             {
                 Status = 200,

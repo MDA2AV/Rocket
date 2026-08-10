@@ -85,8 +85,8 @@ jobs:
 
       # Paths mirror the src/ grouping in ioxide.slnx (core, protocols/, clients/, serving/).
       # Every project carrying a PackageId is packed. ioxide.httpclient is the whole client -
-      # h1, h2c (nghttp2 bundled inside it) and h3 - and project-references ngtcp2/nghttp3,
-      # so those ship as its NuGet dependencies.
+      # h1, h2 and h3 - and project-references http2/ngtcp2/nghttp3, so those ship as its NuGet
+      # dependencies.
       - name: Pack ioxide
         run: dotnet pack src/ioxide/ioxide.csproj --configuration Release --no-build --output ./artifacts
 
@@ -95,9 +95,6 @@ jobs:
 
       - name: Pack ioxide.nghttp3
         run: dotnet pack src/protocols/ioxide.nghttp3/ioxide.nghttp3.csproj --configuration Release --no-build --output ./artifacts
-
-      - name: Pack ioxide.nghttp2
-        run: dotnet pack src/protocols/ioxide.nghttp2/ioxide.nghttp2.csproj --configuration Release --no-build --output ./artifacts
 
       - name: Pack ioxide.http2
         run: dotnet pack src/protocols/ioxide.http2/ioxide.http2.csproj --configuration Release --no-build --output ./artifacts
