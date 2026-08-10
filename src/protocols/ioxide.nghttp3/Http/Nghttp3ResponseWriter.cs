@@ -150,6 +150,7 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
         PromoteStagedChunk();
 
         _connection.ResumeStreamedResponse(_streamId);
+        _connection.PumpIfOutsidePass();
     }
 
     /// <summary>
@@ -182,6 +183,7 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
         // nothing to keep the handler around for.
         _completed = true;
         _connection.ResumeStreamedResponse(_streamId);
+        _connection.PumpIfOutsidePass();
     }
 
     /// <summary>
