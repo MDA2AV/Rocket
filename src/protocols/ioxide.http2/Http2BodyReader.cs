@@ -131,13 +131,19 @@ public sealed class Http2BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
     // Teardown while chunks may still be queued: recycle everything and wake anyone parked.
     internal void Drop()
     {
-        End();
         ReleaseHandedOut();
 
         while (_chunks.TryDequeue(out (byte[] Buffer, int Length) chunk))
         {
             ArrayPool<byte>.Shared.Return(chunk.Buffer);
         }
+
+        // Drained first, so the wake below reports end-of-body rather than handing out a chunk
+        // whose stream is already gone. Woken directly rather than through the connection's
+        // deferred list: teardown is the last thing that happens, so nothing would fire it, and a
+        // handler parked mid-body would wait forever on a body that stopped arriving.
+        _ended = true;
+        FireIfReady();
     }
 
     private void ReleaseHandedOut()

@@ -14,7 +14,7 @@ using Playground.Shared;
 //  the same GetAsync is h1 on the first request and h3 later. Http1Only / Http2Only (h2c) /
 //  Http3Only pin it instead, which is what the nine Proxy/* samples do.
 //
-//      dotnet run -c Release --project Playground/Http3/Nghttp3   # an origin that advertises h3
+//      dotnet run -c Release --project Playground/Http3/Nghttp3Request   # an origin that advertises h3
 //      PLAYGROUND_UPSTREAM_PORT=8080 dotnet run -c Release --project Playground/Clients/Http
 //      curl http://127.0.0.1:8090/
 //

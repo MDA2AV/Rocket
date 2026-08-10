@@ -119,7 +119,7 @@ PANES = {
         "<b>OpenSSL both ways by default</b>; the <code>kernelTx</code>/<code>kernelRx</code> "
         "knobs at the top are what move either direction into the kernel."),
     "h2cstls": (
-        "Http2/ManagedTls", "HTTP/2 &middot; pure C# over TLS", "ioxide + ioxide.http2",
+        "Http2/Tls", "HTTP/2 &middot; pure C# over TLS", "ioxide + ioxide.http2",
         ["curl -k --http2 https://127.0.0.1:8443/"],
         "The pure-C# HTTP/2 server behind TLS, and the diff against "
         "<label for=\"tab-h2tls\" class=\"ex-jump\">h2 &middot; tls &amp; alpn</label> is three "
@@ -139,7 +139,7 @@ PANES = {
         "directly, over ioxide's TLS, or over <code>SslStream</code> - the transport is a "
         "constructor argument, not a branch inside the protocol."),
     "h3cs": (
-        "Http3/Managed", "HTTP/3 &middot; pure C#", "ioxide + ioxide.ngtcp2 + ioxide.http3",
+        "Http3/Buffered", "HTTP/3 &middot; pure C#", "ioxide + ioxide.ngtcp2 + ioxide.http3",
         ["curl --http3-only -k https://127.0.0.1:8443/"],
         "HTTP/3 with <b>no native library above the transport</b> - frames, QPACK and Huffman are "
         "all managed code, and only QUIC itself stays native. Drop-in for "
@@ -150,7 +150,7 @@ PANES = {
         "from sending the header frame and a short body in ONE call rather than two; the large-body "
         "lead is the native shim copying every response body at submit, which this never does."),
     "h3stream": (
-        "Http3/Streamed", "HTTP/3 &middot; streamed response", "ioxide + ioxide.ngtcp2 + ioxide.nghttp3",
+        "Http3/Nghttp3Response", "HTTP/3 &middot; streamed response", "ioxide + ioxide.ngtcp2 + ioxide.nghttp3",
         ["curl --http3-only -k https://127.0.0.1:8443/",
          "curl --http3-only -kN https://127.0.0.1:8443/feed   # never ends"],
         "The response body produced OVER TIME instead of handed over whole - each flush becomes a "
@@ -162,7 +162,7 @@ PANES = {
         "PULLS body bytes rather than accepting pushes, which is why this carries a resume and a "
         "drain the pure-C# writer does not need."),
     "h3csstream": (
-        "Http3/ManagedStreamed", "HTTP/3 &middot; streamed both ways", "ioxide + ioxide.ngtcp2 + ioxide.http3",
+        "Http3/StreamedBoth", "HTTP/3 &middot; streamed both ways", "ioxide + ioxide.ngtcp2 + ioxide.http3",
         ["curl --http3-only -k https://127.0.0.1:8443/",
          "curl --http3-only -kN https://127.0.0.1:8443/feed        # never ends",
          "curl --http3-only -k --data-binary @big.bin https://127.0.0.1:8443/echo"],
@@ -178,7 +178,7 @@ PANES = {
         "resume and a drain because nghttp3 pulls instead; this measures <b>1.32&times;</b> its "
         "throughput on the same 8&times;1&nbsp;KiB response."),
     "h3buf": (
-        "Http3/Buffered", "HTTP/3 &middot; buffered dispatch", "ioxide + ioxide.ngtcp2 + ioxide.nghttp3",
+        "Http3/Nghttp3Buffered", "HTTP/3 &middot; buffered dispatch", "ioxide + ioxide.ngtcp2 + ioxide.nghttp3",
         ["curl --http3-only -k https://127.0.0.1:8443/"],
         "The same server as <label for=\"tab-h3\" class=\"ex-jump\">nghttp3</label> with the other "
         "dispatch mode - one method call is the whole difference. <b>Buffered</b> waits for "
@@ -237,11 +237,11 @@ PANES = {
         ["curl --http2-prior-knowledge http://127.0.0.1:8080/"],
         'This is <b>h2c with prior knowledge</b>: the peer opens with the HTTP/2 connection preface and there is no upgrade dance. For h2 over TLS see the <label for="tab-h2tls" class="ex-jump">tls &amp; alpn</label> tab - the protocol code there is byte-for-byte identical, because <code>Nghttp2Connection</code> takes an <code>IDuplexPipe</code> and never learns what is under it.'),
     "h2cs": (
-        "Http2/Managed", "HTTP/2 &middot; pure C#", "ioxide + ioxide.http2",
+        "Http2/Buffered", "HTTP/2 &middot; pure C#", "ioxide + ioxide.http2",
         ["curl --http2-prior-knowledge http://127.0.0.1:8080/"],
         "Which to take? They measure the same. Interleaved warm runs on one rig - <code>h2load -n 300000 -c 32 -m 32</code>, 4 reactors, 2-byte body - put the ratio between <b>0.98&times; and 1.09&times;</b>, and a 1 KiB body holds the same. On a small response the cost is the loop and the syscalls, not the header codec. So take <code>ioxide.http2</code> when shipping a native library is inconvenient, and <code>ioxide.nghttp2</code> when you want the reference implementation's coverage of the protocol's darker corners. The same choice exists one version up: <code>ioxide.http3</code> is the pure-C# drop-in for <code>ioxide.nghttp3</code>."),
     "h3": (
-        "Http3/Nghttp3", "HTTP/3 &middot; nghttp3", "ioxide + ioxide.ngtcp2 + ioxide.nghttp3",
+        "Http3/Nghttp3Request", "HTTP/3 &middot; nghttp3", "ioxide + ioxide.ngtcp2 + ioxide.nghttp3",
         ["curl --http3-only -k https://127.0.0.1:8443/"],
         "HTTP/3 over QUIC, dispatched as the body streams. Compare "
         "<label for=\"tab-h3buf\" class=\"ex-jump\">buffered</label>, which waits for end-of-stream "
@@ -263,7 +263,7 @@ PANES = {
         "<code>ioxide.nghttp3</code> sits on."),
     "http": (
         "Clients/Http", "HTTP client &middot; alt-svc", "ioxide + ioxide.httpclient",
-        ["dotnet run -c Release --project Playground/Http3/Nghttp3   # an origin advertising h3",
+        ["dotnet run -c Release --project Playground/Http3/Nghttp3Request   # an origin advertising h3",
          "PLAYGROUND_UPSTREAM_PORT=8080 dotnet run -c Release --project Playground/Clients/Http"],
         "Both hops - the inbound connection and the outbound call - ride this reactor's ring and "
         "resume inline, so a request never leaves the thread it arrived on. The knob is "

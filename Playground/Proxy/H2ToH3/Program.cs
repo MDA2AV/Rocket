@@ -19,7 +19,7 @@ using Playground.Shared;
 //  HTTP/3 client requires no HTTP/3 server - the first connect opens an ephemeral UDP socket on
 //  this reactor's ring and replies route back by connection ID.
 //
-//      dotnet run -c Release --project Playground/Http3/Nghttp3     # h3 origin on udp :8443
+//      dotnet run -c Release --project Playground/Http3/Nghttp3Request     # h3 origin on udp :8443
 //      PLAYGROUND_UPSTREAM_PORT=8443 dotnet run -c Release --project Playground/Proxy/H2ToH3
 //      curl -k --http2 https://127.0.0.1:8443/
 //

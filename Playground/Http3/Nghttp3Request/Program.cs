@@ -6,15 +6,17 @@ using ioxide.utils;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  nghttp3 - a real HTTP/3 server, whole. ngtcp2 + picotls are bundled as one native library
+//  nghttp3-streamed-request - a real HTTP/3 server, whole, dispatched as the REQUEST body
+//  streams in: the handler runs while the upload is still arriving, so memory is bound by one
+//  flow-control window rather than by the body. ngtcp2 + picotls are bundled as one native library
 //  (TLS 1.3 lives inside the transport), and nghttp3 puts HTTP/3 on top. Every reactor binds the
 //  UDP port via SO_REUSEPORT and demuxes its own flows.
 //
 //  STREAMED dispatch: your handler runs at end-of-headers, while the body is still arriving. Each
 //  chunk you read credits the peer's flow-control window, so memory is bound by one window rather
-//  than by the size of the upload. See Playground/Http3/Buffered for the other mode.
+//  than by the size of the upload. See Playground/Http3/Nghttp3Buffered for the other mode.
 //
-//      dotnet run -c Release --project Playground/Http3/Nghttp3
+//      dotnet run -c Release --project Playground/Http3/Nghttp3Request
 //      curl --http3-only -k https://127.0.0.1:8443/
 //      h2load --alpn-list=h3 -n 1 -c 1 -d bigfile.bin https://127.0.0.1:8443/
 //
@@ -58,7 +60,7 @@ Env.OverrideCert(ref certOverride, ref keyOverride);
 // One engine for the whole server. ALPN pinned to h3, so nothing else negotiates. The last arg is
 // the per-connection send-retention high-water (default 16 MiB): a response larger than it streams
 // out paced by acks instead of buffering whole, so h3 serves large files in bounded memory. See
-// Playground/Http3/Buffered for the full QUIC/h3 knob set.
+// Playground/Http3/Nghttp3Buffered for the full QUIC/h3 knob set.
 using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"], maxSendRetentionBytes: 16L << 20);
 
 var config = new ServerConfig

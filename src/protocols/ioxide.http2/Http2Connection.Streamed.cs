@@ -205,11 +205,17 @@ public sealed partial class Http2Connection
 
         if (streamId == 0)
         {
-            foreach (List<TaskCompletionSource> waiters in _creditWaiters.Values.ToArray())
+            // Take the waiters OUT before waking any of them. These complete inline, so a resumed
+            // writer that still has no credit re-registers immediately - and clearing afterwards
+            // threw that new waiter away, leaving the writer parked on a wake that never comes,
+            // while the enumeration it was added during threw "collection was modified".
+            List<TaskCompletionSource>[] all = [.. _creditWaiters.Values];
+            _creditWaiters.Clear();
+
+            foreach (List<TaskCompletionSource> waiters in all)
             {
                 Release(waiters);
             }
-            _creditWaiters.Clear();
             return;
         }
 
@@ -229,13 +235,23 @@ public sealed partial class Http2Connection
 
     private void ReleaseAllCreditWaiters()
     {
-        foreach (List<TaskCompletionSource> waiters in _creditWaiters.Values)
+        if (_creditWaiters.Count == 0)
+        {
+            return;
+        }
+
+        // Same discipline as above, and it matters more here: this runs in the teardown finally, so
+        // an exception escaping it bypasses the catch that exists to keep a malformed peer from
+        // looking like a server fault.
+        List<TaskCompletionSource>[] all = [.. _creditWaiters.Values];
+        _creditWaiters.Clear();
+
+        foreach (List<TaskCompletionSource> waiters in all)
         {
             foreach (TaskCompletionSource waiter in waiters)
             {
                 waiter.TrySetResult();
             }
         }
-        _creditWaiters.Clear();
     }
 }

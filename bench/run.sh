@@ -85,7 +85,7 @@ else
 fi
 
 # ── h3 server ───────────────────────────────────────────────────────────────────────────────
-play Http3/Nghttp3 PLAYGROUND_REACTORS=$R PLAYGROUND_QUIC_PORT=18444 PLAYGROUND_PORT=18090
+play Http3/Nghttp3Request PLAYGROUND_REACTORS=$R PLAYGROUND_QUIC_PORT=18444 PLAYGROUND_PORT=18090
 if [ -x "$H3X" ]; then
   N=$("$H3X" -k -t 4 --connections 64 -m 8 -d $DUR --send-batch 8 https://127.0.0.1:18444/ 2>&1 \
       | grep -oE 'throughput:  [0-9]+' | grep -oE '[0-9]+')

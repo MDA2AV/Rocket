@@ -6,8 +6,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <RootNamespace>Playground.Http3.Managed</RootNamespace>
-    <AssemblyName>Playground.Http3.Managed</AssemblyName>
+    <RootNamespace>Playground.Http3.StreamedBoth</RootNamespace>
+    <AssemblyName>Playground.Http3.StreamedBoth</AssemblyName>
   </PropertyGroup>
 
   <ItemGroup>

@@ -54,18 +54,20 @@
   </Folder>
 
   <Folder Name="/apps/playground/http2/">
-    <Project Path="Playground/Http2/Managed/Playground.Http2.Managed.csproj" />
-    <Project Path="Playground/Http2/ManagedStreamed/Playground.Http2.ManagedStreamed.csproj" />
-    <Project Path="Playground/Http2/ManagedTls/Playground.Http2.ManagedTls.csproj" />
+    <Project Path="Playground/Http2/Buffered/Playground.Http2.Buffered.csproj" />
+    <Project Path="Playground/Http2/StreamedResponse/Playground.Http2.StreamedResponse.csproj" />
+    <Project Path="Playground/Http2/StreamedRequest/Playground.Http2.StreamedRequest.csproj" />
+    <Project Path="Playground/Http2/StreamedBoth/Playground.Http2.StreamedBoth.csproj" />
+    <Project Path="Playground/Http2/Tls/Playground.Http2.Tls.csproj" />
     <Project Path="Playground/Http2/SslStream/Playground.Http2.SslStream.csproj" />
   </Folder>
 
   <Folder Name="/apps/playground/http3/">
-    <Project Path="Playground/Http3/Nghttp3/Playground.Http3.Nghttp3.csproj" />
+    <Project Path="Playground/Http3/Nghttp3Request/Playground.Http3.Nghttp3Request.csproj" />
+    <Project Path="Playground/Http3/Nghttp3Buffered/Playground.Http3.Nghttp3Buffered.csproj" />
     <Project Path="Playground/Http3/Buffered/Playground.Http3.Buffered.csproj" />
-    <Project Path="Playground/Http3/Managed/Playground.Http3.Managed.csproj" />
-    <Project Path="Playground/Http3/ManagedStreamed/Playground.Http3.ManagedStreamed.csproj" />
-    <Project Path="Playground/Http3/Streamed/Playground.Http3.Streamed.csproj" />
+    <Project Path="Playground/Http3/StreamedBoth/Playground.Http3.StreamedBoth.csproj" />
+    <Project Path="Playground/Http3/Nghttp3Response/Playground.Http3.Nghttp3Response.csproj" />
   </Folder>
 
   <Folder Name="/apps/playground/quic/">

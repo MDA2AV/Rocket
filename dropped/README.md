@@ -30,4 +30,4 @@ it. That client is pure C# now too, on the same framing and HPACK the server use
 had no callers left.
 
 `build-nghttp2-native.sh` built the native library it bound to. `Playground.Http2.Nghttp2` was its
-h2c sample; `Playground/Http2/Managed` is the same server on the managed stack.
+h2c sample; `Playground/Http2/Buffered` is the same server on the managed stack.

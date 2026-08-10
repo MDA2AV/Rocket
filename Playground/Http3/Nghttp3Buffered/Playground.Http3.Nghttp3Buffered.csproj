@@ -6,8 +6,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <RootNamespace>Playground.Http3.Nghttp3</RootNamespace>
-    <AssemblyName>Playground.Http3.Nghttp3</AssemblyName>
+    <RootNamespace>Playground.Http3.Nghttp3Buffered</RootNamespace>
+    <AssemblyName>Playground.Http3.Nghttp3Buffered</AssemblyName>
   </PropertyGroup>
 
   <ItemGroup>

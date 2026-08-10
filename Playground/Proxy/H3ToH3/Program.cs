@@ -18,7 +18,7 @@ using Playground.Shared;
 //  the certificate the QuicEngine serves, and the ServerName the pool verifies, are the whole
 //  configuration. Compare the h1 and h2 frontends, where TLS is a layer you add.
 //
-//      PLAYGROUND_QUIC_PORT=8444 PLAYGROUND_PORT=8090 dotnet run -c Release --project Playground/Http3/Nghttp3
+//      PLAYGROUND_QUIC_PORT=8444 PLAYGROUND_PORT=8090 dotnet run -c Release --project Playground/Http3/Nghttp3Request
 //      dotnet run -c Release --project Playground/Proxy/H3ToH3
 //      curl --http3-only -ks https://127.0.0.1:8443/anything
 //

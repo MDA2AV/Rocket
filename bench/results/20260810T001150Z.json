@@ -5,6 +5,6 @@
   "reactors": 2, "conns": 64, "threads": 8, "seconds": 10,
   "commit": "96137b9",
   "samples": [
-    {"sample":"Http3/Nghttp3","proto":"h3","rps":480371,"cpu_us_per_req":4.17,"util_pct":100,"note":""},{"sample":"Http3/Buffered","proto":"h3","rps":516707,"cpu_us_per_req":3.87,"util_pct":100,"note":""},{"sample":"Http3/Managed","proto":"h3","rps":665936,"cpu_us_per_req":2.96,"util_pct":98,"note":""},{"sample":"Http3/Streamed","proto":"h3","rps":89906,"cpu_us_per_req":22.03,"util_pct":99,"note":""}
+    {"sample":"Http3/Nghttp3Request","proto":"h3","rps":480371,"cpu_us_per_req":4.17,"util_pct":100,"note":""},{"sample":"Http3/Nghttp3Buffered","proto":"h3","rps":516707,"cpu_us_per_req":3.87,"util_pct":100,"note":""},{"sample":"Http3/Buffered","proto":"h3","rps":665936,"cpu_us_per_req":2.96,"util_pct":98,"note":""},{"sample":"Http3/Nghttp3Response","proto":"h3","rps":89906,"cpu_us_per_req":22.03,"util_pct":99,"note":""}
   ]
 }

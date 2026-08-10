@@ -6,15 +6,15 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <RootNamespace>Playground.Http3.Buffered</RootNamespace>
-    <AssemblyName>Playground.Http3.Buffered</AssemblyName>
+    <RootNamespace>Playground.Http3.Nghttp3Response</RootNamespace>
+    <AssemblyName>Playground.Http3.Nghttp3Response</AssemblyName>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="../../Shared/Playground.Shared.csproj" />
     <ProjectReference Include="../../../src/ioxide/ioxide.csproj" />
     <ProjectReference Include="../../../src/protocols/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
-    <ProjectReference Include="../../../src/protocols/ioxide.http3/ioxide.http3.csproj" />
+    <ProjectReference Include="../../../src/protocols/ioxide.nghttp3/ioxide.nghttp3.csproj" />
   </ItemGroup>
 
 </Project>

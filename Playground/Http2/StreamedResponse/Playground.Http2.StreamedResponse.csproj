@@ -6,8 +6,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <RootNamespace>Playground.Http2.ManagedTls</RootNamespace>
-    <AssemblyName>Playground.Http2.ManagedTls</AssemblyName>
+    <RootNamespace>Playground.Http2.StreamedResponse</RootNamespace>
+    <AssemblyName>Playground.Http2.StreamedResponse</AssemblyName>
   </PropertyGroup>
 
   <ItemGroup>

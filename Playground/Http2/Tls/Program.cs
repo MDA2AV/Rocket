@@ -6,10 +6,12 @@ using ioxide.tls;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  http2-managed-tls - HTTP/2 over TLS in PURE C#: the same server as Playground/Http2/Tls with
-//  ioxide.http2 in place of ioxide.nghttp2. The diff is three type names and a package - no
-//  native library anywhere - because both take an IDuplexPipe and neither learns what is
-//  under it.
+//  http2-tls - HTTP/2 over TLS, negotiated by ALPN, alongside HTTP/1.1 on the SAME port. This
+//  is what a browser expects: it offers "h2,http/1.1" and the server chooses.
+//
+//  Note what Http2Connection is handed: a TlsConnectionDualPipe. It never learns that TLS is
+//  involved - the pipe decrypts on the way in and encrypts on the way out - so the protocol
+//  code here is byte-for-byte the h2c sample's.
 //
 //      dotnet run -c Release --project Playground/Http2/Tls
 //      curl -k --http2 https://127.0.0.1:8443/          # negotiates h2
@@ -181,7 +183,7 @@ for (int i = 0; i < threads.Length; i++)
         }
         catch (Exception e)
         {
-            Console.Error.WriteLine($"[http2-managed-tls] connection failed: {e.Message}");
+            Console.Error.WriteLine($"[http2-tls] connection failed: {e.Message}");
         }
         finally
         {
@@ -194,7 +196,7 @@ for (int i = 0; i < threads.Length; i++)
     threads[i].Start();
 }
 
-Console.WriteLine($"[http2-managed-tls] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
+Console.WriteLine($"[http2-tls] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
                 + $"ALPN h2 then http/1.1, cert {certPath}, "
                 + $"rx={(kernelTx && kernelRx ? "kernel" : "openssl")}, "
                 + $"tx={(kernelTx ? "kernel" : "openssl")}");

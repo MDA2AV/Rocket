@@ -4,7 +4,7 @@ using ioxide.http2;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  http2-managed-streamed - HTTP/2 in pure C# with the RESPONSE BODY STREAMED: the handler pushes
+//  http2-streamed-response - HTTP/2 with the RESPONSE BODY STREAMED: the handler pushes
 //  bytes as it produces them and each flush becomes a DATA frame, instead of returning a finished
 //  Http2Response.
 //
@@ -16,7 +16,7 @@ using Playground.Shared;
 //  FlushAsync waits for a WINDOW_UPDATE rather than failing. That wait is the backpressure: a
 //  peer that stops reading stops the producer instead of growing a queue behind it.
 //
-//      dotnet run -c Release --project Playground/Http2/ManagedStreamed
+//      dotnet run -c Release --project Playground/Http2/StreamedResponse
 //      curl --http2-prior-knowledge http://127.0.0.1:8080/         # chunked
 //      curl --http2-prior-knowledge -N http://127.0.0.1:8080/feed  # never ends
 //
@@ -119,7 +119,7 @@ for (int i = 0; i < threads.Length; i++)
     threads[i].Start();
 }
 
-Console.WriteLine($"[http2-managed-streamed] {config.ReactorCount} reactors on :{config.Tcp!.Port} "
+Console.WriteLine($"[http2-streamed-response] {config.ReactorCount} reactors on :{config.Tcp!.Port} "
                 + $"(pure C#), {chunkCount} x {chunkBytes}-byte chunks per response");
 
 foreach (Thread thread in threads)

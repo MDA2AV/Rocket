@@ -28,7 +28,7 @@ COMBOS = {
     "H1ToH3": ("h1 &rarr; h3", "HTTP/1.1 in &middot; HTTP/3 out",
                "ioxide + ioxide.httpclient",
                [
-                'dotnet run --project Playground/Http3/Nghttp3          # h3 origin on udp :8443',
+                'dotnet run --project Playground/Http3/Nghttp3Request          # h3 origin on udp :8443',
                 'PLAYGROUND_UPSTREAM_PORT=8443 dotnet run --project Playground/Proxy/H1ToH3',
                 'curl -k https://127.0.0.1:8443/']),
     "H2ToH1": ("h2 &rarr; h1", "HTTP/2 in &middot; HTTP/1.1 out",
@@ -44,7 +44,7 @@ COMBOS = {
     "H2ToH3": ("h2 &rarr; h3", "HTTP/2 in &middot; HTTP/3 out",
                "ioxide + ioxide.nghttp2 + ioxide.httpclient",
                [
-                'dotnet run --project Playground/Http3/Nghttp3          # h3 origin on udp :8443',
+                'dotnet run --project Playground/Http3/Nghttp3Request          # h3 origin on udp :8443',
                 'PLAYGROUND_UPSTREAM_PORT=8443 dotnet run --project Playground/Proxy/H2ToH3',
                 'curl -k --http2 https://127.0.0.1:8443/']),
     "H3ToH1": ("h3 &rarr; h1", "HTTP/3 in &middot; HTTP/1.1 out",
@@ -60,7 +60,7 @@ COMBOS = {
     "H3ToH3": ("h3 &rarr; h3", "HTTP/3 in &middot; HTTP/3 out",
                "ioxide + ioxide.ngtcp2 + ioxide.nghttp3 + ioxide.httpclient",
                [
-                'PLAYGROUND_QUIC_PORT=8444 dotnet run --project Playground/Http3/Nghttp3',
+                'PLAYGROUND_QUIC_PORT=8444 dotnet run --project Playground/Http3/Nghttp3Request',
                 'curl --http3-only -k https://127.0.0.1:8443/']),
 }
 

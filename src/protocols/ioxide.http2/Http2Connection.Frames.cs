@@ -140,7 +140,15 @@ public sealed partial class Http2Connection
 
         if (!_streams.TryGetValue(header.StreamId, out PendingRequest? pending))
         {
-            pending = new PendingRequest { StreamId = header.StreamId };
+            // Opens at what the peer's SETTINGS advertised, not at the RFC default. Streams are
+            // created long after those SETTINGS arrive, so starting at 65535 and waiting for a
+            // WINDOW_UPDATE means waiting for one the peer has no reason to send - it believes we
+            // still have its whole window. That stalls any response longer than 65535 bytes.
+            pending = new PendingRequest
+            {
+                StreamId = header.StreamId,
+                SendWindow = _peerInitialStreamWindow,
+            };
             _streams[header.StreamId] = pending;
         }
 
