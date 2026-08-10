@@ -66,4 +66,4 @@ Nothing here is pseudocode. Every pattern above exists as something you can run:
 | --- | --- |
 | **[Documentation](https://mda2av.github.io/ioxide/)** | The examples browser - TCP with and without kTLS, HTTP/2, QUIC, HTTP/3, every client, and all nine proxy combinations, side by side. |
 | **[Playground](Playground/)** | One project per workload, grouped by topic. Each `Program.cs` is a **complete** server - config, reactors, threads, handler - so you can copy the file out and run it. |
-| **[Examples.AspNet](Examples.AspNet/)** | `UseIoxide()` measured against a stock Kestrel baseline. |
+| **[Playground/AspNet](Playground/AspNet/)** | `UseIoxide()` measured against a stock Kestrel baseline. |
