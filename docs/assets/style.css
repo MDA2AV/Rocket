@@ -221,6 +221,7 @@ nav.top .links a.gh svg { display: block; }
 #tab-h2bcl:checked ~ .ex-menu label[for="tab-h2bcl"],
 #tab-h3cs:checked ~ .ex-menu label[for="tab-h3cs"],
 #tab-h3stream:checked ~ .ex-menu label[for="tab-h3stream"],
+#tab-h3csstream:checked ~ .ex-menu label[for="tab-h3csstream"],
 #tab-h3buf:checked ~ .ex-menu label[for="tab-h3buf"],
 #tab-quicalpn:checked ~ .ex-menu label[for="tab-quicalpn"],
 #tab-qclient:checked ~ .ex-menu label[for="tab-qclient"],
@@ -350,6 +351,7 @@ nav.top .links a.gh svg { display: block; }
 #tab-h2bcl:checked ~ .pane-h2bcl { display: block; }
 #tab-h3cs:checked ~ .pane-h3cs { display: block; }
 #tab-h3stream:checked ~ .pane-h3stream { display: block; }
+#tab-h3csstream:checked ~ .pane-h3csstream { display: block; }
 #tab-h3buf:checked ~ .pane-h3buf { display: block; }
 #tab-quicalpn:checked ~ .pane-quicalpn { display: block; }
 #tab-qclient:checked ~ .pane-qclient { display: block; }
@@ -484,6 +486,7 @@ nav.top .links a.gh svg { display: block; }
 #tab-h2bcl:checked ~ .ex-menu label[for="tab-h2bcl"],
   #tab-h3cs:checked ~ .ex-menu label[for="tab-h3cs"],
 #tab-h3stream:checked ~ .ex-menu label[for="tab-h3stream"],
+  #tab-h3csstream:checked ~ .ex-menu label[for="tab-h3csstream"],
 #tab-h3buf:checked ~ .ex-menu label[for="tab-h3buf"],
   #tab-quicalpn:checked ~ .ex-menu label[for="tab-quicalpn"],
   #tab-qclient:checked ~ .ex-menu label[for="tab-qclient"],
