@@ -130,6 +130,23 @@ internal static class Http2ClientTests
             Assert.Equal($"200|{BodyBytes}", body);
         });
 
+        runner.Test("h2 server: a streamed request body is read as it arrives", () =>
+        {
+            // Same 1 MiB upload, but the origin never holds it: StreamRequestBodies dispatches at
+            // the headers and hands the handler a reader. Window credit goes back only as chunks
+            // are read, so if that crediting were wrong the upload would stall at the first window
+            // and this would time out rather than come back short.
+            const int BodyBytes = 1024 * 1024;
+
+            int origin = StartStreamedOrigin();
+            int driver = TestServer.Start(PostSizeDriver(BodyBytes), onStart: reactor =>
+                Http2ClientPool.Start(reactor, OriginOptions(origin)));
+
+            (int status, string body) = Client.Get(driver, "/echo", timeoutMs: 30_000);
+            Assert.Equal(200, status);
+            Assert.Equal($"200|{BodyBytes}", body);
+        });
+
         runner.Test("httpclient h2: a header block past the frame size continues", () =>
         {
             // 40 headers of ~512 bytes overflows the 16 KiB maximum frame size, so the field
@@ -168,6 +185,44 @@ internal static class Http2ClientTests
                     Body = Encoding.ASCII.GetBytes(
                         (request.Body.Length > 0 ? request.Body.Length : request.Headers.Count).ToString()),
                 });
+        }
+        finally
+        {
+            connection.DecRef();
+        }
+    });
+
+    /// <summary>
+    /// The same origin with the body STREAMED: it counts the bytes it is handed and never keeps
+    /// them, so the answer proves the whole body arrived without any of it being held.
+    /// </summary>
+    private static int StartStreamedOrigin() => TestServer.Start(async (_, connection) =>
+    {
+        try
+        {
+            var options = new ioxide.http2.Http2Options { StreamRequestBodies = true };
+            await new ioxide.http2.Http2Connection(connection, options).RunBufferedAsync(async request =>
+            {
+                int total = 0;
+                if (request.BodyReader is { } reader)
+                {
+                    while (true)
+                    {
+                        ReadOnlyMemory<byte> chunk = await reader.ReadAsync();
+                        if (chunk.IsEmpty)
+                        {
+                            break;
+                        }
+                        total += chunk.Length;
+                    }
+                }
+
+                return new ioxide.http2.Http2Response
+                {
+                    Status = 200,
+                    Body = Encoding.ASCII.GetBytes(total.ToString()),
+                };
+            });
         }
         finally
         {

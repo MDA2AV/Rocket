@@ -17,4 +17,16 @@ public sealed record Http2Options
 
     /// <summary>Streams the peer may have open at once.</summary>
     public int MaxConcurrentStreams { get; init; } = 1000;
+
+    /// <summary>
+    /// Dispatch each request as soon as its HEADERS are in, with the body arriving through
+    /// <see cref="Http2Request.BodyReader"/> instead of assembled into
+    /// <see cref="Http2Request.Body"/>.
+    ///
+    /// The trade is what memory is bound by. Buffered holds the whole body, which suits ordinary
+    /// requests and not hostile uploads; streamed holds one flow-control window, because credit is
+    /// only returned to the peer as the handler reads. <see cref="MaxRequestBytes"/> stops applying
+    /// to the body when this is on - there is no arena for it to bound.
+    /// </summary>
+    public bool StreamRequestBodies { get; init; }
 }

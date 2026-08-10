@@ -17,6 +17,7 @@ internal static class Program
         ResponseAssemblyTests.Register(runner);
         ResponseCapTests.Register(runner);
         Http2OutputQueueTests.Register(runner);
+        Http2StreamedRequestTests.Register(runner);
 
         return runner.Summary();
     }

@@ -39,6 +39,10 @@ public sealed partial class Http2Connection : IDisposable
     private readonly Dictionary<int, PendingRequest> _streams = new();
     private readonly List<PendingRequest> _ready = [];
 
+    // Readers whose parked ReadAsync has something to hand over. Collected during parsing and
+    // fired once it has unwound, so a resumed handler cannot re-enter the parser mid-frame.
+    private readonly List<Http2BodyReader> _bodyWakes = [];
+
     private bool _prefaceSeen;
     private bool _disposed;
     private bool _failed;
@@ -90,6 +94,7 @@ public sealed partial class Http2Connection : IDisposable
             pending.Dispose();
         }
         _ready.Clear();
+        _bodyWakes.Clear();
 
         if (_inbound.Length > 0)
         {
@@ -140,6 +145,12 @@ public sealed partial class Http2Connection : IDisposable
                     _passFlushPending = true;
                     ParseAvailable();
                     await DispatchReadyAsync(handler);
+
+                    // Body chunks reach their handlers here, inside the pass: the WINDOW_UPDATEs a
+                    // read stages then ride the same flush as everything else, so credit gets back
+                    // to the peer without a write of its own.
+                    FireBodyWakes();
+
                     _passFlushPending = false;
                     await FlushAsync();
                 }
@@ -247,7 +258,7 @@ public sealed partial class Http2Connection : IDisposable
                 }
                 finally
                 {
-                    pending.Dispose();
+                    RetireStream(pending);
                 }
                 continue;
             }
@@ -286,8 +297,58 @@ public sealed partial class Http2Connection : IDisposable
         }
         finally
         {
-            pending.Dispose();
+            RetireStream(pending);
             await MaybeFlushAsync();
+        }
+    }
+
+    /// <summary>
+    /// Done with a stream. The buffered path already took it out of <c>_streams</c> when it became
+    /// ready; a streamed request is still in there, because DATA frames were arriving the whole
+    /// time the handler ran.
+    /// </summary>
+    private void RetireStream(PendingRequest pending)
+    {
+        _streams.Remove(pending.StreamId);
+        pending.Dispose();
+    }
+
+    /// <summary>Return a consumed chunk's credit to the peer, on both windows it was charged to.</summary>
+    internal void CreditBody(int streamId, int length)
+    {
+        if (length <= 0 || IsBroken)
+        {
+            return;
+        }
+
+        WriteWindowUpdate(0, length);
+        WriteWindowUpdate(streamId, length);
+    }
+
+    /// <summary>A reader has something for a parked ReadAsync; wake it once the parser is done.</summary>
+    internal void NoteBodyWake(Http2BodyReader reader)
+    {
+        if (!_bodyWakes.Contains(reader))
+        {
+            _bodyWakes.Add(reader);
+        }
+    }
+
+    private void FireBodyWakes()
+    {
+        if (_bodyWakes.Count == 0)
+        {
+            return;
+        }
+
+        // Snapshot-and-clear: a resumed handler reads again, which can land another wake here, and
+        // the list must not be mutated while it is being walked.
+        Http2BodyReader[] wakes = _bodyWakes.ToArray();
+        _bodyWakes.Clear();
+
+        foreach (Http2BodyReader reader in wakes)
+        {
+            reader.FireIfReady();
         }
     }
 }
