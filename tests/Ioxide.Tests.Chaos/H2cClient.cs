@@ -46,6 +46,48 @@ public sealed class H2cClient : IDisposable
         return -1;
     }
 
+    /// <summary>
+    /// Read a stream to its end, reporting how many DATA frames carried it, how many body bytes
+    /// arrived, and whether END_STREAM ever came. Frame COUNT is the point: a body delivered whole
+    /// and a body delivered in chunks weigh the same.
+    /// </summary>
+    public (int Frames, int Bytes, bool Ended) DrainBody(int streamId, int timeoutMs = 8000)
+    {
+        long deadline = Environment.TickCount64 + timeoutMs;
+        int frames = 0, bytes = 0;
+
+        while (Environment.TickCount64 < deadline)
+        {
+            if (!TryReadFrame(out byte type, out byte flags, out int sid, out byte[] payload))
+            {
+                return (frames, bytes, false);
+            }
+
+            if (type == Settings && (flags & Ack) == 0)
+            {
+                WriteFrame(Settings, Ack, 0, ReadOnlySpan<byte>.Empty);
+            }
+            else if (type == Data && sid == streamId)
+            {
+                if (payload.Length > 0)
+                {
+                    frames++;
+                    bytes += payload.Length;
+                }
+                if ((flags & EndStream) != 0)
+                {
+                    return (frames, bytes, true);
+                }
+            }
+            else if (type == GoAway)
+            {
+                return (frames, bytes, false);
+            }
+        }
+
+        return (frames, bytes, false);
+    }
+
     /// <summary>HEADERS that deliberately leaves the block OPEN, so CONTINUATION must follow.</summary>
     public void RequestHeadersOnly(int streamId, bool endHeaders = true, bool endStream = true)
         => WriteFrame(Headers, (byte)((endHeaders ? EndHeaders : 0) | (endStream ? EndStream : 0)),

@@ -25,7 +25,6 @@
   </Folder>
 
   <Folder Name="/apps/">
-    <Project Path="Examples.AspNet/Examples.AspNet.csproj" />
   </Folder>
 
   <!-- One runnable project per workload, over a shared library. Each is run directly with
@@ -34,6 +33,7 @@
        Grouped to match the folders on disk, so the IDE tree and the repository agree. -->
   <Folder Name="/apps/playground/">
     <Project Path="Playground/Shared/Playground.Shared.csproj" />
+    <Project Path="Playground/AspNet/Playground.AspNet.csproj" />
   </Folder>
   <Folder Name="/apps/playground/tcp/">
     <Project Path="Playground/Tcp/Raw/Playground.Tcp.Raw.csproj" />
@@ -57,6 +57,7 @@
   <Folder Name="/apps/playground/http2/">
     <Project Path="Playground/Http2/Buffered/Playground.Http2.Buffered.csproj" />
     <Project Path="Playground/Http2/Nghttp2Buffered/Playground.Http2.Nghttp2Buffered.csproj" />
+    <Project Path="Playground/Http2/Nghttp2Response/Playground.Http2.Nghttp2Response.csproj" />
     <Project Path="Playground/Http2/StreamedResponse/Playground.Http2.StreamedResponse.csproj" />
     <Project Path="Playground/Http2/StreamedRequest/Playground.Http2.StreamedRequest.csproj" />
     <Project Path="Playground/Http2/StreamedBoth/Playground.Http2.StreamedBoth.csproj" />

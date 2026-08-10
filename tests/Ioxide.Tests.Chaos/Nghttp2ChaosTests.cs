@@ -160,5 +160,49 @@ internal static class Nghttp2ChaosTests
 
             Assert.Equal(3, client.AwaitFirstResponse());
         });
+
+        runner.Test("nghttp2: a streamed body arrives as separate DATA frames", () =>
+        {
+            // nghttp2 PULLS body bytes, so the shim buffers each chunk and resumes the stream while
+            // its read callback defers on an empty window. Two things can go wrong invisibly: the
+            // body arriving as ONE coalesced frame (the writer flushing nothing per chunk), or the
+            // stream ending at the first dry moment (read_body returning EOF where it should defer).
+            // Counting frames catches both - a single 4096-byte DATA would pass a length check.
+            const int Chunks = 4, ChunkBytes = 1024;
+
+            int port = TestServer.Start(static async (_, conn) =>
+            {
+                try
+                {
+                    await new Nghttp2Connection(conn).RunAsync(static async (_, writer) =>
+                    {
+                        writer.WriteHeaders(new Nghttp2Response { Status = 200 });
+                        for (int i = 0; i < Chunks; i++)
+                        {
+                            byte[] chunk = new byte[ChunkBytes];
+                            chunk.AsSpan().Fill((byte)'x');
+                            chunk.CopyTo(writer.GetSpan(ChunkBytes));
+                            writer.Advance(ChunkBytes);
+                            await writer.FlushAsync();
+                        }
+                    });
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
+            });
+
+            using var client = new H2cClient(port);
+            client.Open();
+            client.Request(streamId: 1);
+
+            (int frames, int bytes, bool ended) = client.DrainBody(streamId: 1);
+
+            Assert.Equal(Chunks * ChunkBytes, bytes);
+            Assert.True(ended, "the stream never ended - read_body deferred forever instead of flagging EOF");
+            Assert.True(frames >= Chunks,
+                $"expected at least {Chunks} DATA frames, got {frames} - the body was coalesced, not streamed");
+        });
     }
 }

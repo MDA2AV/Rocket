@@ -42,13 +42,21 @@ typedef struct ih2_callbacks {
     void (*on_stream_error)(void *user, int32_t stream_id, uint32_t error_code);
 } ih2_callbacks;
 
-/* Per-stream request body, owned here until the stream closes. */
+/* Per-stream response body, owned here until the stream closes.
+ *
+ * Two modes. BUFFERED: body holds the whole thing at submit and read_body drains it. STREAMED:
+ * body is a growable window that C# appends to as it produces bytes, and read_body defers when it
+ * runs dry - nghttp2 then stops asking until ih2_resume_data says there is more. `streaming` tells
+ * the two apart, because "no bytes left" means end-of-body in one and "wait" in the other. */
 typedef struct ih2_stream {
     struct ih2_stream *next;
     int32_t  stream_id;
     uint8_t *body;
-    size_t   body_len;
-    size_t   body_sent;
+    size_t   body_len;      /* bytes currently held */
+    size_t   body_sent;     /* bytes handed to nghttp2 */
+    size_t   body_cap;      /* allocation behind body, streamed mode only */
+    int      streaming;     /* body arrives over time rather than whole at submit */
+    int      eof;           /* streamed: producer has said there is no more */
 } ih2_stream;
 
 typedef struct ih2_conn {
@@ -181,17 +189,43 @@ static ssize_t read_body(nghttp2_session *session, int32_t stream_id, uint8_t *b
     ih2_conn *c = user_data;
     ih2_stream *s = ih2_stream_find(c, stream_id);
 
-    if (s == NULL || s->body_len == 0) {
+    if (s == NULL) {
         *data_flags |= NGHTTP2_DATA_FLAG_EOF;
         return 0;
     }
 
     size_t remaining = s->body_len - s->body_sent;
+
+    if (remaining == 0) {
+        /* Buffered: nothing left means the body is over. Streamed: it means the producer has not
+         * caught up, which is NOT the end - deferring parks the DATA frame without closing the
+         * stream, and nghttp2 will not ask again until ih2_resume_data tells it to. Returning EOF
+         * here instead would truncate every streamed response at its first slow moment. */
+        if (!s->streaming) {
+            *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+            return 0;
+        }
+        if (s->eof) {
+            *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+            return 0;
+        }
+        return NGHTTP2_ERR_DEFERRED;
+    }
+
     size_t take = remaining < length ? remaining : length;
     memcpy(buf, s->body + s->body_sent, take);
     s->body_sent += take;
 
-    if (s->body_sent == s->body_len) {
+    if (s->streaming) {
+        /* Reclaim what has gone out, so a long response does not grow the window forever. */
+        if (s->body_sent == s->body_len) {
+            s->body_len = 0;
+            s->body_sent = 0;
+        }
+        if (s->body_len == 0 && s->eof) {
+            *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+        }
+    } else if (s->body_sent == s->body_len) {
         *data_flags |= NGHTTP2_DATA_FLAG_EOF;
     }
     return (ssize_t)take;
@@ -332,6 +366,110 @@ static ih2_stream *ih2_attach_body(const uint8_t *body, size_t body_len, int *er
 }
 
 /* Answer one request. The stream id is the one the request arrived on. */
+/* ---- streamed responses ------------------------------------------------------------------
+ *
+ * The pull model, wrapped so C# can pretend it pushes. Submit opens the stream with a provider and
+ * no bytes; ih2_stream_write appends and resumes; ih2_stream_close says there will be no more.
+ * read_body defers whenever the window is dry, which is what keeps the stream open through a slow
+ * producer instead of ending it. */
+
+int ih2_submit_response_stream(ih2_conn *c, int32_t stream_id,
+                               const uint8_t *headers, size_t headers_len)
+{
+    if (c == NULL || c->session == NULL) {
+        return NGHTTP2_ERR_INVALID_STATE;
+    }
+
+    nghttp2_nv nv[IH2_MAX_HEADERS];
+    int count = ih2_unpack_headers(headers, headers_len, nv);
+    if (count < 0) {
+        return count;
+    }
+
+    ih2_stream *s = calloc(1, sizeof(*s));
+    if (s == NULL) {
+        return NGHTTP2_ERR_NOMEM;
+    }
+    s->stream_id = stream_id;
+    s->streaming = 1;
+
+    /* Registered BEFORE submit: nghttp2 may call read_body during the submit itself, and read_body
+     * looks the stream up by id. */
+    s->next = c->streams;
+    c->streams = s;
+
+    nghttp2_data_provider provider;
+    provider.source.ptr = s;
+    provider.read_callback = read_body;
+
+    int rv = nghttp2_submit_response(c->session, stream_id, nv, (size_t)count, &provider);
+    if (rv != 0) {
+        ih2_stream_drop(c, stream_id);
+    }
+    return rv;
+}
+
+/* Append to the window and tell nghttp2 there is something to send. Growing by doubling keeps a
+ * fast producer from reallocating per chunk; read_body resets the window once it drains, so this
+ * settles at roughly the largest single burst rather than the whole response. */
+int ih2_stream_write(ih2_conn *c, int32_t stream_id, const uint8_t *data, size_t len)
+{
+    if (c == NULL || c->session == NULL) {
+        return NGHTTP2_ERR_INVALID_STATE;
+    }
+
+    ih2_stream *s = ih2_stream_find(c, stream_id);
+    if (s == NULL || !s->streaming || s->eof) {
+        return NGHTTP2_ERR_INVALID_ARGUMENT;
+    }
+    if (len == 0) {
+        return 0;
+    }
+
+    if (s->body_len + len > s->body_cap) {
+        size_t cap = s->body_cap == 0 ? 16384 : s->body_cap;
+        while (cap < s->body_len + len) {
+            cap *= 2;
+        }
+        uint8_t *grown = realloc(s->body, cap);
+        if (grown == NULL) {
+            return NGHTTP2_ERR_NOMEM;
+        }
+        s->body = grown;
+        s->body_cap = cap;
+    }
+
+    memcpy(s->body + s->body_len, data, len);
+    s->body_len += len;
+
+    /* Deferred is the normal state for a streamed body between chunks, so resuming is not an edge
+     * case - it is how every chunk after the first gets sent at all.
+     *
+     * INVALID_ARGUMENT here means the stream simply was not deferred: nghttp2 had not got round to
+     * asking for body bytes yet, so there is nothing to wake and the bytes just sat in the window
+     * until the next read_body. Treating that as an error kills the connection on the first write
+     * that happens to beat nghttp2 to it - which is most of them. */
+    int rv = nghttp2_session_resume_data(c->session, stream_id);
+    return rv == NGHTTP2_ERR_INVALID_ARGUMENT ? 0 : rv;
+}
+
+/* No more body. read_body will flag EOF once what is buffered has gone out. */
+int ih2_stream_close(ih2_conn *c, int32_t stream_id)
+{
+    if (c == NULL || c->session == NULL) {
+        return NGHTTP2_ERR_INVALID_STATE;
+    }
+
+    ih2_stream *s = ih2_stream_find(c, stream_id);
+    if (s == NULL || !s->streaming) {
+        return NGHTTP2_ERR_INVALID_ARGUMENT;
+    }
+
+    s->eof = 1;
+    int rv = nghttp2_session_resume_data(c->session, stream_id);
+    return rv == NGHTTP2_ERR_INVALID_ARGUMENT ? 0 : rv;
+}
+
 int ih2_submit_response(ih2_conn *c, int32_t stream_id,
                         const uint8_t *headers, size_t headers_len,
                         const uint8_t *body, size_t body_len)

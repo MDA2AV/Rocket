@@ -5,11 +5,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <RootNamespace>Examples.AspNet</RootNamespace>
+    <RootNamespace>Playground.AspNet</RootNamespace>
+    <AssemblyName>Playground.AspNet</AssemblyName>
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="../src/serving/ioxide.Kestrel/ioxide.Kestrel.csproj" />
+    <ProjectReference Include="../../src/serving/ioxide.Kestrel/ioxide.Kestrel.csproj" />
   </ItemGroup>
 
 </Project>
