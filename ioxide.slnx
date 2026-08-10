@@ -57,6 +57,7 @@
   <Folder Name="/apps/playground/http2/">
     <Project Path="Playground/Http2/Buffered/Playground.Http2.Buffered.csproj" />
     <Project Path="Playground/Http2/Nghttp2Buffered/Playground.Http2.Nghttp2Buffered.csproj" />
+    <Project Path="Playground/Http2/Nghttp2Response/Playground.Http2.Nghttp2Response.csproj" />
     <Project Path="Playground/Http2/StreamedResponse/Playground.Http2.StreamedResponse.csproj" />
     <Project Path="Playground/Http2/StreamedRequest/Playground.Http2.StreamedRequest.csproj" />
     <Project Path="Playground/Http2/StreamedBoth/Playground.Http2.StreamedBoth.csproj" />

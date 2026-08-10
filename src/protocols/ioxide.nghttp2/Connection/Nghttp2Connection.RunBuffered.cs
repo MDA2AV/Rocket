@@ -92,7 +92,14 @@ public sealed partial class Nghttp2Connection
 
             try
             {
-                inFlight = handler(pending.Freeze());
+                Nghttp2Request request = pending.Freeze();
+
+                if (TryDispatchStreamed(request, pending))
+                {
+                    continue;   // the writer owns this stream, and retires it when done
+                }
+
+                inFlight = handler(request);
             }
             catch
             {

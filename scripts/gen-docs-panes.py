@@ -278,13 +278,28 @@ PANES = {
         "is a property no amount of benchmarking substitutes for: nghttp2 is continuously fuzzed, "
         "patched by people whose job it is when the next HTTP/2 CVE lands, and has a decade of "
         "interop against every other stack. "
-        "What it does not have is the streaming: it is <b>buffered only</b>, so there is no "
-        "counterpart here to <label for=\"tab-h2sresp\" class=\"ex-jump\">response streamed</label> "
-        "or <label for=\"tab-h2sreq\" class=\"ex-jump\">request streamed</label>, and its dispatch "
-        "loop still waits for each handler in turn. Measured as a client on this rig, the managed "
+        "It streams responses too now - see "
+        "<label for=\"tab-h2ngs\" class=\"ex-jump\">response streamed (nghttp2)</label> - though not "
+        "request bodies, where <label for=\"tab-h2sreq\" class=\"ex-jump\">the managed stack</label> "
+        "is still the only one. Measured as a client on this rig, the managed "
         "stack runs <b>1.35&times;-1.39&times;</b> it. Take this one when you want the reference "
         "implementation's coverage; take "
         "<label for=\"tab-h2cs\" class=\"ex-jump\">buffered</label> for everything else."),
+    "h2ngs": (
+        "Http2/Nghttp2Response", "HTTP/2 &middot; nghttp2, response streamed", "ioxide + ioxide.nghttp2",
+        ["curl --http2-prior-knowledge http://127.0.0.1:8080/",
+         "curl --http2-prior-knowledge -N http://127.0.0.1:8080/feed   # never ends"],
+        "The same streamed response as "
+        "<label for=\"tab-h2sresp\" class=\"ex-jump\">the managed one</label>, and the sample code is "
+        "nearly identical - but what happens underneath is the opposite. nghttp2 owns the framing, so "
+        "it <b>PULLS</b>: it asks for body bytes when it is ready to emit DATA, and its read callback "
+        "<em>defers</em> whenever nothing is buffered rather than ending the stream. Every write "
+        "buffers a chunk natively and resumes the deferred stream. "
+        "So a flush here means <em>handed over</em>, not <em>on the wire</em> - nghttp2 decides frame "
+        "boundaries and timing - where the managed writer stages a DATA frame the moment you flush. "
+        "That difference is the whole reason this needed new native entry points "
+        "(<code>ih2_submit_response_stream</code>, <code>ih2_stream_write</code>, "
+        "<code>ih2_stream_close</code>) rather than being a C# change."),
     "h3": (
         "Http3/Nghttp3Request", "HTTP/3 &middot; request streamed (nghttp3)", "ioxide + ioxide.ngtcp2 + ioxide.nghttp3",
         ["curl --http3-only -k https://127.0.0.1:8443/"],

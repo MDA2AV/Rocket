@@ -44,6 +44,7 @@
   <input type="radio" name="mode-tabs" id="tab-h2sreq">
   <input type="radio" name="mode-tabs" id="tab-h2sboth">
   <input type="radio" name="mode-tabs" id="tab-h2ng">
+  <input type="radio" name="mode-tabs" id="tab-h2ngs">
   <input type="radio" name="mode-tabs" id="tab-h2cstls">
   <input type="radio" name="mode-tabs" id="tab-h2bcl">
   <input type="radio" name="mode-tabs" id="tab-h3">
@@ -110,6 +111,7 @@
       <label for="tab-h2sreq">h2c &middot; request streamed</label>
       <label for="tab-h2sboth">h2c &middot; both streamed</label>
       <label for="tab-h2ng">h2c &middot; buffered (nghttp2)</label>
+      <label for="tab-h2ngs">h2c &middot; response streamed (nghttp2)</label>
       <label for="tab-h2cstls">h2 &middot; tls &amp; alpn</label>
       <label for="tab-h2bcl">h2 &middot; over sslstream</label>
     </details>
@@ -3905,7 +3907,99 @@ foreach (Thread thread in threads)
 {
     thread.Join();
 }</code></pre>
-    <p class="ex-foot">The same h2c server on the <b>reference implementation</b>. Kept because being battle-tested is a property no amount of benchmarking substitutes for: nghttp2 is continuously fuzzed, patched by people whose job it is when the next HTTP/2 CVE lands, and has a decade of interop against every other stack. What it does not have is the streaming: it is <b>buffered only</b>, so there is no counterpart here to <label for="tab-h2sresp" class="ex-jump">response streamed</label> or <label for="tab-h2sreq" class="ex-jump">request streamed</label>, and its dispatch loop still waits for each handler in turn. Measured as a client on this rig, the managed stack runs <b>1.35&times;-1.39&times;</b> it. Take this one when you want the reference implementation's coverage; take <label for="tab-h2cs" class="ex-jump">buffered</label> for everything else.</p>
+    <p class="ex-foot">The same h2c server on the <b>reference implementation</b>. Kept because being battle-tested is a property no amount of benchmarking substitutes for: nghttp2 is continuously fuzzed, patched by people whose job it is when the next HTTP/2 CVE lands, and has a decade of interop against every other stack. It streams responses too now - see <label for="tab-h2ngs" class="ex-jump">response streamed (nghttp2)</label> - though not request bodies, where <label for="tab-h2sreq" class="ex-jump">the managed stack</label> is still the only one. Measured as a client on this rig, the managed stack runs <b>1.35&times;-1.39&times;</b> it. Take this one when you want the reference implementation's coverage; take <label for="tab-h2cs" class="ex-jump">buffered</label> for everything else.</p>
+  </div>
+  <div class="pane pane-h2ngs">
+    <div class="pane-head">
+      <h3>HTTP/2 &middot; nghttp2, response streamed</h3>
+      <span class="pane-pkg">ioxide + ioxide.nghttp2</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+// dotnet add package ioxide.nghttp2
+//   curl --http2-prior-knowledge http://127.0.0.1:8080/
+//   curl --http2-prior-knowledge -N http://127.0.0.1:8080/feed   # never ends
+
+using ioxide;
+using ioxide.nghttp2;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort port       = 8080;
+int    reactors   = Environment.ProcessorCount;
+int    chunkCount = 8;      // DATA frames per response on /
+int    chunkBytes = 1024;   // bytes per chunk
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+var config = new ServerConfig
+{
+    ReactorCount   = reactors,   // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                                        // SQ/CQ depth per ring
+    DualStack      = false,                                                       // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                                                   // bytes per shared recv buffer
+    RecvSlots      = 4096,                                                        // shared recv buffer-ring depth
+    Udp            = null,                                                        // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                                        // no QUIC transport - see Http3/*
+    Tcp = new TcpOptions
+    {
+        Port             = port,
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
+    },
+};
+
+byte[] chunk = [.. Enumerable.Repeat((byte)&#x27;x&#x27;, chunkBytes)];
+
+var threads = new Thread[config.ReactorCount];
+
+for (int i = 0; i &lt; threads.Length; i++)
+{
+    var reactor = new Reactor(i, config);
+
+    reactor.TcpHandle = async (r, conn) =&gt;
+    {
+        try
+        {
+            await new Nghttp2Connection(conn).RunAsync(async (request, writer) =&gt;
+            {
+                bool endless = request.Path.Span.SequenceEqual(&quot;/feed&quot;u8);
+
+                // Headers first and once. No content-length: the length is not known yet, and for
+                // /feed never will be - END_STREAM is what marks the end instead.
+                var response = new Nghttp2Response { Status = 200 };
+                response.Headers.Add(&quot;content-type&quot;u8.ToArray(),
+                    endless ? &quot;text/event-stream&quot;u8.ToArray() : &quot;text/plain&quot;u8.ToArray());
+                writer.WriteHeaders(response);
+
+                for (int n = 0; endless || n &lt; chunkCount; n++)
+                {
+                    chunk.CopyTo(writer.GetSpan(chunk.Length));
+                    writer.Advance(chunk.Length);
+                    await writer.FlushAsync();
+                }
+            });
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    };
+
+    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
+    threads[i].Start();
+}
+
+Console.WriteLine($&quot;[nghttp2-streamed-response] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
+                + $&quot;{chunkCount} x {chunkBytes}-byte chunks per response&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}</code></pre>
+    <p class="ex-foot">The same streamed response as <label for="tab-h2sresp" class="ex-jump">the managed one</label>, and the sample code is nearly identical - but what happens underneath is the opposite. nghttp2 owns the framing, so it <b>PULLS</b>: it asks for body bytes when it is ready to emit DATA, and its read callback <em>defers</em> whenever nothing is buffered rather than ending the stream. Every write buffers a chunk natively and resumes the deferred stream. So a flush here means <em>handed over</em>, not <em>on the wire</em> - nghttp2 decides frame boundaries and timing - where the managed writer stages a DATA frame the moment you flush. That difference is the whole reason this needed new native entry points (<code>ih2_submit_response_stream</code>, <code>ih2_stream_write</code>, <code>ih2_stream_close</code>) rather than being a C# change.</p>
   </div>
 
 
