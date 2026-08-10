@@ -43,6 +43,7 @@ Http3/Nghttp3           h3    8443  /         -                   -
 Http3/Buffered          h3    8443  /         -                   -
 Http3/Managed           h3    8443  /         -                   -
 Http3/Streamed          h3    8443  /         -                   PLAYGROUND_CHUNKS=8 PLAYGROUND_CHUNK_BYTES=1024
+Http3/ManagedStreamed   h3    8443  /         -                   PLAYGROUND_CHUNKS=8 PLAYGROUND_CHUNK_BYTES=1024
 
 Quic/Alpn               echo  8443  /         -                   -
 Quic/Pipe               echo  8443  /         -                   -

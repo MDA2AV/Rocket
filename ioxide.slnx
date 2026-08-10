@@ -66,6 +66,7 @@
     <Project Path="Playground/Http3/Nghttp3/Playground.Http3.Nghttp3.csproj" />
     <Project Path="Playground/Http3/Buffered/Playground.Http3.Buffered.csproj" />
     <Project Path="Playground/Http3/Managed/Playground.Http3.Managed.csproj" />
+    <Project Path="Playground/Http3/ManagedStreamed/Playground.Http3.ManagedStreamed.csproj" />
     <Project Path="Playground/Http3/Streamed/Playground.Http3.Streamed.csproj" />
   </Folder>
 

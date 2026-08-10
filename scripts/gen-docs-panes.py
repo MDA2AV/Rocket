@@ -161,6 +161,22 @@ PANES = {
         "the chunk is what stops a producer outrunning a peer that has stopped reading. nghttp3 "
         "PULLS body bytes rather than accepting pushes, which is why this carries a resume and a "
         "drain the pure-C# writer does not need."),
+    "h3csstream": (
+        "Http3/ManagedStreamed", "HTTP/3 &middot; streamed both ways", "ioxide + ioxide.ngtcp2 + ioxide.http3",
+        ["curl --http3-only -k https://127.0.0.1:8443/",
+         "curl --http3-only -kN https://127.0.0.1:8443/feed        # never ends",
+         "curl --http3-only -k --data-binary @big.bin https://127.0.0.1:8443/echo"],
+        "Both directions streamed, in pure C#. The request body is PULLED a chunk at a time through "
+        "<code>Http3Request.BodyReader</code>, so a large upload is never held whole; the response is "
+        "PUSHED through <code>Http3ResponseWriter</code>, one DATA frame per flush, so a large "
+        "download is never built whole. <code>/echo</code> runs both at once - read a chunk, write a "
+        "chunk - which is what a proxy does. "
+        "Owning the framing is what makes the push side simple: a chunk is just "
+        "<code>[0x00][varint length][payload]</code> handed to the QUIC stream, with no data-reader "
+        "callback to answer and nothing to defer. "
+        "<label for=\"tab-h3stream\" class=\"ex-jump\">nghttp3 &middot; streamed</label> carries a "
+        "resume and a drain because nghttp3 pulls instead; this measures <b>1.32&times;</b> its "
+        "throughput on the same 8&times;1&nbsp;KiB response."),
     "h3buf": (
         "Http3/Buffered", "HTTP/3 &middot; buffered dispatch", "ioxide + ioxide.ngtcp2 + ioxide.nghttp3",
         ["curl --http3-only -k https://127.0.0.1:8443/"],
