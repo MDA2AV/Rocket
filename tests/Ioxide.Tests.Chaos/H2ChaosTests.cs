@@ -11,11 +11,11 @@ namespace Ioxide.Tests;
 /// </summary>
 internal static class H2ChaosTests
 {
-    private static int StartH2c() => TestServer.Start(static async (_, conn) =>
+    private static int StartH2c(Http2Options? options = null) => TestServer.Start(async (_, conn) =>
     {
         try
         {
-            await new Http2Connection(conn).RunBufferedAsync(static _ => Http2Response.Text("ok"));
+            await new Http2Connection(conn, options).RunBufferedAsync(static _ => Http2Response.Text("ok"));
         }
         finally
         {
@@ -115,6 +115,65 @@ internal static class H2ChaosTests
             // At least the first stream must come back; the point is the multiplexer survives a
             // burst without losing the connection.
             Assert.True(client.AwaitResponse(streamId: 1), "server dropped a multiplexed request burst");
+        });
+
+        runner.Test("h2c: a CONTINUATION flood is cut off instead of growing without bound", () =>
+        {
+            // MaxFrameSize bounds one frame; nothing bounds how MANY continuations follow a HEADERS
+            // that never sets END_HEADERS. Unbounded, the accumulated block grows until the process
+            // dies - the flood disclosed in April 2024. The block is capped now, and exceeding it is
+            // a CONNECTION error because a block that stops being decoded desynchronises HPACK.
+            int port = StartH2c(new Http2Options { MaxHeaderListSize = 16 * 1024 });
+
+            using (var client = new H2cClient(port))
+            {
+                client.Open();
+                client.RequestHeadersOnly(streamId: 1, endHeaders: false, endStream: false);
+
+                byte[] filler = new byte[4096];
+                byte seen = 0;
+                for (int i = 0; i < 64 && seen == 0; i++)   // 256 KiB, far past the 16 KiB cap
+                {
+                    try
+                    {
+                        client.WriteFrame(H2cClient.Continuation, flags: 0, streamId: 1, filler);
+                    }
+                    catch (IOException)
+                    {
+                        seen = 0xFF;   // server closed on us, which is also a refusal
+                        break;
+                    }
+                    seen = client.AwaitAnyOf([0x7], timeoutMs: 50);   // GOAWAY
+                }
+
+                Assert.True(seen != 0, "server accepted an unbounded CONTINUATION block");
+            }
+
+            AssertServes(port);   // and the process is still there to serve the next connection
+        });
+
+        runner.Test("h2c: streams past MaxConcurrentStreams are refused, not allocated", () =>
+        {
+            // The limit was advertised in SETTINGS and never enforced, so "open a stream, reset it,
+            // repeat" cost the server an arena per cycle and the peer nothing (CVE-2023-44487).
+            // Streams past the limit now get REFUSED_STREAM, which RFC 9113 8.7 makes safe to retry.
+            int port = StartH2c(new Http2Options { MaxConcurrentStreams = 4 });
+
+            using var client = new H2cClient(port);
+            client.Open();
+
+            // END_HEADERS but NOT END_STREAM: each stream stays open, so the limit is reached.
+            for (int i = 0; i < 4; i++)
+            {
+                client.RequestHeadersOnly(1 + (i * 2), endHeaders: true, endStream: false);
+            }
+
+            client.RequestHeadersOnly(streamId: 101, endHeaders: true, endStream: false);
+            Assert.Equal(H2cClient.RstStream, client.AwaitAnyOf([H2cClient.RstStream], streamId: 101));
+
+            // Refusing must not have desynchronised HPACK - the block was still decoded - so a
+            // stream opened afterwards on the same connection still parses.
+            AssertServes(port);
         });
     }
 }

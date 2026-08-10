@@ -5,6 +5,6 @@
   "reactors": 2, "conns": 64, "threads": 8, "seconds": 10,
   "commit": "3c9a208",
   "samples": [
-    {"sample":"Http3/ManagedStreamed","proto":"h3","rps":28906,"cpu_us_per_req":68.95,"util_pct":100,"note":""}
+    {"sample":"Http3/StreamedBoth","proto":"h3","rps":28906,"cpu_us_per_req":68.95,"util_pct":100,"note":""}
   ]
 }

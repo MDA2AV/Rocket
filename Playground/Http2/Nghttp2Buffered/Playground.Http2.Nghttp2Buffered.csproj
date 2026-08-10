@@ -6,14 +6,14 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <RootNamespace>Playground.Http2.Managed</RootNamespace>
-    <AssemblyName>Playground.Http2.Managed</AssemblyName>
+    <RootNamespace>Playground.Http2.Nghttp2Buffered</RootNamespace>
+    <AssemblyName>Playground.Http2.Nghttp2Buffered</AssemblyName>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="../../Shared/Playground.Shared.csproj" />
     <ProjectReference Include="../../../src/ioxide/ioxide.csproj" />
-    <ProjectReference Include="../../../src/protocols/ioxide.http2/ioxide.http2.csproj" />
+    <ProjectReference Include="../../../src/protocols/ioxide.nghttp2/ioxide.nghttp2.csproj" />
   </ItemGroup>
 
 </Project>

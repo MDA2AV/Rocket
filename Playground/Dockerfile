@@ -3,11 +3,11 @@
 #   docker build -f Playground/Dockerfile --build-arg SAMPLE=Tcp/Raw -t playground-raw .
 #   docker run --rm -p 8080:8080 playground-raw
 #
-#   docker build -f Playground/Dockerfile --build-arg SAMPLE=Http3/Nghttp3 -t playground-h3 .
+#   docker build -f Playground/Dockerfile --build-arg SAMPLE=Http3/Nghttp3Request -t playground-h3 .
 #   docker run --rm -p 8080:8080 -p 8443:8443/udp playground-h3
 #
 # SAMPLE is the directory path under Playground/ - any directory that carries a csproj:
-# Tcp/Raw, Tcp/Pipe, Tls/OpenSsl, Http2/Nghttp2, Http3/Nghttp3, Clients/Pg, Proxy/H1ToH1, ...
+# Tcp/Raw, Tcp/Pipe, Tls/OpenSsl, Http2/Nghttp2, Http3/Nghttp3Request, Clients/Pg, Proxy/H1ToH1, ...
 ARG SAMPLE=Tcp/Raw
 
 FROM mcr.microsoft.com/dotnet/sdk:11.0-preview AS build

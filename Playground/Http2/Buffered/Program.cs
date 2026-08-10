@@ -7,7 +7,7 @@ using Playground.Shared;
 //  http2 - an HTTP/2 server in pure C#: framing, HPACK and flow control; ioxide owns the
 //  ring, the loop and the connection, so a response is written straight into the write slab.
 //
-//      dotnet run -c Release --project Playground/Http2/Managed
+//      dotnet run -c Release --project Playground/Http2/Buffered
 //      curl --http2-prior-knowledge http://127.0.0.1:8080/hello
 //
 //  This is h2c with PRIOR KNOWLEDGE: the peer opens with the HTTP/2 connection preface and no
@@ -71,8 +71,8 @@ for (int i = 0; i < threads.Length; i++)
     {
         try
         {
-            // The connection owns the read loop from here: it feeds nghttp2, dispatches each
-            // request once its stream ends, and drains the egress once per batch.
+            // The connection owns the read loop from here: it parses frames, dispatches each
+            // request once its stream ends, and flushes the batch in one write.
             await new Http2Connection(conn).RunBufferedAsync(_ => new Http2Response
             {
                 Status = 200,
@@ -89,7 +89,7 @@ for (int i = 0; i < threads.Length; i++)
     threads[i].Start();
 }
 
-Console.WriteLine($"[http2] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
+Console.WriteLine($"[http2-buffered] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
                 + $"{body.Length}-byte body (h2c prior knowledge)");
 
 foreach (Thread thread in threads)

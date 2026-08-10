@@ -28,23 +28,23 @@ COMBOS = {
     "H1ToH3": ("h1 &rarr; h3", "HTTP/1.1 in &middot; HTTP/3 out",
                "ioxide + ioxide.httpclient",
                [
-                'dotnet run --project Playground/Http3/Nghttp3          # h3 origin on udp :8443',
+                'dotnet run --project Playground/Http3/Nghttp3Request          # h3 origin on udp :8443',
                 'PLAYGROUND_UPSTREAM_PORT=8443 dotnet run --project Playground/Proxy/H1ToH3',
                 'curl -k https://127.0.0.1:8443/']),
     "H2ToH1": ("h2 &rarr; h1", "HTTP/2 in &middot; HTTP/1.1 out",
-               "ioxide + ioxide.nghttp2 + ioxide.httpclient",
+               "ioxide + ioxide.http2 + ioxide.httpclient",
                [
                 'PLAYGROUND_PORT=8444 dotnet run --project Playground/Tls/Ktls   # a TLS origin',
                 'curl -k --http2 https://127.0.0.1:8443/']),
     "H2ToH2": ("h2 &rarr; h2", "HTTP/2 in &middot; HTTP/2 out",
-               "ioxide + ioxide.nghttp2 + ioxide.httpclient",
+               "ioxide + ioxide.http2 + ioxide.httpclient",
                [
                 'PLAYGROUND_PORT=8444 dotnet run --project Playground/Http2/Tls  # an h2-over-TLS origin',
                 'curl -k --http2 https://127.0.0.1:8443/']),
     "H2ToH3": ("h2 &rarr; h3", "HTTP/2 in &middot; HTTP/3 out",
-               "ioxide + ioxide.nghttp2 + ioxide.httpclient",
+               "ioxide + ioxide.http2 + ioxide.httpclient",
                [
-                'dotnet run --project Playground/Http3/Nghttp3          # h3 origin on udp :8443',
+                'dotnet run --project Playground/Http3/Nghttp3Request          # h3 origin on udp :8443',
                 'PLAYGROUND_UPSTREAM_PORT=8443 dotnet run --project Playground/Proxy/H2ToH3',
                 'curl -k --http2 https://127.0.0.1:8443/']),
     "H3ToH1": ("h3 &rarr; h1", "HTTP/3 in &middot; HTTP/1.1 out",
@@ -60,7 +60,7 @@ COMBOS = {
     "H3ToH3": ("h3 &rarr; h3", "HTTP/3 in &middot; HTTP/3 out",
                "ioxide + ioxide.ngtcp2 + ioxide.nghttp3 + ioxide.httpclient",
                [
-                'PLAYGROUND_QUIC_PORT=8444 dotnet run --project Playground/Http3/Nghttp3',
+                'PLAYGROUND_QUIC_PORT=8444 dotnet run --project Playground/Http3/Nghttp3Request',
                 'curl --http3-only -k https://127.0.0.1:8443/']),
 }
 
@@ -79,7 +79,7 @@ NOTES = {
               "concurrency - a hundred h2 streams need a hundred h1 connections, because h1 has no "
               "multiplexing to borrow.",
     "H2ToH2": "The narrowest proxy in this set: two sockets per reactor no matter how many requests "
-              "are in flight. Two independent nghttp2 sessions are involved and they share nothing - "
+              "are in flight. Two independent HTTP/2 sessions are involved and they share nothing - "
               "HPACK state is per-connection, so a proxy always re-encodes. “Just splice the frames” "
               "is not a shortcut that exists.",
     "H2ToH3": "TCP in, QUIC out - the client half of a migration where the origin moved to HTTP/3 and "

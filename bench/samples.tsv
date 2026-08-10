@@ -34,16 +34,16 @@ Tls/SslStream           h1s   8443  /         -                   -
 Tls/MultiPort           h1    8080  /         -                   -
 
 Http2/Nghttp2           h2c   8080  /         -                   -
-Http2/Managed           h2c   8080  /         -                   -
+Http2/Buffered           h2c   8080  /         -                   -
 Http2/Tls               h2    8443  /         -                   -
 Http2/SslStream         h2    8443  /         -                   -
-Http2/ManagedTls        h2    8443  /         -                   -
+Http2/Tls        h2    8443  /         -                   -
 
-Http3/Nghttp3           h3    8443  /         -                   -
-Http3/Buffered          h3    8443  /         -                   -
-Http3/Managed           h3    8443  /         -                   -
-Http3/Streamed          h3    8443  /         -                   PLAYGROUND_CHUNKS=8 PLAYGROUND_CHUNK_BYTES=1024
-Http3/ManagedStreamed   h3    8443  /         -                   PLAYGROUND_CHUNKS=8 PLAYGROUND_CHUNK_BYTES=1024
+Http3/Nghttp3Request           h3    8443  /         -                   -
+Http3/Nghttp3Buffered          h3    8443  /         -                   -
+Http3/Buffered           h3    8443  /         -                   -
+Http3/Nghttp3Response          h3    8443  /         -                   PLAYGROUND_CHUNKS=8 PLAYGROUND_CHUNK_BYTES=1024
+Http3/StreamedBoth   h3    8443  /         -                   PLAYGROUND_CHUNKS=8 PLAYGROUND_CHUNK_BYTES=1024
 
 Quic/Alpn               echo  8443  /         -                   -
 Quic/Pipe               echo  8443  /         -                   -
@@ -58,10 +58,10 @@ Clients/Quic            driver -    -         -                   -
 
 Proxy/H1ToH1            h1s   8443  /         Tls/OpenSsl         -
 Proxy/H1ToH2            h1s   8443  /         Http2/Tls           -
-Proxy/H1ToH3            h1s   8443  /         Http3/Nghttp3       -
+Proxy/H1ToH3            h1s   8443  /         Http3/Nghttp3Request       -
 Proxy/H2ToH1            h2    8443  /         Tls/OpenSsl         -
 Proxy/H2ToH2            h2    8443  /         Http2/Tls           -
-Proxy/H2ToH3            h2    8443  /         Http3/Nghttp3       -
+Proxy/H2ToH3            h2    8443  /         Http3/Nghttp3Request       -
 Proxy/H3ToH1            h3    8443  /         Tls/OpenSsl         -
 Proxy/H3ToH2            h3    8443  /         Http2/Tls           -
-Proxy/H3ToH3            h3    8443  /         Http3/Nghttp3       -
+Proxy/H3ToH3            h3    8443  /         Http3/Nghttp3Request       -

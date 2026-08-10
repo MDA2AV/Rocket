@@ -1,121 +1,72 @@
-using System.Runtime.InteropServices;
 using ioxide;
-using ioxide.nghttp3;
+using ioxide.http3;
 using ioxide.ngtcp2;
-using ioxide.utils;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  nghttp3-buffered - the same HTTP/3 server as Playground/Http3/Nghttp3, with the OTHER dispatch mode.
+//  http3-buffered - HTTP/3 in PURE C#, dispatched BUFFERED: the handler runs once the request
+//  has fully arrived, so request.Body already holds the whole body. Frames, QPACK and Huffman
+//  are all managed code, so nothing native ships but the QUIC transport underneath.
 //
-//  BUFFERED: dispatch waits for end-of-stream, so the whole body is already in request.Body when
-//  your handler runs - no BodyReader, no pacing - and the handler may still await (a PgPool query,
-//  Redis, anything ioxide-native resumes inline on the reactor).
-//
-//  The trade: memory holds the entire body, so this suits normal-sized requests. Use Playground/Http3/Nghttp3
-//  when uploads can be large or hostile.
-//
-//  It doubles as the QUIC/HTTP3 tuning reference: the Knobs block below shows every h3-path option
-//  (engine, listener, UDP, QPACK) as a literal, including maxSendRetentionBytes - the knob that
-//  bounds memory when serving large responses.
+//  The same server as Playground/Http3/Nghttp3Request otherwise - the diff is the package and the type
+//  names - which is what makes the two directly comparable:
 //
 //      dotnet run -c Release --project Playground/Http3/Buffered
 //      curl --http3-only -k https://127.0.0.1:8443/
 //
-//  Needs: ioxide, ioxide.ngtcp2, ioxide.nghttp3
+//  Needs: ioxide, ioxide.ngtcp2, ioxide.http3
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 // ── Knobs ────────────────────────────────────────────────────────────────────────────────────
 // Edit these. That is the whole mechanism - there is no config file and nothing else to find.
-// Env.Override exists only so bench/run.sh can drive the sample from outside; delete those lines
-// when you copy this out and the literals above them are the entire configuration.
+// Each Env.Override names the variable that can drive it instead, which is how the bench scripts
+// run this sample; the literal is what applies otherwise.
 
-// This sample is the QUIC/HTTP3 tuning reference: every knob the h3 path exposes is here as a
-// literal, grouped by the type it feeds. The defaults are the shipping defaults - shown, not
-// changed - so you can see the whole surface and edit one line.
-
-ushort quicPort = 8443;                        // https://127.0.0.1:8443/ over UDP - h3 lives here
-ushort tcpPort  = 8080;                        // the TCP listener, so the process serves both
+ushort quicPort = 8443;                        // https://127.0.0.1:8443/ over UDP
 int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
 
-Env.Override(ref tcpPort, ref reactors);
 Env.OverrideQuic(ref quicPort, ref reactors);
 
-// ── QuicEngine: the per-endpoint QUIC/TLS state, shared by every connection ───────────────────
-uint cidLength = 8;                            // connection-id length this endpoint mints (1..20)
+// Response body size. 13 is "Hello, World!"; anything else is that many 'x'.
+int bodyBytes = 13;
 
-// Per-connection send-retention high-water. A response larger than this is streamed out paced by
-// the peer's acks instead of buffered whole, so memory stays ~this-per-connection whatever the
-// response size - the knob that lets HTTP/3 serve large files. Raise for more in-flight throughput
-// on fat links; lower to cap memory under many connections. Default 16 MiB.
-long maxSendRetentionBytes = 16L << 20;
+Env.Override(ref bodyBytes, "PLAYGROUND_BODY");
 
-// ── QuicOptions: the listener ─────────────────────────────────────────────────────────────────
-int idleTimeoutMs = 60_000;                    // close a connection idle this long (no packets)
-
-// ── UdpOptions: how datagrams are received ────────────────────────────────────────────────────
-int  udpRecvSlots = 16;                        // multishot recv slots per reactor - datagrams the ring can hold at once
-bool gro          = true;                       // UDP_GRO: coalesce received datagrams into one recv (fewer syscalls)
-
-// ── Nghttp3Options: the HTTP/3 layer ──────────────────────────────────────────────────────────
-// QPACK dynamic table. 0 keeps every header literal, which costs bytes but never blocks a stream
-// on a table update; raise it and set QpackBlockedStreams to trade one for the other.
-long qpackCapacity = 0;
-long qpackBlockedStreams = qpackCapacity > 0 ? 100 : 0;
+// UDP receive slots per reactor: how many datagrams the ring can have outstanding at once.
+int udpRecvSlots = 16;
 
 // A real PEM pair, or null to generate a self-signed localhost cert on first run.
 string? certOverride = null;
 string? keyOverride  = null;
+
+Env.OverrideCert(ref certOverride, ref keyOverride);
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 (string certPath, string keyPath) = QuicCert.Ensure(certOverride, keyOverride);
 
-using var engine = new QuicEngine(certPath, keyPath, cidLength, alpn: ["h3"], maxSendRetentionBytes);
+using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
 
 var config = new ServerConfig
 {
-    ReactorCount   = reactors,
-    RingEntries    = 8192,                                  // SQ/CQ depth per ring
-    DualStack      = false,                                 // true = one IPv6 socket also accepts IPv4-mapped
-    RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
-    RecvSlots      = 4096,                                 // shared recv buffer-ring depth
-    Incremental    = null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
-    Tcp = new TcpOptions
-    {
-        Port             = tcpPort,
-        ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
-        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
-        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
-        PoolMax          = 1024,                           // pooled connection objects kept per reactor
-        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
-        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
-        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
-    },
-    Udp = new UdpOptions { RecvSlots = udpRecvSlots, Gro = gro },
+    ReactorCount = reactors,
+    Tcp = null,                                        // QUIC only
+    Udp = new UdpOptions { RecvSlots = udpRecvSlots },
     Quic = new QuicOptions
     {
         Port = quicPort,
-        LocalCidLength = (int)cidLength,        // must match the engine's cidLength
-        IdleTimeoutMs = idleTimeoutMs,
+        LocalCidLength = 8,
         ConnectionFactory = engine.CreateFactory(),
     },
 };
 
-var h3Options = new Nghttp3Options
+// Built once and reused: the h3 layer copies status, headers and body at submit and never retains
+// the object, so a hot path should not rebuild it per request.
+var response = new Http3Response
 {
-    QpackDynamicTableCapacity = qpackCapacity,
-    QpackBlockedStreams = qpackBlockedStreams,
+    Body = bodyBytes == 13 ? "Hello, World!"u8.ToArray() : [.. Enumerable.Repeat((byte)'x', bodyBytes)],
 };
-
-// Built once and reused for every request - the h3 layer copies it into nghttp3 at submit and never
-// retains it, so this costs zero allocations per request.
-var response = new Nghttp3Response { Body = "Hello, World!"u8.ToArray() };
-response.Headers.Add("content-type"u8.ToArray(), "text/plain"u8.ToArray());
-response.Headers.Add("server"u8.ToArray(), "ioxide"u8.ToArray());
-
-byte[] tcpResponse = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok"u8.ToArray();
-
-List<(Reactor Reactor, Nghttp3Connection Connection)> live = [];
+response.Headers.Add(("content-type"u8.ToArray(), "text/plain"u8.ToArray()));
+response.Headers.Add(("server"u8.ToArray(), "ioxide"u8.ToArray()));
 
 var threads = new Thread[config.ReactorCount];
 
@@ -123,80 +74,14 @@ for (int i = 0; i < threads.Length; i++)
 {
     var reactor = new Reactor(i, config);
 
-    reactor.QuicHandle = (r, quicConn) =>
-    {
-        var h3 = new Nghttp3Connection(quicConn, h3Options);
-        lock (live)
-        {
-            live.Add((r, h3));
-        }
-
-        // RunBufferedAsync, not RunStreamingAsync - that one call is the whole difference.
-        return h3.RunBufferedAsync(request =>
-        {
-            // Dispatch waited for end-of-stream, so the body is ALREADY here: request.Body is
-            // complete and request.Body.Length is just a property read. No BodyReader, no pacing.
-            // This overload is synchronous, but the awaiting one exists too - a PgPool query or a
-            // Redis command resumes inline on this reactor, so you can await it right here.
-            _ = request.Body.Length;
-
-            // One response object, reused for every request: zero allocations on this path. To
-            // route, compare request.Path.Span - it is post-QPACK bytes, so SequenceEqual against a
-            // u8 literal beats decoding it to a string.
-            return response;
-        });
-    };
-
-    reactor.TcpHandle = async (r, conn) =>
-    {
-        try
-        {
-            while (true)
-            {
-                RecvSnapshot snapshot = await conn.ReadAsync();
-                while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
-                {
-                    if (item.HasBuffer) conn.ReturnBuffer(in item);
-                }
-
-                conn.Write(tcpResponse);
-                await conn.FlushAsync();
-
-                if (snapshot.IsClosed) return;
-                conn.ResetRead();
-            }
-        }
-        finally
-        {
-            conn.DecRef();
-        }
-    };
+    reactor.QuicHandle = (r, conn) => new Http3Connection(conn).RunAsync(_ => response);
 
     threads[i] = new Thread(reactor.Run) { Name = $"reactor-{i}" };
     threads[i].Start();
 }
 
-using var drain = PosixSignalRegistration.Create(PosixSignal.SIGTERM, context =>
-{
-    context.Cancel = true;
-    Console.WriteLine("[nghttp3-buffered] SIGTERM: draining connections (GOAWAY)...");
-
-    lock (live)
-    {
-        foreach ((Reactor r, Nghttp3Connection h3) in live)
-        {
-            r.ScheduleOnReactor(static state => ((Nghttp3Connection)state!).Shutdown(), h3);
-        }
-        live.Clear();
-    }
-
-    Thread.Sleep(2000);
-    Console.WriteLine("[nghttp3-buffered] drain complete, exiting");
-    Environment.Exit(0);
-});
-
-Console.WriteLine($"[nghttp3-buffered] {config.ReactorCount} reactors - tcp :{config.Tcp.Port}, "
-                + $"udp :{quicPort} (ngtcp2 {QuicEngine.NativeVersion()})");
+Console.WriteLine($"[h3-managed] {config.ReactorCount} reactors, h3 on udp :{config.Quic!.Port} "
+                + $"(pure C#), {bodyBytes}-byte body, cert {certPath}");
 
 foreach (Thread thread in threads)
 {

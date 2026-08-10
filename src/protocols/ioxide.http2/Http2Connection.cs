@@ -12,14 +12,15 @@ namespace ioxide.http2;
 ///     new Http2Connection(conn).RunBufferedAsync(request => Http2Response.Text("hello"));
 /// </code>
 ///
-/// A drop-in alternative to <c>Nghttp2Connection</c> - same shape, same request and response
-/// surface - the way <c>ioxide.http3</c> is for <c>ioxide.nghttp3</c>. Take this one when shipping
-/// a native library is inconvenient; take nghttp2 when you want the reference implementation's
-/// coverage of the protocol's darker corners.
+/// The default HTTP/2 here, and the one the features land on: streamed responses, streamed
+/// request bodies and non-blocking dispatch are all this side. <c>ioxide.nghttp2</c> remains as
+/// the battle-tested alternative - buffered only, and the reference implementation's coverage of
+/// the protocol's darker corners. Measured on this rig it runs 1.35x-1.39x the binding as a
+/// client; the same framing and HPACK drive <c>ioxide.httpclient</c>, pointed the other way round.
 ///
-/// Like its nghttp2 counterpart it speaks to an <see cref="IDuplexPipe"/> and knows nothing about
-/// TLS: hand it a <c>TcpConnectionDualPipe</c> for h2c or a <c>TlsConnectionDualPipe</c> for h2
-/// over TLS, and the protocol code is identical either way.
+/// It speaks to an <see cref="IDuplexPipe"/> and knows nothing about TLS: hand it a
+/// <c>TcpConnectionDualPipe</c> for h2c or a <c>TlsConnectionDualPipe</c> for h2 over TLS, and the
+/// protocol code is identical either way.
 /// </summary>
 /// <remarks>Reactor thread only.</remarks>
 public sealed partial class Http2Connection : IDisposable
@@ -39,6 +40,16 @@ public sealed partial class Http2Connection : IDisposable
 
     private readonly Dictionary<int, PendingRequest> _streams = new();
     private readonly List<PendingRequest> _ready = [];
+
+    // Readers whose parked ReadAsync has something to hand over. Collected during parsing and
+    // fired once it has unwound, so a resumed handler cannot re-enter the parser mid-frame.
+    private readonly List<Http2BodyReader> _bodyWakes = [];
+
+    // The header block of a stream refused for exceeding MaxConcurrentStreams: decoded to keep
+    // HPACK in step with the peer, then thrown away. A block cannot interleave with another
+    // stream's frames, so one of these is enough.
+    private readonly PendingRequest _discardBlock = new();
+    private int _discardingStream;
 
     private bool _prefaceSeen;
     private bool _disposed;
@@ -91,12 +102,25 @@ public sealed partial class Http2Connection : IDisposable
             pending.Dispose();
         }
         _ready.Clear();
+        _bodyWakes.Clear();
 
         if (_inbound.Length > 0)
         {
             ArrayPool<byte>.Shared.Return(_inbound);
             _inbound = [];
         }
+
+        if (_queued.Length > 0)
+        {
+            ArrayPool<byte>.Shared.Return(_queued);
+            _queued = [];
+        }
+        _queuedUsed = 0;
+
+        // A writer parked on its turn of the write pump has to wake into IsBroken, not hang: the
+        // flush that would have completed its turn is never coming.
+        _turnWaiter?.TrySetResult();
+        _turnWaiter = null;
     }
 
     /// <summary>Serve until the peer goes away, answering each request with <paramref name="handler"/>.</summary>
@@ -122,8 +146,20 @@ public sealed partial class Http2Connection : IDisposable
 
                 if (received)
                 {
+                    // A streamed writer that finishes inside this window needs no write of its own:
+                    // the flush below carries it out together with every other response the pass
+                    // produced. That coalescing is the whole reason buffered h2 is fast, and there
+                    // is no reason a streamed response cannot share it.
+                    _passFlushPending = true;
                     ParseAvailable();
                     await DispatchReadyAsync(handler);
+
+                    // Body chunks reach their handlers here, inside the pass: the WINDOW_UPDATEs a
+                    // read stages then ride the same flush as everything else, so credit gets back
+                    // to the peer without a write of its own.
+                    FireBodyWakes();
+
+                    _passFlushPending = false;
                     await FlushAsync();
                 }
 
@@ -141,6 +177,8 @@ public sealed partial class Http2Connection : IDisposable
         }
         finally
         {
+            // A writer parked on flow-control credit will never be woken by a dead connection.
+            ReleaseAllCreditWaiters();
             Dispose();
         }
     }
@@ -198,16 +236,127 @@ public sealed partial class Http2Connection : IDisposable
 
         foreach (PendingRequest pending in ready)
         {
+            ValueTask<Http2Response> inFlight;
+
             try
             {
                 Http2Request request = pending.Freeze();
-                Http2Response response = await handler(request);
-                WriteResponse(pending.StreamId, response);
+
+                if (TryDispatchStreamed(request, pending))
+                {
+                    continue;   // the writer owns this stream, and retires it when done
+                }
+
+                inFlight = handler(request);
             }
-            finally
+            catch
             {
                 pending.Dispose();
+                throw;
             }
+
+            // Answered synchronously, which nearly every handler does. Stay inline: this response
+            // is staged in time for the pass flush, so it still leaves with every other one, and
+            // there is no Task to allocate.
+            if (inFlight.IsCompletedSuccessfully)
+            {
+                try
+                {
+                    WriteResponse(pending.StreamId, inFlight.Result);
+                }
+                finally
+                {
+                    RetireStream(pending);
+                }
+                continue;
+            }
+
+            // It parked - a database, an upstream, a disk. Awaiting here would hold every OTHER
+            // stream on this connection behind it, including responses already staged and ready to
+            // go, because they all share this one dispatch loop and one TCP connection. So it
+            // finishes on its own and writes its own bytes when it does.
+            _ = CompleteBufferedAsync(inFlight, pending);
+        }
+    }
+
+    /// <summary>
+    /// The tail of a handler that parked. Nothing is awaiting this, so everything the dispatch loop
+    /// would have done afterwards has to happen here instead - retiring the request, and writing,
+    /// since the pass flush has long gone by. Forgetting that tail in the streamed path is what
+    /// leaked 20 GB.
+    /// </summary>
+    private async Task CompleteBufferedAsync(ValueTask<Http2Response> inFlight, PendingRequest pending)
+    {
+        try
+        {
+            Http2Response response = await inFlight;
+            WriteResponse(pending.StreamId, response);
+        }
+        catch (Exception exception)
+        {
+            // Nobody can observe this task, so an escaping exception would vanish silently and the
+            // peer would wait on a stream that is never coming.
+            Console.Error.WriteLine($"[ioxide.http2] request handler faulted: {exception.GetBaseException().Message}");
+
+            if (!IsBroken)
+            {
+                WriteResponse(pending.StreamId, new Http2Response { Status = 500 });
+            }
+        }
+        finally
+        {
+            RetireStream(pending);
+            await MaybeFlushAsync();
+        }
+    }
+
+    /// <summary>
+    /// Done with a stream. The buffered path already took it out of <c>_streams</c> when it became
+    /// ready; a streamed request is still in there, because DATA frames were arriving the whole
+    /// time the handler ran.
+    /// </summary>
+    private void RetireStream(PendingRequest pending)
+    {
+        _streams.Remove(pending.StreamId);
+        pending.Dispose();
+    }
+
+    /// <summary>Return a consumed chunk's credit to the peer, on both windows it was charged to.</summary>
+    internal void CreditBody(int streamId, int length)
+    {
+        if (length <= 0 || IsBroken)
+        {
+            return;
+        }
+
+        WriteWindowUpdate(0, length);
+        WriteWindowUpdate(streamId, length);
+    }
+
+    /// <summary>A reader has something for a parked ReadAsync; wake it once the parser is done.</summary>
+    internal void NoteBodyWake(Http2BodyReader reader)
+    {
+        if (!_bodyWakes.Contains(reader))
+        {
+            _bodyWakes.Add(reader);
+        }
+    }
+
+    private void FireBodyWakes()
+    {
+        if (_bodyWakes.Count == 0)
+        {
+            return;
+        }
+
+        // Snapshot-and-clear: a resumed handler reads again, which can land another wake here, and
+        // the list must not be mutated while it is being walked.
+        Http2BodyReader[] wakes = _bodyWakes.ToArray();
+        _bodyWakes.Clear();
+
+        foreach (Http2BodyReader reader in wakes)
+        {
+            reader.FireIfReady();
         }
     }
 }

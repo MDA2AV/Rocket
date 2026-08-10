@@ -20,6 +20,7 @@ internal static class Program
         TcpChaosTests.Register(runner);
         TlsChaosTests.Register(runner);
         H2ChaosTests.Register(runner);
+        Nghttp2ChaosTests.Register(runner);
         QuicChaosTests.Register(runner);
         H3ChaosTests.Register(runner);
 

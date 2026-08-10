@@ -6,14 +6,15 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <RootNamespace>Playground.Http2.Nghttp2</RootNamespace>
-    <AssemblyName>Playground.Http2.Nghttp2</AssemblyName>
+    <RootNamespace>Playground.Http3.Nghttp3Request</RootNamespace>
+    <AssemblyName>Playground.Http3.Nghttp3Request</AssemblyName>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="../../Shared/Playground.Shared.csproj" />
     <ProjectReference Include="../../../src/ioxide/ioxide.csproj" />
-    <ProjectReference Include="../../../src/protocols/ioxide.nghttp2/ioxide.nghttp2.csproj" />
+    <ProjectReference Include="../../../src/protocols/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
+    <ProjectReference Include="../../../src/protocols/ioxide.nghttp3/ioxide.nghttp3.csproj" />
   </ItemGroup>
 
 </Project>

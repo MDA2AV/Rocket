@@ -36,7 +36,7 @@ Env.OverrideQuic(ref quicPort, ref reactors);
 int udpRecvSlots = 16;
 
 // Per-connection send-retention high-water (default 16 MiB): a response larger than it streams out
-// paced by acks instead of buffering whole. See Playground/Http3/Buffered for the full knob set.
+// paced by acks instead of buffering whole. See Playground/Http3/Nghttp3Buffered for the full knob set.
 long maxSendRetentionBytes = 16L << 20;
 
 // A real PEM pair, or null to generate a self-signed localhost cert on first run.

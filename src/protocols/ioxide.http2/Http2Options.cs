@@ -15,6 +15,34 @@ public sealed record Http2Options
     /// <summary>Flow-control window advertised per stream.</summary>
     public int InitialWindowSize { get; init; } = 1 << 20;
 
-    /// <summary>Streams the peer may have open at once.</summary>
+    /// <summary>
+    /// Streams the peer may have open at once. Advertised in SETTINGS <em>and</em> enforced: past
+    /// this, a new stream is refused with REFUSED_STREAM rather than allocated. It was advisory
+    /// once, which made "open a stream, reset it, repeat" (CVE-2023-44487) cost the server an
+    /// arena per cycle and the peer nothing.
+    /// </summary>
     public int MaxConcurrentStreams { get; init; } = 1000;
+
+    /// <summary>
+    /// Ceiling on one request's header block, accumulated across HEADERS and every CONTINUATION
+    /// that follows it.
+    ///
+    /// <see cref="MaxFrameSize"/> bounds one frame; nothing bounds how many CONTINUATION frames a
+    /// peer may send, so without this a HEADERS that never sets END_HEADERS grows the block until
+    /// the process dies - the CONTINUATION flood. Exceeding it is a CONNECTION error, not a stream
+    /// one, because a block that stops being decoded desynchronises HPACK for everything after it.
+    /// </summary>
+    public int MaxHeaderListSize { get; init; } = 64 * 1024;
+
+    /// <summary>
+    /// Dispatch each request as soon as its HEADERS are in, with the body arriving through
+    /// <see cref="Http2Request.BodyReader"/> instead of assembled into
+    /// <see cref="Http2Request.Body"/>.
+    ///
+    /// The trade is what memory is bound by. Buffered holds the whole body, which suits ordinary
+    /// requests and not hostile uploads; streamed holds one flow-control window, because credit is
+    /// only returned to the peer as the handler reads. <see cref="MaxRequestBytes"/> stops applying
+    /// to the body when this is on - there is no arena for it to bound.
+    /// </summary>
+    public bool StreamRequestBodies { get; init; }
 }

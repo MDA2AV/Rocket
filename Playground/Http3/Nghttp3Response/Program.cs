@@ -5,16 +5,16 @@ using ioxide.ngtcp2;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  nghttp3-streamed - HTTP/3 where the RESPONSE body is produced over time instead of handed
-//  over whole. The other two h3 samples differ in how the REQUEST arrives; this one is about the
-//  other direction.
+//  nghttp3-streamed-response - HTTP/3 where the RESPONSE body is produced over time rather
+//  than handed over whole. The other two nghttp3 samples differ in how the REQUEST arrives;
+//  this one is about the other direction.
 //
 //  Buffered and streaming both end with `return new Nghttp3Response { Body = ... }` - the whole
 //  body has to exist before anything can be sent. That is fine for a page and impossible for a
 //  feed: an endpoint that never stops has no final byte to return. Here the handler gets a
 //  WRITER, and each flush becomes DATA on the wire.
 //
-//      dotnet run -c Release --project Playground/Http3/Streamed
+//      dotnet run -c Release --project Playground/Http3/Nghttp3Response
 //      curl --http3-only -k https://127.0.0.1:8443/         # 64 chunks, one per flush
 //      curl --http3-only -kN https://127.0.0.1:8443/feed    # never ends; ctrl-c to stop
 //

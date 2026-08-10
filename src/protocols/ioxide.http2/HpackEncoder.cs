@@ -4,12 +4,12 @@ namespace ioxide.http2;
 /// The encoding half of HPACK. Deliberately simple: it uses the static table where a name or a
 /// name+value pair matches exactly, and sends everything else as a literal WITHOUT indexing.
 ///
-/// That choice is worth stating plainly, because it is the one place this differs from nghttp2 in
-/// output rather than only in implementation. Never adding to the dynamic table means the encoder
-/// holds no per-connection compression state, so it cannot desynchronise from the peer's decoder -
-/// the failure mode that makes HPACK bugs so unpleasant. It costs bytes on repeated custom headers,
-/// which a server sends far fewer of than a client; the pseudo-headers and common response fields
-/// that dominate a small response are all static-table hits either way.
+/// That choice is worth stating plainly, because it is where this produces different bytes from a
+/// fully general encoder rather than merely reaching them differently. Never adding to the dynamic
+/// table means the encoder holds no per-connection compression state, so it cannot desynchronise
+/// from the peer's decoder - the failure mode that makes HPACK bugs so unpleasant. It costs bytes
+/// on repeated custom headers, which a server sends far fewer of than a client; the pseudo-headers
+/// and common response fields that dominate a small response are all static-table hits either way.
 ///
 /// Literals are sent unencoded rather than Huffman-coded. Huffman saves roughly 20% on header
 /// octets and costs CPU per response; for a server whose headers are mostly static-table indices

@@ -90,6 +90,12 @@ public sealed partial class Nghttp2Connection
     /// Pull everything nghttp2 has queued into the write slab and flush once. Looping until the
     /// session reports nothing left is what keeps a batch of responses to a single send.
     /// </summary>
+    // One drain at a time. Both the read loop and a handler that finished late can start one, and a
+    // drain awaits a real flush - so without this they interleave writes out of the single _egress
+    // buffer, and a PipeWriter refuses a Write while a flush is outstanding anyway.
+    private bool _draining;
+    private bool _drainAgain;
+
     private async ValueTask FlushEgressAsync()
     {
         if (_handle == 0)
@@ -97,23 +103,45 @@ public sealed partial class Nghttp2Connection
             return;
         }
 
-        bool staged = false;
-
-        while (true)
+        if (_draining)
         {
-            int produced = DrainOnce();
-            if (produced <= 0)
-            {
-                break;
-            }
-
-            _pipe.Output.Write(_egress.AsSpan(0, produced));
-            staged = true;
+            // A drain owns the pipe. Whatever was just submitted is sitting in nghttp2's own
+            // queue rather than in ours, so the loop below will pull it before it returns - which
+            // is why this needs no queue of its own, unlike the managed stack.
+            _drainAgain = true;
+            return;
         }
 
-        if (staged)
+        _draining = true;
+        try
         {
-            await _pipe.Output.FlushAsync();
+            do
+            {
+                _drainAgain = false;
+
+                bool staged = false;
+                while (true)
+                {
+                    int produced = DrainOnce();
+                    if (produced <= 0)
+                    {
+                        break;
+                    }
+
+                    _pipe.Output.Write(_egress.AsSpan(0, produced));
+                    staged = true;
+                }
+
+                if (staged)
+                {
+                    await _pipe.Output.FlushAsync();
+                }
+            }
+            while (_drainAgain && _handle != 0);
+        }
+        finally
+        {
+            _draining = false;
         }
     }
 

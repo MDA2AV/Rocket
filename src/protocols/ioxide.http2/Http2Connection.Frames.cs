@@ -140,7 +140,26 @@ public sealed partial class Http2Connection
 
         if (!_streams.TryGetValue(header.StreamId, out PendingRequest? pending))
         {
-            pending = new PendingRequest { StreamId = header.StreamId };
+            if (_streams.Count >= _options.MaxConcurrentStreams)
+            {
+                // Past the limit we advertised. The block still has to be DECODED - HPACK is one
+                // stream across the whole connection, so skipping it would desynchronise every
+                // later request - but it decodes into a scratch that is thrown away, and the peer
+                // is told REFUSED_STREAM, which RFC 9113 8.7 makes safe for it to retry elsewhere.
+                _discardingStream = header.StreamId;
+                DiscardHeaderBlock(header, block);
+                return;
+            }
+
+            // Opens at what the peer's SETTINGS advertised, not at the RFC default. Streams are
+            // created long after those SETTINGS arrive, so starting at 65535 and waiting for a
+            // WINDOW_UPDATE means waiting for one the peer has no reason to send - it believes we
+            // still have its whole window. That stalls any response longer than 65535 bytes.
+            pending = new PendingRequest
+            {
+                StreamId = header.StreamId,
+                SendWindow = _peerInitialStreamWindow,
+            };
             _streams[header.StreamId] = pending;
         }
 
@@ -148,23 +167,82 @@ public sealed partial class Http2Connection
         // piecewise - the whole block has to be in hand first.
         pending.AppendHeaderBlock(block);
 
+        if (pending.HeaderBlock.Length > _options.MaxHeaderListSize)
+        {
+            GoAway(Http2Error.EnhanceYourCalm);
+            return;
+        }
+
         if ((header.Flags & FrameFlags.EndHeaders) != 0)
         {
             if (!DecodeHeaderBlock(pending))
             {
                 return;
             }
+            BeginStreamedBody(pending, ended: (header.Flags & FrameFlags.EndStream) != 0);
         }
 
         if ((header.Flags & FrameFlags.EndStream) != 0)
         {
             pending.RequestEnded = true;
+            pending.BodyReader?.End();
             TryComplete(pending);
         }
     }
 
+    /// <summary>
+    /// A refused stream's header block: decoded to keep the HPACK table in step with the peer, and
+    /// thrown away. Bounded like any other block, so refusing a stream cannot itself be the way in.
+    /// </summary>
+    private void DiscardHeaderBlock(in FrameHeader header, ReadOnlySpan<byte> block)
+    {
+        _discardBlock.AppendHeaderBlock(block);
+
+        if (_discardBlock.HeaderBlock.Length > _options.MaxHeaderListSize)
+        {
+            GoAway(Http2Error.EnhanceYourCalm);
+            return;
+        }
+
+        if ((header.Flags & FrameFlags.EndHeaders) == 0)
+        {
+            return;   // more CONTINUATION to come
+        }
+
+        int streamId = _discardingStream;
+        _discardingStream = 0;
+
+        if (DecodeHeaderBlock(_discardBlock, discard: true))
+        {
+            ResetStream(streamId, Http2Error.RefusedStream);
+        }
+    }
+
+    /// <summary>
+    /// Hand this request over the moment its headers are in, with the body still to come. The
+    /// stream stays in <c>_streams</c> - unlike the buffered path, later DATA frames still have
+    /// somewhere to go - and is retired when the handler finishes instead.
+    /// </summary>
+    private void BeginStreamedBody(PendingRequest pending, bool ended)
+    {
+        if (!_options.StreamRequestBodies || pending.BodyReader is not null)
+        {
+            return;
+        }
+
+        pending.BodyReader = new Http2BodyReader(this, pending.StreamId, ended);
+        _ready.Add(pending);
+    }
+
     private void HandleContinuation(in FrameHeader header, ReadOnlySpan<byte> payload)
     {
+        // The block belongs to a stream we refused; keep decoding it so HPACK stays in step.
+        if (header.StreamId == _discardingStream)
+        {
+            DiscardHeaderBlock(header, payload);
+            return;
+        }
+
         if (!_streams.TryGetValue(header.StreamId, out PendingRequest? pending))
         {
             GoAway(Http2Error.ProtocolError);
@@ -173,17 +251,25 @@ public sealed partial class Http2Connection
 
         pending.AppendHeaderBlock(payload);
 
+        if (pending.HeaderBlock.Length > _options.MaxHeaderListSize)
+        {
+            GoAway(Http2Error.EnhanceYourCalm);
+            return;
+        }
+
         if ((header.Flags & FrameFlags.EndHeaders) != 0)
         {
             if (!DecodeHeaderBlock(pending))
             {
                 return;
             }
+            // END_STREAM rode the HEADERS that opened this block, not the CONTINUATION closing it.
+            BeginStreamedBody(pending, ended: pending.RequestEnded);
             TryComplete(pending);
         }
     }
 
-    private bool DecodeHeaderBlock(PendingRequest pending)
+    private bool DecodeHeaderBlock(PendingRequest pending, bool discard = false)
     {
         try
         {
@@ -198,7 +284,8 @@ public sealed partial class Http2Connection
             }
 
             PendingRequest target = pending;
-            _decoder.Decode(block, _headerScratch, (name, value) => target.AddHeader(name, value));
+            _decoder.Decode(block, _headerScratch,
+                discard ? static (_, _) => { } : (name, value) => target.AddHeader(name, value));
             pending.ClearHeaderBlock();
             pending.HeadersDone = true;
             return true;
@@ -233,7 +320,13 @@ public sealed partial class Http2Connection
             body = body[..^padding];
         }
 
-        if (_streams.TryGetValue(header.StreamId, out PendingRequest? pending))
+        _streams.TryGetValue(header.StreamId, out PendingRequest? pending);
+
+        if (pending?.BodyReader is { } reader)
+        {
+            reader.Push(body);
+        }
+        else if (pending is not null)
         {
             if (pending.BodyLength + body.Length > _options.MaxRequestBytes)
             {
@@ -244,9 +337,14 @@ public sealed partial class Http2Connection
         }
 
         // The whole payload counts against the window, padding included, so the peer's accounting
-        // and ours agree. Replenished immediately: this server buffers the request anyway, so
-        // holding the window back would only stall the peer.
-        if (payload.Length > 0)
+        // and ours agree. Replenished immediately here because this server buffers the request
+        // anyway, so holding the window back would only stall the peer for nothing.
+        //
+        // A STREAMED body is the exception, and the reason the option exists: its credit is
+        // returned as the handler reads (Http2BodyReader.ReadAsync), so a consumer that falls
+        // behind stops replenishing and the peer stops sending. Crediting here as well would hand
+        // the window back before the bytes were consumed and put the bound back on memory.
+        if (payload.Length > 0 && pending?.BodyReader is null)
         {
             WriteWindowUpdate(0, payload.Length);
             if (header.StreamId != 0)
@@ -258,12 +356,20 @@ public sealed partial class Http2Connection
         if ((header.Flags & FrameFlags.EndStream) != 0 && pending is not null)
         {
             pending.RequestEnded = true;
+            pending.BodyReader?.End();
             TryComplete(pending);
         }
     }
 
     private void TryComplete(PendingRequest pending)
     {
+        // A streamed request was handed over at its headers and is being served right now; its
+        // stream is retired by whoever is serving it, not here.
+        if (pending.BodyReader is not null)
+        {
+            return;
+        }
+
         if (!pending.HeadersDone || !pending.RequestEnded)
         {
             return;
@@ -345,6 +451,10 @@ public sealed partial class Http2Connection
         {
             pending.SendWindow += increment;
         }
+
+        // Credit arrived, so a streamed response parked on it can carry on. Stream 0 credits the
+        // connection and therefore unblocks every parked writer, not just one.
+        ReleaseCreditWaiters(header.StreamId);
     }
 
     private void HandlePing(in FrameHeader header, ReadOnlySpan<byte> payload)
@@ -390,6 +500,9 @@ public sealed partial class Http2Connection
         public int StreamId;
         public bool HeadersDone;
         public bool RequestEnded;
+
+        /// <summary>Set only when the body is being streamed; the arena stays empty then.</summary>
+        public Http2BodyReader? BodyReader;
 
         /// <summary>What the peer will still accept on this stream. Starts at its advertised default.</summary>
         public int SendWindow = 65535;
@@ -487,12 +600,13 @@ public sealed partial class Http2Connection
         {
             var request = new Http2Request
             {
-                StreamId  = StreamId,
-                Method    = Slice(Method),
-                Path      = Slice(Path),
-                Scheme    = Slice(Scheme),
-                Authority = Slice(Authority),
-                Body      = Slice(_body),
+                StreamId   = StreamId,
+                Method     = Slice(Method),
+                Path       = Slice(Path),
+                Scheme     = Slice(Scheme),
+                Authority  = Slice(Authority),
+                Body       = Slice(_body),
+                BodyReader = BodyReader,
             };
 
             foreach ((int nameOffset, int nameLength, int valueOffset, int valueLength) in _fields)
@@ -509,6 +623,11 @@ public sealed partial class Http2Connection
 
         public void Dispose()
         {
+            // Recycles any chunk still queued and wakes a handler parked on a body that will
+            // never finish arriving.
+            BodyReader?.Drop();
+            BodyReader = null;
+
             ClearHeaderBlock();
             _fields.Clear();
             if (_arena.Length > 0)

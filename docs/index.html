@@ -39,9 +39,11 @@
   <input type="radio" name="mode-tabs" id="tab-qpipe">
   <input type="radio" name="mode-tabs" id="tab-qraw">
   <input type="radio" name="mode-tabs" id="tab-quicalpn">
-  <input type="radio" name="mode-tabs" id="tab-h2">
   <input type="radio" name="mode-tabs" id="tab-h2cs">
-  <input type="radio" name="mode-tabs" id="tab-h2tls">
+  <input type="radio" name="mode-tabs" id="tab-h2sresp">
+  <input type="radio" name="mode-tabs" id="tab-h2sreq">
+  <input type="radio" name="mode-tabs" id="tab-h2sboth">
+  <input type="radio" name="mode-tabs" id="tab-h2ng">
   <input type="radio" name="mode-tabs" id="tab-h2cstls">
   <input type="radio" name="mode-tabs" id="tab-h2bcl">
   <input type="radio" name="mode-tabs" id="tab-h3">
@@ -103,20 +105,22 @@
 
     <details class="ex-sect">
       <summary>http/2</summary>
-      <label for="tab-h2">h2c &middot; nghttp2</label>
-      <label for="tab-h2cs">h2c &middot; pure c#</label>
-      <label for="tab-h2tls">h2 &middot; tls &amp; alpn</label>
-      <label for="tab-h2cstls">h2 &middot; pure c# + tls</label>
+      <label for="tab-h2cs">h2c &middot; buffered</label>
+      <label for="tab-h2sresp">h2c &middot; response streamed</label>
+      <label for="tab-h2sreq">h2c &middot; request streamed</label>
+      <label for="tab-h2sboth">h2c &middot; both streamed</label>
+      <label for="tab-h2ng">h2c &middot; buffered (nghttp2)</label>
+      <label for="tab-h2cstls">h2 &middot; tls &amp; alpn</label>
       <label for="tab-h2bcl">h2 &middot; over sslstream</label>
     </details>
 
     <details class="ex-sect">
       <summary>http/3</summary>
-      <label for="tab-h3">nghttp3 &middot; streamed</label>
-      <label for="tab-h3buf">nghttp3 &middot; buffered</label>
-      <label for="tab-h3stream">nghttp3 &middot; streamed</label>
-      <label for="tab-h3cs">pure c#</label>
-      <label for="tab-h3csstream">pure c# &middot; streamed</label>
+      <label for="tab-h3cs">h3 &middot; buffered</label>
+      <label for="tab-h3csstream">h3 &middot; request + response streamed</label>
+      <label for="tab-h3buf">h3 &middot; buffered (nghttp3)</label>
+      <label for="tab-h3">h3 &middot; request streamed (nghttp3)</label>
+      <label for="tab-h3stream">h3 &middot; response streamed (nghttp3)</label>
     </details>
 
     <details class="ex-sect">
@@ -772,7 +776,7 @@ foreach (Thread thread in threads)
   </div>
   <div class="pane pane-h2cstls">
     <div class="pane-head">
-      <h3>HTTP/2 &middot; pure C# over TLS</h3>
+      <h3>HTTP/2 &middot; TLS &amp; ALPN</h3>
       <span class="pane-pkg">ioxide + ioxide.http2</span>
     </div>
 <pre><code class="language-csharp">// dotnet add package ioxide
@@ -932,7 +936,7 @@ for (int i = 0; i &lt; threads.Length; i++)
         }
         catch (Exception e)
         {
-            Console.Error.WriteLine($&quot;[http2-managed-tls] connection failed: {e.Message}&quot;);
+            Console.Error.WriteLine($&quot;[http2-tls] connection failed: {e.Message}&quot;);
         }
         finally
         {
@@ -945,7 +949,7 @@ for (int i = 0; i &lt; threads.Length; i++)
     threads[i].Start();
 }
 
-Console.WriteLine($&quot;[http2-managed-tls] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
+Console.WriteLine($&quot;[http2-tls] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
                 + $&quot;ALPN h2 then http/1.1, cert {certPath}, &quot;
                 + $&quot;rx={(kernelTx &amp;&amp; kernelRx ? &quot;kernel&quot; : &quot;openssl&quot;)}, &quot;
                 + $&quot;tx={(kernelTx ? &quot;kernel&quot; : &quot;openssl&quot;)}&quot;);
@@ -981,15 +985,15 @@ sealed class Carry
         _len -= count;
     }
 }</code></pre>
-    <p class="ex-foot">The pure-C# HTTP/2 server behind TLS, and the diff against <label for="tab-h2tls" class="ex-jump">h2 &middot; tls &amp; alpn</label> is three type names and a package - no native library anywhere. Both take an <code>IDuplexPipe</code>, so neither learns what is under it. Measured on this rig at 2 reactors, 64 connections, 32 streams, a 2-byte body: pure C# runs <b>2.46&times;</b> nghttp2 over TLS and 2.73&times; cleartext, at about a third of the CPU per request. That ordering does <b>not</b> generalize - at 32 connections over 4 reactors nghttp2 is ahead instead - and a 2-byte body measures framing and HPACK rather than moving data. TLS itself costs both the same <b>0.05&micro;s per request</b>.</p>
+    <p class="ex-foot">How a browser actually reaches h2: over TLS, with the protocol chosen during the handshake. <code>Alpn = ["h2", "http/1.1"]</code> is an ordered preference, not a weighting - the server takes the first entry the client also offered, and this sample then branches on what was agreed, so ONE port serves both. That is why the h2c samples are the exception rather than the rule. What <code>Http2Connection</code> is handed is a <code>TlsConnectionDualPipe</code>: it never learns TLS is involved, so the protocol code is byte-for-byte the h2c sample's. TLS is <b>OpenSSL both ways by default</b>; the <code>kernelTx</code>/<code>kernelRx</code> knobs at the top move either direction into the kernel, and cost the same <b>0.05&micro;s per request</b> either way.</p>
   </div>
   <div class="pane pane-h2bcl">
     <div class="pane-head">
       <h3>HTTP/2 &middot; over SslStream</h3>
-      <span class="pane-pkg">ioxide + ioxide.nghttp2</span>
+      <span class="pane-pkg">ioxide + ioxide.http2</span>
     </div>
 <pre><code class="language-csharp">// dotnet add package ioxide
-// dotnet add package ioxide.nghttp2
+// dotnet add package ioxide.http2
 //   curl -k --http2 https://127.0.0.1:8443/
 
 using System.IO.Pipelines;
@@ -997,7 +1001,7 @@ using System.Net.Security;
 using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using ioxide;
-using ioxide.nghttp2;
+using ioxide.http2;
 
 // ── Knobs ────────────────────────────────────────────────────────────────────────────────────
 
@@ -1062,8 +1066,8 @@ for (int i = 0; i &lt; threads.Length; i++)
                 return;   // this sample only serves h2; see Playground/Http2/Tls for the fallback
             }
 
-            await new Nghttp2Connection(new StreamDuplexPipe(ssl)).RunBufferedAsync(
-                _ =&gt; new Nghttp2Response { Status = 200, Body = body });
+            await new Http2Connection(new StreamDuplexPipe(ssl)).RunBufferedAsync(
+                _ =&gt; new Http2Response { Status = 200, Body = body });
         }
         catch (Exception e)
         {
@@ -1101,7 +1105,7 @@ internal sealed class StreamDuplexPipe(Stream stream) : IDuplexPipe
   </div>
   <div class="pane pane-h3cs">
     <div class="pane-head">
-      <h3>HTTP/3 &middot; pure C#</h3>
+      <h3>HTTP/3 &middot; buffered</h3>
       <span class="pane-pkg">ioxide + ioxide.ngtcp2 + ioxide.http3</span>
     </div>
 <pre><code class="language-csharp">// dotnet add package ioxide
@@ -1178,7 +1182,7 @@ foreach (Thread thread in threads)
   </div>
   <div class="pane pane-h3stream">
     <div class="pane-head">
-      <h3>HTTP/3 &middot; streamed response</h3>
+      <h3>HTTP/3 &middot; response streamed (nghttp3)</h3>
       <span class="pane-pkg">ioxide + ioxide.ngtcp2 + ioxide.nghttp3</span>
     </div>
 <pre><code class="language-csharp">// dotnet add package ioxide
@@ -1278,7 +1282,7 @@ foreach (Thread thread in threads)
   </div>
   <div class="pane pane-h3csstream">
     <div class="pane-head">
-      <h3>HTTP/3 &middot; streamed both ways</h3>
+      <h3>HTTP/3 &middot; request + response streamed</h3>
       <span class="pane-pkg">ioxide + ioxide.ngtcp2 + ioxide.http3</span>
     </div>
 <pre><code class="language-csharp">// dotnet add package ioxide
@@ -1428,7 +1432,7 @@ static Http3Response Plain(bool eventStream = false)
   </div>
   <div class="pane pane-h3buf">
     <div class="pane-head">
-      <h3>HTTP/3 &middot; buffered dispatch</h3>
+      <h3>HTTP/3 &middot; buffered (nghttp3)</h3>
       <span class="pane-pkg">ioxide + ioxide.ngtcp2 + ioxide.nghttp3</span>
     </div>
 <pre><code class="language-csharp">// dotnet add package ioxide
@@ -1640,7 +1644,7 @@ int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reac
 int udpRecvSlots = 16;
 
 // Per-connection send-retention high-water (default 16 MiB): a response larger than it streams out
-// paced by acks instead of buffering whole. See Playground/Http3/Buffered for the full knob set.
+// paced by acks instead of buffering whole. See Playground/Http3/Nghttp3Buffered for the full knob set.
 long maxSendRetentionBytes = 16L &lt;&lt; 20;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -3387,7 +3391,434 @@ foreach (Thread thread in threads)
 }</code></pre>
     <p class="ex-foot">Diff this against <label for="tab-tlspipe" class="ex-jump">ktls &middot; pipes</label> and the only functional difference is <code>KernelTx</code>; the rest is the banner and the log tag. That is the point of the pipe seam - <code>TlsConnectionDualPipe</code> pairs <code>TcpConnectionPipeReader</code> or <code>TlsDecryptingPipeReader</code> with <code>TcpConnectionPipeWriter</code> or <code>TlsEncryptingPipeWriter</code>, chosen from the <em>session</em>. It has to be the session and not the config, because a handshake that left a partial record keeps the userspace reader whatever was asked for.</p>
   </div>
-  <div class="pane pane-h2">
+
+  <div class="pane pane-h2cs">
+    <div class="pane-head">
+      <h3>HTTP/2 &middot; buffered</h3>
+      <span class="pane-pkg">ioxide + ioxide.http2</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+// dotnet add package ioxide.http2
+//   curl --http2-prior-knowledge http://127.0.0.1:8080/
+
+using System.Text;
+using ioxide;
+using ioxide.http2;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort port      = 8080;
+int    reactors  = Environment.ProcessorCount;
+int    bodyBytes = 2;
+
+
+// Per-connection recv buffer rings (kernel 6.12+) instead of one shared ring per reactor. The
+// handler code is identical either way; this only changes how recv buffers are handed out.
+bool incrementalBuffers = false;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+var config = new ServerConfig
+{
+    ReactorCount   = reactors,  // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                                        // SQ/CQ depth per ring
+    DualStack      = false,                                                       // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                                                   // bytes per shared recv buffer
+    RecvSlots      = 4096,                                                        // shared recv buffer-ring depth
+    Incremental    = incrementalBuffers ? new IncrementalOptions { MaxConnections = 1024, RecvSlots = 8, RecvBufferSize = 16 * 1024 } : null,                                                        // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,                                                        // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                                        // no QUIC transport - see Http3/* and Quic/Alpn
+    Tcp = new TcpOptions
+    {
+        Port             = port,
+        ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
+    },
+};
+
+byte[] body = bodyBytes == 2
+    ? &quot;ok&quot;u8.ToArray()
+    : [.. Enumerable.Repeat((byte)&#x27;x&#x27;, bodyBytes)];
+
+var threads = new Thread[config.ReactorCount];
+
+for (int i = 0; i &lt; threads.Length; i++)
+{
+    var reactor = new Reactor(i, config);
+
+    reactor.TcpHandle = async (r, conn) =&gt;
+    {
+        try
+        {
+            // The connection owns the read loop from here: it parses frames, dispatches each
+            // request once its stream ends, and flushes the batch in one write.
+            await new Http2Connection(conn).RunBufferedAsync(_ =&gt; new Http2Response
+            {
+                Status = 200,
+                Body = body,
+            });
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    };
+
+    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
+    threads[i].Start();
+}
+
+Console.WriteLine($&quot;[http2-buffered] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
+                + $&quot;{body.Length}-byte body (h2c prior knowledge)&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}</code></pre>
+    <p class="ex-foot"><b>h2c with prior knowledge</b>: the peer opens with the HTTP/2 connection preface and there is no upgrade dance. For h2 over TLS see <label for="tab-h2cstls" class="ex-jump">tls &amp; alpn</label> - the protocol code there is byte-for-byte this one, because <code>Http2Connection</code> takes an <code>IDuplexPipe</code> and never learns what is under it. BUFFERED is the dispatch mode: the handler runs once the request has fully arrived, so <code>request.Body</code> holds the whole body and the answer is one <code>Http2Response</code>. That is the right default, and the wrong one for a large upload or an endless response - the three tabs after it are those cases.</p>
+  </div>
+  <div class="pane pane-h2sresp">
+    <div class="pane-head">
+      <h3>HTTP/2 &middot; response streamed</h3>
+      <span class="pane-pkg">ioxide + ioxide.http2</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+// dotnet add package ioxide.http2
+//   curl --http2-prior-knowledge http://127.0.0.1:8080/
+//   curl --http2-prior-knowledge -N http://127.0.0.1:8080/feed   # never ends
+
+using System.Text;
+using ioxide;
+using ioxide.http2;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort port      = 8080;
+int    reactors  = Environment.ProcessorCount;
+int    bodyBytes = 2;   // unused here: the body is produced chunk by chunk
+
+
+// Per-connection recv buffer rings (kernel 6.12+) instead of one shared ring per reactor. The
+// handler code is identical either way; this only changes how recv buffers are handed out.
+bool incrementalBuffers = false;
+
+
+// Chunks written per response on &quot;/&quot;, and the size of each. Their product is never held at once.
+int chunkCount = 64;
+int chunkBytes = 16 * 1024;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+var config = new ServerConfig
+{
+    ReactorCount   = reactors,  // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                                        // SQ/CQ depth per ring
+    DualStack      = false,                                                       // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                                                   // bytes per shared recv buffer
+    RecvSlots      = 4096,                                                        // shared recv buffer-ring depth
+    Incremental    = incrementalBuffers ? new IncrementalOptions { MaxConnections = 1024, RecvSlots = 8, RecvBufferSize = 16 * 1024 } : null,                                                        // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,                                                        // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                                        // no QUIC transport - see Http3/* and Quic/Alpn
+    Tcp = new TcpOptions
+    {
+        Port             = port,
+        ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
+    },
+};
+
+byte[] body = bodyBytes == 2
+    ? &quot;ok&quot;u8.ToArray()
+    : [.. Enumerable.Repeat((byte)&#x27;x&#x27;, bodyBytes)];
+
+var threads = new Thread[config.ReactorCount];
+
+byte[] chunk = Encoding.ASCII.GetBytes(new string(&#x27;x&#x27;, chunkBytes - 1) + &quot;\n&quot;);
+
+for (int i = 0; i &lt; threads.Length; i++)
+{
+    var reactor = new Reactor(i, config);
+
+    reactor.TcpHandle = async (r, conn) =&gt;
+    {
+        try
+        {
+            await new Http2Connection(conn).RunAsync(async (request, writer) =&gt;
+            {
+                bool endless = request.Path.Span.SequenceEqual(&quot;/feed&quot;u8);
+
+                // Headers first and once. No content-length: the length is not known yet, and for
+                // /feed never will be - END_STREAM is what marks the end instead.
+                var response = new Http2Response { Status = 200 };
+                response.Headers.Add(&quot;content-type&quot;u8.ToArray(),
+                    endless ? &quot;text/event-stream&quot;u8.ToArray() : &quot;text/plain&quot;u8.ToArray());
+                writer.WriteHeaders(response);
+
+                for (int n = 0; endless || n &lt; chunkCount; n++)
+                {
+                    chunk.CopyTo(writer.GetSpan(chunk.Length));
+                    writer.Advance(chunk.Length);
+
+                    // Waits when either window is exhausted, and resumes on the WINDOW_UPDATE.
+                    await writer.FlushAsync();
+                }
+            });
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    };
+
+    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
+    threads[i].Start();
+}
+
+Console.WriteLine($&quot;[http2-streamed-response] {config.ReactorCount} reactors on :{config.Tcp!.Port} &quot;
+                + $&quot;(pure C#), {chunkCount} x {chunkBytes}-byte chunks per response&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}</code></pre>
+    <p class="ex-foot">The RESPONSE body produced over time instead of returned whole - each flush becomes a DATA frame. <code>/feed</code> is why the mode exists: an endless response has no final byte, so a buffered API cannot express it at all. <code>Http2ResponseWriter</code> is an <code>IBufferWriter&lt;byte&gt;</code>, so a serializer or a framework's response sink writes into it unchanged. What HTTP/2 adds over <label for="tab-h3csstream" class="ex-jump">the h3 equivalent</label> is that credit is SHARED: every stream rides one TCP connection, so a flush waits on whichever of the stream and connection windows runs out first, and a WINDOW_UPDATE for either wakes it.</p>
+  </div>
+  <div class="pane pane-h2sreq">
+    <div class="pane-head">
+      <h3>HTTP/2 &middot; request streamed</h3>
+      <span class="pane-pkg">ioxide + ioxide.http2</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+// dotnet add package ioxide.http2
+//   head -c 50000000 /dev/zero | curl --http2-prior-knowledge --data-binary @- \
+//     http://127.0.0.1:8080/upload
+
+using System.Text;
+using ioxide;
+using ioxide.http2;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort port     = 8080;
+int    reactors = Environment.ProcessorCount;
+
+
+// Advertised per stream. This is the ceiling on how far ahead of the handler a peer may get, so
+// on a streamed request it is the memory bound - not a throughput knob.
+int streamWindow = 256 * 1024;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+var config = new ServerConfig
+{
+    ReactorCount   = reactors,   // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                                        // SQ/CQ depth per ring
+    DualStack      = false,                                                       // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                                                   // bytes per shared recv buffer
+    RecvSlots      = 4096,                                                        // shared recv buffer-ring depth
+    Udp            = null,                                                        // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                                        // no QUIC transport - see Http3/*
+    Tcp = new TcpOptions
+    {
+        Port             = port,
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
+    },
+};
+
+var http2 = new Http2Options
+{
+    StreamRequestBodies = true,          // the whole point: dispatch at the headers, body follows
+    InitialWindowSize   = streamWindow,  // how far ahead of the handler the peer may run
+};
+
+var threads = new Thread[config.ReactorCount];
+
+for (int i = 0; i &lt; threads.Length; i++)
+{
+    var reactor = new Reactor(i, config);
+
+    reactor.TcpHandle = async (r, conn) =&gt;
+    {
+        try
+        {
+            await new Http2Connection(conn, http2).RunBufferedAsync(async request =&gt;
+            {
+                // BodyReader is set because StreamRequestBodies is on; with it off the body would
+                // be in request.Body instead and this would be null.
+                long total = 0;
+                if (request.BodyReader is { } body)
+                {
+                    while (true)
+                    {
+                        // Empty means end of body. Each read hands back the peer&#x27;s credit for the
+                        // chunk it returns, which is what lets the next one arrive - and the
+                        // memory it points at is recycled by the NEXT read, so anything worth
+                        // keeping has to be copied out here.
+                        ReadOnlyMemory&lt;byte&gt; chunk = await body.ReadAsync();
+                        if (chunk.IsEmpty)
+                        {
+                            break;
+                        }
+                        total += chunk.Length;
+                    }
+                }
+
+                return new Http2Response
+                {
+                    Status = 200,
+                    Body = Encoding.ASCII.GetBytes($&quot;{total} bytes\n&quot;),
+                };
+            });
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    };
+
+    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
+    threads[i].Start();
+}
+
+Console.WriteLine($&quot;[http2-streamed-request] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
+                + $&quot;request bodies streamed, {streamWindow / 1024} KiB window per stream&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}</code></pre>
+    <p class="ex-foot">The other direction, and a different problem. <code>StreamRequestBodies</code> dispatches at the HEADERS and hands the handler an <code>Http2BodyReader</code>, so it runs while the upload is still arriving. What changes is what bounds memory: buffered holds the whole body, so <code>MaxRequestBytes</code> is all that stands between a hostile peer and the arena; streamed holds ONE flow-control window, because a chunk credits the peer's window only as the handler <em>reads</em> it. Fall behind and the peer runs out of credit and stops sending - backpressure the peer takes part in, rather than a buffer you hope is big enough.</p>
+  </div>
+  <div class="pane pane-h2sboth">
+    <div class="pane-head">
+      <h3>HTTP/2 &middot; both directions streamed</h3>
+      <span class="pane-pkg">ioxide + ioxide.http2</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+// dotnet add package ioxide.http2
+//   curl --http2-prior-knowledge -N http://127.0.0.1:8080/feed
+//   head -c 50000000 /dev/zero | curl --http2-prior-knowledge --data-binary @- \
+//     http://127.0.0.1:8080/echo
+
+using ioxide;
+using ioxide.http2;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort port       = 8080;
+int    reactors   = Environment.ProcessorCount;
+int    chunkBytes = 1024;   // one DATA frame per flush on /feed
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+var config = new ServerConfig
+{
+    ReactorCount   = reactors,   // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                                        // SQ/CQ depth per ring
+    DualStack      = false,                                                       // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                                                   // bytes per shared recv buffer
+    RecvSlots      = 4096,                                                        // shared recv buffer-ring depth
+    Udp            = null,                                                        // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                                        // no QUIC transport - see Http3/*
+    Tcp = new TcpOptions
+    {
+        Port             = port,
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
+    },
+};
+
+// Both halves are opt-in and independent: this one turns the REQUEST direction on, RunAsync below
+// is what turns the RESPONSE direction on.
+var http2 = new Http2Options { StreamRequestBodies = true };
+
+byte[] chunk = [.. Enumerable.Repeat((byte)&#x27;x&#x27;, chunkBytes)];
+
+var threads = new Thread[config.ReactorCount];
+
+for (int i = 0; i &lt; threads.Length; i++)
+{
+    var reactor = new Reactor(i, config);
+
+    reactor.TcpHandle = async (r, conn) =&gt;
+    {
+        try
+        {
+            await new Http2Connection(conn, http2).RunAsync(async (request, writer) =&gt;
+            {
+                bool echo = request.Path.Span.SequenceEqual(&quot;/echo&quot;u8);
+
+                // No content-length: on /feed the length will never be known, and on /echo it is
+                // not known yet. END_STREAM is what marks the end instead.
+                var response = new Http2Response { Status = 200 };
+                response.Headers.Add(&quot;content-type&quot;u8.ToArray(), &quot;text/plain&quot;u8.ToArray());
+                writer.WriteHeaders(response);
+
+                if (echo)
+                {
+                    // Both directions at once. Nothing here holds more than one chunk: the read
+                    // credits the peer for what it hands back, and the flush waits for room on the
+                    // way out - so a fast uploader is paced by the slower of the two, not buffered.
+                    while (true)
+                    {
+                        ReadOnlyMemory&lt;byte&gt; incoming = await request.BodyReader!.ReadAsync();
+                        if (incoming.IsEmpty)
+                        {
+                            break;
+                        }
+
+                        incoming.Span.CopyTo(writer.GetSpan(incoming.Length));
+                        writer.Advance(incoming.Length);
+                        await writer.FlushAsync();
+                    }
+                    return;
+                }
+
+                // /feed: a response with no end at all. There is no final byte to wait for, which
+                // is the case a buffered API has no way to express.
+                while (true)
+                {
+                    chunk.CopyTo(writer.GetSpan(chunk.Length));
+                    writer.Advance(chunk.Length);
+                    await writer.FlushAsync();
+                }
+            });
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    };
+
+    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
+    threads[i].Start();
+}
+
+Console.WriteLine($&quot;[http2-streamed-both] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
+                + $&quot;request pulled and response pushed ({chunkBytes}-byte chunks on /feed)&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}</code></pre>
+    <p class="ex-foot">Both at once, which is the shape a proxy needs: <code>/echo</code> reads a chunk and writes a chunk, so neither the upload nor the download is ever held whole. The two directions are separate switches - <code>StreamRequestBodies</code> for the read side, <code>RunAsync</code> with a writer for the write side - because they solve different problems and most servers want exactly one of them. Mirrors <label for="tab-h3csstream" class="ex-jump">h3 &middot; request + response streamed</label>; the difference is HTTP/2's shared connection window, which a handler that stops reading holds down for every other stream on the connection.</p>
+  </div>
+  <div class="pane pane-h2ng">
     <div class="pane-head">
       <h3>HTTP/2 &middot; nghttp2</h3>
       <span class="pane-pkg">ioxide + ioxide.nghttp2</span>
@@ -3474,312 +3905,9 @@ foreach (Thread thread in threads)
 {
     thread.Join();
 }</code></pre>
-    <p class="ex-foot">This is <b>h2c with prior knowledge</b>: the peer opens with the HTTP/2 connection preface and there is no upgrade dance. For h2 over TLS see the <label for="tab-h2tls" class="ex-jump">tls &amp; alpn</label> tab - the protocol code there is byte-for-byte identical, because <code>Nghttp2Connection</code> takes an <code>IDuplexPipe</code> and never learns what is under it.</p>
+    <p class="ex-foot">The same h2c server on the <b>reference implementation</b>. Kept because being battle-tested is a property no amount of benchmarking substitutes for: nghttp2 is continuously fuzzed, patched by people whose job it is when the next HTTP/2 CVE lands, and has a decade of interop against every other stack. What it does not have is the streaming: it is <b>buffered only</b>, so there is no counterpart here to <label for="tab-h2sresp" class="ex-jump">response streamed</label> or <label for="tab-h2sreq" class="ex-jump">request streamed</label>, and its dispatch loop still waits for each handler in turn. Measured as a client on this rig, the managed stack runs <b>1.35&times;-1.39&times;</b> it. Take this one when you want the reference implementation's coverage; take <label for="tab-h2cs" class="ex-jump">buffered</label> for everything else.</p>
   </div>
 
-  <div class="pane pane-h2cs">
-    <div class="pane-head">
-      <h3>HTTP/2 &middot; pure C#</h3>
-      <span class="pane-pkg">ioxide + ioxide.http2</span>
-    </div>
-<pre><code class="language-csharp">// dotnet add package ioxide
-// dotnet add package ioxide.http2
-//   curl --http2-prior-knowledge http://127.0.0.1:8080/
-
-using System.Text;
-using ioxide;
-using ioxide.http2;
-
-// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
-
-ushort port      = 8080;
-int    reactors  = Environment.ProcessorCount;
-int    bodyBytes = 2;
-
-
-// Per-connection recv buffer rings (kernel 6.12+) instead of one shared ring per reactor. The
-// handler code is identical either way; this only changes how recv buffers are handed out.
-bool incrementalBuffers = false;
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-
-var config = new ServerConfig
-{
-    ReactorCount   = reactors,  // io_uring rings/threads - one per core
-    RingEntries    = 8192,                                                        // SQ/CQ depth per ring
-    DualStack      = false,                                                       // true = one IPv6 socket also accepts IPv4-mapped
-    RecvBufferSize = 32 * 1024,                                                   // bytes per shared recv buffer
-    RecvSlots      = 4096,                                                        // shared recv buffer-ring depth
-    Incremental    = incrementalBuffers ? new IncrementalOptions { MaxConnections = 1024, RecvSlots = 8, RecvBufferSize = 16 * 1024 } : null,                                                        // per-connection recv rings (6.12+) - see Tcp/Incremental
-    Udp            = null,                                                        // no raw UDP sockets (TCP-only server)
-    Quic           = null,                                                        // no QUIC transport - see Http3/* and Quic/Alpn
-    Tcp = new TcpOptions
-    {
-        Port             = port,
-        ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
-        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
-        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
-        PoolMax          = 1024,                           // pooled connection objects kept per reactor
-        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
-        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
-        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
-    },
-};
-
-byte[] body = bodyBytes == 2
-    ? &quot;ok&quot;u8.ToArray()
-    : [.. Enumerable.Repeat((byte)&#x27;x&#x27;, bodyBytes)];
-
-var threads = new Thread[config.ReactorCount];
-
-for (int i = 0; i &lt; threads.Length; i++)
-{
-    var reactor = new Reactor(i, config);
-
-    reactor.TcpHandle = async (r, conn) =&gt;
-    {
-        try
-        {
-            // The connection owns the read loop from here: it feeds nghttp2, dispatches each
-            // request once its stream ends, and drains the egress once per batch.
-            await new Http2Connection(conn).RunBufferedAsync(_ =&gt; new Http2Response
-            {
-                Status = 200,
-                Body = body,
-            });
-        }
-        finally
-        {
-            conn.DecRef();
-        }
-    };
-
-    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
-    threads[i].Start();
-}
-
-Console.WriteLine($&quot;[http2] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
-                + $&quot;{body.Length}-byte body (h2c prior knowledge)&quot;);
-
-foreach (Thread thread in threads)
-{
-    thread.Join();
-}</code></pre>
-    <p class="ex-foot">Which to take? They measure the same. Interleaved warm runs on one rig - <code>h2load -n 300000 -c 32 -m 32</code>, 4 reactors, 2-byte body - put the ratio between <b>0.98&times; and 1.09&times;</b>, and a 1 KiB body holds the same. On a small response the cost is the loop and the syscalls, not the header codec. So take <code>ioxide.http2</code> when shipping a native library is inconvenient, and <code>ioxide.nghttp2</code> when you want the reference implementation's coverage of the protocol's darker corners. The same choice exists one version up: <code>ioxide.http3</code> is the pure-C# drop-in for <code>ioxide.nghttp3</code>.</p>
-  </div>
-
-  <div class="pane pane-h2tls">
-    <div class="pane-head">
-      <h3>HTTP/2 &middot; TLS &amp; ALPN</h3>
-      <span class="pane-pkg">ioxide + ioxide.nghttp2</span>
-    </div>
-<pre><code class="language-csharp">// dotnet add package ioxide
-// dotnet add package ioxide.nghttp2
-//   curl -k --http2 https://127.0.0.1:8443/
-
-using System.IO.Pipelines;
-using System.Text;
-using ioxide;
-using ioxide.nghttp2;
-using ioxide.tls;
-
-// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
-
-ushort port      = 8443;                        // https://127.0.0.1:8443/
-int    reactors  = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
-int    bodyBytes = 2;                           // &quot;ok&quot; - this sample is about ALPN, not throughput
-
-
-
-// Hand OUTBOUND encryption to the kernel: the handler writes plaintext and the kernel makes the
-// records. Off by default - OpenSSL both ways is the portable path, and on loopback the kernel
-// is not faster. Its real payoff is sendfile and NIC offload, which a benchmark here cannot see.
-bool kernelTx = false;
-
-// Hand INBOUND decryption to the kernel as well. Requires kernelTx - the RX handoff happens at
-// the same moment as the TX one - and is experimental for a reason: a TLS 1.3 KeyUpdate cannot be
-// read through IORING_OP_RECV, and roughly one first connection in twelve fails outright.
-bool kernelRx = false;
-
-
-// Per-connection recv buffer rings (kernel 6.12+) instead of one shared ring per reactor. The
-// handler code is identical either way; this only changes how recv buffers are handed out.
-bool incrementalBuffers = false;
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-
-const string certPath = &quot;cert.pem&quot;;   // any PEM pair
-const string keyPath  = &quot;key.pem&quot;;
-
-var config = new ServerConfig
-{
-    ReactorCount   = reactors,                                              // io_uring rings/threads - one per core
-    RingEntries    = 8192,                                                  // SQ/CQ depth per ring
-    DualStack      = false,                                                 // true = one IPv6 socket also accepts IPv4-mapped
-    RecvBufferSize = 32 * 1024,                                             // bytes per shared recv buffer
-    RecvSlots      = 4096,                                                  // shared recv buffer-ring depth
-    Incremental    = incrementalBuffers ? new IncrementalOptions { MaxConnections = 1024, RecvSlots = 8, RecvBufferSize = 16 * 1024 } : null,  // per-connection recv rings (6.12+) - see Tcp/Incremental
-    Udp            = null,                                                  // no raw UDP sockets (TCP-only server)
-    Quic           = null,                                                  // no QUIC transport - see Http3/* and Quic/Alpn
-    Tcp = new TcpOptions
-    {
-        Port             = port,
-        ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
-        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
-        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
-        PoolMax          = 1024,                           // pooled connection objects kept per reactor
-        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
-        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
-        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
-    },
-};
-
-byte[] body = bodyBytes == 2 ? &quot;ok&quot;u8.ToArray() : [.. Enumerable.Repeat((byte)&#x27;x&#x27;, bodyBytes)];
-
-byte[] http11Response =
-[
-    .. Encoding.ASCII.GetBytes($&quot;HTTP/1.1 200 OK\r\nContent-Length: {body.Length}\r\n\r\n&quot;),
-    .. body,
-];
-
-var threads = new Thread[config.ReactorCount];
-
-for (int i = 0; i &lt; threads.Length; i++)
-{
-    var reactor = new Reactor(i, config);
-
-    reactor.OnStart = r =&gt; TlsService.Start(r, new TlsOptions
-    {
-        CertificatePath = certPath,                        // PEM certificate chain file (leaf first)
-        CertificatePem  = null,                            // in-memory PEM alternative - set one, not both
-        KeyPath         = keyPath,                         // PEM private key file
-        KeyPem          = null,                            // in-memory PEM alternative to KeyPath
-        Alpn            = [&quot;h2&quot;, &quot;http/1.1&quot;],              // ORDERED, most preferred first - a client offering both gets h2
-        KernelTx        = kernelTx,                        // kTLS encrypt: kernel makes the records (off = OpenSSL both ways)
-        KernelRx        = kernelRx,                        // kTLS decrypt: needs KernelTx; experimental (see the knob above)
-    });
-
-    reactor.TcpHandle = async (r, conn) =&gt;
-    {
-        TlsSession? tls = null;
-        try
-        {
-            tls = await r.GetService&lt;TlsService&gt;()!.AcceptAsync(conn);
-
-            if (tls.NegotiatedAlpn == &quot;h2&quot;)
-            {
-                // The decrypt lives in the pipe, so the HTTP/2 code below is identical to the
-                // cleartext sample. Which halves the pipe uses is decided by what the handshake
-                // achieved, not by anything chosen here.
-                await using var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
-
-                await new Nghttp2Connection(pipe).RunBufferedAsync(_ =&gt; new Nghttp2Response
-                {
-                    Status = 200,
-                    Body = body,
-                });
-                return;
-            }
-
-            // Anything else: HTTP/1.1 on the same port.
-            //
-            // The carry is not incidental. TLS hands back RECORDS, not requests, so a request
-            // split across two records decrypts twice - and answering on &quot;plaintext arrived&quot;
-            // would answer twice to one request. Framing is ours; ioxide does not parse HTTP.
-            var carry = new Carry();
-
-            // The client&#x27;s first request usually rides in with its Finished flight, so the
-            // handshake already decrypted it and it is sitting in the session, not in any recv
-            // buffer. Miss this and that request is dropped and the loop parks on bytes that
-            // already arrived - which is exactly what happened here before.
-            carry.Append(tls.DrainPlaintext());
-
-            while (true)
-            {
-                bool wrote = false;
-                int end;
-                while ((end = carry.Span.IndexOf(&quot;\r\n\r\n&quot;u8)) &gt;= 0)
-                {
-                    carry.Consume(end + 4);
-                    // Correct whichever backend the session ended up with.
-                    tls.Write(conn, http11Response);
-                    wrote = true;
-                }
-
-                if (wrote)
-                {
-                    await conn.FlushAsync();
-                }
-
-                RecvSnapshot snapshot = await conn.ReadAsync();
-
-                unsafe
-                {
-                    while (conn.TryGetItem(snapshot, out ioxide.utils.SpscRecvRing.Item item))
-                    {
-                        if (item.HasBuffer)
-                        {
-                            carry.Append(tls.Decrypt(item.Ptr, item.Len));
-                            conn.ReturnBuffer(in item);
-                        }
-                    }
-                }
-
-                if (snapshot.IsClosed || tls.Closed) return;
-                conn.ResetRead();
-            }
-        }
-        catch (Exception e)
-        {
-            Console.Error.WriteLine($&quot;[http2-tls] connection failed: {e.Message}&quot;);
-        }
-        finally
-        {
-            tls?.Dispose();
-            conn.DecRef();
-        }
-    };
-
-    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
-    threads[i].Start();
-}
-
-Console.WriteLine($&quot;[http2-tls] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
-                + $&quot;ALPN h2 then http/1.1, cert {certPath}, &quot;
-                + $&quot;rx={(kernelTx &amp;&amp; kernelRx ? &quot;kernel&quot; : &quot;openssl&quot;)}, &quot;
-                + $&quot;tx={(kernelTx ? &quot;kernel&quot; : &quot;openssl&quot;)}&quot;);
-
-foreach (Thread thread in threads)
-{
-    thread.Join();
-}
-
-// Decrypted-but-unframed bytes: append at the end, consume from the front. A List&lt;byte&gt; pressed
-// into this job needs CollectionsMarshal to be searched and RemoveRange to be consumed; a plain
-// array does both directly.
-sealed class Carry
-{
-    private byte[] _buf = new byte[8 * 1024];
-    private int _len;
-
-    public ReadOnlySpan&lt;byte&gt; Span =&gt; _buf.AsSpan(0, _len);
-
-    public void Append(ReadOnlySpan&lt;byte&gt; bytes)
-    {
-        if (_buf.Length - _len &lt; bytes.Length)
-        {
-            Array.Resize(ref _buf, Math.Max(_buf.Length * 2, _len + bytes.Length));
-        }
-        bytes.CopyTo(_buf.AsSpan(_len));
-        _len += bytes.Length;
-    }
-
-    public void Consume(int count)
-    {
-        _buf.AsSpan(count, _len - count).CopyTo(_buf);
-        _len -= count;
-    }
-}</code></pre>
-    <p class="ex-foot">How a browser actually reaches h2: over TLS, with the protocol chosen during the handshake. <code>Alpn = ["h2", "http/1.1"]</code> is an ordered preference, not a weighting - the server takes the first entry the client also offered, and this sample then branches on what was agreed, so one port serves both. That is why the h2c samples are the exception rather than the rule. TLS here is <b>OpenSSL both ways by default</b>; the <code>kernelTx</code>/<code>kernelRx</code> knobs at the top are what move either direction into the kernel.</p>
-  </div>
 
   <div class="pane pane-qpipe">
     <div class="pane-head">
@@ -3984,7 +4112,7 @@ foreach (Thread thread in threads)
   </div>
   <div class="pane pane-h3">
     <div class="pane-head">
-      <h3>HTTP/3 &middot; nghttp3</h3>
+      <h3>HTTP/3 &middot; request streamed (nghttp3)</h3>
       <span class="pane-pkg">ioxide + ioxide.ngtcp2 + ioxide.nghttp3</span>
     </div>
 <pre><code class="language-csharp">// dotnet add package ioxide
@@ -4023,7 +4151,7 @@ const string keyPath  = &quot;key.pem&quot;;
 // One engine for the whole server. ALPN pinned to h3, so nothing else negotiates. The last arg is
 // the per-connection send-retention high-water (default 16 MiB): a response larger than it streams
 // out paced by acks instead of buffering whole, so h3 serves large files in bounded memory. See
-// Playground/Http3/Buffered for the full QUIC/h3 knob set.
+// Playground/Http3/Nghttp3Buffered for the full QUIC/h3 knob set.
 using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: [&quot;h3&quot;], maxSendRetentionBytes: 16L &lt;&lt; 20);
 
 var config = new ServerConfig
@@ -4697,7 +4825,7 @@ static bool TryReadTarget(ReadOnlySpan&lt;byte&gt; request, out ReadOnlySpan&lt;
       <span class="pane-pkg">ioxide + ioxide.httpclient</span>
     </div>
 <pre><code class="language-csharp">// dotnet add package ioxide ioxide.httpclient
-//   dotnet run --project Playground/Http3/Nghttp3          # h3 origin on udp :8443
+//   dotnet run --project Playground/Http3/Nghttp3Request          # h3 origin on udp :8443
 //   PLAYGROUND_UPSTREAM_PORT=8443 dotnet run --project Playground/Proxy/H1ToH3
 //   curl -k https://127.0.0.1:8443/
 
@@ -4905,16 +5033,16 @@ static bool TryReadTarget(ReadOnlySpan&lt;byte&gt; request, out ReadOnlySpan&lt;
   <div class="pane pane-pxh2toh1">
     <div class="pane-head">
       <h3>HTTP/2 in &middot; HTTP/1.1 out</h3>
-      <span class="pane-pkg">ioxide + ioxide.nghttp2 + ioxide.httpclient</span>
+      <span class="pane-pkg">ioxide + ioxide.http2 + ioxide.httpclient</span>
     </div>
-<pre><code class="language-csharp">// dotnet add package ioxide ioxide.nghttp2 ioxide.httpclient
+<pre><code class="language-csharp">// dotnet add package ioxide ioxide.http2 ioxide.httpclient
 //   PLAYGROUND_PORT=8444 dotnet run --project Playground/Tls/Ktls   # a TLS origin
 //   curl -k --http2 https://127.0.0.1:8443/
 
 using System.Text;
 using ioxide;
 using ioxide.httpclient;
-using ioxide.nghttp2;
+using ioxide.http2;
 using ioxide.tls;
 
 // ── Knobs ────────────────────────────────────────────────────────────────────────────────────
@@ -5024,7 +5152,7 @@ for (int i = 0; i &lt; threads.Length; i++)
             // Buffered + async: each stream dispatches with its body assembled, and the handler
             // may await - the upstream round trip resumes inline on this reactor. Concurrent
             // streams interleave here, which is exactly why the h1 pool has to be deep.
-            await new Nghttp2Connection(pipe).RunBufferedAsync(async request =&gt;
+            await new Http2Connection(pipe).RunBufferedAsync(async request =&gt;
             {
                 try
                 {
@@ -5033,11 +5161,11 @@ for (int i = 0; i &lt; threads.Length; i++)
                     using HttpClientResponse response = await client.SendAsync(new HttpClientRequest(
                         request.Method, request.Path) { Body = request.Body });
 
-                    // Copy before Dispose: the response arena is freed then, and nghttp2 copies
-                    // the h2 response only AFTER this handler returns. A real proxy would also
+                    // Copy before Dispose: the response arena is freed then, and the h2 response
+                    // is framed only AFTER this handler returns. A real proxy would also
                     // drop hop-by-hop headers - Connection, Keep-Alive, Transfer-Encoding are all
                     // illegal in h2 and would be a protocol error to forward.
-                    var proxied = new Nghttp2Response
+                    var proxied = new Http2Response
                     {
                         Status = response.Status,
                         Body = response.Body.ToArray(),
@@ -5053,7 +5181,7 @@ for (int i = 0; i &lt; threads.Length; i++)
                     // Upstream down is a gateway error on this stream, not a dead h2 connection:
                     // every other stream on it keeps working. A refused certificate arrives the
                     // same way - the handshake is part of opening the upstream connection.
-                    return new Nghttp2Response
+                    return new Http2Response
                     {
                         Status = 502,
                         Body = Encoding.ASCII.GetBytes($&quot;upstream failed: {e.Message}\n&quot;),
@@ -5090,16 +5218,16 @@ foreach (Thread thread in threads)
   <div class="pane pane-pxh2toh2">
     <div class="pane-head">
       <h3>HTTP/2 in &middot; HTTP/2 out</h3>
-      <span class="pane-pkg">ioxide + ioxide.nghttp2 + ioxide.httpclient</span>
+      <span class="pane-pkg">ioxide + ioxide.http2 + ioxide.httpclient</span>
     </div>
-<pre><code class="language-csharp">// dotnet add package ioxide ioxide.nghttp2 ioxide.httpclient
+<pre><code class="language-csharp">// dotnet add package ioxide ioxide.http2 ioxide.httpclient
 //   PLAYGROUND_PORT=8444 dotnet run --project Playground/Http2/Tls  # an h2-over-TLS origin
 //   curl -k --http2 https://127.0.0.1:8443/
 
 using System.Text;
 using ioxide;
 using ioxide.httpclient;
-using ioxide.nghttp2;
+using ioxide.http2;
 using ioxide.tls;
 
 // ── Knobs ────────────────────────────────────────────────────────────────────────────────────
@@ -5206,7 +5334,7 @@ for (int i = 0; i &lt; threads.Length; i++)
 
             // Buffered + async: each stream dispatches with its body assembled, and the handler
             // may await - the upstream round trip resumes inline on this reactor.
-            await new Nghttp2Connection(pipe).RunBufferedAsync(async request =&gt;
+            await new Http2Connection(pipe).RunBufferedAsync(async request =&gt;
             {
                 try
                 {
@@ -5215,11 +5343,11 @@ for (int i = 0; i &lt; threads.Length; i++)
                     using HttpClientResponse response = await client.SendAsync(new HttpClientRequest(
                         request.Method, request.Path) { Body = request.Body });
 
-                    // Copy before Dispose: the response arena is freed then, and nghttp2 copies
-                    // the h2 response only AFTER this handler returns. A real proxy would also
+                    // Copy before Dispose: the response arena is freed then, and the h2 response
+                    // is framed only AFTER this handler returns. A real proxy would also
                     // drop hop-by-hop headers - Connection, Keep-Alive, Transfer-Encoding are all
                     // illegal in h2 and would be a protocol error to forward.
-                    var proxied = new Nghttp2Response
+                    var proxied = new Http2Response
                     {
                         Status = response.Status,
                         Body = response.Body.ToArray(),
@@ -5235,7 +5363,7 @@ for (int i = 0; i &lt; threads.Length; i++)
                     // Upstream down is a gateway error on this stream, not a dead h2 connection:
                     // every other stream on it keeps working. A refused certificate arrives the
                     // same way - the handshake is part of opening the upstream connection.
-                    return new Nghttp2Response
+                    return new Http2Response
                     {
                         Status = 502,
                         Body = Encoding.ASCII.GetBytes($&quot;upstream failed: {e.Message}\n&quot;),
@@ -5267,22 +5395,22 @@ foreach (Thread thread in threads)
 {
     thread.Join();
 }</code></pre>
-    <p class="ex-foot">The narrowest proxy in this set: two sockets per reactor no matter how many requests are in flight. Two independent nghttp2 sessions are involved and they share nothing - HPACK state is per-connection, so a proxy always re-encodes. “Just splice the frames” is not a shortcut that exists.</p>
+    <p class="ex-foot">The narrowest proxy in this set: two sockets per reactor no matter how many requests are in flight. Two independent HTTP/2 sessions are involved and they share nothing - HPACK state is per-connection, so a proxy always re-encodes. “Just splice the frames” is not a shortcut that exists.</p>
   </div>
   <div class="pane pane-pxh2toh3">
     <div class="pane-head">
       <h3>HTTP/2 in &middot; HTTP/3 out</h3>
-      <span class="pane-pkg">ioxide + ioxide.nghttp2 + ioxide.httpclient</span>
+      <span class="pane-pkg">ioxide + ioxide.http2 + ioxide.httpclient</span>
     </div>
-<pre><code class="language-csharp">// dotnet add package ioxide ioxide.nghttp2 ioxide.httpclient
-//   dotnet run --project Playground/Http3/Nghttp3          # h3 origin on udp :8443
+<pre><code class="language-csharp">// dotnet add package ioxide ioxide.http2 ioxide.httpclient
+//   dotnet run --project Playground/Http3/Nghttp3Request          # h3 origin on udp :8443
 //   PLAYGROUND_UPSTREAM_PORT=8443 dotnet run --project Playground/Proxy/H2ToH3
 //   curl -k --http2 https://127.0.0.1:8443/
 
 using System.Text;
 using ioxide;
 using ioxide.httpclient;
-using ioxide.nghttp2;
+using ioxide.http2;
 using ioxide.tls;
 
 // ── Knobs ────────────────────────────────────────────────────────────────────────────────────
@@ -5374,7 +5502,7 @@ for (int i = 0; i &lt; threads.Length; i++)
 
             // Buffered + async: each stream dispatches with its body assembled, and the handler
             // may await - the upstream round trip resumes inline on this reactor.
-            await new Nghttp2Connection(pipe).RunBufferedAsync(async request =&gt;
+            await new Http2Connection(pipe).RunBufferedAsync(async request =&gt;
             {
                 try
                 {
@@ -5383,11 +5511,11 @@ for (int i = 0; i &lt; threads.Length; i++)
                     using HttpClientResponse response = await client.SendAsync(new HttpClientRequest(
                         request.Method, request.Path) { Body = request.Body });
 
-                    // Copy before Dispose: the response arena is freed then, and nghttp2 copies
-                    // the h2 response only AFTER this handler returns. A real proxy would also
+                    // Copy before Dispose: the response arena is freed then, and the h2 response
+                    // is framed only AFTER this handler returns. A real proxy would also
                     // drop hop-by-hop headers - Connection, Keep-Alive, Transfer-Encoding are all
                     // illegal in h2 and would be a protocol error to forward.
-                    var proxied = new Nghttp2Response
+                    var proxied = new Http2Response
                     {
                         Status = response.Status,
                         Body = response.Body.ToArray(),
@@ -5403,7 +5531,7 @@ for (int i = 0; i &lt; threads.Length; i++)
                     // Upstream down is a gateway error on this stream, not a dead h2 connection:
                     // every other stream on it keeps working. A refused certificate arrives the
                     // same way - the handshake is part of opening the upstream connection.
-                    return new Nghttp2Response
+                    return new Http2Response
                     {
                         Status = 502,
                         Body = Encoding.ASCII.GetBytes($&quot;upstream failed: {e.Message}\n&quot;),
@@ -5744,7 +5872,7 @@ foreach (Thread thread in threads)
       <span class="pane-pkg">ioxide + ioxide.ngtcp2 + ioxide.nghttp3 + ioxide.httpclient</span>
     </div>
 <pre><code class="language-csharp">// dotnet add package ioxide ioxide.ngtcp2 ioxide.nghttp3 ioxide.httpclient
-//   PLAYGROUND_QUIC_PORT=8444 dotnet run --project Playground/Http3/Nghttp3
+//   PLAYGROUND_QUIC_PORT=8444 dotnet run --project Playground/Http3/Nghttp3Request
 //   curl --http3-only -k https://127.0.0.1:8443/
 
 using ioxide;
@@ -5872,7 +6000,7 @@ foreach (Thread thread in threads)
     </div>
 <pre><code class="language-csharp">// dotnet add package ioxide
 // dotnet add package ioxide.httpclient
-//   dotnet run -c Release --project Playground/Http3/Nghttp3   # an origin advertising h3
+//   dotnet run -c Release --project Playground/Http3/Nghttp3Request   # an origin advertising h3
 //   PLAYGROUND_UPSTREAM_PORT=8080 dotnet run -c Release --project Playground/Clients/Http
 
 using System.Text;

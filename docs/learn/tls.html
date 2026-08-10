@@ -289,7 +289,7 @@ if (tls.NegotiatedAlpn == "h2")
     size</b>: 0.79&times; at 64 bytes is not the same server as 0.35&times; at 64 KiB.</p>
     <p>kTLS is behind on large <em>single</em> writes - the kernel has to split one 256 KiB write
     into sixteen records - and level once the protocol above it already chunks. Over HTTP/2, where
-    nghttp2 frames responses into 16 KiB DATA frames before they reach the socket, the two are
+    HTTP/2 frames responses into 16 KiB DATA frames before they reach the socket, the two are
     within noise of each other at every size.</p>
 
     <h2>kTLS: where the cost actually is</h2>
