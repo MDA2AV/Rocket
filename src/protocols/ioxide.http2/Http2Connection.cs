@@ -141,6 +141,8 @@ public sealed partial class Http2Connection : IDisposable
         }
         finally
         {
+            // A writer parked on flow-control credit will never be woken by a dead connection.
+            ReleaseAllCreditWaiters();
             Dispose();
         }
     }
@@ -201,6 +203,12 @@ public sealed partial class Http2Connection : IDisposable
             try
             {
                 Http2Request request = pending.Freeze();
+
+                if (TryDispatchStreamed(request, pending))
+                {
+                    continue;   // the writer owns this stream, and retires it when done
+                }
+
                 Http2Response response = await handler(request);
                 WriteResponse(pending.StreamId, response);
             }

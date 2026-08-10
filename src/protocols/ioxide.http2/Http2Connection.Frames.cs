@@ -345,6 +345,10 @@ public sealed partial class Http2Connection
         {
             pending.SendWindow += increment;
         }
+
+        // Credit arrived, so a streamed response parked on it can carry on. Stream 0 credits the
+        // connection and therefore unblocks every parked writer, not just one.
+        ReleaseCreditWaiters(header.StreamId);
     }
 
     private void HandlePing(in FrameHeader header, ReadOnlySpan<byte> payload)
