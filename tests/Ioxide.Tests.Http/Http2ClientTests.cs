@@ -39,9 +39,9 @@ internal static class Http2ClientTests
             Assert.Equal("200|1024", body);   // the sidecar's 1 KiB object
         }, skip: noSidecar);
 
-        // Regression guard: request bodies were silently dropped by the shim (NGHTTP2_DATA_FLAG_NO_COPY
-        // with a no-op send_data callback made nghttp2 account each DATA frame as sent without ever
-        // emitting it). Every earlier test was a GET, so nothing caught it.
+        // Regression guard: request bodies were once silently dropped - accounted for as sent
+        // without a DATA frame ever leaving. Every other test here is a GET, so nothing else on
+        // this connection would notice.
         runner.Test("httpclient h2: POST body actually reaches the origin", () =>
         {
             int driver = TestServer.Start(PostDriverHandler, onStart: reactor =>
@@ -88,12 +88,11 @@ internal static class Http2ClientTests
 
         runner.Test("httpclient h2: a trailered response survives and keeps its body", () =>
         {
-            // nghttp2 reports TRAILERS as HCAT_HEADERS - the same category as the real response
-            // after a 1xx - so begin_headers fires a SECOND time at the end of a trailered stream.
-            // While that callback replaced the response, the assembled one was discarded with
-            // BodyStart/BodyLength still describing its arena, and end_stream then sliced those
-            // offsets out of the fresh, near-empty one: a large body threw
-            // ArgumentOutOfRangeException from inside [UnmanagedCallersOnly] and killed the
+            // Trailers are a SECOND field section on a stream that already has one, which is the
+            // same shape as the real response arriving after a 1xx. While the second section
+            // replaced the response, the assembled one was discarded with BodyStart/BodyLength
+            // still describing its arena, and end-of-stream then sliced those offsets out of the
+            // fresh, near-empty one: a large body threw ArgumentOutOfRangeException and killed the
             // process, a small one came back as silent garbage with status 0.
             //
             // The 20 KB object is deliberate. It cannot fit the trailer section's arena, so a
@@ -109,6 +108,135 @@ internal static class Http2ClientTests
             (_, string second) = Client.Get(driver, "/big.html", timeoutMs: 20_000);
             Assert.Equal("200|20000", second);
         }, skip: noTrailerSidecar);
+
+        // The two paths below need an origin that reports back what it RECEIVED, which nginx has no
+        // way to do - so they run against ioxide's own HTTP/2 server. Both exercise client code the
+        // sidecar tests never reach, because a 1 KiB GET fits in one window and one frame.
+
+        runner.Test("httpclient h2: a body past the flow-control window arrives whole", () =>
+        {
+            // 1 MiB against a 65535-byte connection window: the body cannot go out in one pass, so
+            // the client has to send what it has credit for, park, and resume on each WINDOW_UPDATE
+            // the origin sends back. Getting this wrong either truncates the body or blows the
+            // window and earns a FLOW_CONTROL_ERROR - the origin echoes the length, so both show.
+            const int BodyBytes = 1024 * 1024;
+
+            int origin = StartEchoOrigin();
+            int driver = TestServer.Start(PostSizeDriver(BodyBytes), onStart: reactor =>
+                Http2ClientPool.Start(reactor, OriginOptions(origin)));
+
+            (int status, string body) = Client.Get(driver, "/echo", timeoutMs: 30_000);
+            Assert.Equal(200, status);
+            Assert.Equal($"200|{BodyBytes}", body);
+        });
+
+        runner.Test("httpclient h2: a header block past the frame size continues", () =>
+        {
+            // 40 headers of ~512 bytes overflows the 16 KiB maximum frame size, so the field
+            // section has to leave as HEADERS + CONTINUATION. The block cannot be split anywhere
+            // else on the connection either - HPACK is one stream, and a decoder needs the pieces
+            // contiguous - so a mistake here desynchronises the table rather than failing cleanly.
+            int origin = StartEchoOrigin();
+            int driver = TestServer.Start(ManyHeadersDriver(count: 40, valueBytes: 512), onStart: reactor =>
+                Http2ClientPool.Start(reactor, OriginOptions(origin)));
+
+            (int status, string body) = Client.Get(driver, "/headers", timeoutMs: 30_000);
+            Assert.Equal(200, status);
+            Assert.Equal("200|40", body);
+        });
+    }
+
+    private static Http2ClientOptions OriginOptions(int port) => new()
+    {
+        Host = "127.0.0.1",
+        Port = (ushort)port,
+        PoolSize = 1,
+    };
+
+    /// <summary>
+    /// An ioxide HTTP/2 origin that answers with what it received: the body length for a request
+    /// that carried one, otherwise the number of ordinary header fields.
+    /// </summary>
+    private static int StartEchoOrigin() => TestServer.Start(async (_, connection) =>
+    {
+        try
+        {
+            await new ioxide.http2.Http2Connection(connection).RunBufferedAsync(request =>
+                new ioxide.http2.Http2Response
+                {
+                    Status = 200,
+                    Body = Encoding.ASCII.GetBytes(
+                        (request.Body.Length > 0 ? request.Body.Length : request.Headers.Count).ToString()),
+                });
+        }
+        finally
+        {
+            connection.DecRef();
+        }
+    });
+
+    private static Func<Reactor, TcpConnection, Task> PostSizeDriver(int bodyBytes)
+        => (reactor, connection) => DriveOnce(reactor, connection, upstream =>
+        {
+            byte[] payload = new byte[bodyBytes];
+            payload.AsSpan().Fill((byte)'z');
+            return upstream.PostAsync("/echo"u8.ToArray(), payload);
+        });
+
+    private static Func<Reactor, TcpConnection, Task> ManyHeadersDriver(int count, int valueBytes)
+        => (reactor, connection) => DriveOnce(reactor, connection, upstream =>
+        {
+            var request = new HttpClientRequest(HttpMethods.Get, "/headers");
+            for (int i = 0; i < count; i++)
+            {
+                request.Headers.Add(
+                    Encoding.ASCII.GetBytes($"x-filler-{i:D3}"),
+                    Encoding.ASCII.GetBytes(new string('v', valueBytes)));
+            }
+            return upstream.SendAsync(request);
+        });
+
+    // One request per inbound connection, answering with "status|body" so the assertion reads the
+    // origin's own account of what arrived.
+    private static async Task DriveOnce(Reactor reactor, TcpConnection connection,
+        Func<Http2ClientPool, ValueTask<HttpClientResponse>> exchange)
+    {
+        try
+        {
+            Http2ClientPool upstream = reactor.GetService<Http2ClientPool>()!;
+
+            while (true)
+            {
+                RecvSnapshot snapshot = await connection.ReadAsync();
+                if (snapshot.IsClosed)
+                {
+                    return;
+                }
+                Wire.ReadPath(connection, snapshot);
+
+                string detail;
+                int status;
+                try
+                {
+                    using HttpClientResponse response = await exchange(upstream);
+                    status = response.Status;
+                    detail = Encoding.ASCII.GetString(response.Body.Span);
+                }
+                catch (Exception e)
+                {
+                    status = 599;
+                    detail = e.Message;
+                }
+
+                Wire.Write(connection, 200, $"{status}|{detail}");
+                await connection.FlushAsync();
+                connection.ResetRead();
+            }
+        }
+        finally
+        {
+            connection.DecRef();
+        }
     }
 
     // Sends a POST with a 4 KiB body and reports the status, so a dropped body shows up as a

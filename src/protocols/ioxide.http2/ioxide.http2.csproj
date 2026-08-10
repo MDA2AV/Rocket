@@ -10,7 +10,7 @@
     <PackageId>ioxide.http2</PackageId>
     <Version>0.4.169</Version>
     <Authors>MDA2AV</Authors>
-    <Description>Pure-C# HTTP/2 for the ioxide io_uring runtime: framing, HPACK (static and dynamic tables, Huffman) and flow control, with zero native code. A drop-in alternative to ioxide.nghttp2 for deployments that would rather not ship a native library - same connection shape, same request and response types.</Description>
+    <Description>Pure-C# HTTP/2 for the ioxide io_uring runtime: framing, HPACK (static and dynamic tables, Huffman) and flow control, with zero native code. Serves h2c with prior knowledge and h2 over TLS by ALPN, buffered or streamed in either direction, and the same framing drives ioxide.httpclient's HTTP/2 client.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://mda2av.github.io/ioxide/</PackageProjectUrl>
     <RepositoryUrl>https://github.com/MDA2AV/ioxide</RepositoryUrl>
@@ -22,6 +22,13 @@
   <ItemGroup>
     <None Include="../../../README.md" Pack="true" PackagePath="/" />
     <ProjectReference Include="../../ioxide/ioxide.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The HTTP/2 client is the same framing, HPACK and flow control pointed the other way round,
+         so it uses these types directly rather than having them duplicated or promoted to public
+         API. Only the client half lives over there; the package's own surface stays unchanged. -->
+    <InternalsVisibleTo Include="ioxide.httpclient" />
   </ItemGroup>
 
 </Project>

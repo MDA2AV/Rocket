@@ -1,5 +1,4 @@
 using ioxide.httpclient;
-using ioxide.nghttp2;
 
 namespace ioxide.httpclient;
 
@@ -216,7 +215,7 @@ public sealed class Http2ClientPool : IDisposable
         catch (Exception e)
         {
             _lastOpenFailure = e.Message;
-            Console.Error.WriteLine($"[nghttp2] connect to {_options.Host}:{_options.Port} failed: {e.Message}");
+            Console.Error.WriteLine($"[http2] connect to {_options.Host}:{_options.Port} failed: {e.Message}");
             WakeWaiters();   // fail fast: waiters re-check and time out rather than hang
         }
         finally
