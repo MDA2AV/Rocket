@@ -1272,6 +1272,34 @@ for (int i = 0; i &lt; threads.Length; i++)
         {
             bool endless = request.Path.Span.SequenceEqual(&quot;/feed&quot;u8);
             bool upload  = request.Path.Span.SequenceEqual(&quot;/upload&quot;u8);
+            bool echo    = request.Path.Span.SequenceEqual(&quot;/echo&quot;u8);
+
+            if (echo)
+            {
+                // BOTH directions at once, which is the shape a proxy actually needs: read a
+                // chunk, write a chunk, and never hold more than one. Neither side can run away
+                // from the other - ReadAsync waits for the peer to send, FlushAsync waits for the
+                // connection to have room - so memory stays flat however large the exchange is.
+                writer.WriteHeaders(Plain());
+
+                if (request.BodyReader is { } duplex)
+                {
+                    while (true)
+                    {
+                        ReadOnlyMemory&lt;byte&gt; part = await duplex.ReadAsync();
+                        if (part.IsEmpty)
+                        {
+                            break;   // end of the request body
+                        }
+
+                        part.Span.CopyTo(writer.GetSpan(part.Length));
+                        writer.Advance(part.Length);
+                        await writer.FlushAsync();
+                    }
+                }
+
+                return;
+            }
 
             if (upload)
             {

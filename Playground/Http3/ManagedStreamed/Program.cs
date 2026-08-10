@@ -11,6 +11,10 @@ using Playground.Shared;
 //  flow control, so a large upload is never held whole. The response body goes out through an
 //  Http3ResponseWriter, one DATA frame per flush, so a large download is never built whole.
 //
+//  "/echo" runs both at once - read a chunk, write a chunk - which is what a proxy does and the
+//  case that shows the two halves are independent. Memory stays flat regardless of size, because
+//  each side blocks the other: ReadAsync waits on the peer, FlushAsync waits on the connection.
+//
 //  Because ioxide.http3 owns the framing, sending is a push: build [0x00][varint len][payload]
 //  and hand it to the QUIC stream. There is no data-reader callback to answer and nothing to
 //  defer - which is the difference from the nghttp3 version of this in Playground/Http3/Streamed.
@@ -19,6 +23,7 @@ using Playground.Shared;
 //      curl --http3-only -k https://127.0.0.1:8443/          # chunked download
 //      curl --http3-only -kN https://127.0.0.1:8443/feed     # endless; ctrl-c to stop
 //      curl --http3-only -k --data-binary @big.bin https://127.0.0.1:8443/upload
+//      curl --http3-only -k --data-binary @big.bin https://127.0.0.1:8443/echo    # both ways
 //
 //  Needs: ioxide, ioxide.ngtcp2, ioxide.http3
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -76,6 +81,34 @@ for (int i = 0; i < threads.Length; i++)
         {
             bool endless = request.Path.Span.SequenceEqual("/feed"u8);
             bool upload  = request.Path.Span.SequenceEqual("/upload"u8);
+            bool echo    = request.Path.Span.SequenceEqual("/echo"u8);
+
+            if (echo)
+            {
+                // BOTH directions at once, which is the shape a proxy actually needs: read a
+                // chunk, write a chunk, and never hold more than one. Neither side can run away
+                // from the other - ReadAsync waits for the peer to send, FlushAsync waits for the
+                // connection to have room - so memory stays flat however large the exchange is.
+                writer.WriteHeaders(Plain());
+
+                if (request.BodyReader is { } duplex)
+                {
+                    while (true)
+                    {
+                        ReadOnlyMemory<byte> part = await duplex.ReadAsync();
+                        if (part.IsEmpty)
+                        {
+                            break;   // end of the request body
+                        }
+
+                        part.Span.CopyTo(writer.GetSpan(part.Length));
+                        writer.Advance(part.Length);
+                        await writer.FlushAsync();
+                    }
+                }
+
+                return;
+            }
 
             if (upload)
             {
