@@ -121,7 +121,7 @@ foreach (var t in threads) t.Join();</code></pre>
     <code>SslStream</code>. HTTP/2 and HTTP/3 each come twice - a bundled native, or the same
     surface in pure C# with no native code at all:</p>
     <ul>
-      <li><code>ioxide.nghttp2</code> / <code>ioxide.http2</code> - HTTP/2. h2c with prior
+      <li><code>ioxide.http2</code> - HTTP/2, pure C#. h2c with prior
       knowledge, or h2 over TLS chosen by <a href="tls.html">ALPN</a>.</li>
       <li><code>ioxide.nghttp3</code> / <code>ioxide.http3</code> - HTTP/3, over
       <a href="quic-h3.html">QUIC</a> from <code>ioxide.ngtcp2</code>.</li>
