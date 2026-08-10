@@ -18,6 +18,42 @@ public sealed class H2cClient : IDisposable
     private const byte Data = 0x0, Headers = 0x1, Settings = 0x4, GoAway = 0x7;
     private const byte EndStream = 0x1, EndHeaders = 0x4, Ack = 0x1;
 
+    public const byte RstStream = 0x3, Continuation = 0x9;
+
+    /// <summary>HEADERS that deliberately leaves the block OPEN, so CONTINUATION must follow.</summary>
+    public void RequestHeadersOnly(int streamId, bool endHeaders = true, bool endStream = true)
+        => WriteFrame(Headers, (byte)((endHeaders ? EndHeaders : 0) | (endStream ? EndStream : 0)),
+                      streamId, Hpack("GET", "/"));
+
+    /// <summary>
+    /// Pump until the server sends one of <paramref name="wanted"/> (0 = any stream), answering
+    /// SETTINGS as they arrive. Returns the frame type seen, or 0 on timeout or a closed connection.
+    /// </summary>
+    public byte AwaitAnyOf(ReadOnlySpan<byte> wanted, int streamId = 0, int timeoutMs = 4000)
+    {
+        long deadline = Environment.TickCount64 + timeoutMs;
+        while (Environment.TickCount64 < deadline)
+        {
+            if (!TryReadFrame(out byte type, out byte flags, out int sid, out _))
+            {
+                return 0;
+            }
+            if (type == Settings && (flags & Ack) == 0)
+            {
+                WriteFrame(Settings, Ack, 0, ReadOnlySpan<byte>.Empty);
+                continue;
+            }
+            foreach (byte want in wanted)
+            {
+                if (type == want && (streamId == 0 || sid == streamId))
+                {
+                    return type;
+                }
+            }
+        }
+        return 0;
+    }
+
     private readonly TcpClient _tcp;
     private readonly NetworkStream _s;
 

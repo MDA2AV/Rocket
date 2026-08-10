@@ -43,6 +43,12 @@ public sealed partial class Http2Connection : IDisposable
     // fired once it has unwound, so a resumed handler cannot re-enter the parser mid-frame.
     private readonly List<Http2BodyReader> _bodyWakes = [];
 
+    // The header block of a stream refused for exceeding MaxConcurrentStreams: decoded to keep
+    // HPACK in step with the peer, then thrown away. A block cannot interleave with another
+    // stream's frames, so one of these is enough.
+    private readonly PendingRequest _discardBlock = new();
+    private int _discardingStream;
+
     private bool _prefaceSeen;
     private bool _disposed;
     private bool _failed;

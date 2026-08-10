@@ -140,6 +140,17 @@ public sealed partial class Http2Connection
 
         if (!_streams.TryGetValue(header.StreamId, out PendingRequest? pending))
         {
+            if (_streams.Count >= _options.MaxConcurrentStreams)
+            {
+                // Past the limit we advertised. The block still has to be DECODED - HPACK is one
+                // stream across the whole connection, so skipping it would desynchronise every
+                // later request - but it decodes into a scratch that is thrown away, and the peer
+                // is told REFUSED_STREAM, which RFC 9113 8.7 makes safe for it to retry elsewhere.
+                _discardingStream = header.StreamId;
+                DiscardHeaderBlock(header, block);
+                return;
+            }
+
             // Opens at what the peer's SETTINGS advertised, not at the RFC default. Streams are
             // created long after those SETTINGS arrive, so starting at 65535 and waiting for a
             // WINDOW_UPDATE means waiting for one the peer has no reason to send - it believes we
@@ -156,6 +167,12 @@ public sealed partial class Http2Connection
         // piecewise - the whole block has to be in hand first.
         pending.AppendHeaderBlock(block);
 
+        if (pending.HeaderBlock.Length > _options.MaxHeaderListSize)
+        {
+            GoAway(Http2Error.EnhanceYourCalm);
+            return;
+        }
+
         if ((header.Flags & FrameFlags.EndHeaders) != 0)
         {
             if (!DecodeHeaderBlock(pending))
@@ -170,6 +187,34 @@ public sealed partial class Http2Connection
             pending.RequestEnded = true;
             pending.BodyReader?.End();
             TryComplete(pending);
+        }
+    }
+
+    /// <summary>
+    /// A refused stream's header block: decoded to keep the HPACK table in step with the peer, and
+    /// thrown away. Bounded like any other block, so refusing a stream cannot itself be the way in.
+    /// </summary>
+    private void DiscardHeaderBlock(in FrameHeader header, ReadOnlySpan<byte> block)
+    {
+        _discardBlock.AppendHeaderBlock(block);
+
+        if (_discardBlock.HeaderBlock.Length > _options.MaxHeaderListSize)
+        {
+            GoAway(Http2Error.EnhanceYourCalm);
+            return;
+        }
+
+        if ((header.Flags & FrameFlags.EndHeaders) == 0)
+        {
+            return;   // more CONTINUATION to come
+        }
+
+        int streamId = _discardingStream;
+        _discardingStream = 0;
+
+        if (DecodeHeaderBlock(_discardBlock, discard: true))
+        {
+            ResetStream(streamId, Http2Error.RefusedStream);
         }
     }
 
@@ -191,6 +236,13 @@ public sealed partial class Http2Connection
 
     private void HandleContinuation(in FrameHeader header, ReadOnlySpan<byte> payload)
     {
+        // The block belongs to a stream we refused; keep decoding it so HPACK stays in step.
+        if (header.StreamId == _discardingStream)
+        {
+            DiscardHeaderBlock(header, payload);
+            return;
+        }
+
         if (!_streams.TryGetValue(header.StreamId, out PendingRequest? pending))
         {
             GoAway(Http2Error.ProtocolError);
@@ -198,6 +250,12 @@ public sealed partial class Http2Connection
         }
 
         pending.AppendHeaderBlock(payload);
+
+        if (pending.HeaderBlock.Length > _options.MaxHeaderListSize)
+        {
+            GoAway(Http2Error.EnhanceYourCalm);
+            return;
+        }
 
         if ((header.Flags & FrameFlags.EndHeaders) != 0)
         {
@@ -211,7 +269,7 @@ public sealed partial class Http2Connection
         }
     }
 
-    private bool DecodeHeaderBlock(PendingRequest pending)
+    private bool DecodeHeaderBlock(PendingRequest pending, bool discard = false)
     {
         try
         {
@@ -226,7 +284,8 @@ public sealed partial class Http2Connection
             }
 
             PendingRequest target = pending;
-            _decoder.Decode(block, _headerScratch, (name, value) => target.AddHeader(name, value));
+            _decoder.Decode(block, _headerScratch,
+                discard ? static (_, _) => { } : (name, value) => target.AddHeader(name, value));
             pending.ClearHeaderBlock();
             pending.HeadersDone = true;
             return true;
