@@ -45,6 +45,8 @@
   <input type="radio" name="mode-tabs" id="tab-h2cstls">
   <input type="radio" name="mode-tabs" id="tab-h2bcl">
   <input type="radio" name="mode-tabs" id="tab-h3">
+  <input type="radio" name="mode-tabs" id="tab-h3cs">
+  <input type="radio" name="mode-tabs" id="tab-h3stream">
   <input type="radio" name="mode-tabs" id="tab-h3buf">
   <input type="radio" name="mode-tabs" id="tab-pxmatrix">
   <input type="radio" name="mode-tabs" id="tab-pxh1toh1">
@@ -111,6 +113,8 @@
       <summary>http/3</summary>
       <label for="tab-h3">nghttp3 &middot; streamed</label>
       <label for="tab-h3buf">nghttp3 &middot; buffered</label>
+      <label for="tab-h3stream">nghttp3 &middot; streamed</label>
+      <label for="tab-h3cs">pure c#</label>
     </details>
 
     <details class="ex-sect">
@@ -1092,6 +1096,183 @@ internal sealed class StreamDuplexPipe(Stream stream) : IDuplexPipe
     public PipeWriter Output { get; } = PipeWriter.Create(stream, new StreamPipeWriterOptions(leaveOpen: true));
 }</code></pre>
     <p class="ex-foot">HTTP/2 over the BCL's <code>SslStream</code>, and the point is the ten-line <code>Stream</code>-to-<code>IDuplexPipe</code> adapter at the bottom. <code>Nghttp2Connection</code> takes a pipe, so the same HTTP/2 code runs over the ring directly, over ioxide's TLS, or over <code>SslStream</code> - the transport is a constructor argument, not a branch inside the protocol.</p>
+  </div>
+  <div class="pane pane-h3cs">
+    <div class="pane-head">
+      <h3>HTTP/3 &middot; pure C#</h3>
+      <span class="pane-pkg">ioxide + ioxide.ngtcp2 + ioxide.http3</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+// dotnet add package ioxide.ngtcp2
+// dotnet add package ioxide.http3
+//   curl --http3-only -k https://127.0.0.1:8443/
+
+using ioxide;
+using ioxide.http3;
+using ioxide.ngtcp2;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort quicPort = 8443;                        // https://127.0.0.1:8443/ over UDP
+int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+
+
+// Response body size. 13 is &quot;Hello, World!&quot;; anything else is that many &#x27;x&#x27;.
+int bodyBytes = 13;
+
+
+// UDP receive slots per reactor: how many datagrams the ring can have outstanding at once.
+int udpRecvSlots = 16;
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+const string certPath = &quot;cert.pem&quot;;   // any PEM pair
+const string keyPath  = &quot;key.pem&quot;;
+
+using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: [&quot;h3&quot;]);
+
+var config = new ServerConfig
+{
+    ReactorCount = reactors,
+    Tcp = null,                                        // QUIC only
+    Udp = new UdpOptions { RecvSlots = udpRecvSlots },
+    Quic = new QuicOptions
+    {
+        Port = quicPort,
+        LocalCidLength = 8,
+        ConnectionFactory = engine.CreateFactory(),
+    },
+};
+
+// Built once and reused: the h3 layer copies status, headers and body at submit and never retains
+// the object, so a hot path should not rebuild it per request.
+var response = new Http3Response
+{
+    Body = bodyBytes == 13 ? &quot;Hello, World!&quot;u8.ToArray() : [.. Enumerable.Repeat((byte)&#x27;x&#x27;, bodyBytes)],
+};
+response.Headers.Add((&quot;content-type&quot;u8.ToArray(), &quot;text/plain&quot;u8.ToArray()));
+response.Headers.Add((&quot;server&quot;u8.ToArray(), &quot;ioxide&quot;u8.ToArray()));
+
+var threads = new Thread[config.ReactorCount];
+
+for (int i = 0; i &lt; threads.Length; i++)
+{
+    var reactor = new Reactor(i, config);
+
+    reactor.QuicHandle = (r, conn) =&gt; new Http3Connection(conn).RunAsync(_ =&gt; response);
+
+    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
+    threads[i].Start();
+}
+
+Console.WriteLine($&quot;[h3-managed] {config.ReactorCount} reactors, h3 on udp :{config.Quic!.Port} &quot;
+                + $&quot;(pure C#), {bodyBytes}-byte body, cert {certPath}&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}</code></pre>
+    <p class="ex-foot">HTTP/3 with <b>no native library above the transport</b> - frames, QPACK and Huffman are all managed code, and only QUIC itself stays native. Drop-in for <label for="tab-h3" class="ex-jump">nghttp3</label>: the diff is the package and three type names. It is also <b>faster at every size measured</b> on this rig - 2 reactors, <code>h3x --connections 16 -m 8</code>: <b>1.54&times;</b> at a 13-byte body, 1.28&times; at 50 KiB, 1.32&times; at 1 MiB, using less memory at the large end. The small-body lead came from sending the header frame and a short body in ONE call rather than two; the large-body lead is the native shim copying every response body at submit, which this never does.</p>
+  </div>
+  <div class="pane pane-h3stream">
+    <div class="pane-head">
+      <h3>HTTP/3 &middot; streamed response</h3>
+      <span class="pane-pkg">ioxide + ioxide.ngtcp2 + ioxide.nghttp3</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+// dotnet add package ioxide.ngtcp2
+// dotnet add package ioxide.nghttp3
+//   curl --http3-only -k https://127.0.0.1:8443/
+//   curl --http3-only -kN https://127.0.0.1:8443/feed   # never ends
+
+using System.Text;
+using ioxide;
+using ioxide.nghttp3;
+using ioxide.ngtcp2;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort quicPort = 8443;                        // https://127.0.0.1:8443/ over UDP
+int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+
+
+// Chunks written per response on &quot;/&quot;, and the size of each. The point of the sample is that the
+// product of these two is never held in memory at once.
+int chunkCount = 64;
+int chunkBytes = 4 * 1024;
+
+
+// UDP receive slots per reactor: how many datagrams the ring can have outstanding at once.
+int udpRecvSlots = 16;
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+const string certPath = &quot;cert.pem&quot;;   // any PEM pair
+const string keyPath  = &quot;key.pem&quot;;
+
+using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: [&quot;h3&quot;]);
+
+var config = new ServerConfig
+{
+    ReactorCount = reactors,
+    Tcp = null,                                        // QUIC only: no TCP listener is bound
+    Udp = new UdpOptions { RecvSlots = udpRecvSlots },
+    Quic = new QuicOptions
+    {
+        Port = quicPort,
+        LocalCidLength = 8,
+        ConnectionFactory = engine.CreateFactory(),
+    },
+};
+
+byte[] chunk = Encoding.ASCII.GetBytes(new string(&#x27;x&#x27;, chunkBytes - 1) + &quot;\n&quot;);
+
+var threads = new Thread[config.ReactorCount];
+
+for (int i = 0; i &lt; threads.Length; i++)
+{
+    var reactor = new Reactor(i, config);
+
+    reactor.QuicHandle = (r, conn) =&gt;
+        new Nghttp3Connection(conn).RunStreamedResponseAsync(async (request, writer) =&gt;
+        {
+            bool endless = request.Path.Span.SequenceEqual(&quot;/feed&quot;u8);
+
+            // Headers first and once: HTTP/3 puts HEADERS before DATA and there is no correcting
+            // it later. No Content-Length here - the length is not known yet, and for /feed never
+            // will be.
+            var response = new Nghttp3Response { Status = 200 };
+            response.Headers.Add(&quot;content-type&quot;u8.ToArray(),
+                endless ? &quot;text/event-stream&quot;u8.ToArray() : &quot;text/plain&quot;u8.ToArray());
+            writer.WriteHeaders(response);
+
+            for (int n = 0; endless || n &lt; chunkCount; n++)
+            {
+                chunk.CopyTo(writer.GetSpan(chunk.Length));
+                writer.Advance(chunk.Length);
+
+                // Returns once nghttp3 has taken it. That await IS the backpressure - nothing
+                // queues up behind a peer that has stopped reading.
+                await writer.FlushAsync();
+            }
+
+            // CompleteAsync ends the stream. The runner calls it too if a handler returns without
+            // doing so, since the peer is owed an end either way.
+            await writer.CompleteAsync();
+        });
+
+    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
+    threads[i].Start();
+}
+
+Console.WriteLine($&quot;[h3-streamed] {config.ReactorCount} reactors, h3 on udp :{config.Quic!.Port}, &quot;
+                + $&quot;{chunkCount} x {chunkBytes}-byte chunks per response, cert {certPath}&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}</code></pre>
+    <p class="ex-foot">The response body produced OVER TIME instead of handed over whole - each flush becomes a DATA frame. That is what <code>/feed</code> demonstrates: an endless response has no final byte, so a buffered API cannot express it at all. <code>Nghttp3ResponseWriter</code> is an <code>IBufferWriter&lt;byte&gt;</code>, so a serializer or a framework's response sink writes into it unchanged, and <code>FlushAsync</code> returning only once nghttp3 has taken the chunk is what stops a producer outrunning a peer that has stopped reading. nghttp3 PULLS body bytes rather than accepting pushes, which is why this carries a resume and a drain the pure-C# writer does not need.</p>
   </div>
   <div class="pane pane-h3buf">
     <div class="pane-head">
@@ -3675,6 +3856,10 @@ int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reac
 // Multishot recv slots per reactor - datagrams the ring can hold at once. QPACK capacity 4096
 // advertises a decode-side dynamic table; 0 is static-only, nghttp3&#x27;s default.
 int  udpRecvSlots  = 16;
+
+// Response body size. 13 is &quot;Hello, World!&quot;; anything else is that many &#x27;x&#x27;. A buffered response
+// holds the whole body, so this is also what a streamed response is measured against.
+int  bodyBytes     = 13;
 long qpackCapacity = 0;
 
 
@@ -3732,7 +3917,10 @@ var h3Options = new Nghttp3Options
 // Legal because the h3 layer copies status, headers and body into nghttp3 synchronously at submit
 // and never retains the object - unlike Nghttp3Response.Text($&quot;...&quot;), which encodes a fresh string
 // every time. This is what a hot path should look like.
-var response = new Nghttp3Response { Body = &quot;Hello, World!&quot;u8.ToArray() };
+var response = new Nghttp3Response
+{
+    Body = bodyBytes == 13 ? &quot;Hello, World!&quot;u8.ToArray() : [.. Enumerable.Repeat((byte)&#x27;x&#x27;, bodyBytes)],
+};
 response.Headers.Add(&quot;content-type&quot;u8.ToArray(), &quot;text/plain&quot;u8.ToArray());
 response.Headers.Add(&quot;server&quot;u8.ToArray(), &quot;ioxide&quot;u8.ToArray());
 
