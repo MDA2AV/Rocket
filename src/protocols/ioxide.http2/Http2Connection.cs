@@ -206,6 +206,8 @@ public sealed partial class Http2Connection : IDisposable
 
         foreach (PendingRequest pending in ready)
         {
+            ValueTask<Http2Response> inFlight;
+
             try
             {
                 Http2Request request = pending.Freeze();
@@ -215,13 +217,66 @@ public sealed partial class Http2Connection : IDisposable
                     continue;   // the writer owns this stream, and retires it when done
                 }
 
-                Http2Response response = await handler(request);
-                WriteResponse(pending.StreamId, response);
+                inFlight = handler(request);
             }
-            finally
+            catch
             {
                 pending.Dispose();
+                throw;
             }
+
+            // Answered synchronously, which nearly every handler does. Stay inline: this response
+            // is staged in time for the pass flush, so it still leaves with every other one, and
+            // there is no Task to allocate.
+            if (inFlight.IsCompletedSuccessfully)
+            {
+                try
+                {
+                    WriteResponse(pending.StreamId, inFlight.Result);
+                }
+                finally
+                {
+                    pending.Dispose();
+                }
+                continue;
+            }
+
+            // It parked - a database, an upstream, a disk. Awaiting here would hold every OTHER
+            // stream on this connection behind it, including responses already staged and ready to
+            // go, because they all share this one dispatch loop and one TCP connection. So it
+            // finishes on its own and writes its own bytes when it does.
+            _ = CompleteBufferedAsync(inFlight, pending);
+        }
+    }
+
+    /// <summary>
+    /// The tail of a handler that parked. Nothing is awaiting this, so everything the dispatch loop
+    /// would have done afterwards has to happen here instead - retiring the request, and writing,
+    /// since the pass flush has long gone by. Forgetting that tail in the streamed path is what
+    /// leaked 20 GB.
+    /// </summary>
+    private async Task CompleteBufferedAsync(ValueTask<Http2Response> inFlight, PendingRequest pending)
+    {
+        try
+        {
+            Http2Response response = await inFlight;
+            WriteResponse(pending.StreamId, response);
+        }
+        catch (Exception exception)
+        {
+            // Nobody can observe this task, so an escaping exception would vanish silently and the
+            // peer would wait on a stream that is never coming.
+            Console.Error.WriteLine($"[ioxide.http2] request handler faulted: {exception.GetBaseException().Message}");
+
+            if (!IsBroken)
+            {
+                WriteResponse(pending.StreamId, new Http2Response { Status = 500 });
+            }
+        }
+        finally
+        {
+            pending.Dispose();
+            await MaybeFlushAsync();
         }
     }
 }
