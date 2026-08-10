@@ -7,27 +7,147 @@ namespace ioxide.http2;
 /// <summary>
 /// The write side: everything is staged into the connection's write slab and flushed once per pass,
 /// so a batch of multiplexed responses leaves in one send rather than one each.
+///
+/// Staging and flushing take TURNS, because the transport permits neither a write during a flush
+/// nor a second flush - and with non-blocking dispatch a handler finishes whenever its database
+/// answers, which is as likely as not to be mid-flush. So while a flush is in flight, frames land
+/// in a queue instead of the pipe; when it completes, the whole queue moves into the pipe and goes
+/// out as the next flush. Every response that completed during one transport write leaves on the
+/// single write after it, which is what extends the pass coalescing to handlers that finish
+/// outside the pass. Kestrel's Http2FrameWriter and Go's net/http2 writer land on this same shape.
 /// </summary>
 public sealed partial class Http2Connection
 {
-    private bool _staged;
+    private bool _staged;      // bytes sit in the pipe writer, awaiting a flush
+    private bool _flushing;    // a transport flush is in flight; the pipe writer is untouchable
+    private bool _writeDead;   // a flush faulted; the transport takes no more bytes, ever
+
+    // Frames produced while a flush was in flight, in stage order. Drained into the pipe the
+    // moment the flush completes, so wire order is exactly stage order.
+    private byte[] _queued = [];
+    private int _queuedUsed;
+
+    // Completed when the flush AFTER the current one finishes - the one that carries the queue.
+    // Callers who staged into the queue await this, which keeps the two things a real flush
+    // provided: backpressure, and the yield that hands the reactor back.
+    private TaskCompletionSource? _turnWaiter;
 
     private void Stage(ReadOnlySpan<byte> bytes)
     {
-        _pipe.Output.Write(bytes);
-        _stagedBytes += bytes.Length;
-        _staged = true;
+        if (_disposed || _writeDead)
+        {
+            return;   // a detached tail outlived the connection; there is nobody to send to
+        }
+
+        if (_flushing)
+        {
+            Enqueue(bytes);
+        }
+        else
+        {
+            _pipe.Output.Write(bytes);
+            _staged = true;
+        }
     }
 
     private async ValueTask FlushAsync()
     {
+        if (_disposed || _writeDead)
+        {
+            return;
+        }
+
+        if (_flushing)
+        {
+            // The pump owns the pipe. If this caller queued bytes they leave on the pump's next
+            // turn - await it, so the caller keeps real backpressure. With nothing queued there
+            // is nothing to wait for.
+            if (_queuedUsed > 0)
+            {
+                await TurnAsync();
+            }
+            return;
+        }
+
         if (!_staged)
         {
             return;
         }
-        _staged = false;
-        _stagedBytes = 0;
-        await _pipe.Output.FlushAsync();
+
+        // This caller becomes the pump: it drives turn after turn until a flush completes with
+        // the queue empty. Everyone else who staged meanwhile is parked on TurnAsync.
+        _flushing = true;
+        try
+        {
+            while (true)
+            {
+                _staged = false;
+
+                // Waiters captured BEFORE the flush are the ones whose bytes are in it; anyone
+                // arriving during the await parks a fresh waiter for the turn after.
+                TaskCompletionSource? turn = _turnWaiter;
+                _turnWaiter = null;
+
+                await _pipe.Output.FlushAsync();
+
+                // May resume writers inline; _flushing is still true, so anything they stage
+                // lands in the queue and is picked up by the check just below.
+                turn?.TrySetResult();
+
+                if (_queuedUsed == 0 || _disposed)
+                {
+                    return;
+                }
+
+                _pipe.Output.Write(_queued.AsSpan(0, _queuedUsed));
+                _queuedUsed = 0;
+            }
+        }
+        catch
+        {
+            // The transport refused a write. Nothing staged can ever leave now, so later stages
+            // must drop rather than throw from detached tails nobody observes.
+            _writeDead = true;
+            _failed = true;
+            throw;
+        }
+        finally
+        {
+            _flushing = false;
+            // Never strand a waiter: on a fault the turn it is waiting for will not come, and it
+            // has to wake to see the connection is broken rather than hang forever.
+            _turnWaiter?.TrySetResult();
+            _turnWaiter = null;
+        }
+    }
+
+    private Task TurnAsync()
+    {
+        _turnWaiter ??= new TaskCompletionSource();
+        return _turnWaiter.Task;
+    }
+
+    private void Enqueue(ReadOnlySpan<byte> bytes)
+    {
+        if (_queued.Length - _queuedUsed < bytes.Length)
+        {
+            long size = Math.Max(16 * 1024, (long)_queued.Length * 2);
+            while (size < (long)_queuedUsed + bytes.Length)
+            {
+                size *= 2;
+            }
+
+            byte[] grown = ArrayPool<byte>.Shared.Rent((int)Math.Min(size, Array.MaxLength));
+            _queued.AsSpan(0, _queuedUsed).CopyTo(grown);
+            if (_queued.Length > 0)
+            {
+                ArrayPool<byte>.Shared.Return(_queued);
+            }
+            _queued = grown;
+        }
+
+        bytes.CopyTo(_queued.AsSpan(_queuedUsed));
+        _queuedUsed += bytes.Length;
     }
 
     private void WriteSettings()

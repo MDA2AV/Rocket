@@ -29,6 +29,13 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
     private byte[] _staging = [];
     private int _staged;
 
+    // Bytes THIS response has staged since its last real flush. Inside a pass a writer normally
+    // rides the pass flush, but past Http2Connection.CoalesceLimit it flushes for real anyway -
+    // the yield that keeps a producer looping without any await of its own from spinning the
+    // reactor. Per writer on purpose: a per-pass version of this bound split the pass write and
+    // cost a third of streamed throughput.
+    private int _sinceRealFlush;
+
     private bool _headersSent;
     private bool _completed;
 
@@ -160,6 +167,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         }
 
         _staged = 0;
+        _sinceRealFlush += sent;
 
         if (endStream && sent == 0)
         {
@@ -167,7 +175,16 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
             _connection.SendStreamedData(_streamId, ReadOnlySpan<byte>.Empty, endStream: true);
         }
 
-        await _connection.MaybeFlushAsync();
+        // Inside a pass the pass flush carries these frames with every other response's, so the
+        // writer stays out of the way - unless this one response has already staged past the
+        // limit, where it must write for real to yield. Outside a pass the flush is always real.
+        if (_connection.InDispatchPass && _sinceRealFlush < Http2Connection.CoalesceLimit)
+        {
+            return;
+        }
+
+        _sinceRealFlush = 0;
+        await _connection.FlushOutboundAsync();
     }
 
     private void EnsureStaging(int sizeHint)
@@ -195,6 +212,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
     {
         _streamId = streamId;
         _staged = 0;
+        _sinceRealFlush = 0;
         _headersSent = false;
         _completed = false;
     }

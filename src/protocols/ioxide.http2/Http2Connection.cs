@@ -97,6 +97,18 @@ public sealed partial class Http2Connection : IDisposable
             ArrayPool<byte>.Shared.Return(_inbound);
             _inbound = [];
         }
+
+        if (_queued.Length > 0)
+        {
+            ArrayPool<byte>.Shared.Return(_queued);
+            _queued = [];
+        }
+        _queuedUsed = 0;
+
+        // A writer parked on its turn of the write pump has to wake into IsBroken, not hang: the
+        // flush that would have completed its turn is never coming.
+        _turnWaiter?.TrySetResult();
+        _turnWaiter = null;
     }
 
     /// <summary>Serve until the peer goes away, answering each request with <paramref name="handler"/>.</summary>
