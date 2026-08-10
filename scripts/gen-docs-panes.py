@@ -138,6 +138,29 @@ PANES = {
         "<code>Nghttp2Connection</code> takes a pipe, so the same HTTP/2 code runs over the ring "
         "directly, over ioxide's TLS, or over <code>SslStream</code> - the transport is a "
         "constructor argument, not a branch inside the protocol."),
+    "h3cs": (
+        "Http3/Managed", "HTTP/3 &middot; pure C#", "ioxide + ioxide.ngtcp2 + ioxide.http3",
+        ["curl --http3-only -k https://127.0.0.1:8443/"],
+        "HTTP/3 with <b>no native library above the transport</b> - frames, QPACK and Huffman are "
+        "all managed code, and only QUIC itself stays native. Drop-in for "
+        "<label for=\"tab-h3\" class=\"ex-jump\">nghttp3</label>: the diff is the package and three "
+        "type names. It is also <b>faster at every size measured</b> on this rig - 2 reactors, "
+        "<code>h3x --connections 16 -m 8</code>: <b>1.54&times;</b> at a 13-byte body, 1.28&times; at "
+        "50 KiB, 1.32&times; at 1 MiB, using less memory at the large end. The small-body lead came "
+        "from sending the header frame and a short body in ONE call rather than two; the large-body "
+        "lead is the native shim copying every response body at submit, which this never does."),
+    "h3stream": (
+        "Http3/Streamed", "HTTP/3 &middot; streamed response", "ioxide + ioxide.ngtcp2 + ioxide.nghttp3",
+        ["curl --http3-only -k https://127.0.0.1:8443/",
+         "curl --http3-only -kN https://127.0.0.1:8443/feed   # never ends"],
+        "The response body produced OVER TIME instead of handed over whole - each flush becomes a "
+        "DATA frame. That is what <code>/feed</code> demonstrates: an endless response has no final "
+        "byte, so a buffered API cannot express it at all. <code>Nghttp3ResponseWriter</code> is an "
+        "<code>IBufferWriter&lt;byte&gt;</code>, so a serializer or a framework's response sink "
+        "writes into it unchanged, and <code>FlushAsync</code> returning only once nghttp3 has taken "
+        "the chunk is what stops a producer outrunning a peer that has stopped reading. nghttp3 "
+        "PULLS body bytes rather than accepting pushes, which is why this carries a resume and a "
+        "drain the pure-C# writer does not need."),
     "h3buf": (
         "Http3/Buffered", "HTTP/3 &middot; buffered dispatch", "ioxide + ioxide.ngtcp2 + ioxide.nghttp3",
         ["curl --http3-only -k https://127.0.0.1:8443/"],
