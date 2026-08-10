@@ -88,18 +88,70 @@ public sealed partial class Nghttp2Connection
 
         foreach (PendingRequest pending in ready)
         {
+            ValueTask<Nghttp2Response> inFlight;
+
             try
             {
-                Nghttp2Request request = pending.Freeze();
-                Nghttp2Response response = await handler(request);
-                SubmitResponse(pending.StreamId, response);
+                inFlight = handler(pending.Freeze());
             }
-            finally
+            catch
             {
-                // The arena backs the request's memories, so it can only go back once the handler
-                // has returned and the response is submitted (which copies).
                 pending.Dispose();
+                throw;
             }
+
+            // Answered synchronously, which nearly every handler does. Stay inline: the response is
+            // submitted in time for this pass's drain, so it still leaves with every other one, and
+            // there is no Task to allocate.
+            if (inFlight.IsCompletedSuccessfully)
+            {
+                try
+                {
+                    SubmitResponse(pending.StreamId, inFlight.Result);
+                }
+                finally
+                {
+                    // The arena backs the request's memories, so it can only go back once the
+                    // handler has returned and the response is submitted (which copies).
+                    pending.Dispose();
+                }
+                continue;
+            }
+
+            // It parked - a database, an upstream, a disk. Awaiting here would hold every OTHER
+            // stream on this connection behind it, including responses already submitted and
+            // waiting to go, because they all share this one dispatch loop and one TCP connection.
+            _ = CompleteAsync(inFlight, pending);
+        }
+    }
+
+    /// <summary>
+    /// The tail of a handler that parked. Nothing awaits this, so everything the dispatch loop
+    /// would have done afterwards has to happen here: submitting, retiring the request, and
+    /// draining, since this pass's drain has long gone by.
+    /// </summary>
+    private async Task CompleteAsync(ValueTask<Nghttp2Response> inFlight, PendingRequest pending)
+    {
+        try
+        {
+            SubmitResponse(pending.StreamId, await inFlight);
+        }
+        catch (Exception exception)
+        {
+            // Nobody can observe this task, so an escaping exception would vanish silently and the
+            // peer would wait on a stream that is never coming.
+            Console.Error.WriteLine(
+                $"[ioxide.nghttp2] request handler faulted: {exception.GetBaseException().Message}");
+
+            if (!IsBroken)
+            {
+                SubmitResponse(pending.StreamId, new Nghttp2Response { Status = 500 });
+            }
+        }
+        finally
+        {
+            pending.Dispose();
+            await FlushEgressAsync();
         }
     }
 }
