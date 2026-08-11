@@ -27,6 +27,16 @@ public sealed unsafe class H3TestClient : IDisposable
     private static ulong NowNs() => (ulong)(System.Diagnostics.Stopwatch.GetTimestamp() *
                                             (1_000_000_000.0 / System.Diagnostics.Stopwatch.Frequency));
 
+    private readonly string? _certPath;
+    private readonly string? _keyPath;
+
+    /// <summary>A client that presents a certificate when the server asks for one.</summary>
+    public H3TestClient(string host, int port, string certPath, string keyPath) : this(host, port)
+    {
+        _certPath = certPath;
+        _keyPath = keyPath;
+    }
+
     public H3TestClient(string host, int port)
     {
         _udp = new UdpClient();
@@ -43,7 +53,9 @@ public sealed unsafe class H3TestClient : IDisposable
         {
             OnStreamData = &OnQuicStreamData,
         };
-        _clientEngine = iq_client_engine_new("h3", quicCbs);
+        _clientEngine = _certPath is null
+            ? iq_client_engine_new("h3", quicCbs)
+            : iq_client_engine_new_mtls("h3", _certPath, _keyPath!, quicCbs);
         Assert.True(_clientEngine != 0, "client engine init failed");
 
         Span<byte> local = stackalloc byte[16];
@@ -385,6 +397,10 @@ public sealed unsafe class H3TestClient : IDisposable
     [DllImport(QuicLib)] private static extern nint iq_client_engine_new([MarshalAs(UnmanagedType.LPUTF8Str)] string alpn, IqCallbacks cbs);
     [DllImport(QuicLib)] private static extern void iq_client_engine_free(nint e);
     [DllImport(QuicLib)] private static extern nint iq_client_connect(nint e, byte* localSa, nuint localLen, byte* remoteSa, nuint remoteLen, [MarshalAs(UnmanagedType.LPUTF8Str)] string serverName, [MarshalAs(UnmanagedType.LPUTF8Str)] string alpn, nuint scidLen, ulong ts, void* user, byte* scidOut);
+    [DllImport(QuicLib)] private static extern nint iq_client_engine_new_mtls(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string alpn,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string certPath,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string keyPath, IqCallbacks cbs);
     [DllImport(QuicLib)] private static extern long iq_client_open_bidi(nint conn);
     [DllImport(QuicLib)] private static extern long iq_conn_open_uni(nint conn);
     [DllImport(QuicLib)] private static extern nint iq_conn_write(nint conn, byte* dest, nuint destLen, long streamId, byte* data, nuint dataLen, int fin, long* pConsumed, ulong ts);

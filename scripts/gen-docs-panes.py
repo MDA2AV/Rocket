@@ -176,6 +176,22 @@ PANES = {
         "the trade is that memory holds the whole body, which suits normal requests and not hostile "
         "uploads. <b>Streamed</b> runs you while the body is still arriving and credits the peer's "
         "flow-control window as you read, so memory is bound by one window instead."),
+    "h3mtls": (
+        "Http3/MutualTls", "HTTP/3 &middot; mutual TLS", "ioxide + ioxide.ngtcp2 + ioxide.http3",
+        ["PLAYGROUND_CLIENT_CA=ca.crt dotnet run -c Release --project Playground/Http3/MutualTls",
+         "curl --http3 --cacert ca.crt --cert client.crt --key client.key https://localhost:8443/"],
+        "The client proves who it is too. <code>clientCaPemPath</code> is what turns it on - the CA "
+        "that client certificates are checked against - and the handler reads "
+        "<code>PeerSubject</code> to find out WHICH client it got. That distinction is the point: a "
+        "server that can only answer <em>some valid certificate</em> has a gate, where one that can "
+        "name the peer has an identity to authorise against. "
+        "Read it per REQUEST, not where the connection is accepted - that callback runs before the "
+        "handshake finishes, so there is no identity yet. "
+        "<b>QUIC settles client authentication during the handshake</b>, and RFC 9001 &sect;4.4 "
+        "forbids doing it afterwards, so this is a property of the whole CONNECTION: there is no "
+        "asking for a certificate later because a request reached a protected route. That needs a "
+        "second port. <code>requireClientCertificate</code> decides whether a client offering none "
+        "is refused during the handshake or arrives unauthenticated for the handler to judge."),
     "quicalpn": (
         "Quic/Alpn", "QUIC &middot; two protocols by ALPN", "ioxide + ioxide.ngtcp2 + ioxide.nghttp3",
         ["curl --http3-only -k https://127.0.0.1:8443/"],

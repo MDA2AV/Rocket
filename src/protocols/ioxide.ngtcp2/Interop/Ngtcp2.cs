@@ -34,6 +34,22 @@ internal static unsafe class Ngtcp2
         [MarshalAs(UnmanagedType.LPUTF8Str)] string keyPemPath,
         nuint cidLen, byte* alpn, nuint alpnLen, Callbacks cbs);
 
+    /// <summary>
+    /// Engine with client-certificate verification. <paramref name="clientCaPemPath"/> is the bundle
+    /// client certificates are validated against; null leaves mTLS off and the handshake unchanged.
+    /// <paramref name="requireClientCert"/> decides whether a client offering none is refused
+    /// outright or merely arrives unauthenticated.
+    /// </summary>
+    [DllImport(Lib)] internal static extern nint iq_engine_new_mtls(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string certPemPath,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string keyPemPath,
+        nuint cidLen, byte* alpn, nuint alpnLen,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? clientCaPemPath, int requireClientCert,
+        Callbacks cbs);
+
+    /// <summary>The verified client identity, or 0 written when the peer offered none.</summary>
+    [DllImport(Lib)] internal static extern nuint iq_conn_peer_subject(nint conn, byte* outBuf, nuint outLen);
+
     [DllImport(Lib)] internal static extern void iq_engine_free(nint engine);
 
     [DllImport(Lib)] internal static extern nint iq_accept(

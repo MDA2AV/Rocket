@@ -760,6 +760,87 @@ public static class Sidecars
 /// <summary>A throwaway self-signed cert for the TLS test, written to PEM (ioxide.tls wants paths).</summary>
 public static class TestCert
 {
+    /// <summary>
+    /// A CA, a server certificate and two client certificates - one the CA signed, one a DIFFERENT
+    /// CA signed. mTLS cannot be tested without all four: proving a good certificate is let in says
+    /// nothing unless a bad one is turned away.
+    /// </summary>
+    public static (string CaPath, string ServerCert, string ServerKey,
+                   string ClientCert, string ClientKey,
+                   string RogueCert, string RogueKey) EnsureMutualTls()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "ioxide-e2e-mtls");
+        Directory.CreateDirectory(dir);
+
+        string ca = Path.Combine(dir, "ca.crt");
+        string serverCert = Path.Combine(dir, "server.crt");
+        string serverKey = Path.Combine(dir, "server.key");
+        string clientCert = Path.Combine(dir, "client.crt");
+        string clientKey = Path.Combine(dir, "client.key");
+        string rogueCert = Path.Combine(dir, "rogue.crt");
+        string rogueKey = Path.Combine(dir, "rogue.key");
+
+        if (File.Exists(ca) && File.Exists(clientCert) && File.Exists(rogueCert))
+        {
+            return (ca, serverCert, serverKey, clientCert, clientKey, rogueCert, rogueKey);
+        }
+
+        using var caKey = System.Security.Cryptography.RSA.Create(2048);
+        var caRequest = new System.Security.Cryptography.X509Certificates.CertificateRequest(
+            "CN=ioxide test CA", caKey, System.Security.Cryptography.HashAlgorithmName.SHA256,
+            System.Security.Cryptography.RSASignaturePadding.Pkcs1);
+        caRequest.CertificateExtensions.Add(
+            new System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension(true, false, 0, true));
+        using var caCert = caRequest.CreateSelfSigned(
+            DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
+        File.WriteAllText(ca, caCert.ExportCertificatePem());
+
+        Sign(caCert, "CN=localhost", serverCert, serverKey, server: true);
+        Sign(caCert, "CN=alice", clientCert, clientKey, server: false);
+
+        // A second CA the server has never heard of, so its certificates must be refused.
+        using var rogueKeyPair = System.Security.Cryptography.RSA.Create(2048);
+        var rogueCa = new System.Security.Cryptography.X509Certificates.CertificateRequest(
+            "CN=rogue CA", rogueKeyPair, System.Security.Cryptography.HashAlgorithmName.SHA256,
+            System.Security.Cryptography.RSASignaturePadding.Pkcs1);
+        rogueCa.CertificateExtensions.Add(
+            new System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension(true, false, 0, true));
+        using var rogueCaCert = rogueCa.CreateSelfSigned(
+            DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
+        Sign(rogueCaCert, "CN=mallory", rogueCert, rogueKey, server: false);
+
+        return (ca, serverCert, serverKey, clientCert, clientKey, rogueCert, rogueKey);
+
+        static void Sign(System.Security.Cryptography.X509Certificates.X509Certificate2 issuer,
+            string subject, string certPath, string keyPath, bool server)
+        {
+            using var key = System.Security.Cryptography.RSA.Create(2048);
+            var request = new System.Security.Cryptography.X509Certificates.CertificateRequest(
+                subject, key, System.Security.Cryptography.HashAlgorithmName.SHA256,
+                System.Security.Cryptography.RSASignaturePadding.Pkcs1);
+
+            if (server)
+            {
+                var names = new System.Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder();
+                names.AddDnsName("localhost");
+                names.AddIpAddress(System.Net.IPAddress.Loopback);
+                request.CertificateExtensions.Add(names.Build());
+            }
+
+            request.CertificateExtensions.Add(
+                new System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension(
+                    [new System.Security.Cryptography.Oid(server ? "1.3.6.1.5.5.7.3.1" : "1.3.6.1.5.5.7.3.2")], false));
+
+            byte[] serial = new byte[8];
+            System.Security.Cryptography.RandomNumberGenerator.Fill(serial);
+            using var signed = request.Create(issuer, DateTimeOffset.UtcNow.AddDays(-1),
+                DateTimeOffset.UtcNow.AddYears(1), serial);
+
+            File.WriteAllText(certPath, signed.ExportCertificatePem());
+            File.WriteAllText(keyPath, key.ExportPkcs8PrivateKeyPem());
+        }
+    }
+
     public static (string CertPath, string KeyPath) Ensure()
     {
         string dir = Path.Combine(Path.GetTempPath(), "ioxide-e2e-tls");
