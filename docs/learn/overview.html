@@ -110,8 +110,8 @@ foreach (var t in threads) t.Join();</code></pre>
       <li><a href="postgres.html"><code>ioxide.pg</code></a> - pooled ring-native Postgres.</li>
       <li><a href="redis.html"><code>ioxide.redis</code></a> - full RESP2 Redis client.</li>
       <li><a href="files.html"><code>ioxide.file</code></a> - static files with baked responses.</li>
-      <li><code>ioxide.httpclient</code> - HTTP/1.1, HTTP/2 and HTTP/3 behind one API, protocol
-      chosen per origin via Alt-Svc.</li>
+      <li><code>ioxide.httpclient</code> - the HTTP/1.1 upstream leg between a proxy and an
+      origin.</li>
       <li><a href="clients.html">Your own</a> - the same seam in under 100 lines.</li>
     </ul>
 

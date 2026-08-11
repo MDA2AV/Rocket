@@ -24,11 +24,4 @@
     <ProjectReference Include="../../ioxide/ioxide.csproj" />
   </ItemGroup>
 
-  <ItemGroup>
-    <!-- The HTTP/2 client is the same framing, HPACK and flow control pointed the other way round,
-         so it uses these types directly rather than having them duplicated or promoted to public
-         API. Only the client half lives over there; the package's own surface stays unchanged. -->
-    <InternalsVisibleTo Include="ioxide.httpclient" />
-  </ItemGroup>
-
 </Project>

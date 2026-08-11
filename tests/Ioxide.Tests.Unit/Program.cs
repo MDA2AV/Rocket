@@ -12,7 +12,6 @@ internal static class Program
         var runner = new Runner();
 
         DemuxParseTests.Register(runner);
-        AltSvcTests.Register(runner);
         MessageTests.Register(runner);
         ResponseAssemblyTests.Register(runner);
         ResponseCapTests.Register(runner);

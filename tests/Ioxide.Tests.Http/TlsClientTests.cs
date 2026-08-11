@@ -17,7 +17,6 @@ namespace Ioxide.Tests;
 /// </summary>
 internal static class TlsClientTests
 {
-    private const ushort H2TlsSidecarPort = 14465;
 
     public static void Register(Runner runner)
     {
@@ -121,78 +120,6 @@ internal static class TlsClientTests
             Assert.Equal("200|hello over http/1.1", body);
         });
 
-        // A real HTTP/2-over-TLS origin, which SslStream cannot stand in for: it can negotiate the
-        // ALPN token but not speak the framing behind it. nginx does both.
-        //
-        //   docker run -d --name nginx-h2-tls --network host \
-        //     -v .../nginx-h2-tls.conf:/etc/nginx/nginx.conf:ro \
-        //     -v .../doc_root:/doc_root:ro -v /tmp/ioxide-e2e-tls:/certs:ro nginx
-        bool noH2Tls = !Sidecars.Reachable("127.0.0.1", H2TlsSidecarPort);
-
-        runner.Test("tls client: h2 over TLS against a real HTTP/2 origin", () =>
-        {
-            (string certPath, _) = TestCert.Ensure();
-
-            using TlsClientContext tls = TlsClientContext.Create(new TlsClientOptions
-            {
-                ServerName = "localhost",
-                AlpnProtocols = ["h2", "http/1.1"],
-                CaFile = certPath,
-            });
-
-            int proxy = TestServer.Start(Http2ProxyHandler, onStart: reactor =>
-                Http2ClientPool.Start(reactor, new Http2ClientOptions
-                {
-                    Host = "127.0.0.1",
-                    Port = H2TlsSidecarPort,
-                    PoolSize = 1,
-                    AcquireTimeoutMs = 5_000,
-                    Tls = tls,
-                }));
-
-            (int status, string body) = Client.Get(proxy, "/index.html", timeoutMs: 20_000);
-            Assert.Equal(200, status);
-
-            // The sidecar's 1 KiB object, fetched over HTTP/2 inside TLS with the chain verified.
-            Assert.True(body.StartsWith("200|"), $"upstream should have answered 200, got: {body[..Math.Min(40, body.Length)]}");
-            Assert.Equal(1024, body.Length - "200|".Length);
-        }, skip: noH2Tls);
-
-        runner.Test("tls client: h2 over TLS refuses an origin that did not select h2", () =>
-        {
-            // Over TLS, HTTP/2 is chosen by ALPN and by nothing else. An origin that picked
-            // http/1.1 will not understand the HTTP/2 preface, and sending it anyway produces a
-            // connection that hangs instead of an error anyone can read - so the connect fails
-            // here, while there is still something useful to say.
-            using TlsTestOrigin origin = TlsTestOrigin.Start("http/1.1");
-            (string certPath, _) = TestCert.Ensure();
-
-            // Offer BOTH. Offering only "h2" to an http/1.1-only origin fails the HANDSHAKE with
-            // no_application_protocol, which never reaches the guard being tested - the connection
-            // has to succeed and negotiate http/1.1 for the post-handshake check to fire.
-            using TlsClientContext tls = TlsClientContext.Create(new TlsClientOptions
-            {
-                ServerName = "localhost",
-                AlpnProtocols = ["h2", "http/1.1"],
-                CaFile = certPath,
-            });
-
-            int proxy = TestServer.Start(Http2ProxyHandler, onStart: reactor =>
-                Http2ClientPool.Start(reactor, new Http2ClientOptions
-                {
-                    Host = "127.0.0.1",
-                    Port = (ushort)origin.Port,
-                    PoolSize = 1,
-                    AcquireTimeoutMs = 3_000,
-                    Tls = tls,
-                }));
-
-            (int status, string body) = Client.Get(proxy, "/h2-mismatch", timeoutMs: 20_000);
-            Assert.Equal(200, status);
-            Assert.True(body.StartsWith("599|"), $"the h2 connect should have failed, got: {body}");
-            Assert.True(body.Contains("ALPN") || body.Contains("alpn"),
-                $"should be the ALPN guard rather than a handshake failure, got: {body}");
-        });
 
         runner.Test("tls client: ServerName is required", () =>
         {
@@ -228,47 +155,6 @@ internal static class TlsClientTests
         };
 
         return TestServer.Start(ProxyHandler, onStart: reactor => HttpClientPool.Start(reactor, options));
-    }
-
-    // The same shape as ProxyHandler, driving the HTTP/2 pool instead.
-    private static async Task Http2ProxyHandler(Reactor reactor, TcpConnection connection)
-    {
-        try
-        {
-            Http2ClientPool upstream = reactor.GetService<Http2ClientPool>()!;
-
-            while (true)
-            {
-                RecvSnapshot snapshot = await connection.ReadAsync();
-                if (snapshot.IsClosed)
-                {
-                    return;
-                }
-                string path = Wire.ReadPath(connection, snapshot);
-
-                string detail;
-                int status;
-                try
-                {
-                    using HttpClientResponse response = await upstream.GetAsync(path);
-                    status = response.Status;
-                    detail = Encoding.ASCII.GetString(response.Body.Span);
-                }
-                catch (Exception e)
-                {
-                    status = 599;
-                    detail = e.Message;
-                }
-
-                Wire.Write(connection, 200, $"{status}|{detail}");
-                await connection.FlushAsync();
-                connection.ResetRead();
-            }
-        }
-        finally
-        {
-            connection.DecRef();
-        }
     }
 
     private static async Task ProxyHandler(Reactor reactor, TcpConnection connection)

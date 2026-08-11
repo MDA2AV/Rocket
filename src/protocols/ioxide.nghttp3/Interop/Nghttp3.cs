@@ -1,9 +1,4 @@
-using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-
-// The HTTP/3 CLIENT package drives the same shim from the other side; it is a sibling of this
-// package rather than an outside consumer, so it sees the P/Invoke surface.
-[assembly: InternalsVisibleTo("ioxide.httpclient")]
 
 namespace ioxide.nghttp3;
 
