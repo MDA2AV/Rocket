@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Building with ioxide &middot; Part 1 &middot; ioxide</title>
+    <link rel="stylesheet" href="../assets/style.css">
+    <link rel="stylesheet" href="../assets/highlight-dark.min.css">
+    <link rel="stylesheet" href="blog.css">
+    <script src="../assets/highlight.min.js"></script>
+</head>
+<body>
+    <nav class="top">
+  <a class="brand" href="../"><span>io</span>xide</a>
+  <div class="links">
+    <a href="index.html" class="active">Blog</a>
+    <a class="gh" href="https://github.com/MDA2AV/ioxide" aria-label="GitHub"><svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
+  </div>
+</nav>
+
+    <div class="layout">
+    <aside class="side">
+    <div class="group">Blog</div>
+    <a href="index.html">All posts</a>
+    <details class="series">
+      <summary class="group lead">From scratch</summary>
+      <a href="io-uring-minima-part-1.html"><span class="part-num">Part 1</span>io_uring from scratch</a>
+      <a href="io-uring-minima-part-2.html"><span class="part-num">Part 2</span>Bridge the Async Model</a>
+      <a href="io-uring-minima-part-3.html"><span class="part-num">Part 3</span>Touching the Bytes</a>
+      <a href="io-uring-minima-part-4.html"><span class="part-num">Part 4</span>Zero Copy Receive</a>
+      <a href="io-uring-minima-part-5.html"><span class="part-num">Part 5</span>io_uring and the Thread Pool</a>
+      <a href="io-uring-minima-part-6.html"><span class="part-num">Part 6</span>Numbers</a>
+      <a href="io-uring-minima-part-7.html"><span class="part-num">Part 7</span>fractal</a>
+    </details>
+    <details class="series" open>
+      <summary class="group lead">Building with ioxide</summary>
+      <a href="building-with-ioxide-part-1.html" class="here"><span class="part-num">Part 1</span>A basic web server</a>
+    </details>
+  </aside>
+
+    <main class="page">
+        <a href="index.html" class="back-link">&larr; All posts</a>
+
+        <article>
+            <img src="images/building-with-ioxide-part-1-hero.png" alt="A child in a blue cape and a star-emblazoned shirt sprinting across a running track." class="post-hero">
+
+            <header class="post-header">
+                <h1>Building with ioxide &middot; Part 1: A basic web server</h1>
+                <div class="post-meta">2026-08-11 &middot; Part 1</div>
+            </header>
+
+            <div class="post-body">
+                <p>ioxide is a C# experimental parallel stack for linux I/O with io_uring, a research project to see how far C# can be pushed with it.</p>
+
+                <p>In this post I will explore how easy it is to create a web server using ioxide and rant about some of its design decisions and problems.</p>
+
+                <p>ioxide is a set of 11 nugets centered in one core package which provides the io_uring machinery and workers that power the server.</p>
+
+                <p class="note">A kind reminder that ioxide is a research project. The code here is meant for exploring how far C# can go with io_uring, not as a drop-in replacement for your production stack.</p>
+
+                <h2>Core nuget</h2>
+
+                <p>ioxide is a shared nothing thread per core mechanism, this means that a server is a set of workers, each one running on a dedicated thread, in an exclusive CPU core, there is no cross talk between workers, they are completely independent and if things are done right, should never leave their thread. This is a big paradigm shift when compared to how Kestrel works for example, a work stealing model that schedules work to the thread pool which runs on "the next available CPU core".</p>
+
+                <p>This decision has its ups such as much better CPU efficiency but also.. its downs. The workload is not properly balanced uniformly throughout the available CPU cores, this means that a worker can be overloaded while others are just chilling, also blocking synchronous work would block all requests and work in that same worker. Luckily this is usually not the case for web applications where workloads are async and won't block.</p>
+
+                <p>So.. does this mean we cannot use libraries that schedule to threadpool or just do a simple <code>Task.Run</code>?</p>
+
+                <p>We can still use the threadpool but it is not ideal, each worker enforces a synchronization context so continuations that complete off the worker thread are posted back and resume on it. This implies a small performance loss but very bearable. While io_uring could in fact work with the thread pool work stealing model not forcing synchronization back to reactor, it simply isn't a good fit and the extra complexity would not be worth it, this could be a rant for a more in depth post.</p>
+
+                <p>Moving on, this core package alone is enough to build a fully working TCP server, the I/O API is quite nice as it supports Pipes and Stream on top of the highest performance "raw" mode that yields full control.. and full responsibility to the user. To be fair, pipes are the best of both worlds, trust me you don't want to manually deal with TCP fragmentation.</p>
+
+                <h3>A basic TCP server</h3>
+
+                <p>Following is a very basic TCP server config using a single worker (reactor) and the exposed default server configs. In this case the UDP and QUIC handlers are set to null because we are only accepting TCP connections. Our <code>TcpHandle</code> is as basic as it gets using the pipes API which provides a very ergonomic way to arrange and slice the data for parsing.</p>
+
+                <p>While this all looks very much dotnetish, don't be fooled by this inviting async API, this code uses one single thread and all the async is <code>IValueTaskSource</code> with continuations controlled by the worker. Normally we would want to do some database operations or other async I/O, for that ioxide provides modules/nugets that "plug" into the worker async machinery to ensure nobody leaves our precious shiny thread.</p>
+
+<pre><code class="language-csharp">using System.IO.Pipelines;
+using ioxide;
+using ioxide.utils;
+
+bool incrementalBuffers = false;
+
+var config = new ServerConfig
+{
+    ReactorCount   = 1,         // io_uring rings/threads - one per core
+    RingEntries    = 8192,      // SQ/CQ depth per ring
+    DualStack      = false,     // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024, // bytes per shared recv buffer
+    RecvSlots      = 4096,      // shared recv buffer-ring depth
+    Incremental    = null,      // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,      // no raw UDP sockets (TCP-only server)
+    Quic           = null,      // no QUIC transport - see Http3/* and Quic/Alpn
+    Tcp = new TcpOptions
+    {
+        Port             = 8080,
+        ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
+    },
+};
+
+byte[] body = "ok"u8.ToArray();
+byte[] response =
+[
+    .. System.Text.Encoding.ASCII.GetBytes($"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {body.Length}\r\n\r\n"),
+    .. body,
+];
+
+var threads = new Thread[config.ReactorCount];
+
+for (int i = 0; i &lt; threads.Length; i++){
+    var reactor = new Reactor(i, config);
+
+    reactor.TcpHandle = async (r, tcpConnection) =&gt;{
+        var reader = new TcpConnectionPipeReader(tcpConnection);
+        var writer = new TcpConnectionPipeWriter(tcpConnection);
+
+        try{
+            while (true){
+                ReadResult result = await reader.ReadAsync();
+
+                // This sample does not parse the received data, simply responds with a basic h1 response for any received data
+                reader.AdvanceTo(result.Buffer.End);
+
+                response.CopyTo(writer.GetSpan(response.Length));
+                writer.Advance(response.Length);
+
+                await writer.FlushAsync();
+
+                if (result.IsCompleted) {
+                    return;
+                }
+            }
+        }
+        finally{
+            reader.Complete();
+            tcpConnection.DecRef();
+        }
+    };
+
+    threads[i] = new Thread(reactor.Run) { Name = $"reactor-{i}" };
+    threads[i].Start();
+}
+
+Console.WriteLine($"[pipe] {config.ReactorCount} reactors on :{config.Tcp.Port}");
+
+foreach (Thread thread in threads){
+    thread.Join();
+}</code></pre>
+
+                <h2>TLS</h2>
+
+                <p>And of course, any HTTP server needs some form of TLS. For TCP connections ioxide provides 3 options out of the box:</p>
+
+                <ul>
+                    <li>Kernel TLS, TX and RX</li>
+                    <li>OpenSSL</li>
+                    <li>SslStream</li>
+                </ul>
+
+                <p>This is a topic I've put quite extensive work into, while the most complete option is without a doubt SslStream, kernel TLS is quite high performant.</p>
+
+                <h3>A basic TCP kTLS server</h3>
+
+                <p>By default <code>TlsOptions</code> opts in to the OpenSSL approach as it is more stable and configurable. Again this is a naive server for demo purposes.</p>
+
+<pre><code class="language-csharp">using System.Buffers;
+using System.IO.Pipelines;
+using System.Text;
+using ioxide;
+using ioxide.tls;
+
+const string certPath = "cert.pem";   // any PEM pair
+const string keyPath  = "key.pem";
+
+var config = new ServerConfig{
+    ReactorCount   = 1,
+    RingEntries    = 8192,
+    DualStack      = false,
+    RecvBufferSize = 32 * 1024,
+    RecvSlots      = 4096,
+    Incremental    = null,
+    Udp            = null,
+    Quic           = null,
+    Tcp = new TcpOptions{
+        Port             = 8443,
+        ExtraPorts       = [],
+        ListenBacklog    = 1024,
+        WriteSlabSize    = 16 * 1024,
+        PoolMax          = 1024,
+        WriteOverflow    = WriteOverflowStrategy.Grow,
+        ZeroCopySend     = false,
+        RecvQueueEntries = 64,
+    },
+};
+
+var tlsOptions = new TlsOptions{
+    CertificatePath = certPath,
+    KeyPath         = keyPath,
+    Alpn            = ["http/1.1"],
+    KernelTx        = true,
+    KernelRx        = true,
+};
+
+byte[] body = "ok"u8.ToArray();
+byte[] response =
+[
+    .. System.Text.Encoding.ASCII.GetBytes($"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {body.Length}\r\n\r\n"),
+    .. body,
+];
+
+var threads = new Thread[config.ReactorCount];
+
+for (int i = 0; i &lt; threads.Length; i++){
+    var reactor = new Reactor(i, config);
+
+    reactor.OnStart = r =&gt; TlsService.Start(r, tlsOptions);
+
+    reactor.TcpHandle = async (r, tcpConnection) =&gt;{
+        TlsSession? tls = null;
+        try{
+            tls = await r.GetService&lt;TlsService&gt;().AcceptAsync(tcpConnection);
+
+            // TlsConnectionDualPipe hides all the TLS complexity, use it like you would do with plain text pipes
+            await using var pipe = new TlsConnectionDualPipe(tcpConnection, tls, ownsSession: false);
+
+            while (true){
+                ReadResult read = await pipe.Input.ReadAsync();
+
+                pipe.Input.AdvanceTo(read.Buffer.End);
+                pipe.Output.Write(response);
+                await pipe.Output.FlushAsync();
+
+                if (read.IsCompleted || read.IsCanceled){
+                    return;
+                }
+            }
+        }
+        catch (Exception e){
+            Console.Error.WriteLine($"[tls-ktls-pipes] connection failed: {e.Message}");
+        }
+        finally{
+            tls?.Dispose();
+            tcpConnection.DecRef();
+        }
+    };
+
+    threads[i] = new Thread(reactor.Run) { Name = $"reactor-{i}" };
+    threads[i].Start();
+}
+
+Console.WriteLine($"[tls-ktls-pipes] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
+                + $"{body.Length}-byte body, tx=kernel, rx=kernel (experimental)");
+
+foreach (Thread thread in threads){
+    thread.Join();
+}</code></pre>
+
+                <p>More detail on the three TLS backends and when each one makes sense lives in the <a href="../learn/tls.html">TLS documentation</a>.</p>
+
+                <h2>Benchmarks</h2>
+
+                <p>Naturally ioxide is quite performing, on par with low level Rust, C++ and Zig solutions. Some benchmarks exist at <a href="https://www.http-arena.com/#type=engine">http-arena.com</a>.</p>
+
+                <p>It does not make sense comparing ioxide with aspnet for example, would be an apples to oranges comparison. Some benchmarks between Net.Sockets and ioxide were performed in the past where ioxide shows a much better CPU efficiency especially at low CPU core counts as the io_uring batching becomes much more relevant.</p>
+
+                <h2>Coming up on future posts on this series</h2>
+
+                <h3>QUIC</h3>
+
+                <p>ioxide supports TCP, UDP and QUIC transports, QUIC is a bit different as it is a "user space" transport that sits on UDP. ioxide uses ngtcp2 library for QUIC. This will be covered by an in depth future post on this series.</p>
+
+                <h3>Async file I/O with io_uring</h3>
+
+                <p>Doing file I/O with the io_uring API, truly asynchronous.</p>
+
+                <h3>HttpClient</h3>
+
+                <p>Using io_uring very high performance http clients for reverse proxying.</p>
+
+                <h3>Postgres and Redis drivers</h3>
+
+                <p>Accessing a postgres database and redis cache.</p>
+
+                <h3>HTTP/2 and HTTP/3</h3>
+
+                <p>Integrating ioxide's h2 and h3 packages for real world networking scenarios.</p>
+            </div>
+        </article>
+    </main>
+    </div>
+
+    <footer>
+        <a href="index.html">&larr; All posts</a>
+        &nbsp;&middot;&nbsp;
+        <a href="../">ioxide</a>
+        &nbsp;&middot;&nbsp;
+        <a href="../learn/overview.html">documentation</a>
+    </footer>
+
+    <script>hljs.highlightAll();</script>
+</body>
+</html>

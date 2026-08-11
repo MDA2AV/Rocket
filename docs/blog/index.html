@@ -20,14 +20,20 @@
     <aside class="side">
     <div class="group">Blog</div>
     <a href="index.html" class="here">All posts</a>
-    <div class="group sub">The series</div>
-    <a href="io-uring-minima-part-1.html"><span class="part-num">Part 1</span>io_uring from scratch</a>
-    <a href="io-uring-minima-part-2.html"><span class="part-num">Part 2</span>Bridge the Async Model</a>
-    <a href="io-uring-minima-part-3.html"><span class="part-num">Part 3</span>Touching the Bytes</a>
-    <a href="io-uring-minima-part-4.html"><span class="part-num">Part 4</span>Zero Copy Receive</a>
-    <a href="io-uring-minima-part-5.html"><span class="part-num">Part 5</span>io_uring and the Thread Pool</a>
-    <a href="io-uring-minima-part-6.html"><span class="part-num">Part 6</span>Numbers</a>
-    <a href="io-uring-minima-part-7.html"><span class="part-num">Part 7</span>fractal</a>
+    <details class="series">
+      <summary class="group lead">From scratch</summary>
+      <a href="io-uring-minima-part-1.html"><span class="part-num">Part 1</span>io_uring from scratch</a>
+      <a href="io-uring-minima-part-2.html"><span class="part-num">Part 2</span>Bridge the Async Model</a>
+      <a href="io-uring-minima-part-3.html"><span class="part-num">Part 3</span>Touching the Bytes</a>
+      <a href="io-uring-minima-part-4.html"><span class="part-num">Part 4</span>Zero Copy Receive</a>
+      <a href="io-uring-minima-part-5.html"><span class="part-num">Part 5</span>io_uring and the Thread Pool</a>
+      <a href="io-uring-minima-part-6.html"><span class="part-num">Part 6</span>Numbers</a>
+      <a href="io-uring-minima-part-7.html"><span class="part-num">Part 7</span>fractal</a>
+    </details>
+    <details class="series">
+      <summary class="group lead">Building with ioxide</summary>
+      <a href="building-with-ioxide-part-1.html"><span class="part-num">Part 1</span>A basic web server</a>
+    </details>
   </aside>
 
     <main class="page">
@@ -36,6 +42,13 @@
         <p class="page-subtitle">Notes on io_uring, low-level networking and the internals of zerg.</p>
 
         <ul class="post-list">
+            <li>
+                <a href="building-with-ioxide-part-1.html" class="post-card">
+                    <span class="post-meta">2026-08-11 &middot; Part 1</span>
+                    <div class="post-title">Building with ioxide &middot; Part 1: A basic web server</div>
+                    <div class="post-excerpt">Opening a new series on using ioxide rather than building it. What the shared-nothing thread-per-core model actually means for your code, why a worker can be busy while its neighbours idle, and what happens when you reach for <code>Task.Run</code> anyway. Then a working TCP server on one reactor with the Pipes API, and the same thing again over TLS with the kernel TLS backend and <code>TlsConnectionDualPipe</code>.</div>
+                </a>
+            </li>
             <li>
                 <a href="io-uring-minima-part-7.html" class="post-card">
                     <span class="post-meta">2026-06-01 &middot; Part 7</span>
