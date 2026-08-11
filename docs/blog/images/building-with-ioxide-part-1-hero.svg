@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" font-family="'JetBrains Mono','Fira Code','Cascadia Code','Consolas',monospace">
+  <defs>
+    <marker id="up" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#e25822"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="300" fill="#202124"/>
+
+  <text x="70" y="52" fill="#e25822" font-size="14" font-weight="700" letter-spacing="3">IOXIDE &#183; SHARED NOTHING &#183; THREAD PER CORE</text>
+  <text x="1145" y="52" fill="#9aa0a6" font-size="12" text-anchor="end">no cross talk between workers</text>
+
+  <!-- reactor 0 -->
+  <rect x="70" y="90" width="220" height="120" rx="8" fill="#303134" stroke="#3c4043"/>
+  <text x="180" y="122" fill="#f07b4a" font-size="15" font-weight="700" text-anchor="middle">reactor 0</text>
+  <text x="180" y="150" fill="#e8eaed" font-size="12" text-anchor="middle">io_uring ring</text>
+  <text x="180" y="172" fill="#9aa0a6" font-size="12" text-anchor="middle">own connections</text>
+  <text x="180" y="194" fill="#9aa0a6" font-size="12" text-anchor="middle">thread pinned to cpu 0</text>
+
+  <!-- reactor 1 -->
+  <rect x="355" y="90" width="220" height="120" rx="8" fill="#303134" stroke="#3c4043"/>
+  <text x="465" y="122" fill="#f07b4a" font-size="15" font-weight="700" text-anchor="middle">reactor 1</text>
+  <text x="465" y="150" fill="#e8eaed" font-size="12" text-anchor="middle">io_uring ring</text>
+  <text x="465" y="172" fill="#9aa0a6" font-size="12" text-anchor="middle">own connections</text>
+  <text x="465" y="194" fill="#9aa0a6" font-size="12" text-anchor="middle">thread pinned to cpu 1</text>
+
+  <!-- reactor 2 -->
+  <rect x="640" y="90" width="220" height="120" rx="8" fill="#303134" stroke="#3c4043"/>
+  <text x="750" y="122" fill="#f07b4a" font-size="15" font-weight="700" text-anchor="middle">reactor 2</text>
+  <text x="750" y="150" fill="#e8eaed" font-size="12" text-anchor="middle">io_uring ring</text>
+  <text x="750" y="172" fill="#9aa0a6" font-size="12" text-anchor="middle">own connections</text>
+  <text x="750" y="194" fill="#9aa0a6" font-size="12" text-anchor="middle">thread pinned to cpu 2</text>
+
+  <!-- reactor 3 -->
+  <rect x="925" y="90" width="220" height="120" rx="8" fill="#303134" stroke="#3c4043"/>
+  <text x="1035" y="122" fill="#f07b4a" font-size="15" font-weight="700" text-anchor="middle">reactor 3</text>
+  <text x="1035" y="150" fill="#e8eaed" font-size="12" text-anchor="middle">io_uring ring</text>
+  <text x="1035" y="172" fill="#9aa0a6" font-size="12" text-anchor="middle">own connections</text>
+  <text x="1035" y="194" fill="#9aa0a6" font-size="12" text-anchor="middle">thread pinned to cpu 3</text>
+
+  <!-- severed links between neighbouring reactors -->
+  <g stroke="#3c4043" stroke-width="1.2" stroke-dasharray="3 3">
+    <line x1="292" y1="150" x2="312" y2="150"/>
+    <line x1="333" y1="150" x2="353" y2="150"/>
+    <line x1="577" y1="150" x2="597" y2="150"/>
+    <line x1="618" y1="150" x2="638" y2="150"/>
+    <line x1="862" y1="150" x2="882" y2="150"/>
+    <line x1="903" y1="150" x2="923" y2="150"/>
+  </g>
+  <g stroke="#9aa0a6" stroke-width="1.5">
+    <line x1="316" y1="144" x2="329" y2="157"/>
+    <line x1="329" y1="144" x2="316" y2="157"/>
+    <line x1="601" y1="144" x2="614" y2="157"/>
+    <line x1="614" y1="144" x2="601" y2="157"/>
+    <line x1="886" y1="144" x2="899" y2="157"/>
+    <line x1="899" y1="144" x2="886" y2="157"/>
+  </g>
+
+  <!-- every reactor opens its own listener on the same port -->
+  <g stroke="#e25822" stroke-width="1.5" marker-end="url(#up)">
+    <line x1="180" y1="243" x2="180" y2="214"/>
+    <line x1="465" y1="243" x2="465" y2="214"/>
+    <line x1="750" y1="243" x2="750" y2="214"/>
+    <line x1="1035" y1="243" x2="1035" y2="214"/>
+  </g>
+
+  <rect x="70" y="245" width="1075" height="44" rx="8" fill="rgba(226,88,34,0.10)" stroke="#e25822" stroke-width="1.2"/>
+  <text x="607" y="272" fill="#e8eaed" font-size="13" text-anchor="middle">SO_REUSEPORT &#183; :8080 &#183; the kernel hands each accepted connection to exactly one listener</text>
+</svg>

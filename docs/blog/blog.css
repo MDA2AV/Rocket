@@ -159,6 +159,30 @@ aside.side .part-num {
 aside.side a { line-height: 1.3; }
 aside.side a.here .part-num { color: var(--accent-soft); }
 
+/* ── collapsible series: only the series you are reading is open ── */
+aside.side details.series > summary {
+  display: flex;
+  align-items: center;
+  padding-right: 0.8rem;
+  cursor: pointer;
+  list-style: none;
+}
+aside.side details.series > summary::-webkit-details-marker { display: none; }
+aside.side details.series > summary::after {
+  content: '';
+  margin-left: auto;
+  width: 0.4rem;
+  height: 0.4rem;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: translateY(-1px) rotate(-45deg);   /* chevron points right when closed */
+  transition: transform 0.15s ease;
+  opacity: 0.6;
+}
+aside.side details.series[open] > summary::after { transform: translateY(-2px) rotate(45deg); }
+aside.side details.series > summary:hover { color: var(--accent-soft); }
+aside.side details.series > summary:hover::after { opacity: 1; }
+
 /* ── glossary ────────────────────────────────────────── */
 .glossary {
   background: var(--bg-card);
