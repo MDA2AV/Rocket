@@ -785,18 +785,24 @@ public static class TestCert
             return (ca, serverCert, serverKey, clientCert, clientKey, rogueCert, rogueKey);
         }
 
+        // ONE window for the whole set. Taking UtcNow per certificate lets a leaf be issued a
+        // second after its CA and therefore outlive it, which .NET refuses outright - a flake that
+        // only fires when the two calls straddle a second boundary.
+        DateTimeOffset notBefore = DateTimeOffset.UtcNow.AddDays(-1);
+        DateTimeOffset caNotAfter = notBefore.AddYears(2);
+        DateTimeOffset leafNotAfter = notBefore.AddYears(1);   // strictly inside the CA's window
+
         using var caKey = System.Security.Cryptography.RSA.Create(2048);
         var caRequest = new System.Security.Cryptography.X509Certificates.CertificateRequest(
             "CN=ioxide test CA", caKey, System.Security.Cryptography.HashAlgorithmName.SHA256,
             System.Security.Cryptography.RSASignaturePadding.Pkcs1);
         caRequest.CertificateExtensions.Add(
             new System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension(true, false, 0, true));
-        using var caCert = caRequest.CreateSelfSigned(
-            DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
+        using var caCert = caRequest.CreateSelfSigned(notBefore, caNotAfter);
         File.WriteAllText(ca, caCert.ExportCertificatePem());
 
-        Sign(caCert, "CN=localhost", serverCert, serverKey, server: true);
-        Sign(caCert, "CN=alice", clientCert, clientKey, server: false);
+        Sign(caCert, "CN=localhost", serverCert, serverKey, server: true, notBefore, leafNotAfter);
+        Sign(caCert, "CN=alice", clientCert, clientKey, server: false, notBefore, leafNotAfter);
 
         // A second CA the server has never heard of, so its certificates must be refused.
         using var rogueKeyPair = System.Security.Cryptography.RSA.Create(2048);
@@ -805,14 +811,14 @@ public static class TestCert
             System.Security.Cryptography.RSASignaturePadding.Pkcs1);
         rogueCa.CertificateExtensions.Add(
             new System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension(true, false, 0, true));
-        using var rogueCaCert = rogueCa.CreateSelfSigned(
-            DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
-        Sign(rogueCaCert, "CN=mallory", rogueCert, rogueKey, server: false);
+        using var rogueCaCert = rogueCa.CreateSelfSigned(notBefore, caNotAfter);
+        Sign(rogueCaCert, "CN=mallory", rogueCert, rogueKey, server: false, notBefore, leafNotAfter);
 
         return (ca, serverCert, serverKey, clientCert, clientKey, rogueCert, rogueKey);
 
         static void Sign(System.Security.Cryptography.X509Certificates.X509Certificate2 issuer,
-            string subject, string certPath, string keyPath, bool server)
+            string subject, string certPath, string keyPath, bool server,
+            DateTimeOffset notBefore, DateTimeOffset notAfter)
         {
             using var key = System.Security.Cryptography.RSA.Create(2048);
             var request = new System.Security.Cryptography.X509Certificates.CertificateRequest(
@@ -833,8 +839,7 @@ public static class TestCert
 
             byte[] serial = new byte[8];
             System.Security.Cryptography.RandomNumberGenerator.Fill(serial);
-            using var signed = request.Create(issuer, DateTimeOffset.UtcNow.AddDays(-1),
-                DateTimeOffset.UtcNow.AddYears(1), serial);
+            using var signed = request.Create(issuer, notBefore, notAfter, serial);
 
             File.WriteAllText(certPath, signed.ExportCertificatePem());
             File.WriteAllText(keyPath, key.ExportPkcs8PrivateKeyPem());
