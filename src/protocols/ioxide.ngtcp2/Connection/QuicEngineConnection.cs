@@ -24,6 +24,32 @@ public unsafe partial class QuicEngineConnection : QuicConnection
     private readonly QuicEngine? _engine;              // server connections
     private readonly QuicClientEngine? _clientEngine;   // client connections
     private nint _conn;                        // iq_conn*, null once closed
+
+    /// <summary>
+    /// The verified client certificate's subject, or null when the peer offered none - which is
+    /// possible whenever the engine was built with a client CA but not
+    /// <c>requireClientCertificate</c>. Empty until the handshake completes.
+    ///
+    /// Read it to decide what an authenticated peer may do: a server that can only answer "some
+    /// valid certificate" has a gate rather than an identity.
+    /// </summary>
+    public string? PeerSubject
+    {
+        get
+        {
+            if (_conn == 0)
+            {
+                return null;
+            }
+
+            Span<byte> buffer = stackalloc byte[256];
+            fixed (byte* p = buffer)
+            {
+                nuint written = Ngtcp2.iq_conn_peer_subject(_conn, p, (nuint)buffer.Length);
+                return written == 0 ? null : System.Text.Encoding.UTF8.GetString(buffer[..(int)written]);
+            }
+        }
+    }
     private GCHandle _self;                    // stable void* user passed to the shim
     private bool _handshakeDone;
     private bool _closed;

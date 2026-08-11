@@ -58,6 +58,11 @@ typedef struct iq_engine {
     ptls_context_t                  ptls_ctx;
     ptls_openssl_sign_certificate_t sign_cert;
     ptls_on_client_hello_t          on_client_hello;
+    /* mTLS. verify_cert does the actual path validation; peer_verify wraps it so the identity it
+     * proved can be recorded on the connection - authenticating a client you cannot then name is
+     * rarely what anyone wanted. Both are unused unless a client CA was configured. */
+    ptls_openssl_verify_certificate_t verify_cert;
+    ptls_verify_certificate_t         peer_verify;
     iq_callbacks                    cbs;
     size_t                          cidlen;
     uint8_t                         alpn[256];   /* allowlist, wire format (len-prefixed entries) */
@@ -85,6 +90,11 @@ typedef struct iq_conn {
      * overflow degrades gracefully to auto-credit (no backpressure for the extra stream). */
     int64_t paced[32];
     int     paced_count;
+
+    /* Set during the handshake when a client certificate was verified. The subject is captured
+     * there because picotls does not retain the peer chain afterwards. */
+    char peer_subject[256];
+    int  peer_authenticated;
 } iq_conn;
 
 static int iq_paced_index(iq_conn *c, int64_t stream_id)
@@ -108,6 +118,41 @@ static void iq_rand(uint8_t *dest, size_t destlen, const ngtcp2_rand_ctx *rand_c
 {
     (void)rand_ctx;
     ptls_openssl_random_bytes(dest, destlen);
+}
+
+/* Client certificate verification, wrapping picotls's OpenSSL verifier so the identity it just
+ * proved can be recorded. picotls does not keep the peer chain after the handshake, so if the
+ * subject is not taken here it is gone - and a server that authenticates a client without being
+ * able to say WHICH client has a gate, not an identity. */
+static int iq_verify_certificate(ptls_verify_certificate_t *self, ptls_t *tls, const char *server_name,
+                                 int (**verify_sign)(void *verify_ctx, uint16_t algo, ptls_iovec_t data,
+                                                     ptls_iovec_t signature),
+                                 void **verify_data, ptls_iovec_t *certs, size_t num_certs)
+{
+    iq_engine *e = (iq_engine *)((char *)self - offsetof(iq_engine, peer_verify));
+
+    int rv = e->verify_cert.super.cb(&e->verify_cert.super, tls, server_name, verify_sign, verify_data,
+                                     certs, num_certs);
+    if (rv != 0 || num_certs == 0) {
+        return rv;   /* refused, or nothing offered - nothing to record either way */
+    }
+
+    /* ngtcp2 parks the connection ref here, and conn_ref lives inside iq_conn. */
+    void **slot = ptls_get_data_ptr(tls);
+    if (slot == NULL || *slot == NULL) {
+        return rv;
+    }
+    iq_conn *c = (iq_conn *)((char *)*slot - offsetof(iq_conn, conn_ref));
+
+    const uint8_t *der = certs[0].base;
+    X509 *leaf = d2i_X509(NULL, &der, (long)certs[0].len);
+    if (leaf != NULL) {
+        X509_NAME_oneline(X509_get_subject_name(leaf), c->peer_subject, (int)sizeof(c->peer_subject));
+        c->peer_authenticated = 1;
+        X509_free(leaf);
+    }
+
+    return rv;
 }
 
 /* ALPN. With an engine allowlist: pick the client's first offer that we accept, else fail the
@@ -140,6 +185,22 @@ static int iq_on_client_hello(ptls_on_client_hello_t *self, ptls_t *tls,
         }
     }
     return PTLS_ALERT_NO_APPLICATION_PROTOCOL;
+}
+
+/* The verified client identity, or an empty string when the peer offered none. Returns the length
+ * written, or 0. */
+size_t iq_conn_peer_subject(iq_conn *c, char *out, size_t outlen)
+{
+    if (c == NULL || out == NULL || outlen == 0 || !c->peer_authenticated) {
+        return 0;
+    }
+    size_t n = strlen(c->peer_subject);
+    if (n >= outlen) {
+        n = outlen - 1;
+    }
+    memcpy(out, c->peer_subject, n);
+    out[n] = '\0';
+    return n;
 }
 
 /* ---- ngtcp2 callbacks ------------------------------------------------------------------- */
@@ -268,9 +329,26 @@ static int iq_cb_get_new_connection_id_noreport(ngtcp2_conn *conn, ngtcp2_cid *c
 
 /* ---- engine ----------------------------------------------------------------------------- */
 
+iq_engine *iq_engine_new_mtls(const char *cert_pem_path, const char *key_pem_path,
+                              size_t cidlen, const uint8_t *alpn, size_t alpn_len,
+                              const char *client_ca_pem_path, int require_client_cert,
+                              iq_callbacks cbs);
+
+/* The original five-argument form: no client certificates, exactly as before. */
 iq_engine *iq_engine_new(const char *cert_pem_path, const char *key_pem_path,
                          size_t cidlen, const uint8_t *alpn, size_t alpn_len,
                          iq_callbacks cbs)
+{
+    return iq_engine_new_mtls(cert_pem_path, key_pem_path, cidlen, alpn, alpn_len, NULL, 0, cbs);
+}
+
+/* With mTLS: client_ca_pem_path is the bundle client certificates are validated against, and
+ * require_client_cert decides whether a client that offers none is refused outright or merely
+ * unauthenticated. A NULL bundle leaves both off and the handshake is byte-for-byte what it was. */
+iq_engine *iq_engine_new_mtls(const char *cert_pem_path, const char *key_pem_path,
+                              size_t cidlen, const uint8_t *alpn, size_t alpn_len,
+                              const char *client_ca_pem_path, int require_client_cert,
+                              iq_callbacks cbs)
 {
     iq_engine *e = calloc(1, sizeof(*e));
     if (e == NULL) {
@@ -326,6 +404,37 @@ iq_engine *iq_engine_new(const char *cert_pem_path, const char *key_pem_path,
         fprintf(stderr, "[ioxide.ngtcp2] ngtcp2_crypto_picotls_configure_server_context failed\n");
         goto fail;
     }
+
+    /* AFTER configure_server_context, deliberately: it sets its own fields on the context, and
+       anything mTLS puts there first is not guaranteed to survive it. */
+    if (client_ca_pem_path != NULL) {
+        X509_STORE *store = X509_STORE_new();
+        if (store == NULL) {
+            fprintf(stderr, "[ioxide.ngtcp2] failed to allocate the client CA store\n");
+            goto fail;
+        }
+        if (X509_STORE_load_locations(store, client_ca_pem_path, NULL) != 1) {
+            fprintf(stderr, "[ioxide.ngtcp2] failed to load client CA bundle from %s\n", client_ca_pem_path);
+            X509_STORE_free(store);
+            goto fail;
+        }
+        /* The store is owned by the verifier from here; freeing it separately would double-free. */
+        if (ptls_openssl_init_verify_certificate(&e->verify_cert, store) != 0) {
+            fprintf(stderr, "[ioxide.ngtcp2] failed to init client certificate verification\n");
+            X509_STORE_free(store);
+            goto fail;
+        }
+        X509_STORE_free(store);   /* init took its own reference */
+
+        e->peer_verify.cb         = iq_verify_certificate;
+        e->peer_verify.algos      = e->verify_cert.super.algos;
+        e->ptls_ctx.verify_certificate = &e->peer_verify;
+
+        /* Off: a client with no certificate is let through unauthenticated, and the handler decides.
+         * On: picotls refuses the handshake itself. */
+        e->ptls_ctx.require_client_authentication = require_client_cert != 0;
+    }
+
 
     return e;
 
@@ -578,11 +687,23 @@ const char *iq_strerror(int liberr)
 
 typedef struct iq_client_engine {
     ptls_context_t ptls_ctx;
+    ptls_openssl_sign_certificate_t sign_cert;   /* mTLS: signs with the client's own key */
     iq_callbacks   cbs;
     char           alpn[64];   /* the protocol every connection from this engine offers */
 } iq_client_engine;
 
+iq_client_engine *iq_client_engine_new_mtls(const char *alpn, const char *cert_pem_path,
+                                            const char *key_pem_path, iq_callbacks cbs);
+
 iq_client_engine *iq_client_engine_new(const char *alpn, iq_callbacks cbs)
+{
+    return iq_client_engine_new_mtls(alpn, NULL, NULL, cbs);
+}
+
+/* A client that can prove who it is: cert_pem_path and key_pem_path are the certificate it presents
+ * when a server asks for one. Both NULL leaves the client exactly as it was, offering nothing. */
+iq_client_engine *iq_client_engine_new_mtls(const char *alpn, const char *cert_pem_path,
+                                            const char *key_pem_path, iq_callbacks cbs)
 {
     iq_client_engine *e = calloc(1, sizeof(*e));
     if (e == NULL) {
@@ -596,7 +717,39 @@ iq_client_engine *iq_client_engine_new(const char *alpn, iq_callbacks cbs)
     e->ptls_ctx.get_time      = &ptls_get_time;
     e->ptls_ctx.key_exchanges = ptls_openssl_key_exchanges;
     e->ptls_ctx.cipher_suites = ptls_openssl_cipher_suites;
-    /* Test client: accept the server's self-signed cert unconditionally (verify_certificate NULL). */
+    /* Accepts the server's certificate unconditionally (verify_certificate NULL) - this client
+     * exists to drive our own servers, not to authenticate them. */
+
+    if (cert_pem_path != NULL && key_pem_path != NULL) {
+        if (ptls_load_certificates(&e->ptls_ctx, cert_pem_path) != 0) {
+            fprintf(stderr, "[ioxide.ngtcp2] client: failed to load %s\n", cert_pem_path);
+            free(e);
+            return NULL;
+        }
+
+        BIO *bio = BIO_new_file(key_pem_path, "r");
+        if (bio == NULL) {
+            fprintf(stderr, "[ioxide.ngtcp2] client: failed to open key %s\n", key_pem_path);
+            free(e);
+            return NULL;
+        }
+        EVP_PKEY *pkey = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
+        BIO_free(bio);
+        if (pkey == NULL) {
+            fprintf(stderr, "[ioxide.ngtcp2] client: failed to parse key %s\n", key_pem_path);
+            free(e);
+            return NULL;
+        }
+        int rv = ptls_openssl_init_sign_certificate(&e->sign_cert, pkey);
+        EVP_PKEY_free(pkey);
+        if (rv != 0) {
+            fprintf(stderr, "[ioxide.ngtcp2] client: failed to init sign_certificate\n");
+            free(e);
+            return NULL;
+        }
+        e->ptls_ctx.sign_certificate = &e->sign_cert.super;
+    }
+
     if (ngtcp2_crypto_picotls_configure_client_context(&e->ptls_ctx) != 0) {
         free(e);
         return NULL;

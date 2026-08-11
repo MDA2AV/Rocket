@@ -70,6 +70,7 @@
     <Project Path="Playground/Http3/Nghttp3Buffered/Playground.Http3.Nghttp3Buffered.csproj" />
     <Project Path="Playground/Http3/Buffered/Playground.Http3.Buffered.csproj" />
     <Project Path="Playground/Http3/StreamedBoth/Playground.Http3.StreamedBoth.csproj" />
+    <Project Path="Playground/Http3/MutualTls/Playground.Http3.MutualTls.csproj" />
     <Project Path="Playground/Http3/Nghttp3Response/Playground.Http3.Nghttp3Response.csproj" />
   </Folder>
 

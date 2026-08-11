@@ -51,6 +51,7 @@
   <input type="radio" name="mode-tabs" id="tab-h3cs">
   <input type="radio" name="mode-tabs" id="tab-h3stream">
   <input type="radio" name="mode-tabs" id="tab-h3csstream">
+  <input type="radio" name="mode-tabs" id="tab-h3mtls">
   <input type="radio" name="mode-tabs" id="tab-h3buf">
   <input type="radio" name="mode-tabs" id="tab-pxmatrix">
   <input type="radio" name="mode-tabs" id="tab-pxh1toh1">
@@ -120,6 +121,7 @@
       <summary>http/3</summary>
       <label for="tab-h3cs">h3 &middot; buffered</label>
       <label for="tab-h3csstream">h3 &middot; request + response streamed</label>
+      <label for="tab-h3mtls">h3 &middot; mutual TLS</label>
       <label for="tab-h3buf">h3 &middot; buffered (nghttp3)</label>
       <label for="tab-h3">h3 &middot; request streamed (nghttp3)</label>
       <label for="tab-h3stream">h3 &middot; response streamed (nghttp3)</label>
@@ -1431,6 +1433,110 @@ static Http3Response Plain(bool eventStream = false)
     return response;
 }</code></pre>
     <p class="ex-foot">Both directions streamed, in pure C#. The request body is PULLED a chunk at a time through <code>Http3Request.BodyReader</code>, so a large upload is never held whole; the response is PUSHED through <code>Http3ResponseWriter</code>, one DATA frame per flush, so a large download is never built whole. <code>/echo</code> runs both at once - read a chunk, write a chunk - which is what a proxy does. Owning the framing is what makes the push side simple: a chunk is just <code>[0x00][varint length][payload]</code> handed to the QUIC stream, with no data-reader callback to answer and nothing to defer. <label for="tab-h3stream" class="ex-jump">nghttp3 &middot; streamed</label> carries a resume and a drain because nghttp3 pulls instead; this measures <b>1.32&times;</b> its throughput on the same 8&times;1&nbsp;KiB response.</p>
+  </div>
+  <div class="pane pane-h3mtls">
+    <div class="pane-head">
+      <h3>HTTP/3 &middot; mutual TLS</h3>
+      <span class="pane-pkg">ioxide + ioxide.ngtcp2 + ioxide.http3</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+// dotnet add package ioxide.ngtcp2
+// dotnet add package ioxide.http3
+//   PLAYGROUND_CLIENT_CA=ca.crt dotnet run -c Release --project Playground/Http3/MutualTls
+//   curl --http3 --cacert ca.crt --cert client.crt --key client.key https://localhost:8443/
+
+using System.Text;
+using ioxide;
+using ioxide.http3;
+using ioxide.ngtcp2;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort quicPort = 8443;
+int    reactors = Environment.ProcessorCount;
+
+
+// The server&#x27;s own certificate and key. Null generates a self-signed pair on first run.
+string? certOverride = null;
+string? keyOverride  = null;
+
+
+// The CA that client certificates are checked against. This is what turns mTLS ON - leave it null
+// and the server verifies nothing about the client, exactly as the other h3 samples do.
+string? clientCaPath = Environment.GetEnvironmentVariable(&quot;PLAYGROUND_CLIENT_CA&quot;);
+
+// Refuse a client that offers no certificate, during the handshake. Off, so a client without one
+// still connects and the handler decides what it may see - which is the more useful default when
+// only part of a site is protected.
+bool requireClientCertificate = Environment.GetEnvironmentVariable(&quot;PLAYGROUND_REQUIRE_CLIENT_CERT&quot;) == &quot;1&quot;;
+
+// UDP receive slots per reactor: how many datagrams the ring can have outstanding at once.
+int udpRecvSlots = 16;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+const string certPath = &quot;cert.pem&quot;;   // any PEM pair
+const string keyPath  = &quot;key.pem&quot;;
+
+if (clientCaPath is null)
+{
+    Console.Error.WriteLine(&quot;set PLAYGROUND_CLIENT_CA to a PEM bundle of the CA that signs your client certificates.&quot;);
+    return 1;
+}
+
+using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: [&quot;h3&quot;],
+    clientCaPemPath: clientCaPath, requireClientCertificate: requireClientCertificate);
+
+var config = new ServerConfig
+{
+    ReactorCount = reactors,
+    Tcp = null,                                        // QUIC only
+    Udp = new UdpOptions { RecvSlots = udpRecvSlots },
+    Quic = new QuicOptions
+    {
+        Port = quicPort,
+        LocalCidLength = 8,
+        ConnectionFactory = engine.CreateFactory(),
+    },
+};
+
+var threads = new Thread[config.ReactorCount];
+
+for (int i = 0; i &lt; threads.Length; i++)
+{
+    var reactor = new Reactor(i, config);
+
+    reactor.QuicHandle = (_, connection) =&gt;
+        new Http3Connection(connection).RunAsync(_ =&gt;
+        {
+            // Read HERE, per request - not where the connection is accepted. That callback runs
+            // before the handshake finishes, so there is no identity yet at that point.
+            string? peer = (connection as QuicEngineConnection)?.PeerSubject;
+
+            var response = new Http3Response
+            {
+                Body = Encoding.UTF8.GetBytes(peer is null
+                    ? &quot;anonymous\n&quot;
+                    : $&quot;authenticated as {peer}\n&quot;),
+            };
+            response.Headers.Add((&quot;content-type&quot;u8.ToArray(), &quot;text/plain&quot;u8.ToArray()));
+            return response;
+        });
+
+    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
+    threads[i].Start();
+}
+
+Console.WriteLine($&quot;[http3-mtls] {config.ReactorCount} reactors on :{quicPort}, &quot;
+                + $&quot;client CA {clientCaPath}, &quot;
+                + $&quot;client certificate {(requireClientCertificate ? &quot;REQUIRED&quot; : &quot;optional&quot;)}&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}
+
+return 0;</code></pre>
+    <p class="ex-foot">The client proves who it is too. <code>clientCaPemPath</code> is what turns it on - the CA that client certificates are checked against - and the handler reads <code>PeerSubject</code> to find out WHICH client it got. That distinction is the point: a server that can only answer <em>some valid certificate</em> has a gate, where one that can name the peer has an identity to authorise against. Read it per REQUEST, not where the connection is accepted - that callback runs before the handshake finishes, so there is no identity yet. <b>QUIC settles client authentication during the handshake</b>, and RFC 9001 &sect;4.4 forbids doing it afterwards, so this is a property of the whole CONNECTION: there is no asking for a certificate later because a request reached a protected route. That needs a second port. <code>requireClientCertificate</code> decides whether a client offering none is refused during the handshake or arrives unauthenticated for the handler to judge.</p>
   </div>
   <div class="pane pane-h3buf">
     <div class="pane-head">

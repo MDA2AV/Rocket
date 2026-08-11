@@ -38,8 +38,22 @@ public sealed unsafe class QuicEngine : IDisposable
     /// none of them fails the handshake with no_application_protocol (RFC 9001 §8.1). Null/empty:
     /// accept whichever protocol the client offers first (the pre-H3 permissive behavior).
     /// </summary>
+    /// <param name="clientCaPemPath">
+    /// PEM bundle that client certificates are validated against - mutual TLS. Null (the default)
+    /// leaves it off and the handshake is exactly what it was.
+    ///
+    /// QUIC settles client authentication during the handshake and RFC 9001 section 4.4 forbids
+    /// doing it afterwards, so this is a property of the whole connection: there is no asking for a
+    /// certificate later because a request happened to reach a protected route.
+    /// </param>
+    /// <param name="requireClientCertificate">
+    /// With a CA configured, whether a client offering no certificate is refused during the
+    /// handshake. False lets it connect unauthenticated and leaves the decision to the application,
+    /// which can read <see cref="QuicEngineConnection.PeerSubject"/>.
+    /// </param>
     public QuicEngine(string certPemPath, string keyPemPath, uint cidLength = 8, string[]? alpn = null,
-        long maxSendRetentionBytes = 16L << 20)
+        long maxSendRetentionBytes = 16L << 20,
+        string? clientCaPemPath = null, bool requireClientCertificate = false)
     {
         CidLength = cidLength;
         // Clamp to a floor: the pump overshoots the high-water by at most one egress chunk (16 KiB),
@@ -61,13 +75,15 @@ public sealed unsafe class QuicEngine : IDisposable
         byte[] alpnWire = AlpnWire(alpn);
         fixed (byte* pAlpn = alpnWire)
         {
-            _engine = Ngtcp2.iq_engine_new(certPemPath, keyPemPath, (nuint)cidLength,
-                alpnWire.Length > 0 ? pAlpn : null, (nuint)alpnWire.Length, callbacks);
+            _engine = Ngtcp2.iq_engine_new_mtls(certPemPath, keyPemPath, (nuint)cidLength,
+                alpnWire.Length > 0 ? pAlpn : null, (nuint)alpnWire.Length,
+                clientCaPemPath, requireClientCertificate ? 1 : 0, callbacks);
         }
         if (_engine == 0)
         {
             throw new InvalidOperationException(
-                $"ioxide.ngtcp2: engine init failed (cert '{certPemPath}', key '{keyPemPath}')");
+                $"ioxide.ngtcp2: engine init failed (cert '{certPemPath}', key '{keyPemPath}'"
+                + (clientCaPemPath is null ? ")" : $", client CA '{clientCaPemPath}')"));
         }
     }
 
