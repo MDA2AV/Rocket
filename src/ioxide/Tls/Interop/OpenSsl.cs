@@ -20,6 +20,12 @@ internal static unsafe partial class OpenSsl
     public const int SSL_TLSEXT_ERR_NOACK = 3;
     public const int CRYPTO_EX_INDEX_SSL = 0;
 
+    // Client-certificate verification (mutual TLS).
+    public const int SSL_VERIFY_NONE = 0x00;
+    public const int SSL_VERIFY_PEER = 0x01;
+    public const int SSL_VERIFY_FAIL_IF_NO_PEER_CERT = 0x02;
+    public const long X509_V_OK = 0;
+
     [LibraryImport(Ssl)] public static partial nint TLS_server_method();
     [LibraryImport(Ssl)] public static partial nint SSL_CTX_new(nint method);
     [LibraryImport(Ssl, StringMarshalling = StringMarshalling.Utf8)]
@@ -32,6 +38,43 @@ internal static unsafe partial class OpenSsl
     [LibraryImport(Ssl)] public static partial int SSL_CTX_set_num_tickets(nint ctx, nuint num);
     [LibraryImport(Ssl)] public static partial void SSL_CTX_set_keylog_callback(nint ctx, nint cb);
     [LibraryImport(Ssl)] public static partial void SSL_CTX_set_alpn_select_cb(nint ctx, nint cb, nint arg);
+
+    // --- client certificates (mutual TLS) ---------------------------------------------------------
+
+    /// <summary>
+    /// Ask for a client certificate and decide what a failed chain means. Mode
+    /// <see cref="SSL_VERIFY_PEER"/> alone requests one and accepts a client that sends none;
+    /// adding <see cref="SSL_VERIFY_FAIL_IF_NO_PEER_CERT"/> refuses that client at the handshake.
+    /// With no callback, a chain that does not validate fails the handshake outright - there is
+    /// nothing to prompt and nowhere to fall back to.
+    /// </summary>
+    [LibraryImport(Ssl)] public static partial void SSL_CTX_set_verify(nint ctx, int mode, nint callback);
+
+    [LibraryImport(Ssl, StringMarshalling = StringMarshalling.Utf8)]
+    public static partial int SSL_CTX_load_verify_locations(nint ctx, string? caFile, string? caPath);
+
+    /// <summary>The context's trust store, for adding anchors parsed from memory.</summary>
+    [LibraryImport(Ssl)] public static partial nint SSL_CTX_get_cert_store(nint ctx);
+
+    [LibraryImport(Crypto)] public static partial int X509_STORE_add_cert(nint store, nint x509);
+
+    /// <summary>
+    /// Names sent in the CertificateRequest so a client holding several certificates can pick the
+    /// one this server will accept. Without it the client guesses.
+    /// </summary>
+    [LibraryImport(Ssl, StringMarshalling = StringMarshalling.Utf8)]
+    public static partial nint SSL_load_client_CA_file(string file);
+
+    [LibraryImport(Ssl)] public static partial void SSL_CTX_set_client_CA_list(nint ctx, nint list);
+
+    /// <summary>The peer's leaf certificate, borrowed - no reference taken, so it is not freed.</summary>
+    [LibraryImport(Ssl)] public static partial nint SSL_get0_peer_certificate(nint ssl);
+
+    /// <summary>X509_V_OK, or why the chain was rejected.</summary>
+    [LibraryImport(Ssl)] public static partial long SSL_get_verify_result(nint ssl);
+
+    [LibraryImport(Crypto)] public static partial nint X509_get_subject_name(nint x509);
+    [LibraryImport(Crypto)] public static partial nint X509_NAME_oneline(nint name, byte* buf, int size);
 
     [LibraryImport(Ssl)] public static partial nint SSL_new(nint ctx);
     [LibraryImport(Ssl)] public static partial void SSL_free(nint ssl);
