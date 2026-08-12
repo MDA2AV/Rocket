@@ -6,6 +6,7 @@ using Glyph11.Parser;
 using Glyph11.Parser.UltraHardened;
 using Glyph11.Protocol;
 using Glyph11.Validation;
+using ioxide.utils;
 
 namespace ioxide.httpclient;
 
@@ -71,7 +72,11 @@ internal sealed class HttpClientConnection : IDisposable
 
         _receiveCapacity = options.ReceiveBufferSize;
         _receive = (nint)NativeMemory.Alloc((nuint)_receiveCapacity);
-        _receiveView = new UnmanagedMemoryManager((void*)_receive, _receiveCapacity);
+
+        // Memory<byte> cannot wrap a raw pointer, and Glyph11's zero-copy path slices whatever it
+        // is handed - without this view every header block would be copied into a managed array
+        // just to be parsed. Rebuilt only when the buffer moves.
+        _receiveView = new UnmanagedMemoryManager((byte*)_receive, _receiveCapacity);
     }
 
     public static async Task<HttpClientConnection> ConnectAsync(IRingHost host, HttpClientOptions options)
@@ -529,32 +534,9 @@ internal sealed class HttpClientConnection : IDisposable
         _receiveCapacity = Math.Min(_receiveCapacity * 2, _options.MaxResponseBytes);
         _receive = (nint)NativeMemory.Realloc((void*)_receive, (nuint)_receiveCapacity);
 
-        // Realloc can move the block, so the view handed to the parser has to be rebuilt.
-        _receiveView = new UnmanagedMemoryManager((void*)_receive, _receiveCapacity);
-    }
-
-    /// <summary>
-    /// A <see cref="Memory{T}"/> over the native receive buffer. <see cref="Memory{T}"/> cannot
-    /// wrap a raw pointer, and Glyph11's zero-copy path returns slices of what it is given, so the
-    /// alternative would be copying every header block into a managed array to parse it.
-    /// One instance per buffer, rebuilt only when the buffer moves.
-    /// </summary>
-    private sealed unsafe class UnmanagedMemoryManager(void* pointer, int length) : MemoryManager<byte>
-    {
-        public override Span<byte> GetSpan() => new(pointer, length);
-
-        public override MemoryHandle Pin(int elementIndex = 0)
-            => new((byte*)pointer + elementIndex);
-
-        public override void Unpin()
-        {
-            // Native memory owned by the connection: never moves, so nothing to release.
-        }
-
-        protected override void Dispose(bool disposing)
-        {
-            // The buffer's lifetime is the connection's, freed in HttpClientConnection.Dispose.
-        }
+        // Realloc can move the block, so the view handed to the parser has to be rebuilt. Reset is
+        // internal to ioxide, and this only happens when the buffer actually grows.
+        _receiveView = new UnmanagedMemoryManager((byte*)_receive, _receiveCapacity);
     }
 
     private unsafe int BuildHead(HttpClientRequest request)
