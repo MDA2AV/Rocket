@@ -1,14 +1,14 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net11.0</TargetFramework>
+    <TargetFrameworks>net10.0;net11.0</TargetFrameworks>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <RootNamespace>ioxide.file</RootNamespace>
 
     <PackageId>ioxide.file</PackageId>
-    <Version>0.4.184</Version>
+    <Version>0.4.186</Version>
     <Authors>MDA2AV</Authors>
     <Description>File serving for the ioxide io_uring runtime: immutable asset snapshots with baked responses, pooled positional ring reads, atomic reloads.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
