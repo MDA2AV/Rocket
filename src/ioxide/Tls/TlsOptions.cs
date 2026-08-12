@@ -34,6 +34,41 @@ public sealed class TlsOptions
     public string[] Alpn { get; init; } = ["http/1.1"];
 
     /// <summary>
+    /// PEM bundle of trust anchors that CLIENT certificates are validated against - mutual TLS.
+    /// Null (the default) means no client certificate is ever requested and the handshake is
+    /// exactly what it was.
+    ///
+    /// Setting this asks every client for a certificate and rejects one whose chain does not
+    /// validate. Whether a client offering NOTHING is also rejected is
+    /// <see cref="RequireClientCertificate"/>.
+    ///
+    /// The file's subject names are also sent in the CertificateRequest, so a client holding
+    /// several certificates can pick the one this server accepts rather than guessing. Anchors
+    /// supplied through <see cref="ClientCaPem"/> are trusted identically but send no such hint -
+    /// OpenSSL builds that list from a file.
+    /// </summary>
+    public string? ClientCaPath { get; init; }
+
+    /// <summary>
+    /// Client trust anchors as PEM text - the in-memory alternative to <see cref="ClientCaPath"/>,
+    /// matching how the server's own certificate can come from either. Set at most one of the two.
+    /// </summary>
+    public string? ClientCaPem { get; init; }
+
+    /// <summary>
+    /// With client anchors configured, whether a client that presents NO certificate is refused
+    /// during the handshake.
+    ///
+    /// False - the default - lets it connect unauthenticated and leaves the decision to the
+    /// application, which reads <see cref="TlsSession.PeerSubject"/> and can serve a public route
+    /// while refusing a protected one. True refuses at the handshake, before a single byte of
+    /// request has been read.
+    ///
+    /// Ignored when no anchors are set: there would be nothing to validate against.
+    /// </summary>
+    public bool RequireClientCertificate { get; init; }
+
+    /// <summary>
     /// Let the kernel decrypt inbound records too. Off by default, experimental, and it requires
     /// <see cref="KernelTx"/>: RX is programmed at the same handoff as TX and shares the TCP_ULP
     /// that EnableTx installs, so asking for RX alone is refused at

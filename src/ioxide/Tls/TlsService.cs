@@ -63,6 +63,22 @@ public sealed class TlsService
                 "Exactly one key source: set KeyPath or KeyPem.", nameof(options));
         }
 
+        // Client anchors are optional, but two sources for them is a mistake worth naming rather
+        // than resolving by precedence.
+        if (options.ClientCaPath is not null && options.ClientCaPem is not null)
+        {
+            throw new ArgumentException(
+                "At most one client CA source: set ClientCaPath or ClientCaPem, not both.", nameof(options));
+        }
+
+        // Requiring a certificate with nothing to validate it against would refuse every client
+        // that sends none and accept any that sends anything - the opposite of what it reads as.
+        if (options.RequireClientCertificate && options.ClientCaPath is null && options.ClientCaPem is null)
+        {
+            throw new ArgumentException(
+                "RequireClientCertificate needs trust anchors: set ClientCaPath or ClientCaPem.", nameof(options));
+        }
+
         nint ctx = OpenSsl.SSL_CTX_new(OpenSsl.TLS_server_method());
         if (ctx == 0)
         {
@@ -88,6 +104,7 @@ public sealed class TlsService
         }
 
         LoadCertificate(ctx, options);
+        ConfigureClientVerification(ctx, options);
 
         // The ALPN protocol to select is handed to the (static) callback via its arg, so the
         // configured TlsOptions.Alpn is honored instead of being hard-coded.
@@ -109,6 +126,122 @@ public sealed class TlsService
             reactor.AddService(service);
         }
         return service;
+    }
+
+    /// <summary>
+    /// Client-certificate verification. Does nothing unless anchors are configured, so the
+    /// handshake for everyone else is byte-for-byte what it was.
+    /// </summary>
+    /// <remarks>
+    /// This is a property of the SSL_CTX and therefore of the port: TLS settles client
+    /// authentication during the handshake, and while TLS 1.3 has post-handshake authentication,
+    /// nothing here uses it. A route that wants to authenticate reads
+    /// <see cref="TlsSession.PeerSubject"/> from a handshake that already happened.
+    ///
+    /// Orthogonal to kTLS. The certificate is exchanged and validated during the handshake, which
+    /// OpenSSL performs either way - the kernel only takes over record crypto afterwards - so this
+    /// composes with <see cref="TlsOptions.KernelTx"/> and <see cref="TlsOptions.KernelRx"/>
+    /// unchanged.
+    /// </remarks>
+    private static unsafe void ConfigureClientVerification(nint ctx, TlsOptions options)
+    {
+        if (options.ClientCaPath is null && options.ClientCaPem is null)
+        {
+            return;
+        }
+
+        if (options.ClientCaPath is not null)
+        {
+            if (OpenSsl.SSL_CTX_load_verify_locations(ctx, options.ClientCaPath, null) != 1)
+            {
+                throw new IOException(
+                    $"could not load client CA '{options.ClientCaPath}': {OpenSsl.LastError()}");
+            }
+
+            // Tell the client which issuers we accept. Failure here is not fatal - it costs the
+            // hint, not the verification - so a CA file OpenSSL can trust but not enumerate still
+            // works for a client with a single certificate.
+            nint names = OpenSsl.SSL_load_client_CA_file(options.ClientCaPath);
+            if (names != 0)
+            {
+                OpenSsl.SSL_CTX_set_client_CA_list(ctx, names);
+            }
+            else
+            {
+                OpenSsl.ERR_clear_error();
+            }
+        }
+        else
+        {
+            AddTrustAnchorsPem(ctx, options.ClientCaPem!);
+        }
+
+        int mode = OpenSsl.SSL_VERIFY_PEER;
+        if (options.RequireClientCertificate)
+        {
+            mode |= OpenSsl.SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
+        }
+
+        // No callback: a chain that does not validate fails the handshake. There is no prompt to
+        // fall back to and no partial trust worth inventing.
+        OpenSsl.SSL_CTX_set_verify(ctx, mode, 0);
+    }
+
+    // Trust anchors from PEM text, added straight to the context's store - the in-memory mirror of
+    // load_verify_locations, for hosts that carry a CA bundle as data rather than as a file.
+    private static unsafe void AddTrustAnchorsPem(nint ctx, string pem)
+    {
+        nint store = OpenSsl.SSL_CTX_get_cert_store(ctx);
+        if (store == 0)
+        {
+            throw new IOException($"SSL_CTX_get_cert_store: {OpenSsl.LastError()}");
+        }
+
+        byte[] bytes = System.Text.Encoding.ASCII.GetBytes(pem);
+        int added = 0;
+
+        fixed (byte* p = bytes)
+        {
+            nint bio = OpenSsl.BIO_new_mem_buf(p, bytes.Length);
+            if (bio == 0)
+            {
+                throw new IOException($"BIO_new_mem_buf: {OpenSsl.LastError()}");
+            }
+
+            try
+            {
+                // A bundle may hold several anchors; read until the BIO is exhausted.
+                while (true)
+                {
+                    nint cert = OpenSsl.PEM_read_bio_X509(bio, 0, 0, 0);
+                    if (cert == 0)
+                    {
+                        break;
+                    }
+
+                    int ok = OpenSsl.X509_STORE_add_cert(store, cert);
+                    OpenSsl.X509_free(cert);   // the store took its own reference
+
+                    if (ok != 1)
+                    {
+                        throw new IOException($"X509_STORE_add_cert: {OpenSsl.LastError()}");
+                    }
+                    added++;
+                }
+            }
+            finally
+            {
+                OpenSsl.BIO_free(bio);
+            }
+        }
+
+        // Running off the end of the last certificate leaves a "no start line" error behind.
+        OpenSsl.ERR_clear_error();
+
+        if (added == 0)
+        {
+            throw new IOException("ClientCaPem contained no certificates.");
+        }
     }
 
     // Certificate and key, from whichever source the options carry. The file route is OpenSSL's
@@ -283,6 +416,10 @@ public sealed class TlsService
             // Available only once the handshake is complete, and the handler needs it before it
             // decides which protocol loop to run.
             session.CaptureAlpn();
+
+            // Same moment, same reason: the peer identity exists only after the handshake, and a
+            // handler that authorises per route needs it before it reads a request.
+            session.CapturePeerCertificate();
 
             // Count BEFORE draining: these are the records the handshake pulled off the socket, so
             // they are invisible to the kernel and the RX sequence number has to skip past them.

@@ -452,6 +452,45 @@ public static class Client
     }
 
     /// <summary>
+    /// Like <see cref="GetTls"/>, but presenting a client certificate - mutual TLS. Pass null to
+    /// present none, which is how "the server demanded one and we had nothing" is driven.
+    /// </summary>
+    /// <remarks>
+    /// SslStream is the client here on purpose: a passing test means ioxide's server agrees with an
+    /// independent implementation rather than only with itself. A refused handshake surfaces as an
+    /// <see cref="AuthenticationException"/> or an <see cref="IOException"/> depending on which side
+    /// noticed first, so callers assert on "it threw" rather than on which one.
+    /// </remarks>
+    public static (int Status, string Body) GetTlsClientCert(
+        int port, string path, string? certPath, string? keyPath, int timeoutMs = 6000)
+    {
+        using var client = new TcpClient();
+        client.Connect("127.0.0.1", port);
+        client.ReceiveTimeout = timeoutMs;
+
+        var certificates = new X509CertificateCollection();
+        if (certPath is not null && keyPath is not null)
+        {
+            using X509Certificate2 pem = X509Certificate2.CreateFromPemFile(certPath, keyPath);
+
+            // SslStream on Linux needs the key associated through a PFX round-trip; a PEM-built
+            // certificate carries it in a form the handshake will not use directly.
+            certificates.Add(X509CertificateLoader.LoadPkcs12(pem.Export(X509ContentType.Pfx), null));
+        }
+
+        using var ssl = new SslStream(client.GetStream(), leaveInnerStreamOpen: false, (_, _, _, _) => true);
+        ssl.AuthenticateAsClient(new SslClientAuthenticationOptions
+        {
+            TargetHost = "localhost",
+            EnabledSslProtocols = SslProtocols.Tls13,
+            ClientCertificates = certificates,
+        });
+
+        Send(ssl, path);
+        return ReadResponse(ssl);
+    }
+
+    /// <summary>
     /// Split ONE request across several TLS records - each SslStream.Write emits its own complete
     /// record - and report how many responses came back.
     ///

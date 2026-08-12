@@ -66,6 +66,47 @@ public sealed unsafe class TlsSession : IDisposable
             : System.Text.Encoding.ASCII.GetString(data, (int)length);
     }
 
+    /// <summary>
+    /// Subject of the client certificate this peer presented, or null when it presented none -
+    /// which is possible whenever <see cref="TlsOptions.ClientCaPath"/> is set but
+    /// <see cref="TlsOptions.RequireClientCertificate"/> is not.
+    ///
+    /// A value here means the chain VALIDATED: an invalid one fails the handshake, so a connection
+    /// that reached a handler never carries a certificate that was merely offered. Null means
+    /// unauthenticated, and is the whole decision a handler serving a mixed port has to make.
+    /// </summary>
+    public string? PeerSubject { get; private set; }
+
+    internal void CapturePeerCertificate()
+    {
+        // Borrowed, not owned - get0 takes no reference, so there is nothing to free.
+        nint cert = OpenSsl.SSL_get0_peer_certificate(_ssl);
+        if (cert == 0)
+        {
+            PeerSubject = null;
+            return;
+        }
+
+        // Belt and braces: with SSL_VERIFY_PEER and no callback OpenSSL has already failed the
+        // handshake on a bad chain, so this cannot report a name that was not verified.
+        if (OpenSsl.SSL_get_verify_result(_ssl) != OpenSsl.X509_V_OK)
+        {
+            PeerSubject = null;
+            return;
+        }
+
+        nint name = OpenSsl.X509_get_subject_name(cert);
+        if (name == 0)
+        {
+            PeerSubject = null;
+            return;
+        }
+
+        byte* buffer = stackalloc byte[256];
+        nint result = OpenSsl.X509_NAME_oneline(name, buffer, 256);
+        PeerSubject = result == 0 ? null : Marshal.PtrToStringUTF8((nint)buffer);
+    }
+
     internal TlsSession(nint ssl, nint rbio, nint wbio)
     {
         _ssl = ssl;
