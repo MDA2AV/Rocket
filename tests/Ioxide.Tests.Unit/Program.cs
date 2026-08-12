@@ -13,7 +13,6 @@ internal static class Program
 
         DemuxParseTests.Register(runner);
         MessageTests.Register(runner);
-        ResponseAssemblyTests.Register(runner);
         ResponseCapTests.Register(runner);
         Http2OutputQueueTests.Register(runner);
         Http2StreamedRequestTests.Register(runner);

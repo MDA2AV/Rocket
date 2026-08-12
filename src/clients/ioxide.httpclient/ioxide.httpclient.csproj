@@ -22,6 +22,11 @@
   <ItemGroup>
     <None Include="../../../README.md" Pack="true" PackagePath="/" />
     <ProjectReference Include="../../ioxide/ioxide.csproj" />
+
+    <!-- Response parsing. Hardened HTTP/1.1 is a solved problem and a bad one to solve twice:
+         obs-fold, bare LF, duplicate Content-Length and the Transfer-Encoding smuggling checks
+         are where the CVEs live. Pure managed, no native asset, no transitive dependency. -->
+    <PackageReference Include="Glyph11" Version="0.3.7" />
   </ItemGroup>
 
   <ItemGroup>
