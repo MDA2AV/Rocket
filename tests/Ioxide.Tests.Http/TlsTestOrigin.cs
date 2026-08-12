@@ -21,12 +21,23 @@ internal sealed class TlsTestOrigin : IDisposable
     private readonly X509Certificate2 _certificate;
     private readonly List<SslApplicationProtocol> _alpn;
     private readonly CancellationTokenSource _stopping = new();
+    private X509Certificate2? _clientCa { get; init; }
 
     /// <summary>The port it accepted on.</summary>
     public int Port { get; }
 
     /// <summary>ALPN protocol selected on the most recent handshake, for assertions.</summary>
     public string? LastAlpn { get; private set; }
+
+    /// <summary>When true, a client that presents no certificate is refused at the handshake.</summary>
+    public bool RequireClientCertificate { get; init; }
+
+    /// <summary>
+    /// Subject of the client certificate on the most recent handshake, or null if none was
+    /// presented. Proves the identity actually crossed the wire rather than the handshake merely
+    /// succeeding.
+    /// </summary>
+    public string? LastClientSubject { get; private set; }
 
     private TlsTestOrigin(TcpListener listener, X509Certificate2 certificate, string[] alpn)
     {
@@ -36,8 +47,16 @@ internal sealed class TlsTestOrigin : IDisposable
         Port = ((IPEndPoint)listener.LocalEndpoint).Port;
     }
 
+    /// <summary>
+    /// Start an origin that demands a client certificate, signed by <paramref name="clientCaPath"/>.
+    /// </summary>
+    public static TlsTestOrigin StartMutual(string clientCaPath, params string[] alpn)
+        => StartCore(alpn, clientCaPath);
+
     /// <summary>Start an origin offering <paramref name="alpn"/>, most preferred first.</summary>
-    public static TlsTestOrigin Start(params string[] alpn)
+    public static TlsTestOrigin Start(params string[] alpn) => StartCore(alpn, clientCaPath: null);
+
+    private static TlsTestOrigin StartCore(string[] alpn, string? clientCaPath)
     {
         (string certPath, string keyPath) = TestCert.Ensure();
         X509Certificate2 certificate = X509Certificate2.CreateFromPemFile(certPath, keyPath);
@@ -49,9 +68,38 @@ internal sealed class TlsTestOrigin : IDisposable
         var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
 
-        var origin = new TlsTestOrigin(listener, certificate, alpn);
+        var origin = new TlsTestOrigin(listener, certificate, alpn)
+        {
+            RequireClientCertificate = clientCaPath is not null,
+            // CreateFromPemFile wants the private key alongside; a CA certificate is public and
+            // has none, so parse the certificate on its own.
+            _clientCa = clientCaPath is null
+                ? null
+                : X509Certificate2.CreateFromPem(File.ReadAllText(clientCaPath)),
+        };
+
         _ = origin.AcceptLoopAsync();
         return origin;
+    }
+
+    /// <summary>
+    /// Accept only certificates that chain to the CA this origin was started with. Built fresh per
+    /// handshake so the trust decision is exactly "signed by that CA" and nothing else.
+    /// </summary>
+    private bool ValidateClientCertificate(
+        object sender, X509Certificate? certificate, X509Chain? chain, SslPolicyErrors errors)
+    {
+        if (certificate is null || _clientCa is null)
+        {
+            return false;
+        }
+
+        using var built = new X509Chain();
+        built.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+        built.ChainPolicy.CustomTrustStore.Add(_clientCa);
+        built.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+
+        return built.Build(new X509Certificate2(certificate));
     }
 
     private async Task AcceptLoopAsync()
@@ -84,12 +132,22 @@ internal sealed class TlsTestOrigin : IDisposable
                 {
                     ServerCertificate = _certificate,
                     ApplicationProtocols = _alpn,
-                    ClientCertificateRequired = false,
+                    ClientCertificateRequired = RequireClientCertificate,
+
+                    // Only consult the CA we were given: the machine store must not be able to
+                    // make an unrelated certificate acceptable, or the test proves nothing.
+                    RemoteCertificateValidationCallback = RequireClientCertificate
+                        ? ValidateClientCertificate
+                        : null,
                 });
 
                 LastAlpn = tls.NegotiatedApplicationProtocol.Protocol.Length == 0
                     ? null
                     : tls.NegotiatedApplicationProtocol.ToString();
+
+                LastClientSubject = tls.RemoteCertificate is { } peer
+                    ? new X509Certificate2(peer).Subject
+                    : null;
 
                 var request = new byte[8192];
                 while (true)

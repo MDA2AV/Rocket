@@ -5,16 +5,16 @@ using ioxide.utils;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  http - a reverse proxy that lets the ORIGIN pick the protocol. Both hops - the inbound
+//  http - calling an origin over HTTP/1.1 from inside a handler. Both hops - the inbound
 //  connection and the outbound call - run on this reactor's ring and resume inline, so a request
 //  never leaves the thread it arrived on.
 //
-//  The knob that matters is Policy. Negotiate starts on HTTP/1.1 and switches to HTTP/3 once the
-//  origin advertises it via Alt-Svc (RFC 7838), so the upgrade costs nothing at the call site -
-//  the same GetAsync is h1 on the first request and h3 later. Http1Only / Http2Only (h2c) /
-//  Http3Only pin it instead, which is what the nine Proxy/* samples do.
+//  The pool is what makes that true: HttpClientPool.Start opens its connections on the reactor
+//  that will use them, so GetAsync never hands work to another thread. PoolSize is per reactor,
+//  and it is the ceiling on requests in flight to the origin, since HTTP/1.1 carries one exchange
+//  at a time.
 //
-//      dotnet run -c Release --project Playground/Http3/Nghttp3Request   # an origin that advertises h3
+//      dotnet run -c Release --project Playground/Http1/Hello                # an origin to call
 //      PLAYGROUND_UPSTREAM_PORT=8080 dotnet run -c Release --project Playground/Clients/Http
 //      curl http://127.0.0.1:8090/
 //
@@ -68,14 +68,11 @@ var config = new ServerConfig
     },
 };
 
-var upstream = new RingHttpClientOptions
+var upstream = new HttpClientOptions
 {
     Host     = upstreamHost,
     Port     = upstreamPort,
     PoolSize = upstreamPool,
-
-    // Start on HTTP/1.1, switch to HTTP/3 once the origin advertises it via Alt-Svc.
-    Policy = HttpProtocolPolicy.Negotiate,
 };
 
 var threads = new Thread[config.ReactorCount];
@@ -86,11 +83,11 @@ for (int id = 0; id < threads.Length; id++)
 
     // The pool opens its connections on THIS reactor's ring, which is what keeps both hops on
     // one thread.
-    reactor.OnStart = r => RingHttpClient.Start(r, upstream);
+    reactor.OnStart = r => HttpClientPool.Start(r, upstream);
 
     reactor.TcpHandle = async (r, conn) =>
     {
-        RingHttpClient http = r.GetService<RingHttpClient>();
+        HttpClientPool http = r.GetService<HttpClientPool>();
 
         try
         {
@@ -140,7 +137,7 @@ for (int id = 0; id < threads.Length; id++)
 }
 
 Console.WriteLine($"[http] {config.ReactorCount} reactors on :{config.Tcp!.Port} -> "
-                + $"{upstream.Host}:{upstream.Port} (policy {upstream.Policy})");
+                + $"{upstream.Host}:{upstream.Port} ({upstream.PoolSize} conns per reactor)");
 
 foreach (Thread thread in threads)
 {

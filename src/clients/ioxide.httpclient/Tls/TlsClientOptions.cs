@@ -33,6 +33,22 @@ public sealed record TlsClientOptions
     public string? CaFile { get; init; }
 
     /// <summary>
+    /// PEM certificate to present when the origin asks for one - mutual TLS. Null (the default)
+    /// means no client certificate, and an origin that requires one refuses the handshake.
+    ///
+    /// Include any intermediates in the file, leaf first: the origin validates the chain we send,
+    /// and a leaf-only file works against a store that happens to hold the intermediates while
+    /// failing against every other one.
+    /// </summary>
+    public string? CertificateFile { get; init; }
+
+    /// <summary>
+    /// PEM private key for <see cref="CertificateFile"/>. Set both or neither - a certificate is
+    /// public, so it is the key that proves the identity is ours.
+    /// </summary>
+    public string? PrivateKeyFile { get; init; }
+
+    /// <summary>
     /// Lowest TLS version accepted. 1.2 by default because plenty of origins still stop there;
     /// raise it to <c>0x0304</c> for TLS 1.3 only.
     /// </summary>

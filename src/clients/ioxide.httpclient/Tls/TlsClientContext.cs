@@ -57,6 +57,7 @@ public sealed unsafe class TlsClientContext : IDisposable
             OpenSsl.SSL_CTX_ctrl(ctx, OpenSsl.SSL_CTRL_SET_MIN_PROTO_VERSION, options.MinimumVersion, 0);
 
             ConfigureVerification(ctx, options);
+            ConfigureClientCertificate(ctx, options);
             ConfigureAlpn(ctx, options);
 
             return new TlsClientContext(ctx, options);
@@ -91,6 +92,51 @@ public sealed unsafe class TlsClientContext : IDisposable
         {
             string source = options.CaFile ?? "the system trust store";
             throw new IOException($"could not load trust anchors from {source}: {OpenSsl.LastError()}");
+        }
+    }
+
+    /// <summary>
+    /// Load the certificate this client presents when an origin asks for one.
+    /// </summary>
+    /// <remarks>
+    /// Nothing here arms anything: TLS client authentication is driven by the SERVER sending a
+    /// CertificateRequest. Loading a certificate only means we have an answer ready, so configuring
+    /// this against an origin that never asks costs a file read and changes no handshake.
+    /// </remarks>
+    private static void ConfigureClientCertificate(nint ctx, TlsClientOptions options)
+    {
+        if (options.CertificateFile is null && options.PrivateKeyFile is null)
+        {
+            return;
+        }
+
+        if (options.CertificateFile is null || options.PrivateKeyFile is null)
+        {
+            throw new ArgumentException(
+                "set both CertificateFile and PrivateKeyFile, or neither: a certificate without its key "
+                + "proves nothing, and a key without its certificate has nothing to present.",
+                nameof(options));
+        }
+
+        if (OpenSsl.SSL_CTX_use_certificate_chain_file(ctx, options.CertificateFile) != 1)
+        {
+            throw new IOException(
+                $"could not load client certificate '{options.CertificateFile}': {OpenSsl.LastError()}");
+        }
+
+        if (OpenSsl.SSL_CTX_use_PrivateKey_file(ctx, options.PrivateKeyFile, OpenSsl.SSL_FILETYPE_PEM) != 1)
+        {
+            throw new IOException(
+                $"could not load client private key '{options.PrivateKeyFile}': {OpenSsl.LastError()}");
+        }
+
+        // Catch a mismatched pair here rather than during a handshake, where it surfaces as an
+        // opaque failure against a specific origin.
+        if (OpenSsl.SSL_CTX_check_private_key(ctx) != 1)
+        {
+            throw new IOException(
+                $"client private key '{options.PrivateKeyFile}' does not match certificate "
+                + $"'{options.CertificateFile}': {OpenSsl.LastError()}");
         }
     }
 

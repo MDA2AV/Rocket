@@ -8,23 +8,33 @@
     <RootNamespace>ioxide.httpclient</RootNamespace>
 
     <PackageId>ioxide.httpclient</PackageId>
-    <Version>0.4.179</Version>
+    <Version>0.4.184</Version>
     <Authors>MDA2AV</Authors>
-    <Description>The ring-native HTTP client for the ioxide io_uring runtime: HTTP/1.1, HTTP/2 and HTTP/3 behind one API, with the protocol chosen per origin via Alt-Svc. One package - the h1 parser, a pure-C# HTTP/2 client on ioxide.http2's framing, the nghttp3 bridge, client-side TLS (SNI, ALPN and certificate verification) for https:// origins, and the negotiating client - sharing one set of message types. Every response resumes the awaiting handler inline on its own reactor thread.</Description>
+    <Description>The ring-native HTTP/1.1 client for the ioxide io_uring runtime - the upstream leg between a proxy and an origin. Connections are opened on the reactor thread that will use them, so a request never crosses a thread on its way out or back, and every response resumes the awaiting handler inline on its own reactor. Includes client-side TLS (SNI, ALPN, certificate verification and client certificates for mutual TLS) for https:// origins. Depends on ioxide core alone: no protocol package, no native asset.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://mda2av.github.io/ioxide/</PackageProjectUrl>
     <RepositoryUrl>https://github.com/MDA2AV/ioxide</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <PackageTags>io_uring;http3;h3;quic;httpclient;https;tls;proxy;linux;ioxide</PackageTags>
+    <PackageTags>io_uring;http;http1;httpclient;https;tls;mtls;proxy;linux;ioxide</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
   <ItemGroup>
     <None Include="../../../README.md" Pack="true" PackagePath="/" />
     <ProjectReference Include="../../ioxide/ioxide.csproj" />
-    <ProjectReference Include="../../protocols/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
-    <ProjectReference Include="../../protocols/ioxide.http2/ioxide.http2.csproj" />
-    <ProjectReference Include="../../protocols/ioxide.nghttp3/ioxide.nghttp3.csproj" />
+
+    <!-- Response parsing. Hardened HTTP/1.1 is a solved problem and a bad one to solve twice:
+         obs-fold, bare LF, duplicate Content-Length and the Transfer-Encoding smuggling checks
+         are where the CVEs live. Pure managed, no native asset, no transitive dependency. -->
+    <PackageReference Include="Glyph11" Version="0.3.7" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The response assembler and the message types are internal; the tests drive them directly
+         rather than through a socket, which is the only way to cover a partial or malformed
+         response without a server willing to send one. -->
+    <InternalsVisibleTo Include="Ioxide.Tests.Http" />
+    <InternalsVisibleTo Include="Ioxide.Tests.Unit" />
   </ItemGroup>
 
 

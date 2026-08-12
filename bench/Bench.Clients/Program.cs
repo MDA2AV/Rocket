@@ -1,6 +1,6 @@
-// Load driver for the ring-native HTTP clients, one protocol per run:
+// Load driver for the ring-native HTTP/1.1 client:
 //
-//     Bench.Clients h1|h2|h3 <host> <port> <seconds> [concurrency]
+//     Bench.Clients <host> <port> <seconds> [concurrency]
 //
 // BENCH_REACTORS reactors (default 4) each drive `concurrency` request loops; every await
 // resumes inline on its reactor. Prints one machine-readable line:
@@ -10,11 +10,10 @@ using System.Diagnostics;
 using ioxide;
 using ioxide.httpclient;
 
-string mode     = args[0];
-string host     = args[1];
-ushort port     = ushort.Parse(args[2]);
-int seconds     = int.Parse(args[3]);
-int concurrency = args.Length > 4 ? int.Parse(args[4]) : 64;
+string host     = args[0];
+ushort port     = ushort.Parse(args[1]);
+int seconds     = int.Parse(args[2]);
+int concurrency = args.Length > 3 ? int.Parse(args[3]) : 64;
 int reactors    = int.TryParse(Environment.GetEnvironmentVariable("BENCH_REACTORS"), out int r) ? r : 4;
 
 long completed = 0, failed = 0;
@@ -36,33 +35,17 @@ for (int i = 0; i < reactors; i++)
     {
         OnStart = r =>
         {
-            Func<ValueTask<HttpClientResponse>> send = mode switch
-            {
-                "h1" => Drive(HttpClientPool.Start(r, new HttpClientOptions
-                    { Host = host, Port = port, PoolSize = 4 })),
-                "h2" => Drive(Http2ClientPool.Start(r, new Http2ClientOptions
-                    { Host = host, Port = port, PoolSize = 1 })),
-                "h3" => Drive(Http3ClientPool.Start(r, new Http3ClientOptions
-                    { Host = host, Port = port, ServerName = "localhost", PoolSize = 1 })),
-                _ => throw new ArgumentException(mode),
-            };
+            HttpClientPool pool = HttpClientPool.Start(r, new HttpClientOptions
+                { Host = host, Port = port, PoolSize = 4 });
             for (int loop = 0; loop < concurrency; loop++)
             {
-                _ = LoopAsync(send);
+                _ = LoopAsync(() => pool.GetAsync(path));
             }
         },
     };
     threads[i] = new Thread(reactor.Run) { IsBackground = true, Name = $"bench-{i}" };
     threads[i].Start();
 }
-
-Func<ValueTask<HttpClientResponse>> Drive(object pool) => pool switch
-{
-    HttpClientPool p  => () => p.GetAsync(path),
-    Http2ClientPool p => () => p.GetAsync(path),
-    Http3ClientPool p => () => p.GetAsync(path),
-    _ => throw new UnreachableException(),
-};
 
 async Task LoopAsync(Func<ValueTask<HttpClientResponse>> send)
 {
@@ -99,5 +82,5 @@ Thread.Sleep(seconds * 1000);
 watch.Stop();
 long ok = Interlocked.Read(ref completed), bad = Interlocked.Read(ref failed);
 stop.Set();
-Console.WriteLine($"client-{mode} {reactors}r: {ok / watch.Elapsed.TotalSeconds:F0} req/s ({ok} ok, {bad} failed)");
+Console.WriteLine($"client-h1 {reactors}r: {ok / watch.Elapsed.TotalSeconds:F0} req/s ({ok} ok, {bad} failed)");
 Environment.Exit(bad > ok ? 1 : 0);

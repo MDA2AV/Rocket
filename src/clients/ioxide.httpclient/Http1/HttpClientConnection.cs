@@ -1,6 +1,12 @@
 using System.Buffers;
 using System.Buffers.Text;
 using System.Runtime.InteropServices;
+using Glyph11;
+using Glyph11.Parser;
+using Glyph11.Parser.UltraHardened;
+using Glyph11.Protocol;
+using Glyph11.Validation;
+using ioxide.utils;
 
 namespace ioxide.httpclient;
 
@@ -28,12 +34,19 @@ internal sealed class HttpClientConnection : IDisposable
 
     private nint _receive;
     private int _receiveCapacity;
+    private UnmanagedMemoryManager _receiveView;
     private int _received;    // bytes held in the receive buffer
     private int _consumed;    // parsed prefix of those bytes
 
-    // Framing of the response being read, filled by ParseHead.
-    private long _contentLength = -1;
-    private bool _chunked;
+    // Glyph11's parse target, reused across requests - Clear() between, Dispose() at the end, so
+    // the header list's pooled arrays are rented once for the connection's life rather than per
+    // response. Its spans point into the receive buffer and stay valid only until the next
+    // receive, which is why ParseHead copies what the response keeps.
+    private readonly BinaryResponse _head = new();
+    private readonly ParserLimits _limits;
+
+    // Framing of the response being read, decided by ParseHead.
+    private BodyFramingResult _framing = BodyFramingResult.NoBody;
 
     private bool _broken;
 
@@ -47,11 +60,23 @@ internal sealed class HttpClientConnection : IDisposable
         _transport = transport;
         _hostHeaderLine = hostHeaderLine;
 
+        // A header block cannot exceed the response ceiling, so the two agree rather than the
+        // parser accepting a megabyte of headers the arena would then refuse.
+        _limits = ParserLimits.Default with
+        {
+            MaxTotalHeaderBytes = Math.Min(ParserLimits.Default.MaxTotalHeaderBytes, options.MaxResponseBytes),
+        };
+
         _sendCapacity = options.SendBufferSize;
         _send = (nint)NativeMemory.Alloc((nuint)_sendCapacity);
 
         _receiveCapacity = options.ReceiveBufferSize;
         _receive = (nint)NativeMemory.Alloc((nuint)_receiveCapacity);
+
+        // Memory<byte> cannot wrap a raw pointer, and Glyph11's zero-copy path slices whatever it
+        // is handed - without this view every header block would be copied into a managed array
+        // just to be parsed. Rebuilt only when the buffer moves.
+        _receiveView = new UnmanagedMemoryManager((byte*)_receive, _receiveCapacity);
     }
 
     public static async Task<HttpClientConnection> ConnectAsync(IRingHost host, HttpClientOptions options)
@@ -135,9 +160,7 @@ internal sealed class HttpClientConnection : IDisposable
         var response = new HttpClientResponse();
         try
         {
-            int headEnd = await ReadHeadAsync();
-            ParseHead(response, headEnd);
-            _consumed = headEnd;
+            _consumed = await ReadHeadAsync(response, request);
 
             // 1xx are INTERIM (103 Early Hints, 100 Continue): the real response follows on the
             // same connection. Returning one as final would hand the caller a placeholder and
@@ -146,12 +169,10 @@ internal sealed class HttpClientConnection : IDisposable
             {
                 response.ResetForInterim();
                 Compact();
-                headEnd = await ReadHeadAsync();
-                ParseHead(response, headEnd);
-                _consumed = headEnd;
+                _consumed = await ReadHeadAsync(response, request);
             }
 
-            await ReadBodyAsync(response, headRequest: request.Method.Span.SequenceEqual("HEAD"u8));
+            await ReadBodyAsync(response);
 
             response.Freeze();
             if (response.ConnectionClose)
@@ -167,49 +188,51 @@ internal sealed class HttpClientConnection : IDisposable
         }
     }
 
-    // Receive until the header terminator is buffered; returns its end offset.
-    private async ValueTask<int> ReadHeadAsync()
+    // Receive until a complete header block is buffered and parsed; returns its total size.
+    // Completeness is the parser's call rather than a separate scan for the terminator - one pass
+    // decides "not yet" and "here it is, validated" together.
+    private async ValueTask<int> ReadHeadAsync(HttpClientResponse response, HttpClientRequest request)
     {
-        int searchFrom = 0;
         while (true)
         {
-            int end = IndexOfHeadEnd(searchFrom);
-            if (end >= 0)
+            int headSize = TryParseHead(response, request);
+            if (headSize > 0)
             {
-                return end;
+                return headSize;
             }
-            searchFrom = Math.Max(0, _received - 3);   // the terminator may straddle two reads
             await ReceiveMoreAsync();
         }
     }
 
-    private async ValueTask ReadBodyAsync(HttpClientResponse response, bool headRequest)
+    private async ValueTask ReadBodyAsync(HttpClientResponse response)
     {
-        long contentLength = _contentLength;
-        bool chunked = _chunked;
-        _contentLength = -1;
-        _chunked = false;
+        BodyFramingResult framing = _framing;
+        _framing = BodyFramingResult.NoBody;
 
-        // Responses that carry no body whatever the headers say (RFC 9110 §6.4.1).
-        if (headRequest || response.Status is 204 or 304)
+        switch (framing.Framing)
         {
-            response.SetBodyRange((0, 0));
-            return;
-        }
+            // HEAD, 1xx, 204, 304 and a CONNECT tunnel all land here. The detector needs the
+            // request method to know that, which is why it is passed in: a HEAD response carries
+            // the Content-Length its body WOULD have had, so framing on the response alone reads
+            // the next response as this one's content.
+            case BodyFraming.None:
+                response.SetBodyRange((0, 0));
+                break;
 
-        if (chunked)
-        {
-            await ReadChunkedBodyAsync(response);
-        }
-        else if (contentLength >= 0)
-        {
-            await ReadFixedBodyAsync(response, contentLength);
-        }
-        else
-        {
-            // No framing at all: the body runs until the peer closes (HTTP/1.0 style).
-            await ReadUntilCloseAsync(response);
-            response.ConnectionClose = true;
+            case BodyFraming.Chunked:
+                await ReadChunkedBodyAsync(response);
+                break;
+
+            case BodyFraming.ContentLength:
+                await ReadFixedBodyAsync(response, framing.ContentLength);
+                break;
+
+            default:
+                // No framing header at all: the body runs until the peer closes (HTTP/1.0 style),
+                // which also means this connection cannot be reused.
+                await ReadUntilCloseAsync(response);
+                response.ConnectionClose = true;
+                break;
         }
     }
 
@@ -348,17 +371,6 @@ internal sealed class HttpClientConnection : IDisposable
     private unsafe void CopyIntoSend(ReadOnlySpan<byte> data, int offset)
         => data.CopyTo(new Span<byte>((void*)(_send + offset), _sendCapacity - offset));
 
-    private unsafe int IndexOfHeadEnd(int searchFrom)
-    {
-        if (_received <= searchFrom)
-        {
-            return -1;
-        }
-        int marker = new ReadOnlySpan<byte>((void*)(_receive + searchFrom), _received - searchFrom)
-            .IndexOf("\r\n\r\n"u8);
-        return marker < 0 ? -1 : searchFrom + marker + 4;
-    }
-
     private unsafe int IndexOfCrLf()
     {
         if (_received <= _consumed)
@@ -396,80 +408,96 @@ internal sealed class HttpClientConnection : IDisposable
         return take;
     }
 
-    private unsafe void ParseHead(HttpClientResponse response, int headEnd)
+    /// <summary>
+    /// Parse the buffered bytes as a response head. Returns its total size, or 0 when the block is
+    /// not complete yet and more must be received.
+    /// </summary>
+    /// <remarks>
+    /// Structure and hardening are Glyph11's: bare LF, obs-fold, whitespace before the colon,
+    /// token and field-value charsets, duplicate and malformed Content-Length, and the
+    /// Transfer-Encoding + Content-Length pair that lets a proxy and a client disagree about where
+    /// this response ends. What stays here is what Glyph11 has no opinion on - copying the fields
+    /// the caller keeps, and connection reuse.
+    /// </remarks>
+    private unsafe int TryParseHead(HttpClientResponse response, HttpClientRequest request)
     {
-        var head = new ReadOnlySpan<byte>((void*)_receive, headEnd);
-
-        int lineEnd = head.IndexOf("\r\n"u8);
-        if (lineEnd < 0)
+        if (_received == 0)
         {
-            throw new HttpClientException("malformed status line");
+            return 0;
         }
 
-        ReadOnlySpan<byte> statusLine = head[..lineEnd];
-        if (statusLine.Length < 12 || !statusLine.StartsWith("HTTP/1."u8))
+        _head.Clear();
+        ReadOnlyMemory<byte> buffered = ReceiveBufferAsMemory();
+
+        bool complete;
+        int bytesRead;
+        try
         {
-            throw new HttpClientException("not an HTTP/1.x response");
+            complete = UltraHardenedParser.TryExtractFullResponseHeaderROM(
+                ref buffered, _head, in _limits, out bytesRead);
+        }
+        catch (HttpParseException e)
+        {
+            // A malformed response is not recoverable on a keep-alive connection: the framing is
+            // exactly what was in doubt, so there is no safe offset to resume from.
+            throw new HttpClientException($"malformed response head: {e.Message}", e);
         }
 
-        bool http10 = statusLine[7] == (byte)'0';
-        if (!Utf8Parser.TryParse(statusLine[9..12], out int status, out _))
+        if (!complete)
         {
-            throw new HttpClientException("malformed status code");
+            return 0;
         }
-        response.Status = status;
 
+        // Glyph11 reports one less than the block's real size - see the note in its diff harness,
+        // "C# returns total-1; the C ABI returns the clean total".
+        int headSize = bytesRead + 1;
+
+        response.Status = _head.Status;
+
+        for (int i = 0; i < _head.Headers.Count; i++)
+        {
+            var field = _head.Headers[i];
+
+            (int Offset, int Length) nameRange = response.Append(field.Key.Span);
+            response.LowercaseArena(nameRange);
+            (int Offset, int Length) valueRange = response.Append(field.Value.Span);
+            response.AddHeaderRange(nameRange, valueRange);
+        }
+
+        // Framing needs the request method - see ReadBodyAsync.
+        _framing = BodyFramingDetector.DetectResponseBodyFraming(_head, request.Method.Span);
+        response.ConnectionClose = ShouldClose();
+
+        return headSize;
+    }
+
+    /// <summary>
+    /// Whether this connection can carry another request. Not a parsing question - Glyph11 reads
+    /// the field, RFC 9112 §9.3 decides what it means - and the default flips with the version:
+    /// HTTP/1.1 persists unless told to close, HTTP/1.0 closes unless told to persist.
+    /// </summary>
+    private bool ShouldClose()
+    {
+        bool http10 = _head.Version.Length == 8 && _head.Version.Span[7] == (byte)'0';
         bool sawClose = false;
         bool sawKeepAlive = false;
 
-        int cursor = lineEnd + 2;
-        while (cursor < head.Length)
+        for (int i = 0; i < _head.Headers.Count; i++)
         {
-            ReadOnlySpan<byte> rest = head[cursor..];
-            int end = rest.IndexOf("\r\n"u8);
-            if (end <= 0)
+            var field = _head.Headers[i];
+            if (!EqualsIgnoreCase(field.Key.Span, "connection"u8))
             {
-                break;   // the blank line ending the block
+                continue;
             }
 
-            ReadOnlySpan<byte> line = rest[..end];
-            cursor += end + 2;
-
-            int colon = line.IndexOf((byte)':');
-            if (colon <= 0)
-            {
-                continue;   // tolerate a junk line rather than failing the response
-            }
-
-            ReadOnlySpan<byte> name = line[..colon];
-            ReadOnlySpan<byte> value = line[(colon + 1)..].Trim((byte)' ');
-
-            (int Offset, int Length) nameRange = response.Append(name);
-            response.LowercaseArena(nameRange);
-            (int Offset, int Length) valueRange = response.Append(value);
-            response.AddHeaderRange(nameRange, valueRange);
-
-            if (EqualsIgnoreCase(name, "connection"u8))
-            {
-                sawClose |= ContainsToken(value, "close"u8);
-                sawKeepAlive |= ContainsToken(value, "keep-alive"u8);
-            }
-            else if (EqualsIgnoreCase(name, "content-length"u8))
-            {
-                if (Utf8Parser.TryParse(value, out long declared, out _))
-                {
-                    _contentLength = declared;
-                }
-            }
-            else if (EqualsIgnoreCase(name, "transfer-encoding"u8))
-            {
-                _chunked |= ContainsToken(value, "chunked"u8);
-            }
+            sawClose |= ContainsToken(field.Value.Span, "close"u8);
+            sawKeepAlive |= ContainsToken(field.Value.Span, "keep-alive"u8);
         }
 
-        // HTTP/1.1 keeps alive unless told otherwise; HTTP/1.0 is the reverse.
-        response.ConnectionClose = http10 ? !sawKeepAlive : sawClose;
+        return http10 ? !sawKeepAlive : sawClose;
     }
+
+    private ReadOnlyMemory<byte> ReceiveBufferAsMemory() => _receiveView!.Memory[.._received];
 
     private unsafe void Compact()
     {
@@ -505,6 +533,10 @@ internal sealed class HttpClientConnection : IDisposable
         }
         _receiveCapacity = Math.Min(_receiveCapacity * 2, _options.MaxResponseBytes);
         _receive = (nint)NativeMemory.Realloc((void*)_receive, (nuint)_receiveCapacity);
+
+        // Realloc can move the block, so the view handed to the parser has to be rebuilt. Reset is
+        // internal to ioxide, and this only happens when the buffer actually grows.
+        _receiveView = new UnmanagedMemoryManager((byte*)_receive, _receiveCapacity);
     }
 
     private unsafe int BuildHead(HttpClientRequest request)
@@ -607,6 +639,7 @@ internal sealed class HttpClientConnection : IDisposable
     {
         _broken = true;
         _transport.Dispose();
+        _head.Dispose();   // returns the header list's pooled arrays
         if (_send != 0)
         {
             NativeMemory.Free((void*)_send);
@@ -624,4 +657,11 @@ internal sealed class HttpClientConnection : IDisposable
 public sealed class HttpClientException : Exception
 {
     public HttpClientException(string message) : base(message) { }
+
+    /// <summary>
+    /// Wraps the underlying failure - a parse rejection carries which rule the origin broke, which
+    /// is the whole diagnostic when a response is refused.
+    /// </summary>
+    public HttpClientException(string message, Exception innerException)
+        : base(message, innerException) { }
 }

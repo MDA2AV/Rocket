@@ -194,6 +194,54 @@ internal static class HttpClientTests
             Assert.Equal(200, status);
             Assert.Equal("200|x-demo=Value-Kept", body);
         });
+
+        RegisterHardening(runner);
+    }
+
+    // Hostile responses. Before the parser was Glyph11's these were accepted: the old hand-rolled
+    // head parser skipped any line it could not read, took the LAST Content-Length it saw, and had
+    // no opinion on Transfer-Encoding arriving alongside one. Each of these is a desync waiting for
+    // the next request on the same connection.
+    private static void RegisterHardening(Runner runner)
+    {
+        (string Path, string What)[] rejected =
+        [
+            ("/smuggle",    "Transfer-Encoding and Content-Length together"),
+            ("/twolengths", "two conflicting Content-Length headers"),
+            ("/obsfold",    "an obs-fold continuation line"),
+            ("/barelf",     "a bare LF inside a header line"),
+        ];
+
+        foreach ((string path, string what) in rejected)
+        {
+            runner.Test($"httpclient h1: refuses {what}", () =>
+            {
+                int origin = TestServer.Start(OriginHandler);
+                int proxy = StartProxy(origin);
+
+                (int status, string body) = Client.Get(proxy, path);
+
+                // The proxy handler answers 200 and reports the upstream outcome in the body; 599
+                // is how it reports that the client threw rather than returning a response.
+                Assert.Equal(200, status);
+                Assert.True(body.StartsWith("599|"),
+                    $"{what} should have been refused, got: {body[..Math.Min(80, body.Length)]}");
+            });
+        }
+
+        runner.Test("httpclient h1: a HEAD response's Content-Length does not frame a body", () =>
+        {
+            int origin = TestServer.Start(OriginHandler);
+            int proxy = StartProxy(origin);
+
+            // The proxy forwards this as a real HEAD. Content-Length: 1024 with no body follows,
+            // so framing on it would block until the origin sent 1024 bytes it is never going to
+            // send - hanging until the test's timeout is the failure mode being ruled out.
+            (int status, string body) = Client.Get(proxy, "/head", timeoutMs: 10_000);
+
+            Assert.Equal(200, status);
+            Assert.Equal("200|", body);
+        });
     }
 
     // Start a proxy server: its handler calls the origin through the ring-native client and writes
@@ -257,9 +305,15 @@ internal static class HttpClientTests
                     int upstreamStatus;
                     try
                     {
-                        using HttpClientResponse response = path == "/post"
-                            ? await upstream.PostAsync("/post"u8.ToArray(), "hello world"u8.ToArray())
-                            : await upstream.GetAsync(path);
+                        using HttpClientResponse response = path switch
+                        {
+                            "/post" => await upstream.PostAsync("/post"u8.ToArray(), "hello world"u8.ToArray()),
+                            // Forwarded as a real HEAD so the response's Content-Length has a
+                            // request method to be interpreted against.
+                            "/head" => await upstream.SendAsync(
+                                new HttpClientRequest(HttpMethods.Head, "/head")),
+                            _ => await upstream.GetAsync(path),
+                        };
 
                         upstreamStatus = response.Status;
                         detail = path switch
@@ -323,6 +377,46 @@ internal static class HttpClientTests
 
                     case "/nocontent":
                         connection.Write("HTTP/1.1 204 No Content\r\n\r\n"u8);
+                        break;
+
+                    // ---- Responses a hardened client has to refuse ----
+
+                    // Both framings at once: whoever reads this next disagrees with us about where
+                    // it ends, and the remainder becomes the head of the following response.
+                    case "/smuggle":
+                        connection.Write(Encoding.ASCII.GetBytes(
+                            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 6\r\n\r\n"
+                            + "0\r\n\r\nSTOLEN"));
+                        break;
+
+                    // Two Content-Lengths that disagree - same desync, spelled differently.
+                    case "/twolengths":
+                        connection.Write(Encoding.ASCII.GetBytes(
+                            "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Length: 11\r\n\r\nabcdefghijk"));
+                        break;
+
+                    // obs-fold: a continuation line, deprecated by RFC 9112 §5.2 precisely because
+                    // intermediaries disagree about how to unfold it.
+                    case "/obsfold":
+                        connection.Write(Encoding.ASCII.GetBytes(
+                            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nX-Split: one\r\n  two\r\n\r\nhi"));
+                        break;
+
+                    // A bare LF INSIDE a header line, in a block that is otherwise properly
+                    // terminated. Whether this splits one header or two is exactly what
+                    // implementations disagree about, which is the vector. (A block with no CRLFCRLF
+                    // at all is a different thing - incomplete rather than invalid - so the client
+                    // waits for more bytes there, as it should.)
+                    case "/barelf":
+                        connection.Write(Encoding.ASCII.GetBytes(
+                            "HTTP/1.1 200 OK\r\nX-Bad: one\ntwo\r\nContent-Length: 2\r\n\r\nhi"));
+                        break;
+
+                    // A HEAD response: Content-Length describes the body a GET would have
+                    // returned, and there is no body. A client that frames on it reads the NEXT
+                    // response as this one's content.
+                    case "/head":
+                        connection.Write("HTTP/1.1 200 OK\r\nContent-Length: 1024\r\n\r\n"u8);
                         break;
 
                     case "/closeme":

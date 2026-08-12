@@ -17,7 +17,6 @@ namespace Ioxide.Tests;
 /// </summary>
 internal static class TlsClientTests
 {
-    private const ushort H2TlsSidecarPort = 14465;
 
     public static void Register(Runner runner)
     {
@@ -121,78 +120,6 @@ internal static class TlsClientTests
             Assert.Equal("200|hello over http/1.1", body);
         });
 
-        // A real HTTP/2-over-TLS origin, which SslStream cannot stand in for: it can negotiate the
-        // ALPN token but not speak the framing behind it. nginx does both.
-        //
-        //   docker run -d --name nginx-h2-tls --network host \
-        //     -v .../nginx-h2-tls.conf:/etc/nginx/nginx.conf:ro \
-        //     -v .../doc_root:/doc_root:ro -v /tmp/ioxide-e2e-tls:/certs:ro nginx
-        bool noH2Tls = !Sidecars.Reachable("127.0.0.1", H2TlsSidecarPort);
-
-        runner.Test("tls client: h2 over TLS against a real HTTP/2 origin", () =>
-        {
-            (string certPath, _) = TestCert.Ensure();
-
-            using TlsClientContext tls = TlsClientContext.Create(new TlsClientOptions
-            {
-                ServerName = "localhost",
-                AlpnProtocols = ["h2", "http/1.1"],
-                CaFile = certPath,
-            });
-
-            int proxy = TestServer.Start(Http2ProxyHandler, onStart: reactor =>
-                Http2ClientPool.Start(reactor, new Http2ClientOptions
-                {
-                    Host = "127.0.0.1",
-                    Port = H2TlsSidecarPort,
-                    PoolSize = 1,
-                    AcquireTimeoutMs = 5_000,
-                    Tls = tls,
-                }));
-
-            (int status, string body) = Client.Get(proxy, "/index.html", timeoutMs: 20_000);
-            Assert.Equal(200, status);
-
-            // The sidecar's 1 KiB object, fetched over HTTP/2 inside TLS with the chain verified.
-            Assert.True(body.StartsWith("200|"), $"upstream should have answered 200, got: {body[..Math.Min(40, body.Length)]}");
-            Assert.Equal(1024, body.Length - "200|".Length);
-        }, skip: noH2Tls);
-
-        runner.Test("tls client: h2 over TLS refuses an origin that did not select h2", () =>
-        {
-            // Over TLS, HTTP/2 is chosen by ALPN and by nothing else. An origin that picked
-            // http/1.1 will not understand the HTTP/2 preface, and sending it anyway produces a
-            // connection that hangs instead of an error anyone can read - so the connect fails
-            // here, while there is still something useful to say.
-            using TlsTestOrigin origin = TlsTestOrigin.Start("http/1.1");
-            (string certPath, _) = TestCert.Ensure();
-
-            // Offer BOTH. Offering only "h2" to an http/1.1-only origin fails the HANDSHAKE with
-            // no_application_protocol, which never reaches the guard being tested - the connection
-            // has to succeed and negotiate http/1.1 for the post-handshake check to fire.
-            using TlsClientContext tls = TlsClientContext.Create(new TlsClientOptions
-            {
-                ServerName = "localhost",
-                AlpnProtocols = ["h2", "http/1.1"],
-                CaFile = certPath,
-            });
-
-            int proxy = TestServer.Start(Http2ProxyHandler, onStart: reactor =>
-                Http2ClientPool.Start(reactor, new Http2ClientOptions
-                {
-                    Host = "127.0.0.1",
-                    Port = (ushort)origin.Port,
-                    PoolSize = 1,
-                    AcquireTimeoutMs = 3_000,
-                    Tls = tls,
-                }));
-
-            (int status, string body) = Client.Get(proxy, "/h2-mismatch", timeoutMs: 20_000);
-            Assert.Equal(200, status);
-            Assert.True(body.StartsWith("599|"), $"the h2 connect should have failed, got: {body}");
-            Assert.True(body.Contains("ALPN") || body.Contains("alpn"),
-                $"should be the ALPN guard rather than a handshake failure, got: {body}");
-        });
 
         runner.Test("tls client: ServerName is required", () =>
         {
@@ -209,6 +136,137 @@ internal static class TlsClientTests
             }
 
             Assert.True(threw, "an empty ServerName must be rejected");
+        });
+
+        RegisterMutualTls(runner);
+    }
+
+    /// <summary>
+    /// Mutual TLS from the CLIENT side: presenting a certificate to an origin that demands one.
+    /// The server side of this landed for QUIC (#180); this is the other end of the same handshake,
+    /// over TCP, which is the leg a proxy actually uses to reach a protected origin.
+    /// </summary>
+    private static void RegisterMutualTls(Runner runner)
+    {
+        runner.Test("tls client: presents a client certificate to an origin that demands one", () =>
+        {
+            (string ca, _, _, string clientCert, string clientKey, _, _) = TestCert.EnsureMutualTls();
+            (string originCert, _) = TestCert.Ensure();
+
+            using TlsTestOrigin origin = TlsTestOrigin.StartMutual(ca, "http/1.1");
+
+            int proxy = StartProxy(origin.Port, new TlsClientOptions
+            {
+                ServerName = "localhost",
+                AlpnProtocols = ["http/1.1"],
+                CaFile = originCert,          // the origin's cert is self-signed, so it is its own root
+                CertificateFile = clientCert,
+                PrivateKeyFile = clientKey,
+            });
+
+            (int status, string body) = Client.Get(proxy, "/mtls", timeoutMs: 20_000);
+            Assert.Equal(200, status);
+            Assert.Equal("200|hello over http/1.1", body);
+
+            // The handshake succeeding is not enough - assert the identity actually crossed.
+            Assert.True(origin.LastClientSubject is not null,
+                "the origin should have received a client certificate");
+            Assert.True(origin.LastClientSubject!.Contains("alice"),
+                $"unexpected client identity: {origin.LastClientSubject}");
+        });
+
+        runner.Test("tls client: an origin demanding a certificate refuses a client with none", () =>
+        {
+            (string ca, _, _, _, _, _, _) = TestCert.EnsureMutualTls();
+            (string originCert, _) = TestCert.Ensure();
+
+            using TlsTestOrigin origin = TlsTestOrigin.StartMutual(ca, "http/1.1");
+
+            // Same configuration as above minus the certificate: the request must not go through.
+            int proxy = StartProxy(origin.Port, new TlsClientOptions
+            {
+                ServerName = "localhost",
+                AlpnProtocols = ["http/1.1"],
+                CaFile = originCert,
+            });
+
+            (int status, string body) = Client.Get(proxy, "/mtls", timeoutMs: 20_000);
+            Assert.Equal(200, status);
+            Assert.True(body.StartsWith("599|"),
+                $"an unauthenticated client should have been refused, got: {body[..Math.Min(80, body.Length)]}");
+        });
+
+        runner.Test("tls client: a certificate from the wrong CA is refused", () =>
+        {
+            (string ca, _, _, _, _, string rogueCert, string rogueKey) = TestCert.EnsureMutualTls();
+            (string originCert, _) = TestCert.Ensure();
+
+            using TlsTestOrigin origin = TlsTestOrigin.StartMutual(ca, "http/1.1");
+
+            // Well-formed and correctly signed - by a CA this origin does not trust. Holding a
+            // certificate is not the same as holding one that means anything here.
+            int proxy = StartProxy(origin.Port, new TlsClientOptions
+            {
+                ServerName = "localhost",
+                AlpnProtocols = ["http/1.1"],
+                CaFile = originCert,
+                CertificateFile = rogueCert,
+                PrivateKeyFile = rogueKey,
+            });
+
+            (int status, string body) = Client.Get(proxy, "/mtls", timeoutMs: 20_000);
+            Assert.Equal(200, status);
+            Assert.True(body.StartsWith("599|"),
+                $"a certificate from an untrusted CA should have been refused, got: {body[..Math.Min(80, body.Length)]}");
+        });
+
+        runner.Test("tls client: a key that does not match its certificate fails at construction", () =>
+        {
+            (_, _, _, string clientCert, _, _, string rogueKey) = TestCert.EnsureMutualTls();
+
+            // Caught when the context is built rather than surfacing as an opaque handshake failure
+            // against one particular origin, hours later. OpenSSL rejects the pair while LOADING
+            // the key - it compares against the certificate already in the context - so the
+            // explicit check_private_key call after it is a backstop, not the thing that fires.
+            string? message = null;
+            try
+            {
+                using TlsClientContext _ = TlsClientContext.Create(new TlsClientOptions
+                {
+                    ServerName = "localhost",
+                    CertificateFile = clientCert,
+                    PrivateKeyFile = rogueKey,
+                });
+            }
+            catch (IOException e)
+            {
+                message = e.Message;
+            }
+
+            Assert.True(message is not null, "a mismatched certificate/key pair must be rejected up front");
+            Assert.True(message!.Contains("private key") || message.Contains("does not match"),
+                $"should name the key as the problem, got: {message}");
+        });
+
+        runner.Test("tls client: a certificate without its key is a configuration error", () =>
+        {
+            (_, _, _, string clientCert, _, _, _) = TestCert.EnsureMutualTls();
+
+            bool threw = false;
+            try
+            {
+                using TlsClientContext _ = TlsClientContext.Create(new TlsClientOptions
+                {
+                    ServerName = "localhost",
+                    CertificateFile = clientCert,
+                });
+            }
+            catch (ArgumentException)
+            {
+                threw = true;
+            }
+
+            Assert.True(threw, "CertificateFile without PrivateKeyFile must be rejected");
         });
     }
 
@@ -228,47 +286,6 @@ internal static class TlsClientTests
         };
 
         return TestServer.Start(ProxyHandler, onStart: reactor => HttpClientPool.Start(reactor, options));
-    }
-
-    // The same shape as ProxyHandler, driving the HTTP/2 pool instead.
-    private static async Task Http2ProxyHandler(Reactor reactor, TcpConnection connection)
-    {
-        try
-        {
-            Http2ClientPool upstream = reactor.GetService<Http2ClientPool>()!;
-
-            while (true)
-            {
-                RecvSnapshot snapshot = await connection.ReadAsync();
-                if (snapshot.IsClosed)
-                {
-                    return;
-                }
-                string path = Wire.ReadPath(connection, snapshot);
-
-                string detail;
-                int status;
-                try
-                {
-                    using HttpClientResponse response = await upstream.GetAsync(path);
-                    status = response.Status;
-                    detail = Encoding.ASCII.GetString(response.Body.Span);
-                }
-                catch (Exception e)
-                {
-                    status = 599;
-                    detail = e.Message;
-                }
-
-                Wire.Write(connection, 200, $"{status}|{detail}");
-                await connection.FlushAsync();
-                connection.ResetRead();
-            }
-        }
-        finally
-        {
-            connection.DecRef();
-        }
     }
 
     private static async Task ProxyHandler(Reactor reactor, TcpConnection connection)

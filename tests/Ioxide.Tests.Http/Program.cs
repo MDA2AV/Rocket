@@ -14,9 +14,6 @@ internal static class Program
         var runner = new Runner();
 
         HttpClientTests.Register(runner);
-        Http3ClientTests.Register(runner);
-        Http2ClientTests.Register(runner);
-        RingHttpClientTests.Register(runner);
         TlsClientTests.Register(runner);
 
         return runner.Summary();
