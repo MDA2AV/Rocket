@@ -47,6 +47,25 @@ internal static unsafe partial class OpenSsl
 
     [LibraryImport(Ssl)] public static partial void SSL_CTX_set_verify(nint ctx, int mode, nint callback);
 
+    // --- client certificate (mutual TLS) ----------------------------------------------------------
+
+    /// <summary>
+    /// Our own certificate, PEM. The "chain" form because an origin verifying us needs the
+    /// intermediates too: leaf-only works against a store that already holds them and fails
+    /// everywhere else, which is the worst way for this to break.
+    /// </summary>
+    [LibraryImport(Ssl, StringMarshalling = StringMarshalling.Utf8)]
+    public static partial int SSL_CTX_use_certificate_chain_file(nint ctx, string file);
+
+    [LibraryImport(Ssl, StringMarshalling = StringMarshalling.Utf8)]
+    public static partial int SSL_CTX_use_PrivateKey_file(nint ctx, string file, int type);
+
+    /// <summary>Confirms the key matches the certificate, rather than failing mid-handshake.</summary>
+    [LibraryImport(Ssl)] public static partial int SSL_CTX_check_private_key(nint ctx);
+
+    /// <summary>PEM, for <see cref="SSL_CTX_use_PrivateKey_file"/>.</summary>
+    public const int SSL_FILETYPE_PEM = 1;
+
     /// <summary>Protocols we offer, as a length-prefixed wire list. Returns 0 on SUCCESS.</summary>
     [LibraryImport(Ssl)] public static partial int SSL_CTX_set_alpn_protos(nint ctx, byte* protos, uint length);
 

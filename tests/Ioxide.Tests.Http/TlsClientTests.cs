@@ -137,6 +137,137 @@ internal static class TlsClientTests
 
             Assert.True(threw, "an empty ServerName must be rejected");
         });
+
+        RegisterMutualTls(runner);
+    }
+
+    /// <summary>
+    /// Mutual TLS from the CLIENT side: presenting a certificate to an origin that demands one.
+    /// The server side of this landed for QUIC (#180); this is the other end of the same handshake,
+    /// over TCP, which is the leg a proxy actually uses to reach a protected origin.
+    /// </summary>
+    private static void RegisterMutualTls(Runner runner)
+    {
+        runner.Test("tls client: presents a client certificate to an origin that demands one", () =>
+        {
+            (string ca, _, _, string clientCert, string clientKey, _, _) = TestCert.EnsureMutualTls();
+            (string originCert, _) = TestCert.Ensure();
+
+            using TlsTestOrigin origin = TlsTestOrigin.StartMutual(ca, "http/1.1");
+
+            int proxy = StartProxy(origin.Port, new TlsClientOptions
+            {
+                ServerName = "localhost",
+                AlpnProtocols = ["http/1.1"],
+                CaFile = originCert,          // the origin's cert is self-signed, so it is its own root
+                CertificateFile = clientCert,
+                PrivateKeyFile = clientKey,
+            });
+
+            (int status, string body) = Client.Get(proxy, "/mtls", timeoutMs: 20_000);
+            Assert.Equal(200, status);
+            Assert.Equal("200|hello over http/1.1", body);
+
+            // The handshake succeeding is not enough - assert the identity actually crossed.
+            Assert.True(origin.LastClientSubject is not null,
+                "the origin should have received a client certificate");
+            Assert.True(origin.LastClientSubject!.Contains("alice"),
+                $"unexpected client identity: {origin.LastClientSubject}");
+        });
+
+        runner.Test("tls client: an origin demanding a certificate refuses a client with none", () =>
+        {
+            (string ca, _, _, _, _, _, _) = TestCert.EnsureMutualTls();
+            (string originCert, _) = TestCert.Ensure();
+
+            using TlsTestOrigin origin = TlsTestOrigin.StartMutual(ca, "http/1.1");
+
+            // Same configuration as above minus the certificate: the request must not go through.
+            int proxy = StartProxy(origin.Port, new TlsClientOptions
+            {
+                ServerName = "localhost",
+                AlpnProtocols = ["http/1.1"],
+                CaFile = originCert,
+            });
+
+            (int status, string body) = Client.Get(proxy, "/mtls", timeoutMs: 20_000);
+            Assert.Equal(200, status);
+            Assert.True(body.StartsWith("599|"),
+                $"an unauthenticated client should have been refused, got: {body[..Math.Min(80, body.Length)]}");
+        });
+
+        runner.Test("tls client: a certificate from the wrong CA is refused", () =>
+        {
+            (string ca, _, _, _, _, string rogueCert, string rogueKey) = TestCert.EnsureMutualTls();
+            (string originCert, _) = TestCert.Ensure();
+
+            using TlsTestOrigin origin = TlsTestOrigin.StartMutual(ca, "http/1.1");
+
+            // Well-formed and correctly signed - by a CA this origin does not trust. Holding a
+            // certificate is not the same as holding one that means anything here.
+            int proxy = StartProxy(origin.Port, new TlsClientOptions
+            {
+                ServerName = "localhost",
+                AlpnProtocols = ["http/1.1"],
+                CaFile = originCert,
+                CertificateFile = rogueCert,
+                PrivateKeyFile = rogueKey,
+            });
+
+            (int status, string body) = Client.Get(proxy, "/mtls", timeoutMs: 20_000);
+            Assert.Equal(200, status);
+            Assert.True(body.StartsWith("599|"),
+                $"a certificate from an untrusted CA should have been refused, got: {body[..Math.Min(80, body.Length)]}");
+        });
+
+        runner.Test("tls client: a key that does not match its certificate fails at construction", () =>
+        {
+            (_, _, _, string clientCert, _, _, string rogueKey) = TestCert.EnsureMutualTls();
+
+            // Caught when the context is built rather than surfacing as an opaque handshake failure
+            // against one particular origin, hours later. OpenSSL rejects the pair while LOADING
+            // the key - it compares against the certificate already in the context - so the
+            // explicit check_private_key call after it is a backstop, not the thing that fires.
+            string? message = null;
+            try
+            {
+                using TlsClientContext _ = TlsClientContext.Create(new TlsClientOptions
+                {
+                    ServerName = "localhost",
+                    CertificateFile = clientCert,
+                    PrivateKeyFile = rogueKey,
+                });
+            }
+            catch (IOException e)
+            {
+                message = e.Message;
+            }
+
+            Assert.True(message is not null, "a mismatched certificate/key pair must be rejected up front");
+            Assert.True(message!.Contains("private key") || message.Contains("does not match"),
+                $"should name the key as the problem, got: {message}");
+        });
+
+        runner.Test("tls client: a certificate without its key is a configuration error", () =>
+        {
+            (_, _, _, string clientCert, _, _, _) = TestCert.EnsureMutualTls();
+
+            bool threw = false;
+            try
+            {
+                using TlsClientContext _ = TlsClientContext.Create(new TlsClientOptions
+                {
+                    ServerName = "localhost",
+                    CertificateFile = clientCert,
+                });
+            }
+            catch (ArgumentException)
+            {
+                threw = true;
+            }
+
+            Assert.True(threw, "CertificateFile without PrivateKeyFile must be rejected");
+        });
     }
 
     // A TCP endpoint whose handler fetches from the TLS origin through the pooled client, and
