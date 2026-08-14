@@ -217,6 +217,176 @@ internal static class Qpack
     ];
 
     /// <summary>Encode a response's field section (prefix + :status + headers) into a pooled buffer.</summary>
+    /// <summary>
+    /// The static table indexed for encoding: distinct names, each with the entries sharing it.
+    /// </summary>
+    /// <remarks>
+    /// Grouped rather than flat so a lookup rejects most candidates on length alone. Built once from
+    /// the 99 fixed entries.
+    /// </remarks>
+    private static readonly (byte[] Name, int NameIndex, (byte[] Value, int Index)[] Values)[][] StaticByLength = BuildStaticNames();
+
+    /// <summary>Longest field name in the static table, so a longer name skips the lookup entirely.</summary>
+    private static readonly int LongestStaticName = StaticByLength.Length - 1;
+
+    private static (byte[] Name, int NameIndex, (byte[] Value, int Index)[] Values)[][] BuildStaticNames()
+    {
+        var byName = new List<(byte[] Name, int NameIndex, List<(byte[] Value, int Index)> Values)>();
+
+        for (int i = 0; i < QpackStatic.Table.Length; i++)
+        {
+            (byte[] name, byte[] value) = QpackStatic.Table[i];
+
+            int at = -1;
+            for (int j = 0; j < byName.Count; j++)
+            {
+                if (byName[j].Name.AsSpan().SequenceEqual(name))
+                {
+                    at = j;
+                    break;
+                }
+            }
+
+            if (at < 0)
+            {
+                byName.Add((name, i, [(value, i)]));
+            }
+            else
+            {
+                byName[at].Values.Add((value, i));
+            }
+        }
+
+        // Bucketed by name length. A per-header linear scan of every distinct name is far too
+        // expensive at this request rate - it cost about 6% of throughput - and length alone
+        // narrows 50-odd candidates down to one or two.
+        int longest = 0;
+
+        foreach ((byte[] name, int _, List<(byte[] Value, int Index)> _) in byName)
+        {
+            longest = Math.Max(longest, name.Length);
+        }
+
+        var buckets = new List<(byte[], int, (byte[], int)[])>[longest + 1];
+
+        foreach ((byte[] name, int nameIndex, List<(byte[] Value, int Index)> values) in byName)
+        {
+            buckets[name.Length] ??= [];
+            buckets[name.Length].Add((name, nameIndex, values.ToArray()));
+        }
+
+        var result = new (byte[], int, (byte[], int)[])[longest + 1][];
+
+        for (int i = 0; i <= longest; i++)
+        {
+            result[i] = buckets[i]?.ToArray() ?? [];
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Finds a header in the static table: an exact name and value match, or failing that a name.
+    /// </summary>
+    /// <remarks>
+    /// Names match case-insensitively, so a caller holding HTTP's conventional capitalisation still
+    /// resolves - and then never writes the name at all. Values match exactly, because a field value
+    /// is case-sensitive.
+    /// </remarks>
+    private static bool TryFindStatic(ReadOnlySpan<byte> name, ReadOnlySpan<byte> value, out int exact, out int nameIndex)
+    {
+        exact = -1;
+        nameIndex = -1;
+
+        if (name.Length > LongestStaticName)
+        {
+            return false;
+        }
+
+        foreach ((byte[] candidate, int candidateIndex, (byte[] Value, int Index)[] values) in StaticByLength[name.Length])
+        {
+            if (!EqualsIgnoreCase(candidate, name))
+            {
+                continue;
+            }
+
+            nameIndex = candidateIndex;
+
+            foreach ((byte[] entryValue, int entryIndex) in values)
+            {
+                if (entryValue.AsSpan().SequenceEqual(value))
+                {
+                    exact = entryIndex;
+                    break;
+                }
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool EqualsIgnoreCase(ReadOnlySpan<byte> lowercase, ReadOnlySpan<byte> other)
+    {
+        for (int i = 0; i < lowercase.Length; i++)
+        {
+            byte c = other[i];
+
+            if (c is >= (byte)'A' and <= (byte)'Z')
+            {
+                c |= 0x20;
+            }
+
+            if (c != lowercase[i])
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Writes one header, preferring the static table over spelling the name out.
+    /// </summary>
+    /// <remarks>
+    /// Three tiers, cheapest first: name and value both in the table cost a single byte; a known
+    /// name costs an index plus the literal value; anything else falls back to the full literal.
+    /// Unlike the dynamic table this needs nothing from the peer, so it applies to every client.
+    /// </remarks>
+    private static int WriteHeader(Span<byte> buf, ReadOnlySpan<byte> name, ReadOnlySpan<byte> value)
+    {
+        if (TryFindStatic(name, value, out int exact, out int nameIndex))
+        {
+            if (exact >= 0)
+            {
+                // Indexed Field Line: 1 T=1 index(6+).
+                return WriteInt(buf, 0xC0, 6, exact);
+            }
+
+            // Literal With Name Reference: 01 N=0 T=1 nameindex(4+), then H=0 value(7+).
+            int written = WriteInt(buf, 0x50, 4, nameIndex);
+            written += WriteInt(buf[written..], 0x00, 7, value.Length);
+            value.CopyTo(buf[written..]);
+
+            return written + value.Length;
+        }
+
+        // Literal With Literal Name: 001 N=0 H=0 namelen(3+), lowercased name, H=0 value(7+).
+        int w = WriteInt(buf, 0x20, 3, name.Length);
+
+        foreach (byte b in name)
+        {
+            buf[w++] = b is >= (byte)'A' and <= (byte)'Z' ? (byte)(b | 0x20) : b;
+        }
+
+        w += WriteInt(buf[w..], 0x00, 7, value.Length);
+        value.CopyTo(buf[w..]);
+
+        return w + value.Length;
+    }
+
     public static byte[] EncodeResponseFields(Http3Response response, out int written)
     {
         int cap = 2 + 8;
@@ -258,16 +428,7 @@ internal static class Qpack
 
         foreach ((ReadOnlyMemory<byte> nameM, ReadOnlyMemory<byte> valueM) in response.Headers)
         {
-            // Literal With Literal Name: 001 N=0 H=0 namelen(3+), lowercased name, H=0 value(7+).
-            ReadOnlySpan<byte> name = nameM.Span;
-            w += WriteInt(buf.AsSpan(w), 0x20, 3, name.Length);
-            foreach (byte b in name)
-            {
-                buf[w++] = b is >= (byte)'A' and <= (byte)'Z' ? (byte)(b | 0x20) : b;
-            }
-            w += WriteInt(buf.AsSpan(w), 0x00, 7, valueM.Length);
-            valueM.Span.CopyTo(buf.AsSpan(w));
-            w += valueM.Length;
+            w += WriteHeader(buf.AsSpan(w), nameM.Span, valueM.Span);
         }
 
         written = w;

@@ -24,4 +24,11 @@
     <ProjectReference Include="../../ioxide/ioxide.csproj" />
   </ItemGroup>
 
+    <ItemGroup>
+        <!-- The QPACK encoder is driven directly by the unit tests: a wrong static-table index is
+             invisible from outside, since the response still decodes to the right thing on a peer
+             that happens to agree. -->
+        <InternalsVisibleTo Include="Ioxide.Tests.Unit" />
+    </ItemGroup>
+
 </Project>
