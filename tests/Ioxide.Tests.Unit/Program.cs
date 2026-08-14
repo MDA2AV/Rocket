@@ -16,6 +16,7 @@ internal static class Program
         ResponseCapTests.Register(runner);
         Http2OutputQueueTests.Register(runner);
         Http2StreamedRequestTests.Register(runner);
+        QpackStaticEncodeTests.Register(runner);
 
         return runner.Summary();
     }
