@@ -27,7 +27,22 @@ SECONDS_=${SECONDS_:-10}
 CONNS=${CONNS:-64}
 THREADS=${THREADS:-8}
 MIN_UTIL=${MIN_UTIL:-90}
+HEADROOM_PCT=${HEADROOM_PCT:-8}
+
+# --tune sweeps the load ladder per sample and writes the winner to bench/tuned.tsv; later runs
+# reuse it, so a measurement is both reproducible and near the server's peak rather than wherever
+# a fixed default happens to land.
+TUNE=0
+ARGS=()
+for a in "$@"; do
+  if [ "$a" = --tune ]; then TUNE=1; else ARGS+=("$a"); fi
+done
+set -- ${ARGS+"${ARGS[@]}"}
+SERVER_CPUS=${SERVER_CPUS:-$(. "$(dirname "$0")/lib.sh"; bench_server_cpus)}
 H3X=${H3X:-/home/diogo/h3x/build/h3x}
+
+# One definition of how each protocol is driven, shared with every other script under bench/.
+. "$(dirname "$0")/lib.sh"
 OUT=bench/results
 WORK=bench/.work
 mkdir -p "$OUT" "$WORK" /tmp/ioxide-bench-assets
@@ -90,7 +105,14 @@ start() { # start <role> <sample> <proto> <port> <path> <extra env...>
 
   local portvar=PLAYGROUND_PORT
   [ "$proto" = h3 ] && portvar=PLAYGROUND_QUIC_PORT
-  env PLAYGROUND_REACTORS="$REACTORS" "$portvar=$port" "$@" \
+
+  # Pinned to the performance cores. On a hybrid CPU the scheduler is free to put a reactor on an
+  # efficiency core, and the same server then measures a third of its throughput - a difference
+  # that shows up as a regression and is only where the thread landed.
+  local pin=()
+  command -v taskset >/dev/null 2>&1 && pin=(taskset -c "$SERVER_CPUS")
+
+  "${pin[@]}" env PLAYGROUND_REACTORS="$REACTORS" "$portvar=$port" "$@" \
       "$exe" > "$WORK/$role.log" 2>&1 < /dev/null &
   local pid=$!
   [ "$role" = server ] && SERVER_PID=$pid || ORIGIN_PID=$pid
@@ -102,35 +124,6 @@ start() { # start <role> <sample> <proto> <port> <path> <extra env...>
   done
   echo "    $sample never answered on $port: $(tail -2 "$WORK/$role.log"|tr '\n' ' ')"
   return 1
-}
-
-# rps on stdout, empty when the driver could not run
-load() {
-  local proto=$1 port=$2 secs=$3 out=$4 path=$5
-  case $proto in
-    h1|h1s)
-      local scheme=http; [ "$proto" = h1s ] && scheme=https
-      wrk -t"$THREADS" -c"$CONNS" -d"${secs}s" "$scheme://127.0.0.1:$port$path" >"$out" 2>&1
-      grep -oP 'Requests/sec:\s+\K[\d.]+' "$out" | head -1 ;;
-    h2c|h2)
-      local scheme=https extra=()
-      [ "$proto" = h2c ] && { scheme=http; extra=(--no-tls-proto=h2c); }
-      h2load -t"$THREADS" -c"$CONNS" -m 32 -D "$secs" "${extra[@]}" \
-             "$scheme://127.0.0.1:$port$path" >"$out" 2>&1
-      grep -oP 'finished in .*, \K[\d.]+(?= req/s)' "$out" | head -1 ;;
-    echo)
-      # The driver is a Playground sample too - Clients/Quic, the client half of Quic/Raw. Nothing
-      # bench-only exists to drive these; the example IS the load generator.
-      local drv=Playground/Clients/Quic/bin/Release/net11.0/Playground.Clients.Quic
-      [ -x "$drv" ] || { echo ""; return; }
-      env PLAYGROUND_QUIC_PORT="$port" PLAYGROUND_ECHO_CONNS="$CONNS" \
-          PLAYGROUND_ECHO_SECONDS="$secs" "$drv" >"$out" 2>&1
-      grep -oP '^\K[\d.]+(?= req/s)' "$out" | head -1 ;;
-    h3)
-      [ -x "$H3X" ] || { echo "" ; return; }
-      "$H3X" -d "$secs" --connections "$CONNS" -m 32 -k "https://127.0.0.1:$port$path" >"$out" 2>&1
-      grep -oP 'throughput:\s+\K[\d.]+' "$out" | head -1 ;;
-  esac
 }
 
 # wrk reports failures separately from throughput; a partly-failing run is not a result.
@@ -223,9 +216,25 @@ while read -r sample proto port path origin extra; do
     cleanup; continue
   fi
 
-  load "$proto" "$port" 4 "$WORK/warm.txt" "$path" >/dev/null      # warm: JIT, slabs, handshakes
+  # The shape this sample was tuned at, or the global default. Load shape decides the number, so
+  # it is part of the fixture rather than a knob to leave at whatever it happened to be.
+  CONNS=$(bench_tuned_conns "$sample")
+
+  if [ "$TUNE" = 1 ]; then
+    echo "    tuning $sample ..."
+    read -r tc trps tcpu < <(bench_sweep "$proto" "$port" 4 "$WORK/tune.txt" "$path" "$SERVER_PID")
+    if [ "${tc:-0}" != 0 ]; then
+      grep -v "^$sample\t" bench/tuned.tsv 2>/dev/null > "$WORK/tuned.tmp" || true
+      printf '%s\t%s\n' "$sample" "$tc" >> "$WORK/tuned.tmp"
+      sort -o bench/tuned.tsv "$WORK/tuned.tmp"
+      CONNS=$tc
+      echo "    -> peak at $tc connections (${trps%%.*} req/s, ${tcpu}us/req)"
+    fi
+  fi
+
+  bench_load "$proto" "$port" 4 "$WORK/warm.txt" "$path" >/dev/null      # warm: JIT, slabs, handshakes
   t0=$(cpu_ticks "$SERVER_PID")
-  rps=$(load "$proto" "$port" "$SECONDS_" "$WORK/$STAMP.txt" "$path")
+  rps=$(bench_load "$proto" "$port" "$SECONDS_" "$WORK/$STAMP.txt" "$path")
   t1=$(cpu_ticks "$SERVER_PID")
   cleanup
 
@@ -248,7 +257,7 @@ while read -r sample proto port path origin extra; do
     delta=$(awk -v a="$rps" -v b="${OLD[$sample]}" 'BEGIN{printf "%+.1f%%", (a/b-1)*100}')
   fi
   printf '   %-24s %12.0f %8sus %10s  %s\n' "$sample" "$rps" "$cpu" "$delta" "$note"
-  ROWS+=("{\"sample\":\"$sample\",\"proto\":\"$proto\",\"rps\":$rps,\"cpu_us_per_req\":$cpu,\"util_pct\":$util,\"note\":\"$note\"}")
+  ROWS+=("{\"sample\":\"$sample\",\"proto\":\"$proto\",\"rps\":$rps,\"cpu_us_per_req\":$cpu,\"util_pct\":$util,\"conns\":$CONNS,\"note\":\"$note\"}")
 done < <(registry)
 
 {
@@ -256,7 +265,9 @@ done < <(registry)
          "$STAMP" "$(hostname)" "$(uname -r)"
   printf '  "reactors": %s, "conns": %s, "threads": %s, "seconds": %s,\n' \
          "$REACTORS" "$CONNS" "$THREADS" "$SECONDS_"
-  printf '  "commit": "%s",\n  "samples": [\n    ' "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  printf '  "commit": "%s", "dirty": %s,\n' "$(bench_commit)" "$(bench_dirty)"
+  printf '  "cpu": "%s", "governor": "%s", "server_cpus": "%s",\n' "$(bench_cpu)" "$(bench_gov)" "$SERVER_CPUS"
+  printf '  "samples": [\n    '
   (IFS=$',\n'; printf '%s' "${ROWS[*]}")
   printf '\n  ]\n}\n'
 } > "$RESULT"

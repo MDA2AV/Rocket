@@ -18,6 +18,10 @@ cd "$(dirname "$0")/.."
 R=${BENCH_REACTORS:-4}
 DUR=${BENCH_SECONDS:-8}
 H3X=${H3X:-/home/diogo/h3x/build/h3x}
+
+# The drivers live in one place. This file used to carry its own HTTP/3 invocation that differed
+# from any.sh's, and the same server measured 260k under one and 505k under the other.
+. "$(dirname "$0")/lib.sh"
 BIN=bench/.work
 mkdir -p $BIN
 RESULTS=()
@@ -48,9 +52,12 @@ wait_http() { # $1 url: poll until it answers (up to ~8s) so a slow start reads 
 
 wrk_h1() { # $1 url, $2 threads (default 4), $3 conns (default 64) -> req/s
   # wrk has no warm-up flag: a short throwaway run heats the server, then the measured one.
-  wrk -t${2:-4} -c${3:-64} -d2s "$1" >/dev/null 2>&1
-  wrk -t${2:-4} -c${3:-64} -d${DUR}s "$1" 2>/dev/null \
-    | grep -oE 'Requests/sec: +[0-9.]+' | grep -oE '[0-9.]+' | cut -d. -f1
+  local proto=h1; case "$1" in https://*) proto=h1s ;; esac
+  local port; port=$(printf '%s' "$1" | sed -E 's|.*://[^:]+:([0-9]+).*|\1|')
+  local path; path=$(printf '%s' "$1" | sed -E 's|.*://[^/]+||'); path=${path:-/}
+
+  THREADS=${2:-4} CONNS=${3:-64} bench_load "$proto" "$port" 2 /dev/null "$path" >/dev/null 2>&1
+  THREADS=${2:-4} CONNS=${3:-64} bench_load "$proto" "$port" "$DUR" "$BIN/wrk.txt" "$path" | cut -d. -f1
 }
 
 # ── tcp raw + pipes, 4 reactors and the 12-reactor baseline ─────────────────────────────────
@@ -87,8 +94,8 @@ fi
 # ── h3 server ───────────────────────────────────────────────────────────────────────────────
 play Http3/Nghttp3Request PLAYGROUND_REACTORS=$R PLAYGROUND_QUIC_PORT=18444 PLAYGROUND_PORT=18090
 if [ -x "$H3X" ]; then
-  N=$("$H3X" -k -t 4 --connections 64 -m 8 -d $DUR --send-batch 8 https://127.0.0.1:18444/ 2>&1 \
-      | grep -oE 'throughput:  [0-9]+' | grep -oE '[0-9]+')
+  N=$(CONNS=${CONNS:-64} THREADS=${THREADS:-8} REACTORS=$R \
+      bench_load h3 18444 "$DUR" "$BIN/h3-server.txt" / | cut -d. -f1)
   note "h3-server" "${R}r" "${N:-fail} req/s"
 else
   note "h3-server" "${R}r" "SKIP (h3x not found - set H3X=/path/to/h3x)"

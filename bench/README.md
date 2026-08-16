@@ -109,3 +109,98 @@ steady state - and reported the two as equal. Prefer `-D` over `-n`, and check t
 duration before believing a throughput number.
 
 Numbers are hardware-specific. Compare runs on one machine; never commit them as truth.
+
+
+## What a number here can and cannot be compared to
+
+Every figure is hardware-specific and driver-specific. Two runs are comparable when the recorded
+`cpu`, `reactors`, `conns`, `threads` and `seconds` match and `dirty` is `false` on both. Nothing
+else is comparable, however similar the samples look.
+
+The harness records that context because leaving it out cost a day. The traps below are all real,
+all seen on this repo, and all guarded now.
+
+### The driver is the thing being measured
+
+Reactor utilisation does not tell you whether you measured the server. A run can peg both reactors
+and still be limited by the load generator: fewer requests in flight means less batching per wakeup,
+so the server burns more CPU per request while looking fully busy.
+
+`Http3/Nghttp3Buffered` measured 260k req/s at 7.5 us/req under one driver and 505k at 3.8 us/req
+under another, on the same binary and the same cores, both at ~97% utilisation. After each measured
+run the harness re-runs briefly at double the load; if throughput climbs, the row is marked
+`driver-bound` rather than reported as a server number.
+
+### Two scripts, two answers
+
+The divergence above was `run.sh` driving HTTP/3 as `-t 4 --connections 64 -m 8 --send-batch 8`
+while `any.sh` used `--connections 64 -m 32`. Both were real measurements of the same server and
+neither file said they were different.
+
+Every driver now lives in `lib.sh` and every script sources it. Change an invocation there or
+nowhere.
+
+### Use the parameters that measure the server
+
+    bash bench/any.sh --tune            # sweep the load ladder, keep the peak per sample
+    bash bench/any.sh                   # reuse it
+
+`--tune` sweeps connection counts per sample, records the winner in `bench/tuned.tsv`, and later
+runs reuse it - so a measurement is reproducible *and* near the server's peak instead of wherever a
+fixed default happens to land. Each row records the shape it was measured at, and two rows are only
+comparable when those match.
+
+It is worth the run. `Http3/Nghttp3Buffered` on this hardware:
+
+    conns=4     678797 req/s   2.61us/req
+    conns=8     790815 req/s   2.53us/req
+    conns=16    792865 req/s   2.52us/req   <- peak
+    conns=32    747587 req/s   2.68us/req
+    conns=64    462803 req/s   4.32us/req   <- the old fixed default
+    conns=128   458343 req/s   4.36us/req
+
+The default was reporting 462k for a server that does 810k, and every recorded result for that
+sample was taken there.
+
+### Connection count is not a free parameter
+
+On this hardware `Http3/Nghttp3Buffered` at 2 reactors does ~800k req/s at 16 connections and 442k
+at 64, with CPU per request nearly doubling across that step - per-connection cost dominates once a
+reactor is juggling enough of them. `CONNS` is therefore part of the result, not a detail of how it
+was taken, and the default of 64 sits on the far side of that cliff. Raising it does not make a
+server look better.
+
+### Hybrid CPUs decide the result
+
+On an i9-14900K the same HTTP/3 server measures ~490k req/s on the performance cores and 96k on the
+efficiency ones. Left alone the scheduler picks, and its choice reads as a regression.
+
+So the server is pinned to the performance cores - all of them, not a chosen few. Narrower is worse,
+measured at 2 reactors:
+
+    pinned to two cores        465k req/s
+    pinned to the 6GHz pair    482k
+    pinned to all P-cores      494k
+    unpinned                   505k
+
+Denying the scheduler any choice costs more than the placement gains. Giving it every P-core and no
+E-core keeps almost all of that freedom and removes the cliff; the driver is not pinned at all,
+since confining it would only move the bottleneck onto the driver. `SERVER_CPUS` overrides.
+
+### A leaked server is measured too
+
+Under SO_REUSEPORT the kernel fans connections across every process bound to the port, so a server
+left over from an earlier run silently blends into the next result. Starting a sample refuses a port
+that is already bound; `bench_assert_single_listener` checks the socket count afterwards.
+
+Beware `pkill -f playground` for cleanup - the pattern matches the shell running it.
+
+### A result must name the tree it came from
+
+`bench/results/20260810T001150Z.json` records `commit: 96137b9` alongside samples that did not exist
+until 15 hours later. The commit was stamped correctly; the samples were sitting uncommitted in the
+working tree at the time. Chasing that as a performance regression found nothing, because there was
+nothing to find.
+
+Runs now record `dirty`, along with `cpu`, `governor` and `server_cpus`. A result taken on a dirty
+tree is a note to yourself, not a baseline.
