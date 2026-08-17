@@ -20,6 +20,7 @@ internal static class Program
         H3Tests.Register(runner);
         MutualTlsTests.Register(runner);
         SniTests.Register(runner);
+        RotationTests.Register(runner);
         Http3Tests.Register(runner);
 
         return runner.Summary();

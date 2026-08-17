@@ -15,35 +15,67 @@ namespace ioxide.tls;
 /// </summary>
 public sealed class TlsService
 {
-    private readonly nint _ctx;
     private readonly GCHandle _alpnHandle;   // roots the ALPN wire bytes the select callback reads via its arg
     private readonly bool _kernelRx;
     private readonly bool _kernelTx;
 
-    // One context per SNI name, and the handle rooting the table the servername callback reads via
-    // its arg. Null when nothing but the default certificate was configured, which leaves the
-    // handshake without a servername callback at all.
-    private readonly HostTable? _byHost;
-    private readonly GCHandle _byHostHandle;
+    // Everything about the certificates lives behind this one slot, and a rotation replaces it
+    // whole. The handle roots the slot so the servername callback can reach it through its arg.
+    private readonly CertificateSlot _slot;
+    private readonly GCHandle _slotHandle;
+
+    // What a rotation is NOT allowed to change, kept from the options the service started with.
+    private readonly TlsOptions _options;
+
+    // Serialises rotations against each other. Readers never take it - they read one reference.
+    private readonly Lock _rotation = new();
 
     // A per-SSL ex_data slot holds a GCHandle to the TlsSession, so the static keylog callback can
     // find the right session for an SSL without a process-global, recycled-pointer-keyed map.
     private static readonly int SslSessionIndex =
         OpenSsl.CRYPTO_get_ex_new_index(OpenSsl.CRYPTO_EX_INDEX_SSL, 0, 0, 0, 0, 0);
 
-    private TlsService(nint ctx, GCHandle alpnHandle, bool kernelRx, bool kernelTx,
-        HostTable? byHost, GCHandle byHostHandle)
+    private TlsService(CertificateSlot slot, GCHandle slotHandle, GCHandle alpnHandle, TlsOptions options)
     {
-        _ctx = ctx;
+        _slot = slot;
+        _slotHandle = slotHandle;
         _alpnHandle = alpnHandle;
-        _kernelRx = kernelRx;
-        _kernelTx = kernelTx;
-        _byHost = byHost;
-        _byHostHandle = byHostHandle;
+        _options = options;
+        _kernelRx = options.KernelRx;
+        _kernelTx = options.KernelTx;
     }
 
     /// <summary>The SNI names this service answers for, beside its default certificate.</summary>
-    public IReadOnlyCollection<string> ServerNames => _byHost?.Names ?? [];
+    public IReadOnlyCollection<string> ServerNames => _slot.Current.ByHost?.Names ?? [];
+
+    /// <summary>
+    /// The certificates in force. Replaced whole rather than edited, so a handshake reads one
+    /// coherent set: the default it will answer with, and the alternatives it may pick from.
+    /// </summary>
+    private sealed class Certificates
+    {
+        public required nint Default { get; init; }
+        public required HostTable? ByHost { get; init; }
+    }
+
+    /// <summary>
+    /// The one thing both the accept path and the servername callback read, so a rotation has a
+    /// single place to publish to and neither can see half of one.
+    /// </summary>
+    /// <remarks>
+    /// The handle rooting this never changes, which is what lets the callback keep the same arg for
+    /// the life of the service while the certificates behind it are replaced.
+    /// </remarks>
+    private sealed class CertificateSlot
+    {
+        private Certificates _current = null!;
+
+        public Certificates Current
+        {
+            get => Volatile.Read(ref _current);
+            set => Volatile.Write(ref _current, value);
+        }
+    }
 
     /// <summary>
     /// The SNI table in the form the handshake reads it: names as the UTF-8 bytes they arrive as,
@@ -155,38 +187,146 @@ public sealed class TlsService
         byte[] alpnWire = BuildAlpnWire(options.Alpn);
         GCHandle alpnHandle = GCHandle.Alloc(alpnWire);
 
-        nint ctx = NewContext(options, defaultCertificate, "", alpnHandle);
+        var slot = new CertificateSlot();
+        GCHandle slotHandle = GCHandle.Alloc(slot);
 
-        // Everything above configured the default certificate. SNI adds alternatives beside it,
-        // each a context of its own, and a callback that picks between them per handshake.
-        var byHost = BuildHostContexts(options, alpnHandle);
-        GCHandle hostHandle = default;
+        slot.Current = BuildCertificates(options, defaultCertificate, options.CertificatesByHost, alpnHandle, slotHandle);
 
-        if (byHost is not null)
-        {
-            hostHandle = GCHandle.Alloc(byHost);
-
-            unsafe
-            {
-                // Checked, because the failure is silent otherwise: an unregistered callback means
-                // every name is answered with the default certificate, which looks like a working
-                // server serving the wrong certificate rather than one that failed to start.
-                delegate* unmanaged<nint, nint, nint, int> servername = &ServerNameCallback;
-
-                if (OpenSsl.SSL_CTX_callback_ctrl(ctx, OpenSsl.SSL_CTRL_SET_TLSEXT_SERVERNAME_CB, (nint)servername) != 1 ||
-                    OpenSsl.SSL_CTX_ctrl(ctx, OpenSsl.SSL_CTRL_SET_TLSEXT_SERVERNAME_ARG, 0, GCHandle.ToIntPtr(hostHandle)) != 1)
-                {
-                    throw new IOException($"could not install the SNI callback: {OpenSsl.LastError()}");
-                }
-            }
-        }
-
-        var service = new TlsService(ctx, alpnHandle, options.KernelRx, options.KernelTx, byHost, hostHandle);
+        var service = new TlsService(slot, slotHandle, alpnHandle, options);
         if (register)
         {
             reactor.AddService(service);
         }
         return service;
+    }
+
+    /// <summary>
+    /// Replaces the certificates this service serves, on a running server. New connections are
+    /// answered with them from the next handshake; connections already established keep the
+    /// certificate they were given, which is what they authenticated.
+    /// </summary>
+    /// <param name="defaultCertificate">
+    /// The certificate for a client that sends no name, or asks for one not in
+    /// <paramref name="certificatesByHost"/>.
+    /// </param>
+    /// <param name="certificatesByHost">The certificates chosen by name, or null for none.</param>
+    /// <remarks>
+    /// What renewal needs: an ACME client rewrites its PEM every couple of months, and without this
+    /// the only way to serve the new one is to restart. The protocol floor, ALPN and kTLS are what
+    /// the service started with and cannot be changed here, since those decide how a connection
+    /// behaves rather than which certificate it is shown.
+    ///
+    /// One thing DOES follow the disk, and it is worth knowing before automating this. Client trust
+    /// anchors given as <see cref="TlsOptions.ClientCaPath"/> are re-read from that path on every
+    /// rotation, so an edit to the CA bundle takes effect at the next renewal rather than at the
+    /// next restart - revoking an issuer that way is possible, and so is widening who may connect
+    /// without meaning to. It reads from the path deliberately: the alternative is holding the
+    /// bundle from startup, which would also drop the issuer list sent in the CertificateRequest
+    /// and so break clients that hold several certificates and pick by it. Anchors given as
+    /// <see cref="TlsOptions.ClientCaPem"/> are data, and do not move.
+    ///
+    /// This service belongs to ONE reactor. A server with several rotates each of them, and a
+    /// reactor that is missed keeps serving the old certificate on its share of the connections -
+    /// they all listen on the same port through SO_REUSEPORT, so which one a client reaches is not
+    /// something the client chooses.
+    ///
+    /// Everything is built before anything is published, so a bad path or an unreadable key throws
+    /// and LEAVES THE SERVICE SERVING WHAT IT WAS. A failed rotation is a server that kept working.
+    ///
+    /// Call it from anywhere; it takes a lock against other rotations, and the handshake path never
+    /// does. Each read of the certificates is one reference load, so no handshake sees half a set.
+    /// A connection that is already running when a rotation lands can still take its default from
+    /// the old set and a named certificate from the new one, since it reads them at two different
+    /// moments - harmless, because every set is built from the same options and differs only in
+    /// certificate material, which is exactly why this method is not allowed to change anything else.
+    ///
+    /// The contexts it replaces are kept, not freed. A handshake may be between reading the table
+    /// and using what it found, and OpenSSL gives no way to wait that out - so they are retained
+    /// for the life of the service, as its contexts already were. A rotation is an operational
+    /// event, not a hot path; rotating a handful of names a few times a year costs kilobytes.
+    /// </remarks>
+    public void ReplaceCertificates(TlsCertificate defaultCertificate,
+        IReadOnlyDictionary<string, TlsCertificate>? certificatesByHost = null)
+    {
+        ArgumentNullException.ThrowIfNull(defaultCertificate);
+
+        lock (_rotation)
+        {
+            // Built first, published second. Anything wrong with the new material throws here,
+            // before the service has stopped serving the old.
+            _slot.Current = BuildCertificates(_options, defaultCertificate, certificatesByHost, _alpnHandle, _slotHandle);
+        }
+    }
+
+    /// <summary>
+    /// One coherent set of contexts: the default, the alternatives by name, and the servername
+    /// callback wired to the slot when there are any.
+    /// </summary>
+    /// <remarks>
+    /// Used to start the service and to rotate it, so a rotated context is built exactly the way
+    /// the first one was - the parity between the two paths is not something to maintain twice.
+    /// </remarks>
+    private static Certificates BuildCertificates(TlsOptions options, TlsCertificate defaultCertificate,
+        IReadOnlyDictionary<string, TlsCertificate>? certificatesByHost, GCHandle alpnHandle, GCHandle slotHandle)
+    {
+        RequireOneSourceEach(defaultCertificate, "");
+
+        nint ctx = 0;
+        HostTable? byHost = null;
+
+        try
+        {
+            ctx = NewContext(options, defaultCertificate, "", alpnHandle);
+
+            // The default is configured. SNI adds alternatives beside it, each a context of its own,
+            // and a callback that picks between them per handshake.
+            byHost = BuildHostContexts(options, certificatesByHost, alpnHandle);
+
+            if (byHost is not null)
+            {
+                unsafe
+                {
+                    // Checked, because the failure is silent otherwise: an unregistered callback means
+                    // every name is answered with the default certificate, which looks like a working
+                    // server serving the wrong certificate rather than one that failed to start.
+                    delegate* unmanaged<nint, nint, nint, int> servername = &ServerNameCallback;
+
+                    if (OpenSsl.SSL_CTX_callback_ctrl(ctx, OpenSsl.SSL_CTRL_SET_TLSEXT_SERVERNAME_CB, (nint)servername) != 1 ||
+                        OpenSsl.SSL_CTX_ctrl(ctx, OpenSsl.SSL_CTRL_SET_TLSEXT_SERVERNAME_ARG, 0, GCHandle.ToIntPtr(slotHandle)) != 1)
+                    {
+                        throw new IOException($"could not install the SNI callback: {OpenSsl.LastError()}");
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Nothing here was ever published, so nothing can hold a reference to it and freeing is
+            // safe - unlike the contexts a rotation REPLACES, which are deliberately kept. Without
+            // this a renewal retried against a half-written PEM leaks a certificate and key per
+            // attempt, for as long as it keeps retrying.
+            Release(ctx, byHost);
+            throw;
+        }
+
+        return new Certificates { Default = ctx, ByHost = byHost };
+    }
+
+    /// <summary>Drops contexts that were built and never published.</summary>
+    private static void Release(nint ctx, HostTable? byHost)
+    {
+        if (ctx != 0)
+        {
+            OpenSsl.SSL_CTX_free(ctx);
+        }
+
+        foreach (nint hostCtx in byHost?.Contexts ?? [])
+        {
+            if (hostCtx != 0)
+            {
+                OpenSsl.SSL_CTX_free(hostCtx);
+            }
+        }
     }
 
     /// <summary>
@@ -226,9 +366,10 @@ public sealed class TlsService
     /// A name is stored lowercase: SNI is a DNS name and DNS is case-insensitive, and a client
     /// asking for EXAMPLE.COM means the same host as one asking for example.com.
     /// </remarks>
-    private static HostTable? BuildHostContexts(TlsOptions options, GCHandle alpnHandle)
+    private static HostTable? BuildHostContexts(TlsOptions options,
+        IReadOnlyDictionary<string, TlsCertificate>? certificatesByHost, GCHandle alpnHandle)
     {
-        if (options.CertificatesByHost is not { Count: > 0 } certificates)
+        if (certificatesByHost is not { Count: > 0 } certificates)
         {
             return null;
         }
@@ -238,11 +379,13 @@ public sealed class TlsService
         var contexts = new nint[certificates.Count];
         int next = 0;
 
+        try
+        {
         foreach ((string host, TlsCertificate certificate) in certificates)
         {
             if (string.IsNullOrWhiteSpace(host))
             {
-                throw new ArgumentException("A blank host cannot be asked for by SNI.", nameof(options));
+                throw new ArgumentException("A blank host cannot be asked for by SNI.", "certificatesByHost");
             }
 
             RequireOneSourceEach(certificate, $" for '{host}'");
@@ -261,7 +404,7 @@ public sealed class TlsService
                 {
                     throw new ArgumentException(
                         $"Two certificates for the same host '{names[i]}': names are matched " +
-                        "case-insensitively, so only the first would ever be served.", nameof(options));
+                        "case-insensitively, so only the first would ever be served.", "certificatesByHost");
                 }
             }
 
@@ -271,6 +414,20 @@ public sealed class TlsService
             namesUtf8[next] = folded;
             contexts[next] = hostCtx;
             next++;
+        }
+
+        }
+        catch
+        {
+            // The entries built before the bad one. Unpublished, so nothing holds them - and a
+            // rotation that throws half way through a table would otherwise leak every context it
+            // had already built.
+            for (int i = 0; i < next; i++)
+            {
+                OpenSsl.SSL_CTX_free(contexts[i]);
+            }
+
+            throw;
         }
 
         return new HostTable { Names = names, NamesUtf8 = namesUtf8, Contexts = contexts };
@@ -382,7 +539,10 @@ public sealed class TlsService
     {
         try
         {
-            if (arg == 0 || GCHandle.FromIntPtr(arg).Target is not HostTable byHost)
+            // Read once, through the slot, so a rotation replacing the table mid-handshake is
+            // either wholly before this read or wholly after it.
+            if (arg == 0 || GCHandle.FromIntPtr(arg).Target is not CertificateSlot slot
+                || slot.Current.ByHost is not { } byHost)
             {
                 return OpenSsl.SSL_TLSEXT_ERR_NOACK;
             }
@@ -659,7 +819,10 @@ public sealed class TlsService
     /// </summary>
     public async ValueTask<TlsSession> AcceptAsync(TcpConnection conn)
     {
-        nint ssl = OpenSsl.SSL_new(_ctx);
+        // Read once, here: whichever certificates are in force when this connection starts are the
+        // ones it uses. SSL_new takes its own reference, so a rotation a moment later cannot pull
+        // the context out from under a handshake already running on it.
+        nint ssl = OpenSsl.SSL_new(_slot.Current.Default);
         if (ssl == 0)
         {
             throw new IOException($"SSL_new: {OpenSsl.LastError()}");

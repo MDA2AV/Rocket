@@ -25,6 +25,12 @@ public sealed unsafe class QuicEngine : IDisposable
     // Set once a factory exists, which is the point past which reactors may read the SNI table.
     private bool _serving;
 
+    // Serialises rotations against each other and against disposal. Handshakes never take it: they
+    // read one pointer. Without it two rotations can each publish a generation linking the SAME
+    // predecessor, which loses one of them - it is left out of the chain the engine frees, so its
+    // certificates and keys are never released and one of the two renewals silently did nothing.
+    private readonly Lock _rotation = new();
+
     /// <summary>CID length this endpoint mints; must match <see cref="QuicOptions.LocalCidLength"/>.</summary>
     public uint CidLength { get; }
 
@@ -69,6 +75,16 @@ public sealed unsafe class QuicEngine : IDisposable
         {
             throw new ArgumentException(
                 "At most one client CA source: set clientCaPemPath or clientCaPem, not both.", nameof(clientCaPem));
+        }
+
+        // Requiring a certificate with nothing to validate it against would ask every client for
+        // one, refuse the ones that have none, and then accept whatever the rest sent - a port that
+        // reads as authenticated and is not. The TCP side refuses the same combination.
+        if (requireClientCertificate && clientCaPemPath is null && clientCaPem is null)
+        {
+            throw new ArgumentException(
+                "requireClientCertificate needs trust anchors: set clientCaPemPath or clientCaPem, " +
+                "or drop requireClientCertificate.", nameof(requireClientCertificate));
         }
 
         CidLength = cidLength;
@@ -140,7 +156,8 @@ public sealed unsafe class QuicEngine : IDisposable
         {
             throw new InvalidOperationException(
                 $"ioxide.ngtcp2: cannot add '{host}' once the engine is serving - register every host " +
-                "before CreateFactory. The handshake reads the table without a lock.");
+                $"before CreateFactory. The handshake reads the table without a lock; to change what " +
+                $"a running engine serves, use {nameof(ReplaceCertificates)}.");
         }
 
         ArgumentException.ThrowIfNullOrWhiteSpace(host);
@@ -149,6 +166,102 @@ public sealed unsafe class QuicEngine : IDisposable
         {
             throw new InvalidOperationException(
                 $"ioxide.ngtcp2: could not serve '{host}' from '{certificatePath}' / '{keyPath}'.");
+        }
+    }
+
+    /// <summary>
+    /// Replaces every certificate this engine serves, on a running server - the default and each
+    /// host. Connections already established keep the certificate they were given; the next
+    /// handshake gets the new one.
+    /// </summary>
+    /// <param name="certificatePath">The default certificate, for a client that sends no name or an unregistered one.</param>
+    /// <param name="keyPath">Its private key, PEM.</param>
+    /// <param name="certificatesByHost">The certificates chosen by name, or null to serve only the default.</param>
+    /// <remarks>
+    /// What renewal needs. An ACME client rewrites its PEM every couple of months, and without this
+    /// the only way to serve the new one is to restart - so pass the same paths and their new
+    /// contents are read.
+    ///
+    /// It replaces rather than edits, and that is the point: a certificate outlives the call that
+    /// installs it, since picotls keeps reading the context for as long as a connection lives.
+    /// A whole new set is built first and published with one store, so a reader sees either every
+    /// old certificate or every new one, never a mixture.
+    ///
+    /// Nothing is published unless all of it built. A bad path or an unreadable key throws and
+    /// LEAVES THE ENGINE SERVING WHAT IT WAS - a failed renewal is a server that kept working.
+    ///
+    /// What it does NOT change: the client trust anchors and whether a client certificate is
+    /// required. Those belong to the engine, so renewing a certificate cannot quietly change who is
+    /// allowed to connect.
+    ///
+    /// The certificates it replaces are kept, not freed: a handshake may be between reading them
+    /// and using what it found, and picotls does not refcount contexts. They are released when the
+    /// engine is disposed. Renewing a handful of names a few times a year costs kilobytes.
+    /// </remarks>
+    /// <exception cref="InvalidOperationException">The certificates could not be loaded; the engine still serves the previous ones.</exception>
+    public void ReplaceCertificates(string certificatePath, string keyPath,
+        IReadOnlyDictionary<string, QuicCertificate>? certificatesByHost = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(certificatePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(keyPath);
+
+        lock (_rotation)
+        {
+            ObjectDisposedException.ThrowIf(_engine == 0, this);
+            Replace(certificatePath, keyPath, certificatesByHost);
+        }
+    }
+
+    private void Replace(string certificatePath, string keyPath,
+        IReadOnlyDictionary<string, QuicCertificate>? certificatesByHost)
+    {
+        int count = certificatesByHost?.Count ?? 0;
+
+        // Marshalled by hand: the runtime cannot pair an array with UTF-8 elements, and the shim
+        // takes UTF-8 everywhere else. Freed below whatever happens - the shim copies what it keeps.
+        nint[] hosts = new nint[count], certs = new nint[count], keys = new nint[count];
+        int filled = 0;
+
+        try
+        {
+            if (certificatesByHost is not null)
+            {
+                foreach ((string host, QuicCertificate certificate) in certificatesByHost)
+                {
+                    ArgumentException.ThrowIfNullOrWhiteSpace(host);
+                    ArgumentException.ThrowIfNullOrWhiteSpace(certificate.CertificatePath);
+                    ArgumentException.ThrowIfNullOrWhiteSpace(certificate.KeyPath);
+
+                    hosts[filled] = Marshal.StringToCoTaskMemUTF8(host);
+                    certs[filled] = Marshal.StringToCoTaskMemUTF8(certificate.CertificatePath);
+                    keys[filled] = Marshal.StringToCoTaskMemUTF8(certificate.KeyPath);
+                    filled++;
+                }
+            }
+
+            int result;
+
+            fixed (nint* h = hosts, c = certs, k = keys)
+            {
+                result = Ngtcp2.iq_engine_replace_certificates(_engine, certificatePath, keyPath,
+                    h, c, k, (nuint)filled);
+            }
+
+            if (result != 0)
+            {
+                throw new InvalidOperationException(
+                    $"ioxide.ngtcp2: could not replace the certificates from '{certificatePath}' / '{keyPath}'. " +
+                    "The engine still serves the ones it had.");
+            }
+        }
+        finally
+        {
+            for (int i = 0; i < filled; i++)
+            {
+                Marshal.FreeCoTaskMem(hosts[i]);
+                Marshal.FreeCoTaskMem(certs[i]);
+                Marshal.FreeCoTaskMem(keys[i]);
+            }
         }
     }
 
@@ -213,10 +326,16 @@ public sealed unsafe class QuicEngine : IDisposable
 
     public void Dispose()
     {
-        if (_engine != 0)
+        // Under the same lock a rotation takes: disposing frees every generation, and a rotation
+        // in flight is reading and building from them. Connections are a separate matter - the
+        // engine still has to outlive those, as it always did.
+        lock (_rotation)
         {
-            Ngtcp2.iq_engine_free(_engine);
-            _engine = 0;
+            if (_engine != 0)
+            {
+                Ngtcp2.iq_engine_free(_engine);
+                _engine = 0;
+            }
         }
     }
 }

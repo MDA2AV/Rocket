@@ -63,6 +63,22 @@ internal static unsafe class Ngtcp2
         [MarshalAs(UnmanagedType.LPUTF8Str)] string certPemPath,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string keyPemPath);
 
+    /// <summary>
+    /// Replaces every certificate the engine serves, on a running server: the default, then one per
+    /// entry of the three parallel arrays. Returns 0, or -1 with the reason on stderr. Nothing is
+    /// published unless all of it built, so a failure leaves the engine serving what it had.
+    /// </summary>
+    /// <remarks>
+    /// The three host arrays are passed as raw pointers rather than <c>string[]</c>: the runtime
+    /// marshaller cannot pair an array with UTF-8 elements, and everything else in this shim takes
+    /// UTF-8. The caller owns the strings for the length of the call and nothing outlives it - the
+    /// shim copies what it keeps.
+    /// </remarks>
+    [DllImport(Lib)] internal static extern int iq_engine_replace_certificates(nint engine,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string certPemPath,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string keyPemPath,
+        nint* hosts, nint* hostCerts, nint* hostKeys, nuint hostCount);
+
     [DllImport(Lib)] internal static extern void iq_engine_free(nint engine);
 
     [DllImport(Lib)] internal static extern nint iq_accept(

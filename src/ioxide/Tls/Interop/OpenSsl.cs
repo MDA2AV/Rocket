@@ -52,6 +52,13 @@ internal static unsafe partial class OpenSsl
 
     [LibraryImport(Ssl)] public static partial ulong SSL_CTX_set_options(nint ctx, ulong options);
 
+    /// <summary>
+    /// Drops one reference. Contexts that are SERVING are never freed - a handshake may be between
+    /// reading one and using it - so this is for contexts that were built and then not published,
+    /// which nothing can have a reference to.
+    /// </summary>
+    [LibraryImport(Ssl)] public static partial void SSL_CTX_free(nint ctx);
+
     [LibraryImport(Ssl)] public static partial void SSL_CTX_set_keylog_callback(nint ctx, nint cb);
     [LibraryImport(Ssl)] public static partial void SSL_CTX_set_alpn_select_cb(nint ctx, nint cb, nint arg);
 

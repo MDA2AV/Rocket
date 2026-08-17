@@ -64,18 +64,39 @@ typedef struct iq_host {
     ptls_openssl_sign_certificate_t  sign_cert;
 } iq_host;
 
-typedef struct iq_engine {
+/* Every certificate this engine serves, as one generation.
+ *
+ * Replaced whole rather than edited, because a certificate outlives the call that installs it:
+ * ptls_new hands the default context to a connection and ptls_set_context hands a host's to one
+ * mid-handshake, and picotls reads both for as long as that connection lives. Editing either in
+ * place under a running server is a write beside those reads.
+ *
+ * So a renewal builds a new generation, publishes the pointer with one atomic store, and links the
+ * old one here. Retired generations are NOT freed at that point - a handshake may be between
+ * reading this and using what it found, and picotls does not refcount contexts - so they are kept
+ * until the engine is freed. Renewal is an operational event a few times a year; the cost is a few
+ * kilobytes per generation, and the alternative is a use-after-free. */
+typedef struct iq_certs {
     ptls_context_t                  ptls_ctx;
     ptls_openssl_sign_certificate_t sign_cert;
-    ptls_on_client_hello_t          on_client_hello;
-    /* SNI. Empty unless iq_engine_add_host was called, in which case on_client_hello picks the
-     * context matching the name the client asked for and leaves the default in place otherwise. */
+    /* SNI. Empty unless hosts were registered, in which case on_client_hello picks the context
+     * matching the name the client asked for and leaves the default in place otherwise. */
     iq_host                       **hosts;
     size_t                          host_count;
     size_t                          host_cap;
+    struct iq_certs                *previous;   /* the generation this one replaced */
+} iq_certs;
+
+typedef struct iq_engine {
+    /* The generation in force. Loaded once per connection and per client hello, never dereferenced
+     * across a load, so a reader sees one whole generation or the other and never a mixture. */
+    iq_certs                       *certs;
+    ptls_on_client_hello_t          on_client_hello;
     /* mTLS. verify_cert does the actual path validation; peer_verify wraps it so the identity it
      * proved can be recorded on the connection - authenticating a client you cannot then name is
-     * rarely what anyone wanted. Both are unused unless a client CA was configured. */
+     * rarely what anyone wanted. Both are unused unless a client CA was configured. They live on
+     * the ENGINE rather than the generation: every generation points at these, so renewing a
+     * certificate cannot quietly change who is trusted to connect. */
     ptls_openssl_verify_certificate_t verify_cert;
     ptls_verify_certificate_t         peer_verify;
     iq_callbacks                    cbs;
@@ -198,7 +219,7 @@ static void iq_free_certificates(ptls_context_t *ctx)
 
 /* The context registered for this name, or NULL. Compared case-insensitively: SNI carries a DNS
  * name, and a client asking for EXAMPLE.COM means the host that answers for example.com. */
-static ptls_context_t *iq_context_for(iq_engine *e, ptls_iovec_t name)
+static ptls_context_t *iq_context_for(iq_certs *e, ptls_iovec_t name)
 {
     if (name.base == NULL || name.len == 0) {
         return NULL;
@@ -344,11 +365,18 @@ static int iq_on_client_hello(ptls_on_client_hello_t *self, ptls_t *tls,
      * at which the choice is still open. An unknown name keeps the default: refusing here would
      * report "this server does not hold that name" as a dead connection, and would break every
      * client reaching the server by address. */
-    if (e->host_count > 0) {
-        ptls_context_t *host = iq_context_for(e, params->server_name);
+    {
+        /* One load, and everything below reads through it: a renewal landing between here and the
+         * swap would otherwise let a connection take its name from one generation and its
+         * certificate from another. */
+        iq_certs *certs = __atomic_load_n(&e->certs, __ATOMIC_ACQUIRE);
 
-        if (host != NULL) {
-            ptls_set_context(tls, host);
+        if (certs->host_count > 0) {
+            ptls_context_t *host = iq_context_for(certs, params->server_name);
+
+            if (host != NULL) {
+                ptls_set_context(tls, host);
+            }
         }
     }
 
@@ -553,10 +581,10 @@ iq_engine *iq_engine_new(const char *cert_pem_path, const char *key_pem_path,
  * Call before the engine accepts anything: the contexts are read from the handshake with no lock,
  * on whichever thread the connection landed on. Client verification and the require flag are copied
  * from the default context, so swapping to a named certificate cannot quietly drop mutual TLS. */
-int iq_engine_add_host(iq_engine *e, const char *host, const char *cert_pem_path,
-                       const char *key_pem_path)
+static int iq_certs_add_host(iq_certs *certs, const char *host, const char *cert_pem_path,
+                             const char *key_pem_path)
 {
-    if (e == NULL || host == NULL || *host == '\0' || cert_pem_path == NULL || key_pem_path == NULL) {
+    if (certs == NULL || host == NULL || *host == '\0' || cert_pem_path == NULL || key_pem_path == NULL) {
         return -1;
     }
 
@@ -566,20 +594,20 @@ int iq_engine_add_host(iq_engine *e, const char *host, const char *cert_pem_path
     {
         ptls_iovec_t asked = {(uint8_t *)(uintptr_t)host, strlen(host)};
 
-        if (iq_context_for(e, asked) != NULL) {
+        if (iq_context_for(certs, asked) != NULL) {
             fprintf(stderr, "[ioxide.ngtcp2] host '%s' is already registered\n", host);
             return -1;
         }
     }
 
-    if (e->host_count == e->host_cap) {
-        size_t cap = e->host_cap == 0 ? 4 : e->host_cap * 2;
-        iq_host **grown = realloc(e->hosts, cap * sizeof(*grown));
+    if (certs->host_count == certs->host_cap) {
+        size_t cap = certs->host_cap == 0 ? 4 : certs->host_cap * 2;
+        iq_host **grown = realloc(certs->hosts, cap * sizeof(*grown));
         if (grown == NULL) {
             return -1;
         }
-        e->hosts   = grown;
-        e->host_cap = cap;
+        certs->hosts   = grown;
+        certs->host_cap = cap;
     }
 
     iq_host *h = calloc(1, sizeof(*h));
@@ -644,15 +672,15 @@ int iq_engine_add_host(iq_engine *e, const char *host, const char *cert_pem_path
      * The copy is a SNAPSHOT. It is sound only because client verification is fixed in the
      * constructor - anything that configures anchors later would leave hosts registered before it
      * on the old verifier, which is the bypass this comment exists to prevent. */
-    h->ptls_ctx.verify_certificate            = e->ptls_ctx.verify_certificate;
-    h->ptls_ctx.require_client_authentication = e->ptls_ctx.require_client_authentication;
+    h->ptls_ctx.verify_certificate            = certs->ptls_ctx.verify_certificate;
+    h->ptls_ctx.require_client_authentication = certs->ptls_ctx.require_client_authentication;
 
     /* Not read again for this handshake - picotls consults it only on a first flight, and the swap
      * happens inside that one call. Carried anyway so a host context is a faithful stand-in for the
      * default rather than one that merely happens not to be asked. */
-    h->ptls_ctx.on_client_hello = e->ptls_ctx.on_client_hello;
+    h->ptls_ctx.on_client_hello = certs->ptls_ctx.on_client_hello;
 
-    e->hosts[e->host_count++] = h;
+    certs->hosts[certs->host_count++] = h;
     return 0;
 
 fail:
@@ -668,6 +696,147 @@ fail:
     free(h->name);
     free(h);
     return -1;
+}
+
+/* Registers a certificate for one SNI name on the generation in force. Returns 0, or -1 with the
+ * reason on stderr.
+ *
+ * For building the engine, before it serves anything: it edits the current generation rather than
+ * publishing a new one. Renewing under load is iq_engine_replace_certificates. */
+int iq_engine_add_host(iq_engine *e, const char *host, const char *cert_pem_path,
+                       const char *key_pem_path)
+{
+    if (e == NULL) {
+        return -1;
+    }
+
+    return iq_certs_add_host(e->certs, host, cert_pem_path, key_pem_path);
+}
+
+/* Frees one generation: every host it owns, and its own certificate material. */
+static void iq_certs_free(iq_certs *certs)
+{
+    if (certs == NULL) {
+        return;
+    }
+
+    ptls_openssl_dispose_sign_certificate(&certs->sign_cert);
+    iq_free_certificates(&certs->ptls_ctx);
+
+    for (size_t i = 0; i < certs->host_count; i++) {
+        ptls_openssl_dispose_sign_certificate(&certs->hosts[i]->sign_cert);
+        iq_free_certificates(&certs->hosts[i]->ptls_ctx);
+        free(certs->hosts[i]->name);
+        free(certs->hosts[i]);
+    }
+
+    free(certs->hosts);
+    free(certs);
+}
+
+/* Builds one generation: the default certificate, configured the way the engine's first one was.
+ * Hosts are added afterwards by the caller. Returns NULL with the reason on stderr. */
+static iq_certs *iq_certs_new(iq_engine *e, const char *cert_pem_path, const char *key_pem_path)
+{
+    iq_certs *certs = calloc(1, sizeof(*certs));
+    if (certs == NULL) {
+        return NULL;
+    }
+
+    certs->ptls_ctx.random_bytes  = ptls_openssl_random_bytes;
+    certs->ptls_ctx.get_time      = &ptls_get_time;
+    certs->ptls_ctx.key_exchanges = ptls_openssl_key_exchanges;
+    certs->ptls_ctx.cipher_suites = ptls_openssl_cipher_suites;
+    certs->ptls_ctx.on_client_hello = &e->on_client_hello;
+
+    if (ptls_load_certificates(&certs->ptls_ctx, (char *)cert_pem_path) != 0) {
+        fprintf(stderr, "[ioxide.ngtcp2] failed to load certificates from %s\n", cert_pem_path);
+        goto fail;
+    }
+
+    {
+        BIO *bio = BIO_new_file(key_pem_path, "r");
+        if (bio == NULL) {
+            fprintf(stderr, "[ioxide.ngtcp2] failed to open key %s\n", key_pem_path);
+            goto fail;
+        }
+        EVP_PKEY *pkey = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
+        BIO_free(bio);
+        if (pkey == NULL) {
+            fprintf(stderr, "[ioxide.ngtcp2] failed to parse key %s\n", key_pem_path);
+            goto fail;
+        }
+        int rv = ptls_openssl_init_sign_certificate(&certs->sign_cert, pkey);
+        EVP_PKEY_free(pkey);
+        if (rv != 0) {
+            fprintf(stderr, "[ioxide.ngtcp2] failed to init sign_certificate\n");
+            goto fail;
+        }
+        certs->ptls_ctx.sign_certificate = &certs->sign_cert.super;
+    }
+
+    if (ngtcp2_crypto_picotls_configure_server_context(&certs->ptls_ctx) != 0) {
+        fprintf(stderr, "[ioxide.ngtcp2] configure_server_context failed\n");
+        goto fail;
+    }
+
+    /* Who is trusted to connect belongs to the engine, not to the certificate being installed -
+     * so a renewal carries it over rather than restating it, and cannot drop mutual TLS. */
+    certs->ptls_ctx.verify_certificate            = e->peer_verify.cb != NULL ? &e->peer_verify : NULL;
+    certs->ptls_ctx.require_client_authentication = e->certs != NULL
+        ? e->certs->ptls_ctx.require_client_authentication
+        : 0;
+
+    return certs;
+
+fail:
+    iq_free_certificates(&certs->ptls_ctx);
+    /* Holds a reference to the key once initialised. Unreachable while the only step after it
+     * cannot fail, and here so that stays true if one is ever added - the sibling that builds a
+     * host guards the same way. */
+    if (certs->ptls_ctx.sign_certificate != NULL) {
+        ptls_openssl_dispose_sign_certificate(&certs->sign_cert);
+    }
+    free(certs);
+    return NULL;
+}
+
+/* Replaces every certificate this engine serves, on a running server.
+ *
+ * The default, then one host per entry of the three parallel arrays. Everything is built before
+ * anything is published, so a bad path leaves the engine serving what it already had - a failed
+ * renewal is a server that kept working. Returns 0, or -1 with the reason on stderr.
+ *
+ * Connections already established keep the certificate they were given; the next handshake gets the
+ * new one. What is NOT replaced: the client trust anchors and whether a client certificate is
+ * required, which are the engine's and stay as they were. */
+int iq_engine_replace_certificates(iq_engine *e, const char *cert_pem_path, const char *key_pem_path,
+                                   const char *const *hosts, const char *const *host_certs,
+                                   const char *const *host_keys, size_t host_count)
+{
+    if (e == NULL || cert_pem_path == NULL || key_pem_path == NULL) {
+        return -1;
+    }
+
+    iq_certs *next = iq_certs_new(e, cert_pem_path, key_pem_path);
+    if (next == NULL) {
+        return -1;
+    }
+
+    for (size_t i = 0; i < host_count; i++) {
+        if (iq_certs_add_host(next, hosts[i], host_certs[i], host_keys[i]) != 0) {
+            iq_certs_free(next);
+            return -1;
+        }
+    }
+
+    /* Published with one store, after everything above succeeded. A reader loading this pointer
+     * either sees the whole new generation or the whole old one. */
+    iq_certs *previous = e->certs;
+    next->previous = previous;
+    __atomic_store_n(&e->certs, next, __ATOMIC_RELEASE);
+
+    return 0;
 }
 
 /* Trust anchors from PEM text rather than a file, for a host that carries its CA bundle as data.
@@ -728,47 +897,11 @@ iq_engine *iq_engine_new_mtls(const char *cert_pem_path, const char *key_pem_pat
         e->alpn_len = alpn_len;
     }
 
-    e->ptls_ctx.random_bytes = ptls_openssl_random_bytes;
-    e->ptls_ctx.get_time     = &ptls_get_time;
-    e->ptls_ctx.key_exchanges = ptls_openssl_key_exchanges;
-    e->ptls_ctx.cipher_suites = ptls_openssl_cipher_suites;
+    e->on_client_hello.cb = iq_on_client_hello;
 
-    e->on_client_hello.cb     = iq_on_client_hello;
-    e->ptls_ctx.on_client_hello = &e->on_client_hello;
-
-    if (ptls_load_certificates(&e->ptls_ctx, cert_pem_path) != 0) {
-        fprintf(stderr, "[ioxide.ngtcp2] failed to load certificates from %s\n", cert_pem_path);
-        goto fail;
-    }
-
-    {
-        BIO *bio = BIO_new_file(key_pem_path, "r");
-        if (bio == NULL) {
-            fprintf(stderr, "[ioxide.ngtcp2] failed to open key %s\n", key_pem_path);
-            goto fail;
-        }
-        EVP_PKEY *pkey = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
-        BIO_free(bio);
-        if (pkey == NULL) {
-            fprintf(stderr, "[ioxide.ngtcp2] failed to parse key %s\n", key_pem_path);
-            goto fail;
-        }
-        int rv = ptls_openssl_init_sign_certificate(&e->sign_cert, pkey);
-        EVP_PKEY_free(pkey);
-        if (rv != 0) {
-            fprintf(stderr, "[ioxide.ngtcp2] failed to init sign_certificate\n");
-            goto fail;
-        }
-        e->ptls_ctx.sign_certificate = &e->sign_cert.super;
-    }
-
-    if (ngtcp2_crypto_picotls_configure_server_context(&e->ptls_ctx) != 0) {
-        fprintf(stderr, "[ioxide.ngtcp2] ngtcp2_crypto_picotls_configure_server_context failed\n");
-        goto fail;
-    }
-
-    /* AFTER configure_server_context, deliberately: it sets its own fields on the context, and
-       anything mTLS puts there first is not guaranteed to survive it. */
+    /* Who is trusted to connect is settled BEFORE the first certificate is built, because it
+       belongs to the engine rather than to any one generation - every generation, including the
+       ones a later renewal installs, points at the verifier set up here. */
     if (client_ca_pem_path != NULL || client_ca_pem != NULL) {
         X509_STORE *store = X509_STORE_new();
         if (store == NULL) {
@@ -796,18 +929,33 @@ iq_engine *iq_engine_new_mtls(const char *cert_pem_path, const char *key_pem_pat
 
         e->peer_verify.cb         = iq_verify_certificate;
         e->peer_verify.algos      = e->verify_cert.super.algos;
-        e->ptls_ctx.verify_certificate = &e->peer_verify;
-
-        /* Off: a client with no certificate is let through unauthenticated, and the handler decides.
-         * On: picotls refuses the handshake itself. */
-        e->ptls_ctx.require_client_authentication = require_client_cert != 0;
     }
 
+    /* The first generation. Every later one is built by the same function, so a renewed certificate
+       is configured exactly the way this one was. */
+    e->certs = iq_certs_new(e, cert_pem_path, key_pem_path);
+    if (e->certs == NULL) {
+        goto fail;
+    }
+
+    /* Off: a client with no certificate is let through unauthenticated, and the handler decides.
+     * On: picotls refuses the handshake itself. Carried forward by every renewal.
+     *
+     * Only when there are anchors to check against, and that condition is the point: requiring a
+     * certificate with no verifier installed asks every client for one, refuses the ones that have
+     * none, and then accepts whatever the rest send - a port that looks authenticated and is not. */
+    if (e->peer_verify.cb != NULL) {
+        e->certs->ptls_ctx.require_client_authentication = require_client_cert != 0;
+    }
 
     return e;
 
 fail:
-    iq_free_certificates(&e->ptls_ctx);
+    /* The verifier is built before the first certificate now, so this path can be reached with it
+     * holding a reference to the trust store - which nothing else would ever release. */
+    if (e->peer_verify.cb != NULL) {
+        ptls_openssl_dispose_verify_certificate(&e->verify_cert);
+    }
     free(e);
     return NULL;
 }
@@ -817,16 +965,21 @@ void iq_engine_free(iq_engine *e)
     if (e == NULL) {
         return;
     }
-    ptls_openssl_dispose_sign_certificate(&e->sign_cert);
-    iq_free_certificates(&e->ptls_ctx);
+    /* Every generation, including the ones retired by a renewal - which is where they are freed,
+       since a live connection could still have been reading one when it was replaced. */
+    iq_certs *certs = e->certs;
 
-    for (size_t i = 0; i < e->host_count; i++) {
-        ptls_openssl_dispose_sign_certificate(&e->hosts[i]->sign_cert);
-        iq_free_certificates(&e->hosts[i]->ptls_ctx);
-        free(e->hosts[i]->name);
-        free(e->hosts[i]);
+    while (certs != NULL) {
+        iq_certs *previous = certs->previous;
+        iq_certs_free(certs);
+        certs = previous;
     }
-    free(e->hosts);
+
+    /* The trust store the verifier took a reference to. Never released before, which only showed
+     * once an engine could be built and torn down repeatedly. */
+    if (e->peer_verify.cb != NULL) {
+        ptls_openssl_dispose_verify_certificate(&e->verify_cert);
+    }
 
     free(e);
 }
@@ -917,7 +1070,10 @@ iq_conn *iq_accept(iq_engine *e,
     c->conn_ref.user_data = c;
 
     ngtcp2_crypto_picotls_ctx_init(&c->cptls);
-    c->cptls.ptls = ptls_new(&e->ptls_ctx, 1 /* server */);
+    /* Whichever generation is in force when this connection starts is the one it uses for its
+       whole life - picotls keeps reading the context, and a renewal a moment later installs a new
+       generation without touching this one. */
+    c->cptls.ptls = ptls_new(&__atomic_load_n(&e->certs, __ATOMIC_ACQUIRE)->ptls_ctx, 1 /* server */);
     if (c->cptls.ptls == NULL) {
         ngtcp2_conn_del(c->conn);
         free(c);

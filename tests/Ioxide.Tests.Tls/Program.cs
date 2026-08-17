@@ -23,6 +23,7 @@ internal static class Program
         TlsPipeTests.Register(runner, ktls);
         MutualTlsTests.Register(runner, ktls);
         SniTests.Register(runner, ktls);
+        RotationTests.Register(runner, ktls);
 
         return runner.Summary();
     }
