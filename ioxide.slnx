@@ -54,6 +54,7 @@
     <Project Path="Playground/Tls/OpenSsl/Playground.Tls.OpenSsl.csproj" />
     <Project Path="Playground/Tls/OpenSslPipes/Playground.Tls.OpenSslPipes.csproj" />
     <Project Path="Playground/Tls/SslStream/Playground.Tls.SslStream.csproj" />
+    <Project Path="Playground/Tls/Sni/Playground.Tls.Sni.csproj" />
   </Folder>
 
   <Folder Name="/apps/playground/http2/">
@@ -74,6 +75,7 @@
     <Project Path="Playground/Http3/StreamedBoth/Playground.Http3.StreamedBoth.csproj" />
     <Project Path="Playground/Http3/MutualTls/Playground.Http3.MutualTls.csproj" />
     <Project Path="Playground/Http3/Nghttp3Response/Playground.Http3.Nghttp3Response.csproj" />
+    <Project Path="Playground/Http3/Sni/Playground.Http3.Sni.csproj" />
   </Folder>
 
   <Folder Name="/apps/playground/quic/">

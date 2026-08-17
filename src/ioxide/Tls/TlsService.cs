@@ -20,17 +20,89 @@ public sealed class TlsService
     private readonly bool _kernelRx;
     private readonly bool _kernelTx;
 
+    // One context per SNI name, and the handle rooting the table the servername callback reads via
+    // its arg. Null when nothing but the default certificate was configured, which leaves the
+    // handshake without a servername callback at all.
+    private readonly HostTable? _byHost;
+    private readonly GCHandle _byHostHandle;
+
     // A per-SSL ex_data slot holds a GCHandle to the TlsSession, so the static keylog callback can
     // find the right session for an SSL without a process-global, recycled-pointer-keyed map.
     private static readonly int SslSessionIndex =
         OpenSsl.CRYPTO_get_ex_new_index(OpenSsl.CRYPTO_EX_INDEX_SSL, 0, 0, 0, 0, 0);
 
-    private TlsService(nint ctx, GCHandle alpnHandle, bool kernelRx, bool kernelTx)
+    private TlsService(nint ctx, GCHandle alpnHandle, bool kernelRx, bool kernelTx,
+        HostTable? byHost, GCHandle byHostHandle)
     {
         _ctx = ctx;
         _alpnHandle = alpnHandle;
         _kernelRx = kernelRx;
         _kernelTx = kernelTx;
+        _byHost = byHost;
+        _byHostHandle = byHostHandle;
+    }
+
+    /// <summary>The SNI names this service answers for, beside its default certificate.</summary>
+    public IReadOnlyCollection<string> ServerNames => _byHost?.Names ?? [];
+
+    /// <summary>
+    /// The SNI table in the form the handshake reads it: names as the UTF-8 bytes they arrive as,
+    /// so choosing one costs a comparison and no allocation on the reactor thread.
+    /// </summary>
+    /// <remarks>
+    /// Scanned linearly. A host serves a handful of names, and walking a few short byte strings
+    /// beats hashing one that would have to be decoded into a managed string first - which is the
+    /// allocation this shape exists to avoid.
+    /// </remarks>
+    private sealed class HostTable
+    {
+        public required byte[][] NamesUtf8 { get; init; }
+        public required nint[] Contexts { get; init; }
+        public required string[] Names { get; init; }
+
+        /// <summary>The context registered for this name, or 0. Case-insensitive, as DNS is.</summary>
+        public nint Find(ReadOnlySpan<byte> name)
+        {
+            for (int i = 0; i < NamesUtf8.Length; i++)
+            {
+                ReadOnlySpan<byte> candidate = NamesUtf8[i];
+
+                if (candidate.Length != name.Length)
+                {
+                    continue;
+                }
+
+                int j = 0;
+                while (j < name.Length && candidate[j] == Lower(name[j]))
+                {
+                    j++;
+                }
+
+                if (j == name.Length)
+                {
+                    return Contexts[i];
+                }
+            }
+
+            return 0;
+        }
+
+        // ASCII, which is all a DNS name can hold that has a case at all - the names were folded
+        // the same way when the table was built.
+        internal static byte Lower(byte c) => (byte)(c is >= (byte)'A' and <= (byte)'Z' ? c - 'A' + 'a' : c);
+    }
+
+    /// <summary>A configured name in the form the matcher compares: UTF-8, ASCII-lowercased.</summary>
+    private static byte[] Fold(string host)
+    {
+        byte[] bytes = System.Text.Encoding.UTF8.GetBytes(host);
+
+        for (int i = 0; i < bytes.Length; i++)
+        {
+            bytes[i] = HostTable.Lower(bytes[i]);
+        }
+
+        return bytes;
     }
 
     /// <summary>Create the per-reactor service and register it. Call from <c>Reactor.OnStart</c>.</summary>
@@ -52,16 +124,15 @@ public sealed class TlsService
 
         // The certificate and key each come from exactly one place - a path or in-memory PEM.
         // Neither set (possible now that the path is not `required`) and both set are refused.
-        if ((options.CertificatePath is null) == (options.CertificatePem is null))
+        TlsCertificate defaultCertificate = new()
         {
-            throw new ArgumentException(
-                "Exactly one certificate source: set CertificatePath or CertificatePem.", nameof(options));
-        }
-        if ((options.KeyPath is null) == (options.KeyPem is null))
-        {
-            throw new ArgumentException(
-                "Exactly one key source: set KeyPath or KeyPem.", nameof(options));
-        }
+            CertificatePath = options.CertificatePath,
+            CertificatePem = options.CertificatePem,
+            KeyPath = options.KeyPath,
+            KeyPem = options.KeyPem,
+        };
+
+        RequireOneSourceEach(defaultCertificate, "");
 
         // Client anchors are optional, but two sources for them is a mistake worth naming rather
         // than resolving by precedence.
@@ -79,11 +150,159 @@ public sealed class TlsService
                 "RequireClientCertificate needs trust anchors: set ClientCaPath or ClientCaPem.", nameof(options));
         }
 
+        // The ALPN protocol to select is handed to the (static) callback via its arg, so the
+        // configured TlsOptions.Alpn is honored instead of being hard-coded.
+        byte[] alpnWire = BuildAlpnWire(options.Alpn);
+        GCHandle alpnHandle = GCHandle.Alloc(alpnWire);
+
+        nint ctx = NewContext(options, defaultCertificate, "", alpnHandle);
+
+        // Everything above configured the default certificate. SNI adds alternatives beside it,
+        // each a context of its own, and a callback that picks between them per handshake.
+        var byHost = BuildHostContexts(options, alpnHandle);
+        GCHandle hostHandle = default;
+
+        if (byHost is not null)
+        {
+            hostHandle = GCHandle.Alloc(byHost);
+
+            unsafe
+            {
+                // Checked, because the failure is silent otherwise: an unregistered callback means
+                // every name is answered with the default certificate, which looks like a working
+                // server serving the wrong certificate rather than one that failed to start.
+                delegate* unmanaged<nint, nint, nint, int> servername = &ServerNameCallback;
+
+                if (OpenSsl.SSL_CTX_callback_ctrl(ctx, OpenSsl.SSL_CTRL_SET_TLSEXT_SERVERNAME_CB, (nint)servername) != 1 ||
+                    OpenSsl.SSL_CTX_ctrl(ctx, OpenSsl.SSL_CTRL_SET_TLSEXT_SERVERNAME_ARG, 0, GCHandle.ToIntPtr(hostHandle)) != 1)
+                {
+                    throw new IOException($"could not install the SNI callback: {OpenSsl.LastError()}");
+                }
+            }
+        }
+
+        var service = new TlsService(ctx, alpnHandle, options.KernelRx, options.KernelTx, byHost, hostHandle);
+        if (register)
+        {
+            reactor.AddService(service);
+        }
+        return service;
+    }
+
+    /// <summary>
+    /// One OpenSSL context per SNI name, built here so that selecting one at handshake time is a
+    /// lookup and nothing more. Null when no alternatives were configured.
+    /// </summary>
+    /// <remarks>
+    /// Swapping to one of these changes the certificate and nothing else, but NOT because every
+    /// setting is repeated here - the two halves are worth telling apart, because only one of them
+    /// is load-bearing:
+    ///
+    /// Settings OpenSSL copies into the SSL when it is created, from the DEFAULT context, and never
+    /// re-reads: the verify mode, SSL_OP_* options, min/max protocol version, and the ticket count.
+    /// A swap cannot touch these, so a host context cannot weaken them - it is why SNI cannot be
+    /// used to escape mutual TLS or the kTLS protocol floor. Setting them below is inert.
+    ///
+    /// Settings a host context therefore has to carry itself, because OpenSSL takes them from it:
+    /// the client trust anchors and CA list, and the ALPN and keylog callbacks, each read back off
+    /// the context after the swap - and EVERYTHING IN ITS CERT, which the swap duplicates wholesale
+    /// over the connection's own. That is the certificate and key, and with them the security
+    /// level, the signature-algorithm lists, and the certificate callback. Omitting any of these
+    /// changes how the connection behaves: dropping the anchors would fail every mutual-TLS client
+    /// of a named host, and a security level or sigalg list configured only on the default would be
+    /// silently reset to OpenSSL's own for every named one.
+    ///
+    /// That split is the invariant to preserve: anything added to the default context in future
+    /// belongs in the second group unless it is known to be in the first.
+    ///
+    /// One thing neither group covers, because the swap cannot reach it: the session cache and the
+    /// ticket keys, which come from the context the connection was CREATED from. Every host shares
+    /// the default's, so a resumption ticket is not bound to the name it was issued under. Harmless
+    /// while every host is verified alike - no certificate is sent on a resumption at all, and
+    /// clients key their own caches by name - but it is the thing to close before any per-host
+    /// policy is added here, and per-host session id contexts are NOT the way to close it: the
+    /// ticket is accepted while parsing extensions, before this callback runs at all.
+    ///
+    /// A name is stored lowercase: SNI is a DNS name and DNS is case-insensitive, and a client
+    /// asking for EXAMPLE.COM means the same host as one asking for example.com.
+    /// </remarks>
+    private static HostTable? BuildHostContexts(TlsOptions options, GCHandle alpnHandle)
+    {
+        if (options.CertificatesByHost is not { Count: > 0 } certificates)
+        {
+            return null;
+        }
+
+        var names = new string[certificates.Count];
+        var namesUtf8 = new byte[certificates.Count][];
+        var contexts = new nint[certificates.Count];
+        int next = 0;
+
+        foreach ((string host, TlsCertificate certificate) in certificates)
+        {
+            if (string.IsNullOrWhiteSpace(host))
+            {
+                throw new ArgumentException("A blank host cannot be asked for by SNI.", nameof(options));
+            }
+
+            RequireOneSourceEach(certificate, $" for '{host}'");
+
+            // Folded the SAME way the handshake folds the name it receives - ASCII only. Using
+            // ToLowerInvariant here instead would fold letters the matcher does not (a Unicode
+            // uppercase, the Kelvin sign), and the entry would sit in the table unreachable.
+            //
+            // Checked before a context is built rather than after, so a rejected entry has not
+            // already allocated one that nothing will ever free.
+            byte[] folded = Fold(host);
+
+            for (int i = 0; i < next; i++)
+            {
+                if (namesUtf8[i].AsSpan().SequenceEqual(folded))
+                {
+                    throw new ArgumentException(
+                        $"Two certificates for the same host '{names[i]}': names are matched " +
+                        "case-insensitively, so only the first would ever be served.", nameof(options));
+                }
+            }
+
+            nint hostCtx = NewContext(options, certificate, $" for '{host}'", alpnHandle);
+
+            names[next] = System.Text.Encoding.UTF8.GetString(folded);
+            namesUtf8[next] = folded;
+            contexts[next] = hostCtx;
+            next++;
+        }
+
+        return new HostTable { Names = names, NamesUtf8 = namesUtf8, Contexts = contexts };
+    }
+
+    /// <summary>
+    /// One configured OpenSSL context. The default certificate and every SNI alternative are built
+    /// HERE and nowhere else.
+    /// </summary>
+    /// <remarks>
+    /// That is the point of the method rather than a tidiness argument. A per-host context has to
+    /// carry everything OpenSSL reads back off the context after a handshake swaps to it, and the
+    /// two were previously configured by two pieces of code that had to be kept in step by hand -
+    /// so a setting added to one and forgotten on the other would apply to clients that sent no
+    /// name and silently not to clients that did. Built from one body, they cannot drift.
+    ///
+    /// <paramref name="what"/> names the offender in any error - empty for the default certificate,
+    /// " for 'host'" for an alternative.
+    /// </remarks>
+    private static nint NewContext(TlsOptions options, TlsCertificate certificate, string what, GCHandle alpnHandle)
+    {
         nint ctx = OpenSsl.SSL_CTX_new(OpenSsl.TLS_server_method());
         if (ctx == 0)
         {
-            throw new IOException($"SSL_CTX_new: {OpenSsl.LastError()}");
+            throw new IOException($"SSL_CTX_new{what}: {OpenSsl.LastError()}");
         }
+
+        // OpenSSL copies a context's options onto each SSL as it is created and never re-reads
+        // them, so this holds for every connection whether or not it asked for a name. TLS 1.3 has
+        // no renegotiation to refuse; over TLS 1.2 refusing it costs nothing anyone uses and takes
+        // away a second ClientHello - which, with SNI, would be a second go at the certificate.
+        OpenSsl.SSL_CTX_set_options(ctx, OpenSsl.SSL_OP_NO_RENEGOTIATION);
 
         // The kTLS constraints are the kernel path's, not TLS's - so they apply only when the
         // kernel path was asked for. The default keeps OpenSSL's own defaults: TLS 1.2 and 1.3,
@@ -95,7 +314,7 @@ public sealed class TlsService
             OpenSsl.SSL_CTX_ctrl(ctx, OpenSsl.SSL_CTRL_SET_MAX_PROTO_VERSION, OpenSsl.TLS1_3_VERSION, 0);
             if (OpenSsl.SSL_CTX_set_ciphersuites(ctx, "TLS_AES_128_GCM_SHA256") != 1)
             {
-                throw new IOException($"set_ciphersuites: {OpenSsl.LastError()}");
+                throw new IOException($"set_ciphersuites{what}: {OpenSsl.LastError()}");
             }
 
             // No session tickets: they would consume record sequence numbers after the
@@ -103,29 +322,104 @@ public sealed class TlsService
             OpenSsl.SSL_CTX_set_num_tickets(ctx, 0);
         }
 
-        LoadCertificate(ctx, options);
+        LoadCertificate(ctx, certificate, what);
         ConfigureClientVerification(ctx, options);
-
-        // The ALPN protocol to select is handed to the (static) callback via its arg, so the
-        // configured TlsOptions.Alpn is honored instead of being hard-coded.
-        byte[] alpnWire = BuildAlpnWire(options.Alpn);
-        GCHandle alpnHandle = GCHandle.Alloc(alpnWire);
 
         unsafe
         {
             delegate* unmanaged<nint, nint, void> keylog = &KeylogCallback;
             OpenSsl.SSL_CTX_set_keylog_callback(ctx, (nint)keylog);
 
+            // ALPN is settled against whichever context the handshake ends on, so every context
+            // needs the callback - reading the same wire bytes through the same handle.
             delegate* unmanaged<nint, nint, nint, nint, uint, nint, int> alpn = &AlpnSelectCallback;
             OpenSsl.SSL_CTX_set_alpn_select_cb(ctx, (nint)alpn, GCHandle.ToIntPtr(alpnHandle));
         }
 
-        var service = new TlsService(ctx, alpnHandle, options.KernelRx, options.KernelTx);
-        if (register)
+        return ctx;
+    }
+
+    /// <summary>
+    /// Exactly one source for the certificate and exactly one for the key. Neither set is as wrong
+    /// as both: one is an entry nobody finished, the other two answers to one question.
+    /// </summary>
+    private static void RequireOneSourceEach(TlsCertificate certificate, string what)
+    {
+        if ((certificate.CertificatePath is null) == (certificate.CertificatePem is null))
         {
-            reactor.AddService(service);
+            throw new ArgumentException(
+                $"Exactly one certificate source{what}: set CertificatePath or CertificatePem.", "options");
         }
-        return service;
+
+        if ((certificate.KeyPath is null) == (certificate.KeyPem is null))
+        {
+            throw new ArgumentException(
+                $"Exactly one key source{what}: set KeyPath or KeyPem.", "options");
+        }
+    }
+
+    /// <summary>
+    /// Picks the certificate for the name the client asked for, mid-handshake.
+    /// </summary>
+    /// <remarks>
+    /// An unknown name, or none at all, leaves the default context in place and the handshake
+    /// continues - the client then decides whether the certificate it got will do. Aborting here
+    /// instead would break every client reaching this server by address or by an alias nobody
+    /// listed, and would report it as a dead connection rather than a certificate mismatch.
+    ///
+    /// A name that WAS matched returns OK, and any other outcome returns NOACK. The difference is
+    /// what the server says about it: OK acknowledges the extension, so OpenSSL echoes the name
+    /// back and records it on the session. Acknowledging a name this server does not hold would be
+    /// claiming one it cannot serve (RFC 6066 3), and would file the client's own string against
+    /// the session. NOACK declines the extension WITHOUT failing the handshake, which is exactly
+    /// the "answer with the default" behaviour above.
+    ///
+    /// Runs on the reactor thread. The lookup allocates nothing: the name is compared as UTF-8
+    /// bytes already in native memory, against a table built when the service started.
+    /// </remarks>
+    [UnmanagedCallersOnly]
+    private static unsafe int ServerNameCallback(nint ssl, nint alert, nint arg)
+    {
+        try
+        {
+            if (arg == 0 || GCHandle.FromIntPtr(arg).Target is not HostTable byHost)
+            {
+                return OpenSsl.SSL_TLSEXT_ERR_NOACK;
+            }
+
+            nint namePtr = OpenSsl.SSL_get_servername(ssl, OpenSsl.TLSEXT_NAMETYPE_host_name);
+            if (namePtr == 0)
+            {
+                // No SNI extension. The default certificate is the answer, which is what it is for.
+                return OpenSsl.SSL_TLSEXT_ERR_NOACK;
+            }
+
+            // OpenSSL's own copy of the name, NUL-terminated and valid for this handshake - read
+            // where it lies rather than decoded into a string only to be thrown away. OpenSSL has
+            // already refused an over-long name and one carrying a NUL, so the span is bounded.
+            nint hostCtx = byHost.Find(MemoryMarshal.CreateReadOnlySpanFromNullTerminated((byte*)namePtr));
+
+            if (hostCtx == 0)
+            {
+                return OpenSsl.SSL_TLSEXT_ERR_NOACK;
+            }
+
+            // Fails only when the certificate cannot be duplicated, and the default context is
+            // still a working answer - but then this name was NOT the one being served, so it must
+            // not be acknowledged as though it were.
+            if (OpenSsl.SSL_set_SSL_CTX(ssl, hostCtx) == 0)
+            {
+                return OpenSsl.SSL_TLSEXT_ERR_NOACK;
+            }
+        }
+        catch
+        {
+            // A throw here would cross native frames. The default certificate is a working answer,
+            // so failing to select a better one is not a reason to lose the connection.
+            return OpenSsl.SSL_TLSEXT_ERR_NOACK;
+        }
+
+        return OpenSsl.SSL_TLSEXT_ERR_OK;
     }
 
     /// <summary>
@@ -244,32 +538,33 @@ public sealed class TlsService
         }
     }
 
-    // Certificate and key, from whichever source the options carry. The file route is OpenSSL's
-    // own loaders; the in-memory route reads the same PEM through a memory BIO.
-    private static void LoadCertificate(nint ctx, TlsOptions options)
+    // Certificate and key, from whichever source the caller carries. The file route is OpenSSL's
+    // own loaders; the in-memory route reads the same PEM through a memory BIO. Which of the two
+    // is set was settled by RequireOneSourceEach before any context existed.
+    private static void LoadCertificate(nint ctx, TlsCertificate certificate, string what)
     {
-        if (options.CertificatePath is not null)
+        if (certificate.CertificatePath is not null)
         {
-            if (OpenSsl.SSL_CTX_use_certificate_chain_file(ctx, options.CertificatePath) != 1)
+            if (OpenSsl.SSL_CTX_use_certificate_chain_file(ctx, certificate.CertificatePath) != 1)
             {
-                throw new IOException($"certificate '{options.CertificatePath}': {OpenSsl.LastError()}");
+                throw new IOException($"certificate{what} '{certificate.CertificatePath}': {OpenSsl.LastError()}");
             }
         }
         else
         {
-            LoadCertificatePem(ctx, options.CertificatePem!);
+            LoadCertificatePem(ctx, certificate.CertificatePem!);
         }
 
-        if (options.KeyPath is not null)
+        if (certificate.KeyPath is not null)
         {
-            if (OpenSsl.SSL_CTX_use_PrivateKey_file(ctx, options.KeyPath, OpenSsl.SSL_FILETYPE_PEM) != 1)
+            if (OpenSsl.SSL_CTX_use_PrivateKey_file(ctx, certificate.KeyPath, OpenSsl.SSL_FILETYPE_PEM) != 1)
             {
-                throw new IOException($"private key '{options.KeyPath}': {OpenSsl.LastError()}");
+                throw new IOException($"private key{what} '{certificate.KeyPath}': {OpenSsl.LastError()}");
             }
         }
         else
         {
-            LoadKeyPem(ctx, options.KeyPem!);
+            LoadKeyPem(ctx, certificate.KeyPem!);
         }
     }
 

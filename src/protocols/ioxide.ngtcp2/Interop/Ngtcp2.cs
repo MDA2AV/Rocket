@@ -53,6 +53,16 @@ internal static unsafe class Ngtcp2
     /// <summary>The verified client identity, or 0 written when the peer offered none.</summary>
     [DllImport(Lib)] internal static extern nuint iq_conn_peer_subject(nint conn, byte* outBuf, nuint outLen);
 
+    /// <summary>
+    /// Registers a certificate for one SNI name, served instead of the default when a client asks
+    /// for that host. Returns 0, or -1 with the reason on stderr. Call before accepting: the table
+    /// is read from the handshake without a lock.
+    /// </summary>
+    [DllImport(Lib)] internal static extern int iq_engine_add_host(nint engine,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string host,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string certPemPath,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string keyPemPath);
+
     [DllImport(Lib)] internal static extern void iq_engine_free(nint engine);
 
     [DllImport(Lib)] internal static extern nint iq_accept(

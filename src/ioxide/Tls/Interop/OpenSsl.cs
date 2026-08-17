@@ -18,6 +18,13 @@ internal static unsafe partial class OpenSsl
     public const int TLS1_3_VERSION = 0x0304;
     public const int SSL_TLSEXT_ERR_OK = 0;
     public const int SSL_TLSEXT_ERR_NOACK = 3;
+
+    // Server Name Indication (RFC 6066 3.1). The callback fires mid-handshake, after the
+    // ClientHello is parsed and before a certificate is chosen, which is the only point at which
+    // the name is known and the choice is still open.
+    public const int SSL_CTRL_SET_TLSEXT_SERVERNAME_CB = 53;
+    public const int SSL_CTRL_SET_TLSEXT_SERVERNAME_ARG = 54;
+    public const int TLSEXT_NAMETYPE_host_name = 0;
     public const int CRYPTO_EX_INDEX_SSL = 0;
 
     // Client-certificate verification (mutual TLS).
@@ -36,8 +43,32 @@ internal static unsafe partial class OpenSsl
     public static partial int SSL_CTX_set_ciphersuites(nint ctx, string list);
     [LibraryImport(Ssl)] public static partial long SSL_CTX_ctrl(nint ctx, int cmd, long arg, nint parg);
     [LibraryImport(Ssl)] public static partial int SSL_CTX_set_num_tickets(nint ctx, nuint num);
+    /// <summary>
+    /// Renegotiation, which TLS 1.3 does not have at all and which no current client asks a server
+    /// for over TLS 1.2. Refusing it closes a request-flood amplifier, and - since a renegotiation
+    /// carries a second ClientHello - a second chance to pick a different certificate mid-connection.
+    /// </summary>
+    public const ulong SSL_OP_NO_RENEGOTIATION = 1UL << 30;
+
+    [LibraryImport(Ssl)] public static partial ulong SSL_CTX_set_options(nint ctx, ulong options);
+
     [LibraryImport(Ssl)] public static partial void SSL_CTX_set_keylog_callback(nint ctx, nint cb);
     [LibraryImport(Ssl)] public static partial void SSL_CTX_set_alpn_select_cb(nint ctx, nint cb, nint arg);
+
+    /// <summary>
+    /// Takes a function pointer rather than a value, which is why it is not SSL_CTX_ctrl: the
+    /// servername callback is installed through this and its argument through SSL_CTX_ctrl.
+    /// </summary>
+    [LibraryImport(Ssl)] public static partial long SSL_CTX_callback_ctrl(nint ctx, int cmd, nint fp);
+
+    /// <summary>The name the client asked for, or null when it sent no SNI extension.</summary>
+    [LibraryImport(Ssl)] public static partial nint SSL_get_servername(nint ssl, int type);
+
+    /// <summary>
+    /// Swaps the context a handshake in progress will answer from, which is how one listener serves
+    /// several certificates. Valid from the servername callback, before the certificate is picked.
+    /// </summary>
+    [LibraryImport(Ssl)] public static partial nint SSL_set_SSL_CTX(nint ssl, nint ctx);
 
     // --- client certificates (mutual TLS) ---------------------------------------------------------
 
