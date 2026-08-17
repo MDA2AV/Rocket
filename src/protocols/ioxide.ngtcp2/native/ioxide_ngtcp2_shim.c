@@ -6,7 +6,8 @@
  * C# would be fragile against upstream layout drift. The shim owns every struct layout in C
  * (compiled against the exact bundled headers) and exposes a small stable ABI:
  *
- *   engine  = iq_engine_new(cert, key, cidlen, alpn, cbs) one per factory; owns ptls_context
+ *   engine  = iq_engine_new_mtls(cert, key, cidlen, alpn, ca, cbs)  one per factory; owns the
+ *                                                        certificates every connection is served
  *   conn    = iq_accept(engine, addrs, first_pkt, ...)   validates + creates the server conn
  *             iq_conn_read(...)                          feed one UDP datagram
  *             iq_conn_write(...)                         produce one UDP datagram (loop until 0)
@@ -107,7 +108,6 @@ typedef struct iq_engine {
 
 typedef struct iq_conn {
     ngtcp2_conn                *conn;
-    iq_engine                  *engine;    /* server connections only (CID length, ptls ctx) */
     iq_callbacks                cbs;       /* copied from whichever engine created this conn */
     ngtcp2_crypto_conn_ref      conn_ref;
     ngtcp2_crypto_picotls_ctx   cptls;
@@ -116,7 +116,6 @@ typedef struct iq_conn {
     ngtcp2_path                 path;
     ngtcp2_ccerr                last_error;
     void                       *user;
-    void (*on_stream_data_raw)(void *user, int64_t stream_id, const uint8_t *data, size_t datalen, int fin);
     ptls_raw_extension_t        exts[2];   /* [0] QUIC transport params (filled by ngtcp2), [1] terminator */
     char                        alpn[64];  /* client: the single protocol we offer */
     ptls_iovec_t                alpn_vec;  /* points into alpn[], handed to picotls for the CH */
@@ -215,6 +214,101 @@ static void iq_free_certificates(ptls_context_t *ctx)
     free(ctx->certificates.list);
     ctx->certificates.list  = NULL;
     ctx->certificates.count = 0;
+}
+
+/* Loads a certificate chain and its key into a context, and installs the signer. Returns 0, or -1
+ * with the reason on stderr; on failure the context is left exactly as it was found.
+ *
+ * One function because it was three, and the three had drifted: each had its own wording, its own
+ * teardown, and the client's had none at all.
+ *
+ * The pair is checked against each other, which is the part worth keeping. OpenSSL does it for the
+ * TCP side when the key is installed, and picotls does not - so without this a certificate and a
+ * key that do not belong together load happily here and fail every real handshake afterwards. That
+ * is exactly the state a half-finished renewal leaves on disk, and catching it at load is what lets
+ * a failed renewal leave the server serving what it had. */
+static int iq_load_keypair(ptls_context_t *ctx, ptls_openssl_sign_certificate_t *sign,
+                           const char *cert_pem_path, const char *key_pem_path, const char *who)
+{
+    if (ptls_load_certificates(ctx, (char *)cert_pem_path) != 0 || ctx->certificates.count == 0) {
+        fprintf(stderr, "[ioxide.ngtcp2] %s: failed to load certificates from %s\n", who, cert_pem_path);
+        goto fail;
+    }
+
+    BIO *bio = BIO_new_file(key_pem_path, "r");
+    if (bio == NULL) {
+        fprintf(stderr, "[ioxide.ngtcp2] %s: failed to open key %s\n", who, key_pem_path);
+        goto fail;
+    }
+
+    EVP_PKEY *pkey = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
+    BIO_free(bio);
+
+    if (pkey == NULL) {
+        fprintf(stderr, "[ioxide.ngtcp2] %s: failed to parse key %s\n", who, key_pem_path);
+        goto fail;
+    }
+
+    {
+        /* Does this key belong to this certificate? The leaf is the one the key has to match. */
+        const uint8_t *der = ctx->certificates.list[0].base;
+        X509 *leaf = d2i_X509(NULL, &der, (long)ctx->certificates.list[0].len);
+        int matched = leaf != NULL && X509_check_private_key(leaf, pkey) == 1;
+
+        if (leaf != NULL) {
+            X509_free(leaf);
+        }
+
+        if (!matched) {
+            fprintf(stderr, "[ioxide.ngtcp2] %s: the key in %s does not match the certificate in %s\n",
+                    who, key_pem_path, cert_pem_path);
+            EVP_PKEY_free(pkey);
+            goto fail;
+        }
+    }
+
+    int rv = ptls_openssl_init_sign_certificate(sign, pkey);
+    EVP_PKEY_free(pkey);
+
+    if (rv != 0) {
+        fprintf(stderr, "[ioxide.ngtcp2] %s: failed to init sign_certificate\n", who);
+        goto fail;
+    }
+
+    ctx->sign_certificate = &sign->super;
+    return 0;
+
+fail:
+    /* ptls_load_certificates mallocs the list before it so much as opens the file, and leaves
+     * whatever it parsed behind on a partial failure - so there is something to free here even
+     * when the load is what failed. */
+    iq_free_certificates(ctx);
+    return -1;
+}
+
+/* Releases what iq_load_keypair installed. Keyed off the signer, which is set last, so this is
+ * safe on a context that never got that far. */
+static void iq_dispose_keypair(ptls_context_t *ctx, ptls_openssl_sign_certificate_t *sign)
+{
+    if (ctx->sign_certificate != NULL) {
+        ptls_openssl_dispose_sign_certificate(sign);
+        ctx->sign_certificate = NULL;
+    }
+
+    iq_free_certificates(ctx);
+}
+
+/* One SNI host and everything it owns. The half-built case is the same shape as the fully-built
+ * one, which is why the failure path and the teardown path are the same function. */
+static void iq_host_free(iq_host *h)
+{
+    if (h == NULL) {
+        return;
+    }
+
+    iq_dispose_keypair(&h->ptls_ctx, &h->sign_cert);
+    free(h->name);
+    free(h);
 }
 
 /* The context registered for this name, or NULL. Compared case-insensitively: SNI carries a DNS
@@ -391,15 +485,23 @@ static int iq_on_client_hello(ptls_on_client_hello_t *self, ptls_t *tls,
             params->negotiated_protocols.list[0].len);
     }
 
-    for (size_t i = 0; i < params->negotiated_protocols.count; i++) {
-        ptls_iovec_t offer = params->negotiated_protocols.list[i];
-        for (size_t off = 0; off < e->alpn_len;) {
-            size_t len = e->alpn[off];
+    /* The SERVER's order decides, which is why this walks the allowlist on the outside: the first
+     * protocol this engine lists that the client also offered is the one negotiated. The TCP side
+     * has always worked that way and both are documented as preference-ordered; walking the
+     * client's offers first would quietly let the client choose instead. No deployment can see the
+     * difference while only one protocol is listed, which is exactly why it would go unnoticed. */
+    for (size_t off = 0; off < e->alpn_len;) {
+        size_t len = e->alpn[off];
+
+        for (size_t i = 0; i < params->negotiated_protocols.count; i++) {
+            ptls_iovec_t offer = params->negotiated_protocols.list[i];
+
             if (len == offer.len && memcmp(e->alpn + off + 1, offer.base, len) == 0) {
                 return ptls_set_negotiated_protocol(tls, (const char *)offer.base, offer.len);
             }
-            off += 1 + len;
         }
+
+        off += 1 + len;
     }
     return PTLS_ALERT_NO_APPLICATION_PROTOCOL;
 }
@@ -462,9 +564,6 @@ static int iq_cb_recv_stream_data(ngtcp2_conn *conn, uint32_t flags, int64_t str
 
     if (c->cbs.on_stream_data) {
         c->cbs.on_stream_data(c->user, stream_id, data, datalen,
-                              (flags & NGTCP2_STREAM_DATA_FLAG_FIN) != 0);
-    } else if (c->on_stream_data_raw) {
-        c->on_stream_data_raw(c->user, stream_id, data, datalen,
                               (flags & NGTCP2_STREAM_DATA_FLAG_FIN) != 0);
     }
     return 0;
@@ -567,13 +666,6 @@ iq_engine *iq_engine_new_mtls(const char *cert_pem_path, const char *key_pem_pat
                               const char *client_ca_pem_path, const char *client_ca_pem,
                               int require_client_cert, iq_callbacks cbs);
 
-/* The original five-argument form: no client certificates, exactly as before. */
-iq_engine *iq_engine_new(const char *cert_pem_path, const char *key_pem_path,
-                         size_t cidlen, const uint8_t *alpn, size_t alpn_len,
-                         iq_callbacks cbs)
-{
-    return iq_engine_new_mtls(cert_pem_path, key_pem_path, cidlen, alpn, alpn_len, NULL, NULL, 0, cbs);
-}
 
 /* Registers a certificate for one SNI name, to be served instead of the default when a client asks
  * for that host. Returns 0, or -1 with the reason on stderr.
@@ -631,30 +723,8 @@ static int iq_certs_add_host(iq_certs *certs, const char *host, const char *cert
     h->ptls_ctx.key_exchanges = ptls_openssl_key_exchanges;
     h->ptls_ctx.cipher_suites = ptls_openssl_cipher_suites;
 
-    if (ptls_load_certificates(&h->ptls_ctx, (char *)cert_pem_path) != 0) {
-        fprintf(stderr, "[ioxide.ngtcp2] host '%s': failed to load certificates from %s\n", host, cert_pem_path);
+    if (iq_load_keypair(&h->ptls_ctx, &h->sign_cert, cert_pem_path, key_pem_path, host) != 0) {
         goto fail;
-    }
-
-    {
-        BIO *bio = BIO_new_file(key_pem_path, "r");
-        if (bio == NULL) {
-            fprintf(stderr, "[ioxide.ngtcp2] host '%s': failed to open key %s\n", host, key_pem_path);
-            goto fail;
-        }
-        EVP_PKEY *pkey = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
-        BIO_free(bio);
-        if (pkey == NULL) {
-            fprintf(stderr, "[ioxide.ngtcp2] host '%s': failed to parse key %s\n", host, key_pem_path);
-            goto fail;
-        }
-        int rv = ptls_openssl_init_sign_certificate(&h->sign_cert, pkey);
-        EVP_PKEY_free(pkey);
-        if (rv != 0) {
-            fprintf(stderr, "[ioxide.ngtcp2] host '%s': failed to init sign_certificate\n", host);
-            goto fail;
-        }
-        h->ptls_ctx.sign_certificate = &h->sign_cert.super;
     }
 
     if (ngtcp2_crypto_picotls_configure_server_context(&h->ptls_ctx) != 0) {
@@ -684,17 +754,7 @@ static int iq_certs_add_host(iq_certs *certs, const char *host, const char *cert
     return 0;
 
 fail:
-    /* ptls_load_certificates mallocs the list before it so much as opens the file, and leaves
-     * whatever it parsed behind on a partial failure - so there is something to free here even
-     * when the load is what failed. */
-    iq_free_certificates(&h->ptls_ctx);
-    /* Holds a reference to the key once it is initialised. Unreachable while the only step after
-     * it cannot fail, and here so that stays true if one is ever added. */
-    if (h->ptls_ctx.sign_certificate != NULL) {
-        ptls_openssl_dispose_sign_certificate(&h->sign_cert);
-    }
-    free(h->name);
-    free(h);
+    iq_host_free(h);
     return -1;
 }
 
@@ -720,14 +780,10 @@ static void iq_certs_free(iq_certs *certs)
         return;
     }
 
-    ptls_openssl_dispose_sign_certificate(&certs->sign_cert);
-    iq_free_certificates(&certs->ptls_ctx);
+    iq_dispose_keypair(&certs->ptls_ctx, &certs->sign_cert);
 
     for (size_t i = 0; i < certs->host_count; i++) {
-        ptls_openssl_dispose_sign_certificate(&certs->hosts[i]->sign_cert);
-        iq_free_certificates(&certs->hosts[i]->ptls_ctx);
-        free(certs->hosts[i]->name);
-        free(certs->hosts[i]);
+        iq_host_free(certs->hosts[i]);
     }
 
     free(certs->hosts);
@@ -749,30 +805,9 @@ static iq_certs *iq_certs_new(iq_engine *e, const char *cert_pem_path, const cha
     certs->ptls_ctx.cipher_suites = ptls_openssl_cipher_suites;
     certs->ptls_ctx.on_client_hello = &e->on_client_hello;
 
-    if (ptls_load_certificates(&certs->ptls_ctx, (char *)cert_pem_path) != 0) {
-        fprintf(stderr, "[ioxide.ngtcp2] failed to load certificates from %s\n", cert_pem_path);
+    if (iq_load_keypair(&certs->ptls_ctx, &certs->sign_cert, cert_pem_path, key_pem_path,
+                        "default certificate") != 0) {
         goto fail;
-    }
-
-    {
-        BIO *bio = BIO_new_file(key_pem_path, "r");
-        if (bio == NULL) {
-            fprintf(stderr, "[ioxide.ngtcp2] failed to open key %s\n", key_pem_path);
-            goto fail;
-        }
-        EVP_PKEY *pkey = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
-        BIO_free(bio);
-        if (pkey == NULL) {
-            fprintf(stderr, "[ioxide.ngtcp2] failed to parse key %s\n", key_pem_path);
-            goto fail;
-        }
-        int rv = ptls_openssl_init_sign_certificate(&certs->sign_cert, pkey);
-        EVP_PKEY_free(pkey);
-        if (rv != 0) {
-            fprintf(stderr, "[ioxide.ngtcp2] failed to init sign_certificate\n");
-            goto fail;
-        }
-        certs->ptls_ctx.sign_certificate = &certs->sign_cert.super;
     }
 
     if (ngtcp2_crypto_picotls_configure_server_context(&certs->ptls_ctx) != 0) {
@@ -790,13 +825,7 @@ static iq_certs *iq_certs_new(iq_engine *e, const char *cert_pem_path, const cha
     return certs;
 
 fail:
-    iq_free_certificates(&certs->ptls_ctx);
-    /* Holds a reference to the key once initialised. Unreachable while the only step after it
-     * cannot fail, and here so that stays true if one is ever added - the sibling that builds a
-     * host guards the same way. */
-    if (certs->ptls_ctx.sign_certificate != NULL) {
-        ptls_openssl_dispose_sign_certificate(&certs->sign_cert);
-    }
+    iq_dispose_keypair(&certs->ptls_ctx, &certs->sign_cert);
     free(certs);
     return NULL;
 }
@@ -1009,7 +1038,6 @@ iq_conn *iq_accept(iq_engine *e,
     if (c == NULL) {
         return NULL;
     }
-    c->engine = e;
     c->cbs = e->cbs;
     c->user   = user;
 
@@ -1146,12 +1174,6 @@ ngtcp2_ssize iq_conn_write(iq_conn *c, uint8_t *dest, size_t destlen,
     return n;
 }
 
-/* Build the CONNECTION_CLOSE datagram for the current error state (0 = nothing to send). */
-ngtcp2_ssize iq_conn_write_close(iq_conn *c, uint8_t *dest, size_t destlen, uint64_t ts)
-{
-    return ngtcp2_conn_write_connection_close(c->conn, &c->path, NULL, dest, destlen,
-                                              &c->last_error, ts);
-}
 
 /* App-initiated close: record an APPLICATION error (e.g. H3_NO_ERROR for graceful shutdown) and
  * build the CONNECTION_CLOSE datagram carrying it. The caller sends it and tears the conn down. */
@@ -1178,10 +1200,6 @@ int iq_conn_is_established(iq_conn *c)
     return ngtcp2_conn_get_handshake_completed(c->conn);
 }
 
-int iq_conn_in_draining(iq_conn *c)
-{
-    return ngtcp2_conn_in_draining_period(c->conn);
-}
 
 /* Open a server-initiated unidirectional stream (H3 control / QPACK). Returns the stream id, or
  * a negative ngtcp2 error (e.g. STREAM_ID_BLOCKED when the peer's uni allowance is exhausted). */
@@ -1228,9 +1246,6 @@ typedef struct iq_client_engine {
     /* Unused unless iq_client_engine_record_server_certificate was called. */
     ptls_verify_certificate_t record_cert;
 } iq_client_engine;
-
-iq_client_engine *iq_client_engine_new_mtls(const char *alpn, const char *cert_pem_path,
-                                            const char *key_pem_path, iq_callbacks cbs);
 
 /* Records the subject of the certificate the SERVER served, and accepts it whatever it is.
  *
@@ -1306,10 +1321,6 @@ void iq_client_engine_record_server_certificate(iq_client_engine *e)
     e->ptls_ctx.verify_certificate = &e->record_cert;
 }
 
-iq_client_engine *iq_client_engine_new(const char *alpn, iq_callbacks cbs)
-{
-    return iq_client_engine_new_mtls(alpn, NULL, NULL, cbs);
-}
 
 /* A client that can prove who it is: cert_pem_path and key_pem_path are the certificate it presents
  * when a server asks for one. Both NULL leaves the client exactly as it was, offering nothing. */
@@ -1332,36 +1343,14 @@ iq_client_engine *iq_client_engine_new_mtls(const char *alpn, const char *cert_p
      * exists to drive our own servers, not to authenticate them. */
 
     if (cert_pem_path != NULL && key_pem_path != NULL) {
-        if (ptls_load_certificates(&e->ptls_ctx, cert_pem_path) != 0) {
-            fprintf(stderr, "[ioxide.ngtcp2] client: failed to load %s\n", cert_pem_path);
+        if (iq_load_keypair(&e->ptls_ctx, &e->sign_cert, cert_pem_path, key_pem_path, "client") != 0) {
             free(e);
             return NULL;
         }
-
-        BIO *bio = BIO_new_file(key_pem_path, "r");
-        if (bio == NULL) {
-            fprintf(stderr, "[ioxide.ngtcp2] client: failed to open key %s\n", key_pem_path);
-            free(e);
-            return NULL;
-        }
-        EVP_PKEY *pkey = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
-        BIO_free(bio);
-        if (pkey == NULL) {
-            fprintf(stderr, "[ioxide.ngtcp2] client: failed to parse key %s\n", key_pem_path);
-            free(e);
-            return NULL;
-        }
-        int rv = ptls_openssl_init_sign_certificate(&e->sign_cert, pkey);
-        EVP_PKEY_free(pkey);
-        if (rv != 0) {
-            fprintf(stderr, "[ioxide.ngtcp2] client: failed to init sign_certificate\n");
-            free(e);
-            return NULL;
-        }
-        e->ptls_ctx.sign_certificate = &e->sign_cert.super;
     }
 
     if (ngtcp2_crypto_picotls_configure_client_context(&e->ptls_ctx) != 0) {
+        iq_dispose_keypair(&e->ptls_ctx, &e->sign_cert);
         free(e);
         return NULL;
     }
@@ -1370,6 +1359,13 @@ iq_client_engine *iq_client_engine_new_mtls(const char *alpn, const char *cert_p
 
 void iq_client_engine_free(iq_client_engine *e)
 {
+    if (e == NULL) {
+        return;
+    }
+
+    /* Was free(e) alone, so every client engine holding a certificate leaked it and the key with
+     * it. The server side has always released these; this side simply never did. */
+    iq_dispose_keypair(&e->ptls_ctx, &e->sign_cert);
     free(e);
 }
 
@@ -1390,7 +1386,6 @@ iq_conn *iq_client_connect(iq_client_engine *e,
     }
     c->user = user;
     c->cbs = e->cbs;
-    c->on_stream_data_raw = e->cbs.on_stream_data;   // legacy raw path for the bare test drivers
 
     memcpy(&c->local_addr, local_sa, local_salen);
     memcpy(&c->remote_addr, remote_sa, remote_salen);

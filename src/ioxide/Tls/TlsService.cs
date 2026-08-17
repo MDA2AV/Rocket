@@ -16,8 +16,6 @@ namespace ioxide.tls;
 public sealed class TlsService
 {
     private readonly GCHandle _alpnHandle;   // roots the ALPN wire bytes the select callback reads via its arg
-    private readonly bool _kernelRx;
-    private readonly bool _kernelTx;
 
     // Everything about the certificates lives behind this one slot, and a rotation replaces it
     // whole. The handle roots the slot so the servername callback can reach it through its arg.
@@ -41,8 +39,6 @@ public sealed class TlsService
         _slotHandle = slotHandle;
         _alpnHandle = alpnHandle;
         _options = options;
-        _kernelRx = options.KernelRx;
-        _kernelTx = options.KernelTx;
     }
 
     /// <summary>The SNI names this service answers for, beside its default certificate.</summary>
@@ -163,8 +159,6 @@ public sealed class TlsService
             KeyPath = options.KeyPath,
             KeyPem = options.KeyPem,
         };
-
-        RequireOneSourceEach(defaultCertificate, "");
 
         // Client anchors are optional, but two sources for them is a mistake worth naming rather
         // than resolving by precedence.
@@ -322,10 +316,7 @@ public sealed class TlsService
 
         foreach (nint hostCtx in byHost?.Contexts ?? [])
         {
-            if (hostCtx != 0)
-            {
-                OpenSsl.SSL_CTX_free(hostCtx);
-            }
+            OpenSsl.SSL_CTX_free(hostCtx);
         }
     }
 
@@ -385,7 +376,7 @@ public sealed class TlsService
         {
             if (string.IsNullOrWhiteSpace(host))
             {
-                throw new ArgumentException("A blank host cannot be asked for by SNI.", "certificatesByHost");
+                throw new ArgumentException("A blank host cannot be asked for by SNI.");
             }
 
             RequireOneSourceEach(certificate, $" for '{host}'");
@@ -404,7 +395,7 @@ public sealed class TlsService
                 {
                     throw new ArgumentException(
                         $"Two certificates for the same host '{names[i]}': names are matched " +
-                        "case-insensitively, so only the first would ever be served.", "certificatesByHost");
+                        "case-insensitively, so only the first would ever be served.");
                 }
             }
 
@@ -505,13 +496,13 @@ public sealed class TlsService
         if ((certificate.CertificatePath is null) == (certificate.CertificatePem is null))
         {
             throw new ArgumentException(
-                $"Exactly one certificate source{what}: set CertificatePath or CertificatePem.", "options");
+                $"Exactly one certificate source{what}: set CertificatePath or CertificatePem.");
         }
 
         if ((certificate.KeyPath is null) == (certificate.KeyPem is null))
         {
             throw new ArgumentException(
-                $"Exactly one key source{what}: set KeyPath or KeyPem.", "options");
+                $"Exactly one key source{what}: set KeyPath or KeyPem.");
         }
     }
 
@@ -890,7 +881,7 @@ public sealed class TlsService
             // Everything the handshake needed to send is flushed; from the next write on, the kernel
             // produces the records. kTLS rejects MSG_WAITALL, so switch this connection's sends to
             // plain (the reactor still loops on short sends). EnableTx zeros 'secret' once programmed.
-            if (_kernelTx)
+            if (_options.KernelTx)
             {
                 // The keylog secret exists only on TLS 1.3, which the kTLS branch pins above - so
                 // here its absence is a real failure, not a version artifact.
@@ -911,7 +902,7 @@ public sealed class TlsService
             // RX is opt-in and per connection. A partial record left in the BIO means bytes the
             // kernel will never see, and no sequence number recovers those - that connection stays
             // on the userspace path rather than corrupting itself.
-            if (_kernelTx && _kernelRx && !partialRecord && session.ClientSecret is not null)
+            if (_options.KernelTx && _options.KernelRx && !partialRecord && session.ClientSecret is not null)
             {
                 Ktls.EnableRx(conn.ClientFd, session.ClientSecret, (ulong)consumedRecords);
                 session.ClientSecret = null;   // EnableRx zeroed it

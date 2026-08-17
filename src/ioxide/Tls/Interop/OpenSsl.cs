@@ -28,7 +28,6 @@ internal static unsafe partial class OpenSsl
     public const int CRYPTO_EX_INDEX_SSL = 0;
 
     // Client-certificate verification (mutual TLS).
-    public const int SSL_VERIFY_NONE = 0x00;
     public const int SSL_VERIFY_PEER = 0x01;
     public const int SSL_VERIFY_FAIL_IF_NO_PEER_CERT = 0x02;
     public const long X509_V_OK = 0;
@@ -124,11 +123,6 @@ internal static unsafe partial class OpenSsl
     [LibraryImport(Ssl)] public static partial int SSL_shutdown(nint ssl);
     [LibraryImport(Ssl)] public static partial int SSL_get_error(nint ssl, int ret);
 
-    /// <summary>
-    /// Plaintext already decrypted and waiting, in bytes. Distinguishes "the destination filled but
-    /// there is more" from "that was everything", which a zero-length SSL_read cannot.
-    /// </summary>
-    [LibraryImport(Ssl)] public static partial int SSL_pending(nint ssl);
 
     /// <summary>What ALPN settled on, or nothing when the client offered none we serve.</summary>
     [LibraryImport(Ssl)] public static partial void SSL_get0_alpn_selected(nint ssl, byte** data, uint* length);

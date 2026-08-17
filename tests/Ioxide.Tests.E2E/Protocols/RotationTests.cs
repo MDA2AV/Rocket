@@ -29,7 +29,7 @@ internal static class RotationTests
             Assert.True(Ask(udpPort, "first.test").Contains("first.test"),
                 "the engine should start on the certificate it was given");
 
-            engine.ReplaceCertificates(second, secondKey);
+            engine.ReplaceCertificates(new QuicCertificate(second, secondKey));
 
             Assert.True(Ask(udpPort, "first.test").Contains("second.test"),
                 "a connection made after the rotation should get the new certificate");
@@ -49,7 +49,7 @@ internal static class RotationTests
             Assert.True(Ask(udpPort, "named.test").Contains("alpha.test"),
                 "the name should start on the certificate it was registered with");
 
-            engine.ReplaceCertificates(cert, key, new Dictionary<string, QuicCertificate>
+            engine.ReplaceCertificates(new QuicCertificate(cert, key), new Dictionary<string, QuicCertificate>
             {
                 ["named.test"] = new(beta, betaKey),
             });
@@ -72,7 +72,7 @@ internal static class RotationTests
             Assert.True(Ask(udpPort, "alpha.test").Contains("localhost"),
                 "before the rotation the name is unknown and gets the default");
 
-            engine.ReplaceCertificates(cert, key, new Dictionary<string, QuicCertificate>
+            engine.ReplaceCertificates(new QuicCertificate(cert, key), new Dictionary<string, QuicCertificate>
             {
                 ["alpha.test"] = new(alpha, alphaKey),
             });
@@ -88,18 +88,9 @@ internal static class RotationTests
             using var engine = new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]);
             int udpPort = Serve(engine);
 
-            bool threw = false;
-
-            try
-            {
-                engine.ReplaceCertificates("/nonexistent/new.crt", "/nonexistent/new.key");
-            }
-            catch (InvalidOperationException)
-            {
-                threw = true;
-            }
-
-            Assert.True(threw, "a rotation naming a certificate that cannot be read should throw");
+            Assert.Throws<InvalidOperationException>(
+                () => engine.ReplaceCertificates(new QuicCertificate("/nonexistent/new.crt", "/nonexistent/new.key")),
+                "could not replace the certificates");
 
             Assert.True(Ask(udpPort, "localhost").Contains("localhost"),
                 "and the engine should still serve the certificate it had");
@@ -121,7 +112,7 @@ internal static class RotationTests
 
             try
             {
-                engine.ReplaceCertificates(cert, key, new Dictionary<string, QuicCertificate>
+                engine.ReplaceCertificates(new QuicCertificate(cert, key), new Dictionary<string, QuicCertificate>
                 {
                     ["alpha.test"] = new(beta, betaKey),
                     ["broken.test"] = new("/nonexistent/b.crt", "/nonexistent/b.key"),
@@ -136,6 +127,36 @@ internal static class RotationTests
 
             Assert.True(Ask(udpPort, "alpha.test").Contains("alpha.test"),
                 "and no part of it should have been applied");
+        });
+
+        runner.Test("rotate/quic: a key that does not match its certificate is refused", () =>
+        {
+            // OpenSSL cross-checks the pair when the key is installed, so the TCP side has always
+            // refused this; picotls does not, so QUIC used to load it happily and then fail every
+            // real client's handshake. That is the state a half-finished renewal leaves on disk,
+            // and it is invisible to the in-tree client, which never checks a signature.
+            (string alpha, string alphaKey) = TestCert.EnsureNamed("alpha.test");
+            (string beta, string betaKey) = TestCert.EnsureNamed("beta.test");
+
+            Assert.Throws<InvalidOperationException>(
+                () => new QuicEngine(alpha, betaKey, cidLength: 8, alpn: ["h3"]).Dispose(),
+                "engine init failed");
+
+            using var engine = new QuicEngine(alpha, alphaKey, cidLength: 8, alpn: ["h3"]);
+
+            // Before serving, so the refusal is about the mismatched pair and not about the engine
+            // already being live - which is what this asserted by accident until the reason was named.
+            Assert.Throws<InvalidOperationException>(() => engine.AddHost("beta.test", beta, alphaKey),
+                "could not serve 'beta.test'");
+
+            int udpPort = Serve(engine);
+
+            Assert.Throws<InvalidOperationException>(
+                () => engine.ReplaceCertificates(new QuicCertificate(beta, alphaKey)),
+                "could not replace the certificates");
+
+            Assert.True(Ask(udpPort, "alpha.test").Contains("alpha.test"),
+                "and the engine should still serve the pair it had");
         });
 
         runner.Test("rotate/quic: connections keep working across rotations under load", () =>
@@ -185,7 +206,7 @@ internal static class RotationTests
 
             for (int i = 0; i < 12; i++)
             {
-                engine.ReplaceCertificates(cert, key, new Dictionary<string, QuicCertificate>
+                engine.ReplaceCertificates(new QuicCertificate(cert, key), new Dictionary<string, QuicCertificate>
                 {
                     ["alpha.test"] = i % 2 == 0 ? new(beta, betaKey) : new(alpha, alphaKey),
                 });
@@ -216,7 +237,7 @@ internal static class RotationTests
 
             int udpPort = ServeIdentity(engine);
 
-            engine.ReplaceCertificates(serverCert, serverKey, new Dictionary<string, QuicCertificate>
+            engine.ReplaceCertificates(new QuicCertificate(serverCert, serverKey), new Dictionary<string, QuicCertificate>
             {
                 ["alpha.test"] = new(beta, betaKey),
             });
@@ -286,7 +307,7 @@ internal static class RotationTests
                 {
                     for (int n = 0; n < 15; n++)
                     {
-                        engine.ReplaceCertificates(cert, key, new Dictionary<string, QuicCertificate>
+                        engine.ReplaceCertificates(new QuicCertificate(cert, key), new Dictionary<string, QuicCertificate>
                         {
                             ["alpha.test"] = i % 2 == 0 ? new(beta, betaKey) : new(alpha, alphaKey),
                         });
@@ -324,7 +345,7 @@ internal static class RotationTests
 
             // Renew alpha onto beta's material: the name is no longer covered, so a client that
             // checks must now refuse it - which is what proves the swap actually took effect.
-            engine.ReplaceCertificates(cert, key, new Dictionary<string, QuicCertificate>
+            engine.ReplaceCertificates(new QuicCertificate(cert, key), new Dictionary<string, QuicCertificate>
             {
                 ["alpha.test"] = new(betaCert, betaKey),
             });
@@ -333,8 +354,10 @@ internal static class RotationTests
             Assert.True(after != 0,
                 "after the rotation alpha.test is served beta's certificate, which does not cover that name - a validating client must refuse it");
 
-            (int beta, _, string betaErr) = CurlH3.Get("beta.test", udpPort, ca);
-            Assert.True(beta != 0 || betaErr.Length >= 0, "beta.test is not registered; the default answers it");
+            // beta.test was never registered, so the default certificate answers it - and the
+            // default does not cover that name, so a client that validates must refuse.
+            (int beta, _, _) = CurlH3.Get("beta.test", udpPort, ca);
+            Assert.True(beta != 0, "an unregistered name is answered with the default certificate, which a validating client must refuse");
         }, skip: !CurlH3.Available);
     }
 

@@ -34,6 +34,14 @@ public sealed class Runner
             Console.WriteLine($"FAIL  {name}: {e.Message}");
             _failed++;
         }
+        finally
+        {
+            // Servers do not outlive the test that started them. A reactor busy-polls its ring, so
+            // leaving them up means a long suite ends with dozens of them competing for the box -
+            // and the tests that notice are whichever ones happen to be timing-sensitive, which
+            // makes it look like a bug in whatever they were testing.
+            TestServer.StopAll();
+        }
     }
 
     /// <summary>
@@ -121,5 +129,37 @@ public static class Assert
         {
             throw new Exception(message);
         }
+    }
+
+    /// <summary>
+    /// Runs <paramref name="action"/> and requires it to throw <typeparamref name="T"/>, optionally
+    /// with <paramref name="because"/> somewhere in the message.
+    /// </summary>
+    /// <remarks>
+    /// The reason to pass a fragment: a test that only asserts "it threw" passes when something
+    /// else entirely went wrong - a port already bound, a reactor that died - and reports the
+    /// refusal it was looking for. Naming the reason is what makes the test about the reason.
+    /// </remarks>
+    public static void Throws<T>(Action action, string? because = null) where T : Exception
+    {
+        try
+        {
+            action();
+        }
+        catch (T e)
+        {
+            if (because is not null && !e.Message.Contains(because))
+            {
+                throw new Exception($"threw {typeof(T).Name} as expected, but for the wrong reason: {e.Message}");
+            }
+
+            return;
+        }
+        catch (Exception e)
+        {
+            throw new Exception($"expected {typeof(T).Name}, got {e.GetType().Name}: {e.Message}");
+        }
+
+        throw new Exception($"expected {typeof(T).Name}{(because is null ? "" : $" ({because})")}, but nothing was thrown");
     }
 }

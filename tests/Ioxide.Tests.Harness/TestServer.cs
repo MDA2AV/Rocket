@@ -56,6 +56,69 @@ public static class TestServer
     /// <summary>Reserve a unique port (e.g. for TcpOptions.ExtraPorts).</summary>
     public static int NextPort() => Interlocked.Increment(ref _nextPort);
 
+    // Every server this harness starts, so the runner can shut them down when a test ends.
+    private static readonly List<(Reactor Reactor, Thread Thread)> Started = [];
+    private static readonly Lock StartedLock = new();
+
+    private static void Track(Reactor reactor, Thread thread)
+    {
+        lock (StartedLock)
+        {
+            Started.Add((reactor, thread));
+        }
+    }
+
+    /// <summary>
+    /// Stops every server started since the last call. The runner does this after each test, so a
+    /// suite runs against the servers the current test started and nothing else.
+    /// </summary>
+    /// <remarks>
+    /// Not tidiness. A reactor polls its io_uring ring, so a server left running keeps a core busy
+    /// for the whole suite; a hundred tests later the box is oversubscribed by two orders of
+    /// magnitude and everything is slow. That shows up as unrelated tests timing out - which reads
+    /// like a server bug and is only ever the harness competing with itself.
+    ///
+    /// Stopping is best-effort: a reactor that will not come down in time is left to the process
+    /// exit rather than failing the test that happened to run last.
+    /// </remarks>
+    public static void StopAll()
+    {
+        (Reactor Reactor, Thread Thread)[] running;
+
+        lock (StartedLock)
+        {
+            running = [.. Started];
+            Started.Clear();
+        }
+
+        foreach ((Reactor reactor, _) in running)
+        {
+            try
+            {
+                reactor.Stop();
+            }
+            catch (Exception)
+            {
+                // Already stopped by the test itself, or never finished starting.
+            }
+        }
+
+        int stuck = 0;
+
+        foreach ((_, Thread thread) in running)
+        {
+            if (!thread.Join(2000))
+            {
+                stuck++;
+            }
+        }
+
+        if (stuck > 0)
+        {
+            Console.WriteLine($"[harness] {stuck}/{running.Length} reactors did not stop");
+        }
+    }
+
     /// <summary>
     /// A port with nothing listening on it, for the tests that need a connect to be refused - dead
     /// backends, connect-storm budgets, black-holed h3 endpoints.
@@ -107,6 +170,7 @@ public static class TestServer
             Name = $"test-reactor-{port}",
         };
         thread.Start();
+        Track(reactor, thread);
 
         WaitForListen(port);
         return (port, reactor, thread);
@@ -169,6 +233,7 @@ public static class TestServer
                 Name = $"test-shard-{port}-{shard}",
             };
             thread.Start();
+            Track(reactor, thread);
         }
 
         // All shards up - or a shard died before OnStart, in which case WaitForListen surfaces the
@@ -250,6 +315,7 @@ public static class TestServer
             Name = $"test-reactor-udp-{udpPort}",
         };
         thread.Start();
+        Track(reactor, thread);
 
         WaitForListen(tcpPort);
         return (tcpPort, udpPort);
@@ -292,6 +358,7 @@ public static class TestServer
             Name = $"test-reactor-h3client-{tcpPort}",
         };
         thread.Start();
+        Track(reactor, thread);
 
         WaitForListen(tcpPort);
         return tcpPort;
@@ -341,6 +408,7 @@ public static class TestServer
             Name = $"test-reactor-h3proxy-{tcpPort}",
         };
         thread.Start();
+        Track(reactor, thread);
 
         WaitForListen(tcpPort);
         return tcpPort;
@@ -964,10 +1032,65 @@ public static class CurlH3
             "--http3-only",
             "--cacert", caPath,
             "--resolve", $"{host}:{port}:127.0.0.1",
-            "--max-time", "10",
+            "--max-time", "15",
             "--silent", "--show-error",
             $"https://{host}:{port}{path}",
         ]);
+}
+
+/// <summary>
+/// The system curl, over TCP - a client that validates the chain AND matches the name, which is
+/// what makes it worth driving alongside SslStream.
+/// </summary>
+/// <remarks>
+/// SslStream in this harness accepts any certificate, so it can say WHICH one arrived but never
+/// whether anyone would take it. curl answers the second question, and it is the one that matters
+/// while certificates are being replaced underneath it.
+/// </remarks>
+public static class Curl
+{
+    private static readonly Lazy<bool> Present = new(() =>
+    {
+        try
+        {
+            return CurlH3.Run("curl", ["--version"], timeoutMs: 5000).Exit == 0;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    });
+
+    public static bool Available => Present.Value;
+
+    /// <summary>
+    /// One verified HTTPS GET. <paramref name="host"/> is sent as SNI and checked against the
+    /// certificate; the connection still goes to loopback, which is what --resolve is for.
+    /// Optionally presents a client certificate, for a server that asks for one.
+    /// </summary>
+    public static (int Exit, string Stdout, string Stderr) Get(string host, int port, string caPath,
+        string path = "/", string? clientCert = null, string? clientKey = null, int timeoutMs = 15000)
+    {
+        var args = new List<string>
+        {
+            "--cacert", caPath,
+            "--resolve", $"{host}:{port}:127.0.0.1",
+            "--max-time", "15",
+            "--silent", "--show-error",
+        };
+
+        if (clientCert is not null && clientKey is not null)
+        {
+            args.Add("--cert");
+            args.Add(clientCert);
+            args.Add("--key");
+            args.Add(clientKey);
+        }
+
+        args.Add($"https://{host}:{port}{path}");
+
+        return CurlH3.Run("curl", [.. args], timeoutMs);
+    }
 }
 
 /// <summary>A throwaway self-signed cert for the TLS test, written to PEM (ioxide.tls wants paths).</summary>
@@ -1115,13 +1238,25 @@ public static class TestCert
     /// can only ever ask "which certificate came back". Handing these to a client that checks makes
     /// the assertion "would anyone actually accept this", and that is a different question.
     /// </remarks>
+    /// <summary>
+    /// A second, DIFFERENT certificate for the same name, signed by the same CA - what a renewal
+    /// produces. Distinct key and serial, identical subject and SAN, so a validating client accepts
+    /// either and cannot tell which it got except by looking.
+    /// </summary>
+    public static (string CaPath, string CertPath, string KeyPath) EnsureRenewedFromCa(string host)
+        => EnsureNamedFromCa(host, "renewed");
+
     public static (string CaPath, string CertPath, string KeyPath) EnsureNamedFromCa(string host)
+        => EnsureNamedFromCa(host, "");
+
+    private static (string CaPath, string CertPath, string KeyPath) EnsureNamedFromCa(string host, string variant)
     {
         (string ca, _, _, _, _, _, _) = EnsureMutualTls();
 
         string dir = Path.Combine(Path.GetTempPath(), "ioxide-e2e-mtls");
         string tag = Convert.ToHexString(
-            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(host)))[..8];
+            System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(host + "\u0000" + variant)))[..8];
 
         string certPath = Path.Combine(dir, $"host-{tag}.crt");
         string keyPath = Path.Combine(dir, $"host-{tag}.key");

@@ -40,7 +40,8 @@ public sealed unsafe class QuicClientEngine : IDisposable
             OnAckedStreamData    = &QuicEngineConnection.CbAckedStreamData,
         };
 
-        _engine = Ngtcp2.iq_client_engine_new(alpn, callbacks);
+        // No certificate: the two nulls are what "this client presents nothing" looks like.
+        _engine = Ngtcp2.iq_client_engine_new_mtls(alpn, null, null, callbacks);
         if (_engine == 0)
         {
             throw new InvalidOperationException("ioxide.ngtcp2: client engine init failed");

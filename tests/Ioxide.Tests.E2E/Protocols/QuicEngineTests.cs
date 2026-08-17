@@ -153,7 +153,7 @@ internal sealed unsafe class QuicTestClient : IDisposable
         {
             OnStreamData = &OnClientStreamData,
         };
-        _clientEngine = iq_client_engine_new("echo", cbs);
+        _clientEngine = iq_client_engine_new_mtls("echo", null, null, cbs);
         Assert.True(_clientEngine != 0, "client engine init failed");
 
         // Local + remote sockaddr_in (loopback). ngtcp2 needs both for the path.
@@ -322,7 +322,10 @@ internal sealed unsafe class QuicTestClient : IDisposable
     }
 
     private const string Lib = "ioxide_ngtcp2";
-    [DllImport(Lib)] private static extern nint iq_client_engine_new([MarshalAs(UnmanagedType.LPUTF8Str)] string alpn, IqCallbacks cbs);
+    [DllImport(Lib)] private static extern nint iq_client_engine_new_mtls(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string alpn,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? certPath,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? keyPath, IqCallbacks cbs);
     [DllImport(Lib)] private static extern void iq_client_engine_free(nint e);
     [DllImport(Lib)] private static extern nint iq_client_connect(nint e, byte* localSa, nuint localLen, byte* remoteSa, nuint remoteLen, [MarshalAs(UnmanagedType.LPUTF8Str)] string serverName, [MarshalAs(UnmanagedType.LPUTF8Str)] string alpn, nuint scidLen, ulong ts, void* user, byte* scidOut);
     [DllImport(Lib)] private static extern long iq_client_open_bidi(nint conn);

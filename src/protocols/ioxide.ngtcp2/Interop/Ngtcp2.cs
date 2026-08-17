@@ -29,10 +29,6 @@ internal static unsafe class Ngtcp2
         public delegate* unmanaged<void*, long, ulong, ulong, void>     OnAckedStreamData;
     }
 
-    [DllImport(Lib)] internal static extern nint iq_engine_new(
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string certPemPath,
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string keyPemPath,
-        nuint cidLen, byte* alpn, nuint alpnLen, Callbacks cbs);
 
     /// <summary>
     /// Engine with client-certificate verification. Client certificates are validated against
@@ -101,13 +97,10 @@ internal static unsafe class Ngtcp2
 
     [DllImport(Lib)] internal static extern nint iq_conn_close(
         nint conn, ulong appErrorCode, byte* dest, nuint destLen, ulong ts);
-    [DllImport(Lib)] internal static extern nint iq_conn_write_close(
-        nint conn, byte* dest, nuint destLen, ulong ts);
 
     [DllImport(Lib)] internal static extern ulong iq_conn_expiry(nint conn);
     [DllImport(Lib)] internal static extern int   iq_conn_handle_expiry(nint conn, ulong ts);
     [DllImport(Lib)] internal static extern int   iq_conn_is_established(nint conn);
-    [DllImport(Lib)] internal static extern int   iq_conn_in_draining(nint conn);
     [DllImport(Lib)] internal static extern long  iq_conn_open_uni(nint conn);
     [DllImport(Lib)] internal static extern void  iq_conn_set_stream_paced(nint conn, long streamId, int on);
     [DllImport(Lib)] internal static extern void  iq_conn_consume(nint conn, long streamId, ulong n);
@@ -115,8 +108,19 @@ internal static unsafe class Ngtcp2
 
     // --- client side (ioxide.httpclient / QuicClientEngine) ---------------------------------
 
-    [DllImport(Lib)] internal static extern nint iq_client_engine_new(
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string alpn, Callbacks callbacks);
+    /// <summary>
+    /// Client engine. The certificate and key are what this client PRESENTS when a server asks for
+    /// one - both null to present nothing, which is the ordinary case.
+    /// </summary>
+    /// <remarks>
+    /// This client does not authenticate the server: it accepts whatever certificate it is sent.
+    /// </remarks>
+    [DllImport(Lib)] internal static extern nint iq_client_engine_new_mtls(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string alpn,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? certPemPath,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? keyPemPath,
+        Callbacks cbs);
+
     [DllImport(Lib)] internal static extern void iq_client_engine_free(nint engine);
 
     /// <summary>Open a client connection. scidLen must equal the demux slice of whoever routes our

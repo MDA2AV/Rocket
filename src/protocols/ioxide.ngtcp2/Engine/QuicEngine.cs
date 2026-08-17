@@ -174,8 +174,10 @@ public sealed unsafe class QuicEngine : IDisposable
     /// host. Connections already established keep the certificate they were given; the next
     /// handshake gets the new one.
     /// </summary>
-    /// <param name="certificatePath">The default certificate, for a client that sends no name or an unregistered one.</param>
-    /// <param name="keyPath">Its private key, PEM.</param>
+    /// <param name="defaultCertificate">
+    /// The certificate for a client that sends no name, or asks for one not in
+    /// <paramref name="certificatesByHost"/>.
+    /// </param>
     /// <param name="certificatesByHost">The certificates chosen by name, or null to serve only the default.</param>
     /// <remarks>
     /// What renewal needs. An ACME client rewrites its PEM every couple of months, and without this
@@ -199,20 +201,32 @@ public sealed unsafe class QuicEngine : IDisposable
     /// engine is disposed. Renewing a handful of names a few times a year costs kilobytes.
     /// </remarks>
     /// <exception cref="InvalidOperationException">The certificates could not be loaded; the engine still serves the previous ones.</exception>
-    public void ReplaceCertificates(string certificatePath, string keyPath,
+    public void ReplaceCertificates(QuicCertificate defaultCertificate,
         IReadOnlyDictionary<string, QuicCertificate>? certificatesByHost = null)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(certificatePath);
-        ArgumentException.ThrowIfNullOrWhiteSpace(keyPath);
+        ArgumentNullException.ThrowIfNull(defaultCertificate);
+        ArgumentException.ThrowIfNullOrWhiteSpace(defaultCertificate.CertificatePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(defaultCertificate.KeyPath);
+
+        // Validated before anything is allocated, so the cleanup below only ever has to undo
+        // allocation rather than half a validation pass.
+        foreach ((string host, QuicCertificate certificate) in
+                 certificatesByHost ?? (IReadOnlyDictionary<string, QuicCertificate>)new Dictionary<string, QuicCertificate>())
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(host);
+            ArgumentNullException.ThrowIfNull(certificate);
+            ArgumentException.ThrowIfNullOrWhiteSpace(certificate.CertificatePath);
+            ArgumentException.ThrowIfNullOrWhiteSpace(certificate.KeyPath);
+        }
 
         lock (_rotation)
         {
             ObjectDisposedException.ThrowIf(_engine == 0, this);
-            Replace(certificatePath, keyPath, certificatesByHost);
+            Replace(defaultCertificate, certificatesByHost);
         }
     }
 
-    private void Replace(string certificatePath, string keyPath,
+    private void Replace(QuicCertificate defaultCertificate,
         IReadOnlyDictionary<string, QuicCertificate>? certificatesByHost)
     {
         int count = certificatesByHost?.Count ?? 0;
@@ -228,10 +242,6 @@ public sealed unsafe class QuicEngine : IDisposable
             {
                 foreach ((string host, QuicCertificate certificate) in certificatesByHost)
                 {
-                    ArgumentException.ThrowIfNullOrWhiteSpace(host);
-                    ArgumentException.ThrowIfNullOrWhiteSpace(certificate.CertificatePath);
-                    ArgumentException.ThrowIfNullOrWhiteSpace(certificate.KeyPath);
-
                     hosts[filled] = Marshal.StringToCoTaskMemUTF8(host);
                     certs[filled] = Marshal.StringToCoTaskMemUTF8(certificate.CertificatePath);
                     keys[filled] = Marshal.StringToCoTaskMemUTF8(certificate.KeyPath);
@@ -243,14 +253,15 @@ public sealed unsafe class QuicEngine : IDisposable
 
             fixed (nint* h = hosts, c = certs, k = keys)
             {
-                result = Ngtcp2.iq_engine_replace_certificates(_engine, certificatePath, keyPath,
-                    h, c, k, (nuint)filled);
+                result = Ngtcp2.iq_engine_replace_certificates(_engine,
+                    defaultCertificate.CertificatePath, defaultCertificate.KeyPath, h, c, k, (nuint)filled);
             }
 
             if (result != 0)
             {
                 throw new InvalidOperationException(
-                    $"ioxide.ngtcp2: could not replace the certificates from '{certificatePath}' / '{keyPath}'. " +
+                    $"ioxide.ngtcp2: could not replace the certificates from " +
+                    $"'{defaultCertificate.CertificatePath}' / '{defaultCertificate.KeyPath}'. " +
                     "The engine still serves the ones it had.");
             }
         }

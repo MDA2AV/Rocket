@@ -38,8 +38,10 @@ public sealed class TlsOptions
     /// byte for byte and so would simply never be asked for. Two keys differing only in case are
     /// refused, since only the first could ever be served.
     ///
-    /// Each entry costs one OpenSSL context, built once when the service starts. Selection at
-    /// handshake time is a dictionary lookup on the reactor thread, with no managed allocation.
+    /// Each entry costs one OpenSSL context. Selection at handshake time is a short linear scan
+    /// over the names as UTF-8 bytes, on the reactor thread, with no managed allocation - a
+    /// dictionary would mean decoding the name into a string first, which is the allocation the
+    /// shape exists to avoid. Contexts are rebuilt whenever the certificates are replaced.
     /// </remarks>
     public IReadOnlyDictionary<string, TlsCertificate>? CertificatesByHost { get; init; }
 

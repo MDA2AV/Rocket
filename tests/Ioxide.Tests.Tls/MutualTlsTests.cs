@@ -192,7 +192,8 @@ internal static class MutualTlsTests
                 CertificatePath = certPath,
                 KeyPath = keyPath,
                 RequireClientCertificate = true,
-            }), "RequireClientCertificate without anchors must be rejected");
+            }, "RequireClientCertificate needs trust anchors"),
+                "RequireClientCertificate without anchors must be rejected");
         });
 
         runner.Test("mtls: two client CA sources are refused", () =>
@@ -205,7 +206,8 @@ internal static class MutualTlsTests
                 KeyPath = serverKey,
                 ClientCaPath = ca,
                 ClientCaPem = File.ReadAllText(ca),
-            }), "ClientCaPath and ClientCaPem together must be rejected");
+            }, "At most one client CA source"),
+                "ClientCaPath and ClientCaPem together must be rejected");
         });
 
         runner.Test("mtls: an unreadable client CA fails at startup", () =>
@@ -217,7 +219,8 @@ internal static class MutualTlsTests
                 CertificatePath = certPath,
                 KeyPath = keyPath,
                 ClientCaPath = "/nonexistent/ca.pem",
-            }), "a missing CA file must be reported at startup");
+            }, "/nonexistent/ca.pem"),
+                "a missing CA file must be reported at startup");
         });
     }
 
@@ -241,16 +244,21 @@ internal static class MutualTlsTests
         }
     }
 
-    private static bool StartFails(TlsOptions options)
+    /// <summary>
+    /// Whether starting with these options was refused FOR THE STATED REASON. The reason matters:
+    /// without it this also passes when the port was already bound or the reactor died on the way
+    /// up, and reports that as the configuration refusal it was looking for.
+    /// </summary>
+    private static bool StartFails(TlsOptions options, string because)
     {
         try
         {
             TestServer.Start(EmptyHandler, r => TlsService.Start(r, options));
             return false;
         }
-        catch (Exception)
+        catch (Exception e)
         {
-            return true;
+            return e.Message.Contains(because);
         }
     }
 

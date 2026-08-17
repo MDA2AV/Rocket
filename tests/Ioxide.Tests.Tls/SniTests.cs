@@ -16,6 +16,8 @@ namespace Ioxide.Tests;
 /// </remarks>
 internal static class SniTests
 {
+    private static readonly byte[] Response = "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok"u8.ToArray();
+
     public static void Register(Runner runner, bool ktls)
     {
         foreach ((string label, bool kernelTx) in Paths(ktls))
@@ -492,6 +494,20 @@ internal static class SniTests
         {
             session = await reactor.GetService<TlsService>()!.AcceptAsync(connection);
 
+            // The first request routinely rides in with the handshake's final flight - a TLS 1.3
+            // client sends it immediately after Finished, and those bytes are already decrypted and
+            // gone from the socket by the time AcceptAsync returns. Answering it BEFORE parking on
+            // a read is what the send-first loop means; waiting first hangs, because the bytes
+            // being waited for already arrived.
+            if (!session.DrainPlaintext().IsEmpty)
+            {
+                session.Write(connection, Response);
+                await connection.FlushAsync();
+            }
+
+            // No ResetRead above: that belongs to a read that was actually issued, and calling it
+            // for one that never happened leaves the connection's read state describing a read
+            // nobody made.
             while (true)
             {
                 RecvSnapshot snapshot = await connection.ReadAsync();
