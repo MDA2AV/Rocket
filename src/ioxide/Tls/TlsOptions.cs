@@ -20,6 +20,30 @@ public sealed class TlsOptions
     public string? KeyPem { get; init; }
 
     /// <summary>
+    /// Further certificates, chosen by the name the client asked for - Server Name Indication
+    /// (RFC 6066 3.1), which is what lets one address serve several hosts over TLS.
+    /// </summary>
+    /// <remarks>
+    /// The certificate above remains the DEFAULT, and answers a client that sent no name or asked
+    /// for one this table does not hold. Refusing an unknown name is not done here: a server that
+    /// aborts the handshake on it cannot serve a bare IP or an alias, and the client would see a
+    /// connection failure rather than a certificate it can reason about.
+    ///
+    /// Names are matched case-insensitively and exactly - a wildcard certificate covers its names
+    /// through the certificate itself, not through this table. Keys are hostnames only: SNI carries
+    /// no port, and a literal IP address is not a legal SNI value (RFC 6066 3.1).
+    ///
+    /// Keys must be ASCII, which is what SNI carries: an international name belongs here in its
+    /// A-label form (<c>xn--</c>...), the form a client actually sends. A non-ASCII key is matched
+    /// byte for byte and so would simply never be asked for. Two keys differing only in case are
+    /// refused, since only the first could ever be served.
+    ///
+    /// Each entry costs one OpenSSL context, built once when the service starts. Selection at
+    /// handshake time is a dictionary lookup on the reactor thread, with no managed allocation.
+    /// </remarks>
+    public IReadOnlyDictionary<string, TlsCertificate>? CertificatesByHost { get; init; }
+
+    /// <summary>
     /// Protocols this port serves, MOST PREFERRED FIRST. The client sends what it supports and the
     /// server picks; listing <c>["h2", "http/1.1"]</c> means a browser offering both gets HTTP/2.
     ///

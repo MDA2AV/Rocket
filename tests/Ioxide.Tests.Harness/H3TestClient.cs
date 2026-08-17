@@ -30,6 +30,20 @@ public sealed unsafe class H3TestClient : IDisposable
     private readonly string? _certPath;
     private readonly string? _keyPath;
 
+    /// <summary>
+    /// The name to ask for, sent as SNI. Defaults to "localhost"; set it to drive a server that
+    /// serves several hosts from one port. QUIC always sends a name - unlike TLS over TCP there is
+    /// no "omit the extension" case, since RFC 9001 clients are expected to offer one.
+    /// </summary>
+    public string ServerName { get; init; } = "localhost";
+
+    /// <summary>
+    /// Ask for the subject of the certificate the server serves. Off by default: it costs a
+    /// verify callback on the handshake, and only a test asking WHICH certificate came back needs
+    /// it. The certificate is accepted either way - this client never validated one.
+    /// </summary>
+    public bool RecordServerCertificate { get; init; }
+
     /// <summary>A client that presents a certificate when the server asks for one.</summary>
     public H3TestClient(string host, int port, string certPath, string keyPath) : this(host, port)
     {
@@ -58,6 +72,11 @@ public sealed unsafe class H3TestClient : IDisposable
             : iq_client_engine_new_mtls("h3", _certPath, _keyPath!, quicCbs);
         Assert.True(_clientEngine != 0, "client engine init failed");
 
+        if (RecordServerCertificate)
+        {
+            iq_client_engine_record_server_certificate(_clientEngine);
+        }
+
         Span<byte> local = stackalloc byte[16];
         Span<byte> remote = stackalloc byte[16];
         FillSockaddrIn(local, (ushort)((IPEndPoint)_udp.Client.LocalEndPoint!).Port, IPAddress.Loopback);
@@ -66,10 +85,30 @@ public sealed unsafe class H3TestClient : IDisposable
         fixed (byte* l = local)
         fixed (byte* r = remote)
         {
-            _conn = iq_client_connect(_clientEngine, l, 16, r, 16, "localhost", "h3",
+            _conn = iq_client_connect(_clientEngine, l, 16, r, 16, ServerName, "h3",
                                       0, NowNs(), (void*)GCHandle.ToIntPtr(_self), null);
         }
         Assert.True(_conn != 0, "client connect failed");
+    }
+
+    /// <summary>
+    /// The subject of the certificate the server served, once the handshake is done. Empty unless
+    /// <see cref="RecordServerCertificate"/> was set, since nothing captured it otherwise.
+    /// </summary>
+    /// <remarks>
+    /// Observed, not authenticated - this client validates nothing. Read through the shim's
+    /// server-subject entry point rather than its peer-subject one, which reports only identities
+    /// that were actually verified.
+    /// </remarks>
+    public string ServerCertificateSubject()
+    {
+        Span<byte> buf = stackalloc byte[256];
+
+        fixed (byte* p = buf)
+        {
+            nuint n = iq_conn_server_subject(_conn, p, (nuint)buf.Length);
+            return n == 0 ? "" : Encoding.ASCII.GetString(p, (int)n);
+        }
     }
 
     public bool CompleteHandshake(int timeoutMs)
@@ -407,6 +446,8 @@ public sealed unsafe class H3TestClient : IDisposable
     [DllImport(QuicLib)] private static extern int  iq_conn_read(nint conn, void* remoteSa, nuint remoteLen, byte* pkt, nuint pktLen, byte ecn, ulong ts);
     [DllImport(QuicLib)] private static extern int  iq_conn_is_established(nint conn);
     [DllImport(QuicLib)] private static extern void iq_conn_free(nint conn);
+    [DllImport(QuicLib)] private static extern void iq_client_engine_record_server_certificate(nint e);
+    [DllImport(QuicLib)] private static extern nuint iq_conn_server_subject(nint conn, byte* outBuf, nuint outLen);
 
     private const string H3Lib = "ioxide_nghttp3";
     [DllImport(H3Lib)] private static extern nint ih3_client_new(Ih3Callbacks cbs, void* user);

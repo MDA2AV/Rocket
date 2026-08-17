@@ -19,6 +19,7 @@ internal static class Program
         QuicEngineTests.Register(runner);
         H3Tests.Register(runner);
         MutualTlsTests.Register(runner);
+        SniTests.Register(runner);
         Http3Tests.Register(runner);
 
         return runner.Summary();

@@ -452,6 +452,75 @@ public static class Client
     }
 
     /// <summary>
+    /// Handshakes asking for one host by name, and reports the certificate the server answered
+    /// with - which is the whole observable effect of SNI selection.
+    /// </summary>
+    /// <param name="host">
+    /// Sent as the SNI extension. Null sends none at all, which is how "a client that does not
+    /// speak SNI gets the default certificate" is driven - SslStream omits the extension for an
+    /// empty target host, as an IP literal is not a legal SNI value.
+    /// </param>
+    public static string ServerCertificateSubject(int port, string? host, int timeoutMs = 6000)
+    {
+        using var client = new TcpClient();
+        client.Connect("127.0.0.1", port);
+        client.ReceiveTimeout = timeoutMs;
+
+        using var ssl = new SslStream(client.GetStream(), leaveInnerStreamOpen: false, (_, _, _, _) => true);
+
+        ssl.AuthenticateAsClient(new SslClientAuthenticationOptions
+        {
+            TargetHost = host ?? string.Empty,
+            EnabledSslProtocols = SslProtocols.Tls13,
+        });
+
+        return ssl.RemoteCertificate?.Subject ?? "<none>";
+    }
+
+    /// <summary>
+    /// Asks for one host by name and then USES the connection: reports the certificate served, the
+    /// ALPN agreed, and the answer to a request over it.
+    /// </summary>
+    /// <remarks>
+    /// The request is the point. Reading the certificate proves only that selection picked the
+    /// right one - a host context missing something the connection needs afterwards, its keylog
+    /// callback under kTLS being the real example, hands back a perfect certificate on a connection
+    /// that then dies. Only asking it for something catches that.
+    /// </remarks>
+    public static (string Subject, string Alpn, int Status, string Body) GetTlsSni(
+        int port, string path, string? host, string[]? alpn = null, int timeoutMs = 6000)
+    {
+        using var client = new TcpClient();
+        client.Connect("127.0.0.1", port);
+        client.ReceiveTimeout = timeoutMs;
+
+        using var ssl = new SslStream(client.GetStream(), leaveInnerStreamOpen: false, (_, _, _, _) => true);
+
+        var options = new SslClientAuthenticationOptions
+        {
+            TargetHost = host ?? string.Empty,
+            EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+        };
+
+        if (alpn is not null)
+        {
+            options.ApplicationProtocols = [.. alpn.Select(a => new SslApplicationProtocol(a))];
+        }
+
+        ssl.AuthenticateAsClient(options);
+
+        string subject = ssl.RemoteCertificate?.Subject ?? "<none>";
+        string negotiated = ssl.NegotiatedApplicationProtocol.Protocol.Length == 0
+            ? ""
+            : ssl.NegotiatedApplicationProtocol.ToString();
+
+        Send(ssl, path);
+        (int status, string body) = ReadResponse(ssl);
+
+        return (subject, negotiated, status, body);
+    }
+
+    /// <summary>
     /// Like <see cref="GetTls"/>, but presenting a client certificate - mutual TLS. Pass null to
     /// present none, which is how "the server demanded one and we had nothing" is driven.
     /// </summary>
@@ -461,8 +530,14 @@ public static class Client
     /// <see cref="AuthenticationException"/> or an <see cref="IOException"/> depending on which side
     /// noticed first, so callers assert on "it threw" rather than on which one.
     /// </remarks>
+    /// <param name="host">
+    /// The name to ask for, sent as SNI. Defaults to the name the default certificate carries; pass
+    /// another to drive a client certificate and a named host TOGETHER, which is what proves that
+    /// selecting a certificate by name cannot also select its way out of client verification.
+    /// </param>
     public static (int Status, string Body) GetTlsClientCert(
-        int port, string path, string? certPath, string? keyPath, int timeoutMs = 6000)
+        int port, string path, string? certPath, string? keyPath, int timeoutMs = 6000,
+        string host = "localhost")
     {
         using var client = new TcpClient();
         client.Connect("127.0.0.1", port);
@@ -481,7 +556,7 @@ public static class Client
         using var ssl = new SslStream(client.GetStream(), leaveInnerStreamOpen: false, (_, _, _, _) => true);
         ssl.AuthenticateAsClient(new SslClientAuthenticationOptions
         {
-            TargetHost = "localhost",
+            TargetHost = host,
             EnabledSslProtocols = SslProtocols.Tls13,
             ClientCertificates = certificates,
         });
@@ -796,6 +871,105 @@ public static class Sidecars
     public static bool KtlsAvailable() => Directory.Exists("/sys/module/tls");
 }
 
+/// <summary>
+/// An HTTP/3 curl, used as a client that actually VALIDATES the server - which ioxide's own QUIC
+/// client does not do, so nothing driven by it can answer "would a real client accept this".
+/// </summary>
+/// <remarks>
+/// Optional by design: h3 support is not in a stock curl, so a test that needs one skips where it
+/// is missing rather than failing. Set <c>IOXIDE_CURL_H3</c> to point at a build, otherwise
+/// <c>curl-h3</c> and then <c>curl</c> are tried and each is asked whether it really has HTTP3.
+/// </remarks>
+public static class CurlH3
+{
+    private static readonly Lazy<string?> Found = new(Locate);
+
+    /// <summary>The binary to run, or null when this machine has no HTTP/3 curl.</summary>
+    public static string? Path => Found.Value;
+
+    public static bool Available => Found.Value is not null;
+
+    private static string? Locate()
+    {
+        string? configured = Environment.GetEnvironmentVariable("IOXIDE_CURL_H3");
+
+        foreach (string candidate in configured is null
+                     ? ["curl-h3", "curl"]
+                     : new[] { configured, "curl-h3", "curl" })
+        {
+            if (HasHttp3(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool HasHttp3(string binary)
+    {
+        try
+        {
+            (int exit, string stdout, _) = Run(binary, ["--version"], timeoutMs: 5000);
+
+            // The Features line is the only claim that counts - a curl can link ngtcp2 and still
+            // be built without the protocol.
+            return exit == 0 && stdout.Contains("HTTP3");
+        }
+        catch (Exception)
+        {
+            return false;   // not on PATH, not executable: simply not a curl we can use
+        }
+    }
+
+    /// <summary>Runs curl and hands back what it said. Never throws on a non-zero exit - a refused
+    /// connection IS the result some tests are asserting on.</summary>
+    public static (int Exit, string Stdout, string Stderr) Run(string binary, string[] args, int timeoutMs = 15000)
+    {
+        var info = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = binary,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+
+        foreach (string a in args)
+        {
+            info.ArgumentList.Add(a);
+        }
+
+        using var process = System.Diagnostics.Process.Start(info)
+            ?? throw new IOException($"could not start {binary}");
+
+        string stdout = process.StandardOutput.ReadToEnd();
+        string stderr = process.StandardError.ReadToEnd();
+
+        if (!process.WaitForExit(timeoutMs))
+        {
+            process.Kill(entireProcessTree: true);
+            throw new TimeoutException($"{binary} did not exit within {timeoutMs}ms");
+        }
+
+        return (process.ExitCode, stdout, stderr);
+    }
+
+    /// <summary>
+    /// One verified HTTP/3 GET. <paramref name="host"/> is what curl asks for by name - sent as SNI
+    /// AND checked against the certificate it gets back - while the connection still goes to
+    /// loopback, which is what --resolve is for.
+    /// </summary>
+    public static (int Exit, string Stdout, string Stderr) Get(string host, int port, string caPath, string path = "/")
+        => Run(Path!,
+        [
+            "--http3-only",
+            "--cacert", caPath,
+            "--resolve", $"{host}:{port}:127.0.0.1",
+            "--max-time", "10",
+            "--silent", "--show-error",
+            $"https://{host}:{port}{path}",
+        ]);
+}
+
 /// <summary>A throwaway self-signed cert for the TLS test, written to PEM (ioxide.tls wants paths).</summary>
 public static class TestCert
 {
@@ -819,7 +993,8 @@ public static class TestCert
         string rogueCert = Path.Combine(dir, "rogue.crt");
         string rogueKey = Path.Combine(dir, "rogue.key");
 
-        if (File.Exists(ca) && File.Exists(clientCert) && File.Exists(rogueCert))
+        if (File.Exists(ca) && File.Exists(Path.Combine(dir, "ca.key"))
+            && File.Exists(clientCert) && File.Exists(rogueCert))
         {
             return (ca, serverCert, serverKey, clientCert, clientKey, rogueCert, rogueKey);
         }
@@ -839,6 +1014,10 @@ public static class TestCert
             new System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension(true, false, 0, true));
         using var caCert = caRequest.CreateSelfSigned(notBefore, caNotAfter);
         File.WriteAllText(ca, caCert.ExportCertificatePem());
+
+        // The CA's key too, so a test can issue a certificate for a name of its own later -
+        // EnsureNamedFromCa signs with it, and a chain needs the issuer that a client will anchor to.
+        File.WriteAllText(Path.Combine(dir, "ca.key"), caKey.ExportPkcs8PrivateKeyPem());
 
         Sign(caCert, "CN=localhost", serverCert, serverKey, server: true, notBefore, leafNotAfter);
         Sign(caCert, "CN=alice", clientCert, clientKey, server: false, notBefore, leafNotAfter);
@@ -883,6 +1062,100 @@ public static class TestCert
             File.WriteAllText(certPath, signed.ExportCertificatePem());
             File.WriteAllText(keyPath, key.ExportPkcs8PrivateKeyPem());
         }
+    }
+
+    /// <summary>
+    /// A self-signed certificate for one name, so SNI selection has something to tell apart. The
+    /// subject carries the name, which is what a test asserts on after the handshake.
+    /// </summary>
+    public static (string CertPath, string KeyPath) EnsureNamed(string host)
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "ioxide-e2e-tls");
+        Directory.CreateDirectory(dir);
+
+        // Distinct hosts must not share a filename. Substituting the awkward characters alone maps
+        // alpha.test and alpha_test onto one pair of files, and whichever is asked for second
+        // silently gets the other's certificate - a wrong-certificate result inside the very
+        // fixture meant to prove certificates are chosen correctly. The hash keeps them apart.
+        string safe = host.Replace('*', '_').Replace('.', '_');
+        string tag = Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(host)))[..8];
+
+        string certPath = Path.Combine(dir, $"sni-{safe}-{tag}.crt");
+        string keyPath = Path.Combine(dir, $"sni-{safe}-{tag}.key");
+
+        // Both halves, not just the certificate: a leftover certificate beside a missing key is
+        // reused forever and every test fails at startup on a path that looks perfectly fine.
+        if (!File.Exists(certPath) || !File.Exists(keyPath))
+        {
+            using var rsa = RSA.Create(2048);
+            var request = new CertificateRequest($"CN={host}", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+
+            var names = new SubjectAlternativeNameBuilder();
+            names.AddDnsName(host);
+            request.CertificateExtensions.Add(names.Build());
+
+            using X509Certificate2 cert = request.CreateSelfSigned(
+                DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
+
+            File.WriteAllText(certPath, cert.ExportCertificatePem());
+            File.WriteAllText(keyPath, rsa.ExportPkcs8PrivateKeyPem());
+        }
+
+        return (certPath, keyPath);
+    }
+
+    /// <summary>
+    /// A certificate for one name, signed by the same CA <see cref="EnsureMutualTls"/> mints, with
+    /// that name as a SAN. Unlike <see cref="EnsureNamed"/>'s self-signed pair, this is something a
+    /// REAL client can validate: a chain back to an anchor it can be given, and a name to match.
+    /// </summary>
+    /// <remarks>
+    /// Which is the point. ioxide's own QUIC client authenticates nothing, so a test driven by it
+    /// can only ever ask "which certificate came back". Handing these to a client that checks makes
+    /// the assertion "would anyone actually accept this", and that is a different question.
+    /// </remarks>
+    public static (string CaPath, string CertPath, string KeyPath) EnsureNamedFromCa(string host)
+    {
+        (string ca, _, _, _, _, _, _) = EnsureMutualTls();
+
+        string dir = Path.Combine(Path.GetTempPath(), "ioxide-e2e-mtls");
+        string tag = Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(host)))[..8];
+
+        string certPath = Path.Combine(dir, $"host-{tag}.crt");
+        string keyPath = Path.Combine(dir, $"host-{tag}.key");
+
+        if (File.Exists(certPath) && File.Exists(keyPath))
+        {
+            return (ca, certPath, keyPath);
+        }
+
+        // The CA's own key is not kept, so the CA is re-derived here from the same material rather
+        // than loaded - EnsureMutualTls writes only the certificate.
+        using X509Certificate2 caCert = X509Certificate2.CreateFromPemFile(
+            Path.Combine(dir, "ca.crt"), Path.Combine(dir, "ca.key"));
+
+        DateTimeOffset notBefore = DateTimeOffset.UtcNow.AddDays(-1);
+        DateTimeOffset notAfter = notBefore.AddYears(1);
+
+        using var key = RSA.Create(2048);
+        var request = new CertificateRequest($"CN={host}", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+
+        var names = new SubjectAlternativeNameBuilder();
+        names.AddDnsName(host);
+        request.CertificateExtensions.Add(names.Build());
+        request.CertificateExtensions.Add(
+            new X509EnhancedKeyUsageExtension([new Oid("1.3.6.1.5.5.7.3.1")], false));
+
+        byte[] serial = new byte[8];
+        RandomNumberGenerator.Fill(serial);
+        using X509Certificate2 signed = request.Create(caCert, notBefore, notAfter, serial);
+
+        File.WriteAllText(certPath, signed.ExportCertificatePem());
+        File.WriteAllText(keyPath, key.ExportPkcs8PrivateKeyPem());
+
+        return (ca, certPath, keyPath);
     }
 
     public static (string CertPath, string KeyPath) Ensure()

@@ -22,6 +22,9 @@ public sealed unsafe class QuicEngine : IDisposable
 {
     private nint _engine;   // iq_engine*
 
+    // Set once a factory exists, which is the point past which reactors may read the SNI table.
+    private bool _serving;
+
     /// <summary>CID length this endpoint mints; must match <see cref="QuicOptions.LocalCidLength"/>.</summary>
     public uint CidLength { get; }
 
@@ -101,6 +104,54 @@ public sealed unsafe class QuicEngine : IDisposable
         }
     }
 
+    /// <summary>
+    /// Serves <paramref name="certificatePath"/> to clients asking for <paramref name="host"/> by
+    /// name, instead of the certificate this engine was built with - Server Name Indication
+    /// (RFC 6066 3.1), which is what lets one UDP port answer for several hosts.
+    /// </summary>
+    /// <remarks>
+    /// Call before <see cref="CreateFactory()"/>, and this REFUSES afterwards. The table is read
+    /// during the handshake on whichever reactor the connection landed on, with no lock; adding to
+    /// it while those reads are running is a write beside them, and the reader would be walking
+    /// memory the write is in the middle of moving. Enforced rather than documented because the
+    /// consequence is not a wrong answer - it is a native use-after-free.
+    ///
+    /// The certificate given to the constructor stays the default: a client that sends no name, or
+    /// asks for one not registered here, is answered with it rather than refused. Client
+    /// verification carries over unchanged, so a named host cannot quietly serve without the mutual
+    /// TLS the engine was configured for.
+    ///
+    /// A name already registered is refused rather than shadowed, since the first registration is
+    /// the one that would answer.
+    ///
+    /// PEM paths, for the same reason the constructor takes them: ngtcp2 loads certificates by path.
+    /// </remarks>
+    /// <exception cref="InvalidOperationException">
+    /// The engine is already serving, the name is already registered, or the certificate or key
+    /// could not be loaded.
+    /// </exception>
+    /// <exception cref="ArgumentException">The name is blank.</exception>
+    public void AddHost(string host, string certificatePath, string keyPath)
+    {
+        // Before the name is judged: on a serving engine that is the reason the call is refused,
+        // whatever the name looks like, and reporting the name first would send the caller after
+        // the wrong problem.
+        if (_serving)
+        {
+            throw new InvalidOperationException(
+                $"ioxide.ngtcp2: cannot add '{host}' once the engine is serving - register every host " +
+                "before CreateFactory. The handshake reads the table without a lock.");
+        }
+
+        ArgumentException.ThrowIfNullOrWhiteSpace(host);
+
+        if (Ngtcp2.iq_engine_add_host(_engine, host, certificatePath, keyPath) != 0)
+        {
+            throw new InvalidOperationException(
+                $"ioxide.ngtcp2: could not serve '{host}' from '{certificatePath}' / '{keyPath}'.");
+        }
+    }
+
     // TLS wire format: each entry length-prefixed (one byte), concatenated.
     private static byte[] AlpnWire(string[]? alpn)
     {
@@ -133,6 +184,10 @@ public sealed unsafe class QuicEngine : IDisposable
 
     public QuicConnectionFactory CreateFactory(Func<Reactor, QuicEngineConnection> create)
     {
+        // From here the SNI table can be read by any reactor a handshake lands on, so it is closed
+        // to further writes. See AddHost.
+        _serving = true;
+
         return (Reactor reactor, in UdpDatagram datagram, in QuicCid dcid) =>
         {
             QuicEngineConnection conn = create(reactor);
