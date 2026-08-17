@@ -40,9 +40,13 @@ string? keyOverride  = null;
 
 Env.OverrideCert(ref certOverride, ref keyOverride);
 
-// The CA that client certificates are checked against. This is what turns mTLS ON - leave it null
+// The CA that client certificates are checked against. This is what turns mTLS ON - leave both null
 // and the server verifies nothing about the client, exactly as the other h3 samples do.
+//
+// Either the bundle's path, or the bundle itself as PEM text for a host that keeps its CA in a
+// secrets store rather than on disk. Set one, not both.
 string? clientCaPath = Environment.GetEnvironmentVariable("PLAYGROUND_CLIENT_CA");
+string? clientCaPem  = Environment.GetEnvironmentVariable("PLAYGROUND_CLIENT_CA_PEM");
 
 // Refuse a client that offers no certificate, during the handshake. Off, so a client without one
 // still connects and the handler decides what it may see - which is the more useful default when
@@ -55,14 +59,16 @@ int udpRecvSlots = 16;
 
 (string certPath, string keyPath) = QuicCert.Ensure(certOverride, keyOverride);
 
-if (clientCaPath is null)
+if (clientCaPath is null && clientCaPem is null)
 {
-    Console.Error.WriteLine("set PLAYGROUND_CLIENT_CA to a PEM bundle of the CA that signs your client certificates.");
+    Console.Error.WriteLine("set PLAYGROUND_CLIENT_CA to a PEM bundle of the CA that signs your client "
+                          + "certificates, or PLAYGROUND_CLIENT_CA_PEM to that bundle as text.");
     return 1;
 }
 
 using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"],
-    clientCaPemPath: clientCaPath, requireClientCertificate: requireClientCertificate);
+    clientCaPemPath: clientCaPath, requireClientCertificate: requireClientCertificate,
+    clientCaPem: clientCaPem);
 
 var config = new ServerConfig
 {
@@ -105,7 +111,7 @@ for (int i = 0; i < threads.Length; i++)
 }
 
 Console.WriteLine($"[http3-mtls] {config.ReactorCount} reactors on :{quicPort}, "
-                + $"client CA {clientCaPath}, "
+                + $"client CA {clientCaPath ?? "from PEM text"}, "
                 + $"client certificate {(requireClientCertificate ? "REQUIRED" : "optional")}");
 
 foreach (Thread thread in threads)

@@ -92,6 +92,79 @@ internal static class MutualTlsTests
             Assert.True(status != 200, $"an untrusted certificate was served anyway (status {status})");
         });
 
+        runner.Test("mtls: the trust anchors can be PEM text rather than a file", () =>
+        {
+            (string ca, string serverCert, string serverKey,
+             string clientCert, string clientKey, _, _) = TestCert.EnsureMutualTls();
+
+            // The same anchors as the first test, handed over as data instead of as a path - what a
+            // host keeping its bundle in a secrets store holds, without writing it out to read back.
+            using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                requireClientCertificate: true, clientCaPem: File.ReadAllText(ca));
+
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                    _ => new Nghttp3Response
+                    {
+                        Body = Encoding.ASCII.GetBytes((conn as QuicEngineConnection)?.PeerSubject ?? "anonymous"),
+                    }));
+
+            using var client = new H3TestClient("127.0.0.1", udpPort, clientCert, clientKey);
+            client.Connect();
+            Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");
+
+            (int status, string body) = client.Get("/", timeoutMs: 5000);
+            Assert.Equal(200, status);
+            Assert.True(body.Contains("alice"), $"the handler should see the client's subject, got: {body}");
+        });
+
+        runner.Test("mtls: PEM text anchors refuse a certificate from another CA", () =>
+        {
+            // The other half of the one above: anchors read from text have to turn a stranger away
+            // as well as let the trusted one in. A store that verified nothing would pass that test
+            // just as happily, so admitting alice proves only half of it.
+            (string ca, string serverCert, string serverKey, _, _,
+             string rogueCert, string rogueKey) = TestCert.EnsureMutualTls();
+
+            using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                requireClientCertificate: true, clientCaPem: File.ReadAllText(ca));
+
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                    static _ => new Nghttp3Response { Body = "should never be reached"u8.ToArray() }));
+
+            using var client = new H3TestClient("127.0.0.1", udpPort, rogueCert, rogueKey);
+            client.Connect();
+            client.CompleteHandshake(timeoutMs: 3000);
+
+            (int status, _) = client.Get("/", timeoutMs: 3000);
+            Assert.True(status != 200, $"an untrusted certificate was served anyway (status {status})");
+        });
+
+        runner.Test("mtls: naming both a CA file and CA text is refused", () =>
+        {
+            (string ca, string serverCert, string serverKey, _, _, _, _) = TestCert.EnsureMutualTls();
+
+            // Two sources for one answer: silently picking either would make the other look applied.
+            bool refused = false;
+
+            try
+            {
+                using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                    clientCaPemPath: ca, requireClientCertificate: true, clientCaPem: File.ReadAllText(ca));
+            }
+            catch (ArgumentException)
+            {
+                refused = true;
+            }
+
+            Assert.True(refused, "two client CA sources should be refused, not quietly resolved to one");
+        });
+
         runner.Test("mtls: off by default - no client CA means no certificate is asked for", () =>
         {
             // The regression guard for everyone not using mTLS: the handshake must be untouched.
