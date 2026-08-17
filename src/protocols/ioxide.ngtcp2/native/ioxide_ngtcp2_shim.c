@@ -33,6 +33,7 @@
 #include <openssl/bio.h>
 #include <openssl/pem.h>
 #include <openssl/evp.h>
+#include <openssl/err.h>
 
 /* ---- callback table into C# ------------------------------------------------------------- */
 
@@ -331,24 +332,58 @@ static int iq_cb_get_new_connection_id_noreport(ngtcp2_conn *conn, ngtcp2_cid *c
 
 iq_engine *iq_engine_new_mtls(const char *cert_pem_path, const char *key_pem_path,
                               size_t cidlen, const uint8_t *alpn, size_t alpn_len,
-                              const char *client_ca_pem_path, int require_client_cert,
-                              iq_callbacks cbs);
+                              const char *client_ca_pem_path, const char *client_ca_pem,
+                              int require_client_cert, iq_callbacks cbs);
 
 /* The original five-argument form: no client certificates, exactly as before. */
 iq_engine *iq_engine_new(const char *cert_pem_path, const char *key_pem_path,
                          size_t cidlen, const uint8_t *alpn, size_t alpn_len,
                          iq_callbacks cbs)
 {
-    return iq_engine_new_mtls(cert_pem_path, key_pem_path, cidlen, alpn, alpn_len, NULL, 0, cbs);
+    return iq_engine_new_mtls(cert_pem_path, key_pem_path, cidlen, alpn, alpn_len, NULL, NULL, 0, cbs);
 }
 
-/* With mTLS: client_ca_pem_path is the bundle client certificates are validated against, and
- * require_client_cert decides whether a client that offers none is refused outright or merely
- * unauthenticated. A NULL bundle leaves both off and the handshake is byte-for-byte what it was. */
+/* Trust anchors from PEM text rather than a file, for a host that carries its CA bundle as data.
+ * Returns how many certificates were added, 0 if the text held none usable.
+ *
+ * X509_STORE_load_locations cannot read memory, so the blocks are parsed here and added one at a
+ * time - the same anchors, reached the other way. A duplicate is not an error: add_cert refuses it
+ * and the store already holds one, so it counts. */
+static int iq_store_add_pem(X509_STORE *store, const char *pem)
+{
+    BIO *bio = BIO_new_mem_buf(pem, -1);
+    if (bio == NULL) {
+        return 0;
+    }
+
+    int added = 0;
+    X509 *cert;
+
+    while ((cert = PEM_read_bio_X509(bio, NULL, NULL, NULL)) != NULL) {
+        if (X509_STORE_add_cert(store, cert) == 1) {
+            added++;
+        } else if (ERR_GET_REASON(ERR_peek_last_error()) == X509_R_CERT_ALREADY_IN_HASH_TABLE) {
+            added++;
+        }
+        X509_free(cert);
+    }
+
+    /* The loop ends by design on PEM_R_NO_START_LINE once the last block is consumed, and any
+     * duplicate above left its own. Neither is a failure, so the queue must not outlive this. */
+    ERR_clear_error();
+
+    BIO_free(bio);
+    return added;
+}
+
+/* With mTLS: the client certificates are validated against client_ca_pem_path, a bundle on disk, or
+ * client_ca_pem, the same bundle as PEM text - at most one, and require_client_cert decides whether
+ * a client that offers none is refused outright or merely arrives unauthenticated. Both NULL leaves
+ * mTLS off and the handshake is byte-for-byte what it was. */
 iq_engine *iq_engine_new_mtls(const char *cert_pem_path, const char *key_pem_path,
                               size_t cidlen, const uint8_t *alpn, size_t alpn_len,
-                              const char *client_ca_pem_path, int require_client_cert,
-                              iq_callbacks cbs)
+                              const char *client_ca_pem_path, const char *client_ca_pem,
+                              int require_client_cert, iq_callbacks cbs)
 {
     iq_engine *e = calloc(1, sizeof(*e));
     if (e == NULL) {
@@ -407,14 +442,20 @@ iq_engine *iq_engine_new_mtls(const char *cert_pem_path, const char *key_pem_pat
 
     /* AFTER configure_server_context, deliberately: it sets its own fields on the context, and
        anything mTLS puts there first is not guaranteed to survive it. */
-    if (client_ca_pem_path != NULL) {
+    if (client_ca_pem_path != NULL || client_ca_pem != NULL) {
         X509_STORE *store = X509_STORE_new();
         if (store == NULL) {
             fprintf(stderr, "[ioxide.ngtcp2] failed to allocate the client CA store\n");
             goto fail;
         }
-        if (X509_STORE_load_locations(store, client_ca_pem_path, NULL) != 1) {
-            fprintf(stderr, "[ioxide.ngtcp2] failed to load client CA bundle from %s\n", client_ca_pem_path);
+        if (client_ca_pem_path != NULL) {
+            if (X509_STORE_load_locations(store, client_ca_pem_path, NULL) != 1) {
+                fprintf(stderr, "[ioxide.ngtcp2] failed to load client CA bundle from %s\n", client_ca_pem_path);
+                X509_STORE_free(store);
+                goto fail;
+            }
+        } else if (iq_store_add_pem(store, client_ca_pem) == 0) {
+            fprintf(stderr, "[ioxide.ngtcp2] the client CA PEM text held no usable certificate\n");
             X509_STORE_free(store);
             goto fail;
         }

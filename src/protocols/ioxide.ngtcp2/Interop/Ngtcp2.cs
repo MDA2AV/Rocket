@@ -35,16 +35,19 @@ internal static unsafe class Ngtcp2
         nuint cidLen, byte* alpn, nuint alpnLen, Callbacks cbs);
 
     /// <summary>
-    /// Engine with client-certificate verification. <paramref name="clientCaPemPath"/> is the bundle
-    /// client certificates are validated against; null leaves mTLS off and the handshake unchanged.
-    /// <paramref name="requireClientCert"/> decides whether a client offering none is refused
-    /// outright or merely arrives unauthenticated.
+    /// Engine with client-certificate verification. Client certificates are validated against
+    /// <paramref name="clientCaPemPath"/>, a bundle on disk, or <paramref name="clientCaPem"/>, the
+    /// same bundle as PEM text - pass at most one. Both null leaves mTLS off and the handshake
+    /// unchanged. <paramref name="requireClientCert"/> decides whether a client offering none is
+    /// refused outright or merely arrives unauthenticated.
     /// </summary>
     [DllImport(Lib)] internal static extern nint iq_engine_new_mtls(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string certPemPath,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string keyPemPath,
         nuint cidLen, byte* alpn, nuint alpnLen,
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string? clientCaPemPath, int requireClientCert,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? clientCaPemPath,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? clientCaPem,
+        int requireClientCert,
         Callbacks cbs);
 
     /// <summary>The verified client identity, or 0 written when the peer offered none.</summary>

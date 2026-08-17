@@ -39,12 +39,18 @@ public sealed unsafe class QuicEngine : IDisposable
     /// accept whichever protocol the client offers first (the pre-H3 permissive behavior).
     /// </summary>
     /// <param name="clientCaPemPath">
-    /// PEM bundle that client certificates are validated against - mutual TLS. Null (the default)
-    /// leaves it off and the handshake is exactly what it was.
+    /// PEM bundle that client certificates are validated against, as a path - mutual TLS. Null (the
+    /// default), with <paramref name="clientCaPem"/> also null, leaves it off and the handshake is
+    /// exactly what it was.
     ///
     /// QUIC settles client authentication during the handshake and RFC 9001 section 4.4 forbids
     /// doing it afterwards, so this is a property of the whole connection: there is no asking for a
     /// certificate later because a request happened to reach a protected route.
+    /// </param>
+    /// <param name="clientCaPem">
+    /// The same trust anchors as PEM text - the in-memory alternative to
+    /// <paramref name="clientCaPemPath"/>, for a host that carries its CA bundle as data rather than
+    /// as a file. Set at most one of the two.
     /// </param>
     /// <param name="requireClientCertificate">
     /// With a CA configured, whether a client offering no certificate is refused during the
@@ -53,8 +59,15 @@ public sealed unsafe class QuicEngine : IDisposable
     /// </param>
     public QuicEngine(string certPemPath, string keyPemPath, uint cidLength = 8, string[]? alpn = null,
         long maxSendRetentionBytes = 16L << 20,
-        string? clientCaPemPath = null, bool requireClientCertificate = false)
+        string? clientCaPemPath = null, bool requireClientCertificate = false,
+        string? clientCaPem = null)
     {
+        if (clientCaPemPath is not null && clientCaPem is not null)
+        {
+            throw new ArgumentException(
+                "At most one client CA source: set clientCaPemPath or clientCaPem, not both.", nameof(clientCaPem));
+        }
+
         CidLength = cidLength;
         // Clamp to a floor: the pump overshoots the high-water by at most one egress chunk (16 KiB),
         // so a cap below that would wedge a response mid-flight. 256 KiB gives comfortable headroom.
@@ -77,13 +90,14 @@ public sealed unsafe class QuicEngine : IDisposable
         {
             _engine = Ngtcp2.iq_engine_new_mtls(certPemPath, keyPemPath, (nuint)cidLength,
                 alpnWire.Length > 0 ? pAlpn : null, (nuint)alpnWire.Length,
-                clientCaPemPath, requireClientCertificate ? 1 : 0, callbacks);
+                clientCaPemPath, clientCaPem, requireClientCertificate ? 1 : 0, callbacks);
         }
         if (_engine == 0)
         {
             throw new InvalidOperationException(
                 $"ioxide.ngtcp2: engine init failed (cert '{certPemPath}', key '{keyPemPath}'"
-                + (clientCaPemPath is null ? ")" : $", client CA '{clientCaPemPath}')"));
+                + (clientCaPemPath is not null ? $", client CA '{clientCaPemPath}')"
+                    : clientCaPem is not null ? ", client CA from PEM text)" : ")"));
         }
     }
 
