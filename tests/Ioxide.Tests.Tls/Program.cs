@@ -24,6 +24,7 @@ internal static class Program
         MutualTlsTests.Register(runner, ktls);
         SniTests.Register(runner, ktls);
         RotationTests.Register(runner, ktls);
+        PostureTests.Register(runner);
 
         return runner.Summary();
     }

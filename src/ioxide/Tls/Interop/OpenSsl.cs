@@ -15,6 +15,7 @@ internal static unsafe partial class OpenSsl
     public const int SSL_CTRL_SET_MIN_PROTO_VERSION = 123;
     public const int SSL_CTRL_SET_MAX_PROTO_VERSION = 124;
     public const int SSL_CTRL_EXTRA_CHAIN_CERT = 14;
+    public const int TLS1_2_VERSION = 0x0303;
     public const int TLS1_3_VERSION = 0x0304;
     public const int SSL_TLSEXT_ERR_OK = 0;
     public const int SSL_TLSEXT_ERR_NOACK = 3;
@@ -38,8 +39,13 @@ internal static unsafe partial class OpenSsl
     public static partial int SSL_CTX_use_certificate_chain_file(nint ctx, string file);
     [LibraryImport(Ssl, StringMarshalling = StringMarshalling.Utf8)]
     public static partial int SSL_CTX_use_PrivateKey_file(nint ctx, string file, int type);
+    /// <summary>TLS 1.3 suites, e.g. "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384".</summary>
     [LibraryImport(Ssl, StringMarshalling = StringMarshalling.Utf8)]
     public static partial int SSL_CTX_set_ciphersuites(nint ctx, string list);
+
+    /// <summary>TLS 1.2 and below. A separate list from the 1.3 one, in OpenSSL and here.</summary>
+    [LibraryImport(Ssl, StringMarshalling = StringMarshalling.Utf8)]
+    public static partial int SSL_CTX_set_cipher_list(nint ctx, string list);
     [LibraryImport(Ssl)] public static partial long SSL_CTX_ctrl(nint ctx, int cmd, long arg, nint parg);
     [LibraryImport(Ssl)] public static partial int SSL_CTX_set_num_tickets(nint ctx, nuint num);
     /// <summary>

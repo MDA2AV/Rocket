@@ -60,6 +60,56 @@ public sealed class TlsOptions
     public string[] Alpn { get; init; } = ["http/1.1"];
 
     /// <summary>
+    /// How long a connection may take to finish its TLS handshake before the server gives up on
+    /// it, in milliseconds. 0 disables the sweep.
+    ///
+    /// The default exists because the handshake read has no deadline of its own: a peer that opens
+    /// a connection and then sends nothing, or dribbles a ClientHello a byte at a time, otherwise
+    /// holds a connection, its SSL object and its BIOs for as long as it cares to. That is cheap
+    /// to do and not cheap to absorb, and it is the one part of a TLS server reachable before any
+    /// authentication has happened.
+    ///
+    /// Enforced on the reactor's timer, so the granularity is the tick (~250 ms) and a connection
+    /// is closed at the first tick after its deadline rather than exactly on it.
+    /// </summary>
+    public int HandshakeTimeoutMs { get; init; } = 10_000;
+
+    /// <summary>
+    /// Lowest TLS version this server will negotiate.
+    ///
+    /// <see cref="TlsProtocolVersion.Default"/> keeps OpenSSL's own floor, which on a current
+    /// build is TLS 1.2. <see cref="TlsProtocolVersion.Tls13"/> turns the server into 1.3-only,
+    /// which is what a deployment that has to state a posture usually wants: it removes every
+    /// TLS 1.2 ciphersuite, renegotiation, and static-RSA key exchange in one setting rather than
+    /// leaving them to be excluded one at a time through <see cref="CipherList"/>.
+    ///
+    /// <see cref="KernelTx"/> already pins 1.3, so setting this to
+    /// <see cref="TlsProtocolVersion.Tls12"/> alongside it is a contradiction and is refused at
+    /// <see cref="TlsService.Start"/> rather than silently losing to whichever runs last.
+    /// </summary>
+    public TlsProtocolVersion MinProtocolVersion { get; init; } = TlsProtocolVersion.Default;
+
+    /// <summary>
+    /// TLS 1.3 ciphersuites to offer, in preference order and in OpenSSL's naming, e.g.
+    /// <c>"TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384"</c>. Null keeps OpenSSL's defaults.
+    ///
+    /// Separate from <see cref="CipherList"/> because OpenSSL keeps the two lists separate: a 1.3
+    /// suite named here does not restrict a 1.2 handshake and vice versa, so a server that means
+    /// to constrain both has to say both - or set <see cref="MinProtocolVersion"/> to
+    /// <see cref="TlsProtocolVersion.Tls13"/> and be done.
+    ///
+    /// Refused together with <see cref="KernelTx"/>, which requires exactly
+    /// <c>TLS_AES_128_GCM_SHA256</c> to derive kernel keys.
+    /// </summary>
+    public string? CipherSuites { get; init; }
+
+    /// <summary>
+    /// Ciphers for TLS 1.2 and below, in OpenSSL's cipher-list syntax. Null keeps OpenSSL's
+    /// defaults. Has no effect on a 1.3 handshake - see <see cref="CipherSuites"/>.
+    /// </summary>
+    public string? CipherList { get; init; }
+
+    /// <summary>
     /// PEM bundle of trust anchors that CLIENT certificates are validated against - mutual TLS.
     /// Null (the default) means no client certificate is ever requested and the handshake is
     /// exactly what it was.

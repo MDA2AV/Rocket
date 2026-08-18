@@ -28,6 +28,63 @@ public sealed class TlsService
     // Serialises rotations against each other. Readers never take it - they read one reference.
     private readonly Lock _rotation = new();
 
+    /// <summary>
+    /// Handshakes still running, oldest first. A queue rather than a set because every entry gets
+    /// the same timeout, so insertion order IS deadline order and the sweep can stop at the first
+    /// entry that has not expired instead of walking all of them.
+    /// </summary>
+    private readonly Queue<PendingHandshake> _handshakes = new();
+
+    private sealed class PendingHandshake
+    {
+        public TcpConnection Conn = null!;
+        public long DeadlineMs;
+        public bool Done;
+    }
+
+    /// <summary>
+    /// Closes connections that have been handshaking too long. Runs on the reactor thread from the
+    /// reactor's ticker, so it needs no lock and can touch the connection directly.
+    /// </summary>
+    private void SweepHandshakes()
+    {
+        long now = Environment.TickCount64;
+
+        while (_handshakes.Count > 0)
+        {
+            PendingHandshake head = _handshakes.Peek();
+
+            if (head.Done)
+            {
+                _handshakes.Dequeue();
+                continue;
+            }
+
+            if (now < head.DeadlineMs)
+            {
+                return;   // deadlines are in insertion order, so nothing behind this has expired
+            }
+
+            _handshakes.Dequeue();
+            head.Done = true;
+
+            // Both halves are needed, and neither is redundant.
+            //
+            // shutdown() is what the PEER sees, and it is also what releases the connection. A
+            // TcpConnection is held by two refs, the handler's and the reactor's, and the
+            // reactor's is only given up when its multishot recv completes - which for a peer
+            // that simply says nothing never happens, so marking the connection closed on its own
+            // leaves the socket open for as long as that peer likes, which is the thing being
+            // defended against. Shutting the socket down completes that recv with EOF and the
+            // ordinary teardown runs.
+            //
+            // MarkClosed is what wakes the handshake NOW, rather than one io_uring round trip
+            // later, with the closed snapshot its loop already knows how to handle.
+            Sockets.Shutdown(head.Conn.ClientFd);
+            head.Conn.MarkClosed();
+        }
+    }
+
     // Identifies this server to OpenSSL's session cache. Any stable value works - what matters is
     // that it is set at all, and that it does not change between the contexts of one service.
     private static readonly byte[] SessionIdContext = "ioxide"u8.ToArray();
@@ -154,6 +211,23 @@ public sealed class TlsService
                 "Set KernelTx = true as well, or drop KernelRx.", nameof(options));
         }
 
+        // kTLS derives its keys from one specific suite over TLS 1.3, so it PINS both. A caller
+        // who also states a floor of 1.2, or a suite list of their own, has asked for two
+        // incompatible things - named here rather than resolved by whichever line runs last.
+        if (options.KernelTx && options.MinProtocolVersion == TlsProtocolVersion.Tls12)
+        {
+            throw new ArgumentException(
+                "KernelTx negotiates TLS 1.3 only, so MinProtocolVersion = Tls12 cannot hold. " +
+                "Drop one of the two.", nameof(options));
+        }
+
+        if (options.KernelTx && options.CipherSuites is not null)
+        {
+            throw new ArgumentException(
+                "KernelTx requires exactly TLS_AES_128_GCM_SHA256 to derive kernel keys, so " +
+                "CipherSuites cannot be set alongside it. Drop one of the two.", nameof(options));
+        }
+
         // The certificate and key each come from exactly one place - a path or in-memory PEM.
         // Neither set (possible now that the path is not `required`) and both set are refused.
         TlsCertificate defaultCertificate = new()
@@ -191,6 +265,10 @@ public sealed class TlsService
         slot.Current = BuildCertificates(options, defaultCertificate, options.CertificatesByHost, alpnHandle, slotHandle);
 
         var service = new TlsService(slot, slotHandle, alpnHandle, options);
+        if (options.HandshakeTimeoutMs > 0)
+        {
+            reactor.AddTicker(service.SweepHandshakes);
+        }
         if (register)
         {
             reactor.AddService(service);
@@ -476,6 +554,32 @@ public sealed class TlsService
         // no renegotiation to refuse; over TLS 1.2 refusing it costs nothing anyone uses and takes
         // away a second ClientHello - which, with SNI, would be a second go at the certificate.
         OpenSsl.SSL_CTX_set_options(ctx, OpenSsl.SSL_OP_NO_RENEGOTIATION);
+
+        // Caller-stated posture first; the kTLS block below then pins what it must, and Start has
+        // already refused the combinations where the two would disagree.
+        if (options.MinProtocolVersion != TlsProtocolVersion.Default)
+        {
+            long floor = options.MinProtocolVersion == TlsProtocolVersion.Tls13
+                ? OpenSsl.TLS1_3_VERSION
+                : OpenSsl.TLS1_2_VERSION;
+
+            if (OpenSsl.SSL_CTX_ctrl(ctx, OpenSsl.SSL_CTRL_SET_MIN_PROTO_VERSION, floor, 0) != 1)
+            {
+                throw new IOException($"set_min_proto_version{what}: {OpenSsl.LastError()}");
+            }
+        }
+
+        if (options.CipherSuites is { } suites && OpenSsl.SSL_CTX_set_ciphersuites(ctx, suites) != 1)
+        {
+            throw new IOException($"set_ciphersuites{what}: {OpenSsl.LastError()}");
+        }
+
+        // Empty is not "no restriction" - it is a list nothing matches, which would fail every
+        // TLS 1.2 handshake at the point of use rather than here.
+        if (options.CipherList is { } ciphers && OpenSsl.SSL_CTX_set_cipher_list(ctx, ciphers) != 1)
+        {
+            throw new IOException($"set_cipher_list{what}: {OpenSsl.LastError()}");
+        }
 
         // The kTLS constraints are the kernel path's, not TLS's - so they apply only when the
         // kernel path was asked for. The default keeps OpenSSL's own defaults: TLS 1.2 and 1.3,
@@ -884,6 +988,18 @@ public sealed class TlsService
         session.AttachHandle(handle);
         session.AttachFd(conn.ClientFd);   // the teardown close_notify goes out on it, both modes
 
+        // Under the sweep from here until the handshake settles, either way.
+        PendingHandshake? pending = null;
+        if (_options.HandshakeTimeoutMs > 0)
+        {
+            pending = new PendingHandshake
+            {
+                Conn = conn,
+                DeadlineMs = Environment.TickCount64 + _options.HandshakeTimeoutMs,
+            };
+            _handshakes.Enqueue(pending);
+        }
+
         try
         {
             while (true)
@@ -973,6 +1089,16 @@ public sealed class TlsService
         {
             session.Dispose();   // frees the ex_data GCHandle and the SSL (+ BIOs)
             throw;
+        }
+        finally
+        {
+            // However this ended - handshake done, peer gone, the sweep itself - the entry stops
+            // being a candidate. Flagged rather than removed: it may be anywhere in the queue, and
+            // the sweep drops flagged entries when they reach the front, which costs nothing.
+            if (pending is not null)
+            {
+                pending.Done = true;
+            }
         }
     }
 
