@@ -442,17 +442,23 @@ internal static class MutualTlsTests
     /// Whether the handshake was refused. Which exception arrives depends on which side noticed
     /// first, so the assertion is on refusal rather than on its spelling.
     /// </summary>
+    /// <summary>
+    /// Whether the server DECLINED this client, as opposed to anything else that can go wrong.
+    /// </summary>
+    /// <remarks>
+    /// This used to be a bare try/catch, which is satisfied by far more than a refusal: a server
+    /// that hangs, a server that crashes on the certificate rather than rejecting it, a port
+    /// already held by something else, a fixture that failed to load. Each of those is a green test
+    /// reporting the refusal it was looking for while the refusal never happened.
+    ///
+    /// A drop still counts - closing without an alert is a rude way to decline, but it is
+    /// declining. A timeout does not: a server that hangs has refused nothing, and hanging is a
+    /// worse failure than admitting the client, since it holds the connection too.
+    /// </remarks>
     private static bool HandshakeFails(int port, string? certPath, string? keyPath)
     {
-        try
-        {
-            Client.GetTlsClientCert(port, "/who", certPath, keyPath);
-            return false;
-        }
-        catch (Exception)
-        {
-            return true;
-        }
+        Client.TlsOutcome outcome = Client.TryGetTls(port, "/who", certPath, keyPath);
+        return outcome is Client.TlsOutcome.Refused or Client.TlsOutcome.Dropped;
     }
 
     /// <summary>

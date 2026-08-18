@@ -167,18 +167,10 @@ internal static class SniTests
                 },
             }));
 
-            bool refused;
-
-            try
-            {
-                // A named host, and nothing to prove who is asking.
-                Client.GetTlsClientCert(port, "/", null, null, host: "alpha.test");
-                refused = false;
-            }
-            catch (Exception)
-            {
-                refused = true;
-            }
+            // A named host, and nothing to prove who is asking. Classified rather than caught:
+            // a hang or a crash is not a refusal, and a bare try/catch reported both as one.
+            Client.TlsOutcome outcome = Client.TryGetTls(port, "/", null, null, host: "alpha.test");
+            bool refused = outcome is Client.TlsOutcome.Refused or Client.TlsOutcome.Dropped;
 
             Assert.True(refused,
                 "asking for a host by name must not be a way around the client certificate the server requires");
@@ -207,17 +199,8 @@ internal static class SniTests
             Assert.Equal(200, status);
 
             // Same named host, a certificate from a CA this server never trusted: still turned away.
-            bool rogueRefused;
-
-            try
-            {
-                Client.GetTlsClientCert(port, "/", rogueCert, rogueKey, host: "alpha.test");
-                rogueRefused = false;
-            }
-            catch (Exception)
-            {
-                rogueRefused = true;
-            }
+            Client.TlsOutcome rogueOutcome = Client.TryGetTls(port, "/", rogueCert, rogueKey, host: "alpha.test");
+            bool rogueRefused = rogueOutcome is Client.TlsOutcome.Refused or Client.TlsOutcome.Dropped;
 
             Assert.True(rogueRefused,
                 "a named host must validate client certificates against the same anchors as the default");

@@ -637,18 +637,15 @@ internal static class RotationTests
         return [.. head, .. who];
     }
 
-    /// <summary>Whether the handshake was refused, presenting the given certificate for a name.</summary>
+    /// <summary>
+    /// Whether the server DECLINED this client for a name. A drop counts, a timeout does not: a
+    /// server that hangs has refused nothing, and a bare try/catch here reported hangs, crashes and
+    /// bound ports as the refusal it was looking for.
+    /// </summary>
     private static bool HandshakeFails(int port, string? certPath, string? keyPath, string host)
     {
-        try
-        {
-            Client.GetTlsClientCert(port, "/", certPath, keyPath, host: host);
-            return false;
-        }
-        catch (Exception)
-        {
-            return true;
-        }
+        Client.TlsOutcome outcome = Client.TryGetTls(port, "/", certPath, keyPath, host: host);
+        return outcome is Client.TlsOutcome.Refused or Client.TlsOutcome.Dropped;
     }
 
     /// <summary>Completes the handshake and answers, so a certificate can be read AND used.</summary>

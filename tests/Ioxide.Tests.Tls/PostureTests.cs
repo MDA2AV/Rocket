@@ -244,14 +244,28 @@ internal static class PostureTests
             CipherSuitesPolicy = new CipherSuitesPolicy([suite]),
         };
 
+    /// <summary>
+    /// Whether the handshake completed. A refusal returns false; a server that HANGS throws, so
+    /// that the negative tests here cannot be satisfied by one.
+    /// </summary>
+    /// <remarks>
+    /// The distinction matters because every posture test that asserts a client is turned away
+    /// reads this helper's false. A bare try/catch returns false for a refusal, for a hang, for a
+    /// crash and for a port held by something else - so "the server refused a TLS 1.2 client" was
+    /// satisfied by a server that had stopped answering anyone at all, which is a worse outcome
+    /// than the one being ruled out.
+    /// </remarks>
     private static bool Handshakes(int port, SslProtocols protocols, SslClientAuthenticationOptions? auth = null)
     {
+        using var sock = new TcpClient();
+        sock.Connect("127.0.0.1", port);
+        sock.ReceiveTimeout = 6_000;
+        sock.SendTimeout = 6_000;
+
+        using var ssl = new SslStream(sock.GetStream(), false, (_, _, _, _) => true);
+
         try
         {
-            using var sock = new TcpClient();
-            sock.Connect("127.0.0.1", port);
-            using var ssl = new SslStream(sock.GetStream(), false, (_, _, _, _) => true);
-
             if (auth is not null)
             {
                 auth.EnabledSslProtocols = protocols;
@@ -264,8 +278,30 @@ internal static class PostureTests
 
             return true;
         }
-        catch (Exception)
+        catch (AuthenticationException)
         {
+            return false;   // refused, which is what these tests mean by "does not handshake"
+        }
+        catch (IOException e) when (Timeout(e))
+        {
+            throw new Exception(
+                $"the server on :{port} neither completed nor refused the handshake within 6 s - "
+                + "a hang is not a refusal, and this assertion would have read it as one.", e);
+        }
+        catch (IOException)
+        {
+            return false;   // closed without an alert: rude, but still declined
+        }
+
+        static bool Timeout(Exception e)
+        {
+            for (Exception? at = e; at is not null; at = at.InnerException)
+            {
+                if (at is SocketException { SocketErrorCode: SocketError.TimedOut })
+                {
+                    return true;
+                }
+            }
             return false;
         }
     }
