@@ -158,9 +158,24 @@ public static class TestServer
         int port = Interlocked.Increment(ref _nextPort);
         config = config with { Tcp = (config.Tcp ?? new TcpOptions()) with { Port = (ushort)port }, ReactorCount = 1 };
 
+        // Wrapped so the caller can be told when OnStart has actually RUN - see the wait below.
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
         var reactor = new Reactor(0, config)
         {
-            OnStart = onStart,
+            OnStart = r =>
+            {
+                try
+                {
+                    onStart?.Invoke(r);
+                    started.TrySetResult();
+                }
+                catch (Exception e)
+                {
+                    started.TrySetException(e);
+                    throw;   // RunGuarded still records the reactor death, exactly as before
+                }
+            },
             TcpHandle = handle,
         };
 
@@ -173,6 +188,7 @@ public static class TestServer
         Track(reactor, thread);
 
         WaitForListen(port);
+        WaitForOnStart(port, started);
         return (port, reactor, thread);
     }
 
@@ -461,6 +477,50 @@ public static class TestServer
             }
         }
         return drained;
+    }
+
+    /// <summary>
+    /// Waits until the reactor's <c>OnStart</c> has finished, and rethrows what it threw.
+    /// </summary>
+    /// <remarks>
+    /// Run opens the listener BEFORE it calls OnStart, so WaitForListen's probe proves only that
+    /// the port is bound. Two things follow, and both were live:
+    ///
+    /// A test could return from Start and immediately use something OnStart was supposed to have
+    /// created - a TlsService to rotate certificates on, most often - and get a null reference,
+    /// intermittently, depending on which side won.
+    ///
+    /// And an OnStart that THREW left its exception in StartupFailures with nothing consuming it,
+    /// so a test asserting that a bad configuration is refused could sail past its own assertion
+    /// and have the refusal surface later as an unrelated "a test reactor died" at the end of the
+    /// run. Every refusal test in the suite depended on losing that race the right way round.
+    /// </remarks>
+    private static void WaitForOnStart(int port, TaskCompletionSource started)
+    {
+        for (int attempt = 0; attempt < 200; attempt++)
+        {
+            // A reactor that died before reaching OnStart never completes the task, so its failure
+            // has to be looked for rather than waited on.
+            if (StartupFailures.TryRemove(port, out Exception? failure))
+            {
+                throw new Exception($"server on :{port} failed to start: {failure.Message}", failure);
+            }
+
+            try
+            {
+                if (started.Task.Wait(50))
+                {
+                    return;
+                }
+            }
+            catch (AggregateException e) when (e.InnerException is not null)
+            {
+                StartupFailures.TryRemove(port, out _);   // consumed here, so it is not also reported unowned
+                throw new Exception($"server on :{port} failed to start: {e.InnerException.Message}", e.InnerException);
+            }
+        }
+
+        throw new Exception($"server on :{port} bound its listener but never finished OnStart");
     }
 
     private static void WaitForListen(int port)

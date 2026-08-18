@@ -14,6 +14,50 @@ internal static class HardeningTests
 {
     public static void Register(Runner runner)
     {
+        runner.Test("harness: Start does not return before OnStart has run", () =>
+        {
+            // A test of the harness, because the harness is what every other test's setup trusts.
+            // Reactor.Run opens the listener BEFORE calling OnStart, and readiness was a TCP probe -
+            // so Start could return while OnStart was still running. A test that configured a
+            // service there and used it on the next line raced it and NREd intermittently, and a
+            // configuration refusal thrown from OnStart could arrive AFTER the assertion meant to
+            // catch it, surfacing later as an unrelated reactor death.
+            //
+            // The delay is what makes this deterministic: without the wait, the probe wins every
+            // time and the flag is still false when Start returns.
+            bool ranToCompletion = false;
+
+            TestServer.Start(
+                static (_, conn) => { conn.DecRef(); return Task.CompletedTask; },
+                _ =>
+                {
+                    Thread.Sleep(200);
+                    ranToCompletion = true;
+                });
+
+            Assert.True(ranToCompletion,
+                "Start returned while OnStart was still running - everything a test configures there is a race");
+        });
+
+        runner.Test("harness: a refusal thrown from OnStart reaches the caller", () =>
+        {
+            // The other half. Every "this configuration is refused" test in the suite asserts on an
+            // exception from Start, and that exception is raised on the reactor thread inside
+            // OnStart - so it only ever arrived in time because the probe happened to be slower.
+            Assert.Throws<Exception>(
+                () => TestServer.Start(
+                    static (_, conn) => { conn.DecRef(); return Task.CompletedTask; },
+                    _ =>
+                    {
+                        // Delayed on purpose. Thrown immediately it beats the probe on any machine
+                        // fast enough to notice, which is how this test passed against the old
+                        // harness too - proving the timing rather than the behaviour.
+                        Thread.Sleep(200);
+                        throw new InvalidOperationException("refused-on-purpose");
+                    }),
+                "refused-on-purpose");
+        });
+
         runner.Test("core: shared recv survives buffer-group exhaustion (#93)", () =>
         {
             const int totalBytes = 24 * 1024;   // vs an 8 x 1 KiB group: guaranteed exhaustion while held
