@@ -243,6 +243,7 @@ internal static unsafe partial class OpenSsl
     [LibraryImport(Crypto)] public static partial void ERR_clear_error();
     [LibraryImport(Ssl)] public static partial int SSL_CTX_use_certificate(nint ctx, nint x509);
     [LibraryImport(Ssl)] public static partial int SSL_CTX_use_PrivateKey(nint ctx, nint pkey);
+    [LibraryImport(Ssl)] public static partial int SSL_CTX_check_private_key(nint ctx);
     [LibraryImport(Crypto)] public static partial int BIO_write(nint bio, byte* data, int dlen);
     [LibraryImport(Crypto)] public static partial int BIO_read(nint bio, byte* data, int dlen);
     [LibraryImport(Crypto)] public static partial nuint BIO_ctrl_pending(nint bio);

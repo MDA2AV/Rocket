@@ -944,6 +944,21 @@ public sealed class TlsService
         {
             LoadKeyPem(ctx, certificate.KeyPem!);
         }
+
+        // The pair has to be checked explicitly, because OpenSSL only checks it for us when the two
+        // land in the SAME algorithm slot. A certificate and key that are both RSA and unrelated
+        // are refused by use_PrivateKey itself - but an RSA certificate with an EC key is not: the
+        // key goes into the EC slot, which has no certificate, and the RSA slot keeps a certificate
+        // with no key. Nothing complains, the server starts, and every handshake afterwards fails
+        // with no shared cipher. That is the shape of an operator moving a server from RSA to EC
+        // and updating one of the two files.
+        if (OpenSsl.SSL_CTX_check_private_key(ctx) != 1)
+        {
+            OpenSsl.ERR_clear_error();
+            throw new IOException(
+                $"the certificate and private key{what} do not go together - a certificate of one "
+                + "algorithm with a key of another leaves the context with neither a usable pair.");
+        }
     }
 
     private static unsafe void LoadCertificatePem(nint ctx, string pem)
