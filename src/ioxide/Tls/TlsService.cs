@@ -262,7 +262,19 @@ public sealed class TlsService
         var slot = new CertificateSlot();
         GCHandle slotHandle = GCHandle.Alloc(slot);
 
-        slot.Current = BuildCertificates(options, defaultCertificate, options.CertificatesByHost, alpnHandle, slotHandle);
+        try
+        {
+            slot.Current = BuildCertificates(options, defaultCertificate, options.CertificatesByHost, alpnHandle, slotHandle);
+        }
+        catch
+        {
+            // Start fails on ordinary operational input - a PEM caught half-written by a renewal,
+            // a path that is not readable yet - and a supervisor retries it. Leaking two handles
+            // per attempt is the same shape as the rotation leak already fixed one layer down.
+            alpnHandle.Free();
+            slotHandle.Free();
+            throw;
+        }
 
         var service = new TlsService(slot, slotHandle, alpnHandle, options);
         if (options.HandshakeTimeoutMs > 0)
@@ -569,9 +581,38 @@ public sealed class TlsService
             }
         }
 
-        if (options.CipherSuites is { } suites && OpenSsl.SSL_CTX_set_ciphersuites(ctx, suites) != 1)
+        if (options.CipherSuites is { } suites)
         {
-            throw new IOException($"set_ciphersuites{what}: {OpenSsl.LastError()}");
+            // OpenSSL is no help here on its own. It accepts an EMPTY 1.3 list and returns success,
+            // which leaves no TLS 1.3 suite enabled at all - so with a 1.3 floor the server starts
+            // clean and fails every handshake. And it ignores names it does not know as long as one
+            // in the list is valid, so a single typo silently drops the suite the operator meant to
+            // pin. Neither shows up until a client cannot connect, and neither is a mistake the
+            // caller can see. Note CipherList (1.2) behaves the opposite way and refuses both.
+            //
+            // Each name is offered on its own first, because a one-name list that OpenSSL does not
+            // recognise IS an all-unknown list, which it does refuse. The full list is applied
+            // afterwards so ordering is the caller's.
+            string[] names = suites.Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (names.Length == 0)
+            {
+                throw new IOException(
+                    $"CipherSuites{what} is empty, which disables every TLS 1.3 suite. Leave it null for the default.");
+            }
+
+            foreach (string name in names)
+            {
+                if (OpenSsl.SSL_CTX_set_ciphersuites(ctx, name) != 1)
+                {
+                    OpenSsl.ERR_clear_error();
+                    throw new IOException($"set_ciphersuites{what}: OpenSSL does not know the suite '{name}'.");
+                }
+            }
+
+            if (OpenSsl.SSL_CTX_set_ciphersuites(ctx, suites) != 1)
+            {
+                throw new IOException($"set_ciphersuites{what}: {OpenSsl.LastError()}");
+            }
         }
 
         // Empty is not "no restriction" - it is a list nothing matches, which would fail every
@@ -579,6 +620,16 @@ public sealed class TlsService
         if (options.CipherList is { } ciphers && OpenSsl.SSL_CTX_set_cipher_list(ctx, ciphers) != 1)
         {
             throw new IOException($"set_cipher_list{what}: {OpenSsl.LastError()}");
+        }
+
+        // A stated list is documented as being in preference order, and OpenSSL's default is to let
+        // the CLIENT's order win - so without this the operator's order was decoration. Set only
+        // when they actually stated one: with no list configured the default order is OpenSSL's to
+        // choose, and forcing server preference there would change which suite existing clients
+        // negotiate for no one's benefit.
+        if (options.CipherSuites is not null || options.CipherList is not null)
+        {
+            OpenSsl.SSL_CTX_set_options(ctx, OpenSsl.SSL_OP_CIPHER_SERVER_PREFERENCE);
         }
 
         // The kTLS constraints are the kernel path's, not TLS's - so they apply only when the
@@ -621,8 +672,16 @@ public sealed class TlsService
 
         unsafe
         {
-            delegate* unmanaged<nint, nint, void> keylog = &KeylogCallback;
-            OpenSsl.SSL_CTX_set_keylog_callback(ctx, (nint)keylog);
+            // Only the kernel path consumes these, and the callback necessarily materialises each
+            // traffic secret as an immutable managed string that nothing can scrub afterwards - it
+            // outlives the byte[] this code is careful to zero, and lands in any core dump. So it
+            // is registered where it is used rather than on every context. (KernelRx is refused
+            // without KernelTx, so this covers both.)
+            if (options.KernelTx)
+            {
+                delegate* unmanaged<nint, nint, void> keylog = &KeylogCallback;
+                OpenSsl.SSL_CTX_set_keylog_callback(ctx, (nint)keylog);
+            }
 
             // ALPN is settled against whichever context the handshake ends on, so every context
             // needs the callback - reading the same wire bytes through the same handle.
@@ -805,6 +864,19 @@ public sealed class TlsService
                     nint cert = OpenSsl.PEM_read_bio_X509(bio, 0, 0, 0);
                     if (cert == 0)
                     {
+                        // Exhausted, or stopped on a malformed block. Only the first is an end of
+                        // bundle: stopping early on the second would trust the anchors BEFORE the
+                        // bad block and silently drop everything after it, so clients issued by a
+                        // later anchor are refused with nothing said server-side. The file route
+                        // refuses such a bundle outright, and TlsOptions documents the two sources
+                        // as equivalent.
+                        if (!OpenSsl.ErrorIsEndOfPem())
+                        {
+                            throw new IOException(
+                                $"ClientCaPem is malformed after {added} usable certificate(s); "
+                                + "the rest of the bundle would have been ignored.");
+                        }
+
                         break;
                     }
 
@@ -1150,6 +1222,22 @@ public sealed class TlsService
     [UnmanagedCallersOnly]
     private static void KeylogCallback(nint ssl, nint line)
     {
+        // Guarded for the same reason ServerNameCallback is: OpenSSL's C frame sits between here
+        // and any managed caller, so an escaping exception aborts the PROCESS rather than faulting
+        // one connection - uncatchably, and with no stack to read. The body parses a string and
+        // allocates, so it is not throw-free by inspection.
+        try
+        {
+            KeylogCore(ssl, line);
+        }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($"[tls] keylog callback faulted: {e}");
+        }
+    }
+
+    private static void KeylogCore(nint ssl, nint line)
+    {
         string? text = Marshal.PtrToStringUTF8(line);
         if (text == null)
         {
@@ -1190,6 +1278,22 @@ public sealed class TlsService
 
     [UnmanagedCallersOnly]
     private static unsafe int AlpnSelectCallback(nint ssl, nint outPtr, nint outLen, nint inPtr, uint inLen, nint arg)
+    {
+        // Same reason as the other two: an exception crossing OpenSSL's frame aborts the process.
+        // NOACK on failure is the safe answer - it declines ALPN and lets the handshake continue,
+        // which is what this returns for "nothing in common" anyway.
+        try
+        {
+            return AlpnSelectCore(outPtr, outLen, inPtr, inLen, arg);
+        }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($"[tls] alpn callback faulted: {e}");
+            return OpenSsl.SSL_TLSEXT_ERR_NOACK;
+        }
+    }
+
+    private static unsafe int AlpnSelectCore(nint outPtr, nint outLen, nint inPtr, uint inLen, nint arg)
     {
         if (arg == 0 || GCHandle.FromIntPtr(arg).Target is not byte[] wire)
         {

@@ -81,6 +81,39 @@ internal static class PostureTests
             }, "set_ciphersuites"), "an unknown ciphersuite should be refused at startup");
         });
 
+        runner.Test("posture: a ciphersuite list that is merely MOSTLY right fails at startup", () =>
+        {
+            // The dangerous shape, because OpenSSL reports success for it. set_ciphersuites ignores
+            // names it does not know as long as ONE in the list is valid, so a single typo silently
+            // drops the suite the operator meant to pin and the server runs with a narrower list
+            // than it was configured with. The all-unknown case above already failed; this one did
+            // not, which is why "it started" was never evidence the list was applied.
+            (string certPath, string keyPath) = TestCert.Ensure();
+
+            Assert.True(StartFails(new TlsOptions
+            {
+                CertificatePath = certPath,
+                KeyPath = keyPath,
+                CipherSuites = "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA25",   // one digit short
+            }, "TLS_CHACHA20_POLY1305_SHA25"), "a typo among valid suites should be refused, and named");
+        });
+
+        runner.Test("posture: an empty ciphersuite list is refused rather than disabling TLS 1.3", () =>
+        {
+            // OpenSSL accepts "" and returns success, leaving NO TLS 1.3 suite enabled. Paired with
+            // a 1.3 floor that is a server which starts perfectly and cannot complete a single
+            // handshake; on the default floor it quietly becomes TLS 1.2-only. An empty string is
+            // what a config binder produces from a blank field, so this is reachable by accident.
+            (string certPath, string keyPath) = TestCert.Ensure();
+
+            Assert.True(StartFails(new TlsOptions
+            {
+                CertificatePath = certPath,
+                KeyPath = keyPath,
+                CipherSuites = "",
+            }, "empty"), "an empty ciphersuite list should be refused at startup");
+        });
+
         runner.Test("posture: kTLS pinning a floor of 1.3 refuses a stated floor of 1.2", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();

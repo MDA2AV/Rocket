@@ -54,6 +54,10 @@ internal static unsafe partial class OpenSsl
     /// carries a second ClientHello - a second chance to pick a different certificate mid-connection.
     /// </summary>
     public const ulong SSL_OP_NO_RENEGOTIATION = 1UL << 30;
+    public const ulong SSL_OP_CIPHER_SERVER_PREFERENCE = 0x00400000UL;
+
+    /// <summary>PEM's "the BIO holds no further object", i.e. an ordinary end of bundle.</summary>
+    public const int PEM_R_NO_START_LINE = 108;
 
     [LibraryImport(Ssl)] public static partial ulong SSL_CTX_set_options(nint ctx, ulong options);
 
@@ -246,6 +250,33 @@ internal static unsafe partial class OpenSsl
     [LibraryImport(Crypto)] public static partial long BIO_ctrl(nint bio, int cmd, long larg, byte** parg);
     [LibraryImport(Crypto)] public static partial ulong ERR_get_error();
     [LibraryImport(Crypto)] public static partial void ERR_error_string_n(ulong e, byte* buf, nuint len);
+
+    /// <summary>
+    /// Drains the queue and reports whether it held ONLY "no start line" - PEM's way of saying the
+    /// BIO is exhausted. Anything else means the read stopped on a malformed block, which is the
+    /// difference between "that was the last certificate in the bundle" and "the rest of the bundle
+    /// was silently dropped".
+    /// </summary>
+    public static bool ErrorIsEndOfPem()
+    {
+        bool sawEnd = false;
+        bool sawOther = false;
+
+        ulong code;
+        while ((code = ERR_get_error()) != 0)
+        {
+            if ((int)(code & 0xFFF) == PEM_R_NO_START_LINE)
+            {
+                sawEnd = true;
+            }
+            else
+            {
+                sawOther = true;   // keep draining: a half-read queue becomes the next caller's bug
+            }
+        }
+
+        return sawEnd && !sawOther;
+    }
 
     public static string LastError()
     {

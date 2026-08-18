@@ -207,7 +207,23 @@ public sealed unsafe class TlsSession : IDisposable
                 return null;
             }
 
-            return System.Text.Encoding.UTF8.GetString(span);
+            string common = System.Text.Encoding.UTF8.GetString(span);
+
+            // No control characters. This is the value documented as the one to authorize on, and
+            // the thing callers do next to authorizing is log it - so a CN carrying CR or LF forges
+            // log lines, and one carrying it into a header splits the response. PeerSubject escapes
+            // these on its way through X509_NAME_oneline, which left the accessor sold as the safe
+            // one as the only raw one. Refusing beats sanitising: a name that had to be rewritten
+            // to be safe is not the name that was presented.
+            foreach (char c in common)
+            {
+                if (char.IsControl(c))
+                {
+                    return null;
+                }
+            }
+
+            return common;
         }
         finally
         {
@@ -559,16 +575,34 @@ public sealed unsafe class TlsSession : IDisposable
             return;
         }
 
-        // A TLS 1.3 close_notify record is ~24 bytes: 5 header + 2 alert + 1 inner type + 16 tag.
-        byte* record = stackalloc byte[64];
-        int n = OpenSsl.BIO_read(_wbio, record, 64);
-        if (n > 0)
+        // Drain the record rather than assuming its size. A TLS 1.3 close_notify is ~24 bytes, but
+        // this server speaks TLS 1.2 by default, where a CBC-SHA256/384 suite makes it 69 or 85 - and
+        // a single fixed-size read put a header on the wire announcing more than followed, which is
+        // exactly the truncation that close_notify exists to disprove. Whatever else is pending
+        // goes too: it is already encrypted and the peer is entitled to it.
+        //
+        // MSG_DONTWAIT because accepted sockets are BLOCKING - the accept SQE asks for no
+        // SOCK_NONBLOCK and nothing sets it afterwards. Without it, a peer that has stopped reading
+        // parks the REACTOR THREAD here during teardown and every other connection on it stops.
+        // The kTLS sibling has always passed it.
+        byte* record = stackalloc byte[512];
+        while (true)
         {
-            _ = send(_fd, record, (nuint)n, MSG_NOSIGNAL);
+            int n = OpenSsl.BIO_read(_wbio, record, 512);
+            if (n <= 0)
+            {
+                break;
+            }
+
+            if (send(_fd, record, (nuint)n, MSG_NOSIGNAL | MSG_DONTWAIT) != n)
+            {
+                break;   // best effort: this is teardown and nothing here awaits a retry
+            }
         }
     }
 
     private const int MSG_NOSIGNAL = 0x4000;   // a dead peer must not SIGPIPE the process
+    private const int MSG_DONTWAIT = 0x40;     // teardown must never park the reactor thread
 
     [DllImport("libc")]
     private static extern nint send(int sockfd, byte* buf, nuint len, int flags);

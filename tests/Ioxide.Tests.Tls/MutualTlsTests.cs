@@ -181,6 +181,24 @@ internal static class MutualTlsTests
     // Configuration mistakes that should fail where they are written, not at some later handshake.
     private static void RegisterConfigurationErrors(Runner runner)
     {
+        runner.Test("mtls: a trust bundle with a corrupt block is refused, not silently truncated", () =>
+        {
+            // ClientCaPath and ClientCaPem are documented as equivalent in what they trust. They
+            // were not: the file route refuses such a bundle outright, while the PEM-text route
+            // read until it stopped and kept whatever came BEFORE the bad block - so every client
+            // issued by a later anchor was refused, with nothing said server-side. Failing closed
+            // is not the same as failing loudly, and an operator has no way to see the difference.
+            (string ca, _, _, _, _, _, _) = TestCert.EnsureMutualTls();
+
+            Assert.True(StartFails(new TlsOptions
+            {
+                CertificatePath = TestCert.Ensure().CertPath,
+                KeyPath = TestCert.Ensure().KeyPath,
+                ClientCaPem = BundleWithCorruptMiddle(ca),
+                RequireClientCertificate = true,
+            }, "malformed"), "a bundle with a corrupt block should be refused at startup");
+        });
+
         runner.Test("mtls: requiring a certificate without anchors is refused", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
@@ -291,6 +309,22 @@ internal static class MutualTlsTests
             }, "/nonexistent/ca.pem"),
                 "a missing CA file must be reported at startup");
         });
+    }
+
+    /// <summary>
+    /// A trust bundle whose MIDDLE block is corrupt: a real anchor, then a well-formed PEM envelope
+    /// around bytes that are not a certificate, then a second real anchor. The shape a secrets
+    /// store or a partial write produces, and the one where "read until the reader stops" quietly
+    /// trusts a narrower set than the operator wrote.
+    /// </summary>
+    private static string BundleWithCorruptMiddle(string caPath)
+    {
+        string anchor = File.ReadAllText(caPath).Trim();
+        return anchor + "\n"
+            + "-----BEGIN CERTIFICATE-----\n"
+            + "bm90IGEgY2VydGlmaWNhdGU=\n"
+            + "-----END CERTIFICATE-----\n"
+            + anchor + "\n";
     }
 
     private static (string Label, bool KernelTx)[] Paths(bool ktls) =>
