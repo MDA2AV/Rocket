@@ -75,11 +75,18 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
     /// </summary>
     public async ValueTask DisposeAsync()
     {
-        // Cancelling the reader unblocks a pump parked in the pipe's FlushAsync; MarkClosed wakes
-        // one parked in the connection's ReadAsync with a closed snapshot. Without the second, a
-        // server-initiated close against a quiet peer awaited a CQE that never comes, and the
-        // handler's finally - the DecRef that releases the connection - never ran.
-        _inbound.Reader.CancelPendingRead();
+        // Two ways a pump can be parked, and each needs its own release.
+        //
+        // Completing the reader releases one parked in the pipe's FlushAsync. Cancelling does NOT:
+        // CancelPendingRead cancels a pending READ, and a writer held at the pause threshold is
+        // waiting for the reader to consume, which only completion promises it never will. A
+        // handler that stopped draining a large body and closed - an ordinary shape - parked the
+        // pump there forever, so the await below never returned, the handler's DecRef never ran,
+        // and the connection, its SSL and both BIOs were leaked for the life of the process.
+        //
+        // MarkClosed releases one parked in the connection's ReadAsync with a closed snapshot,
+        // which is what a server-initiated close against a quiet peer needs.
+        _inbound.Reader.Complete();
         _conn.MarkClosed();
 
         try

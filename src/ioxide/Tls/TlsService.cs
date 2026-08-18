@@ -28,6 +28,10 @@ public sealed class TlsService
     // Serialises rotations against each other. Readers never take it - they read one reference.
     private readonly Lock _rotation = new();
 
+    // Identifies this server to OpenSSL's session cache. Any stable value works - what matters is
+    // that it is set at all, and that it does not change between the contexts of one service.
+    private static readonly byte[] SessionIdContext = "ioxide"u8.ToArray();
+
     // A per-SSL ex_data slot holds a GCHandle to the TlsSession, so the static keylog callback can
     // find the right session for an SSL without a process-global, recycled-pointer-keyed map.
     private static readonly int SslSessionIndex =
@@ -446,6 +450,27 @@ public sealed class TlsService
             throw new IOException($"SSL_CTX_new{what}: {OpenSsl.LastError()}");
         }
 
+        try
+        {
+            Configure(ctx, options, certificate, what, alpnHandle);
+        }
+        catch
+        {
+            // The context is this method's to release until it returns one. A caller cannot do it:
+            // the assignment it would free through never happened, which is exactly how a renewal
+            // retried against a half-written PEM leaked a certificate and key per attempt.
+            OpenSsl.SSL_CTX_free(ctx);
+            throw;
+        }
+
+        return ctx;
+    }
+
+    /// <summary>Everything a context needs beyond existing. Separate so the allocation above has
+    /// exactly one owner and one release path.</summary>
+    private static void Configure(nint ctx, TlsOptions options, TlsCertificate certificate, string what, GCHandle alpnHandle)
+    {
+
         // OpenSSL copies a context's options onto each SSL as it is created and never re-reads
         // them, so this holds for every connection whether or not it asked for a name. TLS 1.3 has
         // no renegotiation to refuse; over TLS 1.2 refusing it costs nothing anyone uses and takes
@@ -473,6 +498,23 @@ public sealed class TlsService
         LoadCertificate(ctx, certificate, what);
         ConfigureClientVerification(ctx, options);
 
+        // Scope sessions to this server. Required rather than tidy: with SSL_VERIFY_PEER set and no
+        // id context, OpenSSL treats a resumption attempt as fatal to the whole HANDSHAKE, not just
+        // to the resumption - so an mTLS port issues tickets and then refuses every client that
+        // comes back with one, which is roughly every second connection from anything that caches.
+        // Constant per process: every context of this service must accept the others' tickets, or a
+        // rotation would invalidate every outstanding session.
+        unsafe
+        {
+            fixed (byte* id = SessionIdContext)
+            {
+                if (OpenSsl.SSL_CTX_set_session_id_context(ctx, id, (uint)SessionIdContext.Length) != 1)
+                {
+                    throw new IOException($"could not set the session id context{what}: {OpenSsl.LastError()}");
+                }
+            }
+        }
+
         unsafe
         {
             delegate* unmanaged<nint, nint, void> keylog = &KeylogCallback;
@@ -483,8 +525,6 @@ public sealed class TlsService
             delegate* unmanaged<nint, nint, nint, nint, uint, nint, int> alpn = &AlpnSelectCallback;
             OpenSsl.SSL_CTX_set_alpn_select_cb(ctx, (nint)alpn, GCHandle.ToIntPtr(alpnHandle));
         }
-
-        return ctx;
     }
 
     /// <summary>
@@ -837,8 +877,7 @@ public sealed class TlsService
         {
             while (true)
             {
-                int ret = OpenSsl.SSL_accept(ssl);
-                int err = ret == 1 ? 0 : OpenSsl.SSL_get_error(ssl, ret);   // read immediately, before other OpenSSL calls
+                int ret = OpenSsl.Accept(ssl, out int err);
 
                 await FlushOutbound(conn, wbio);   // server flights stage into the slab
 

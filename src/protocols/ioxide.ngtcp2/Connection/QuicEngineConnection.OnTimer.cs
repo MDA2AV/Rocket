@@ -49,8 +49,7 @@ public unsafe partial class QuicEngineConnection
         }
         finally
         {
-            _inEngineCycle = false;
-            FlushGso();
+            EndEngineCycle();
         }
     }
 }

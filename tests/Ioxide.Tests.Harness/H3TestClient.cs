@@ -85,8 +85,11 @@ public sealed unsafe class H3TestClient : IDisposable
         fixed (byte* l = local)
         fixed (byte* r = remote)
         {
+            // 16-byte CIDs, the length this client has always ended up with. It reads one
+            // connection off its own socket rather than demultiplexing, so the value only has to
+            // be legal - but it is stated rather than left to a default.
             _conn = iq_client_connect(_clientEngine, l, 16, r, 16, ServerName, "h3",
-                                      0, NowNs(), (void*)GCHandle.ToIntPtr(_self), null);
+                                      16, NowNs(), (void*)GCHandle.ToIntPtr(_self), null);
         }
         Assert.True(_conn != 0, "client connect failed");
     }
@@ -122,6 +125,10 @@ public sealed unsafe class H3TestClient : IDisposable
                 return true;
             }
             PumpIn();
+            if (_peerClosed)
+            {
+                return false;
+            }
         }
         return false;
     }
@@ -187,13 +194,14 @@ public sealed unsafe class H3TestClient : IDisposable
         }
 
         long deadline = Environment.TickCount64 + timeoutMs;
-        while (Environment.TickCount64 < deadline && !_done)
+        while (Environment.TickCount64 < deadline && !_done && !_peerClosed)
         {
             DrainH3Out();
             FlushOut();
             PumpIn();
         }
 
+        // Status 0 = never answered, which is what a refused connection looks like from here.
         return (_status, Encoding.UTF8.GetString(_body.ToArray()));
     }
 
@@ -234,7 +242,7 @@ public sealed unsafe class H3TestClient : IDisposable
         int off = 0;
         bool finPending = fin;
 
-        while (off < data.Length || finPending)
+        while ((off < data.Length || finPending) && !_peerClosed)
         {
             Assert.True(Environment.TickCount64 < deadline, "client write stalled (window never reopened)");
 
@@ -297,6 +305,17 @@ public sealed unsafe class H3TestClient : IDisposable
         }
     }
 
+    /// <summary>
+    /// Set once the engine reports the connection is over - which, after a server refuses the
+    /// handshake, is how its CONNECTION_CLOSE arrives here. Tracked because every pump loop below
+    /// otherwise reads "cannot send" as "flow-control window is shut" and waits out its deadline,
+    /// reporting a stalled window for a connection that is simply dead.
+    /// </summary>
+    private bool _peerClosed;
+
+    /// <summary>Whether the peer ended the connection. A refusal test asserts on this.</summary>
+    public bool PeerClosed => _peerClosed;
+
     private void PumpIn()
     {
         try
@@ -305,7 +324,12 @@ public sealed unsafe class H3TestClient : IDisposable
             byte[] pkt = _udp.Receive(ref from);
             fixed (byte* p = pkt)
             {
-                iq_conn_read(_conn, null, 0, p, (nuint)pkt.Length, 0, NowNs());
+                // Nonzero covers draining, closing and every protocol error: in all of them the
+                // connection is finished and no later datagram changes that.
+                if (iq_conn_read(_conn, null, 0, p, (nuint)pkt.Length, 0, NowNs()) != 0)
+                {
+                    _peerClosed = true;
+                }
             }
         }
         catch (SocketException)

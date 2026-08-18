@@ -38,9 +38,30 @@ public unsafe partial class QuicEngineConnection
         }
         finally
         {
-            _inEngineCycle = false;
-            FlushGso();
+            EndEngineCycle();
         }
+    }
+
+    /// <summary>
+    /// Leaves an engine cycle. ngtcp2's frames have unwound by the time this runs, which is what
+    /// makes both halves legal: flushing the coalesced GSO batch, and acting on a fault that was
+    /// recorded from inside a callback. Every entry into the engine ends here, so a callback has
+    /// exactly one way to ask for teardown and exactly one place where it happens.
+    /// </summary>
+    private void EndEngineCycle()
+    {
+        _inEngineCycle = false;
+        FlushGso();
+
+        if (_deferredFault is null || _closed)
+        {
+            return;
+        }
+
+        Console.Error.WriteLine($"[ioxide.ngtcp2] {_deferredFault}; closing connection.");
+
+        // Our own fault, not the peer's, so it hears INTERNAL_ERROR rather than nothing at all.
+        Teardown(WriteTransportFarewell(Ngtcp2.NGTCP2_ERR_INTERNAL));
     }
 
     private void QueueSend(ReadOnlySpan<byte> datagram)

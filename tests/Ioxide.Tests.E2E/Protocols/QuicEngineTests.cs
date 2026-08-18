@@ -165,8 +165,9 @@ internal sealed unsafe class QuicTestClient : IDisposable
         fixed (byte* l = local)
         fixed (byte* r = remote)
         {
+            // See H3TestClient: one connection per socket, so the length only has to be legal.
             _conn = iq_client_connect(_clientEngine, l, 16, r, 16, "localhost", "echo",
-                                      0, NowNs(), (void*)GCHandle.ToIntPtr(GCHandle.Alloc(this)), null);
+                                      16, NowNs(), (void*)GCHandle.ToIntPtr(GCHandle.Alloc(this)), null);
         }
         Assert.True(_conn != 0, "client connect failed");
     }

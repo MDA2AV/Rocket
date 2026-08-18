@@ -12,20 +12,17 @@ public unsafe partial class QuicEngineConnection
             return;
         }
 
-        fixed (byte* dest = _sendBuf)
+        int farewell = 0;
+        if (_conn != 0)
         {
-            nint written = Ngtcp2.iq_conn_close(_conn, applicationErrorCode,
-                dest, (nuint)_sendBuf.Length, NowNs());
-            if ((int)written > 0)
+            fixed (byte* dest = _sendBuf)
             {
-                Send(_sendBuf.AsSpan(0, (int)written));   // last words: direct, unbatched
+                nint written = Ngtcp2.iq_conn_close(_conn, applicationErrorCode,
+                    dest, (nuint)_sendBuf.Length, NowNs());
+                farewell = (int)written > 0 ? (int)written : 0;
             }
         }
 
-        // Close the send gate before the transport wakes the handler (QuicRemoveConnection ->
-        // MarkClosed resumes it inline): a farewell SendStream must not pump a dead conn.
-        _closed = true;
-        _reactor.QuicRemoveConnection(this);
-        Destroy();
+        Teardown(farewell);
     }
 }

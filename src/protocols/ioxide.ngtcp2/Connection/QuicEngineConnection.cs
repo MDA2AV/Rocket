@@ -33,7 +33,42 @@ public unsafe partial class QuicEngineConnection : QuicConnection
     /// Read it to decide what an authenticated peer may do: a server that can only answer "some
     /// valid certificate" has a gate rather than an identity.
     /// </summary>
+    /// <remarks>
+    /// For people to read - logs, audit trails, errors. Do not authorize on a substring of it: the
+    /// format escapes a literal '/' in an attribute as "\/", which still contains '/', so a client
+    /// whose organisation is <c>Acme\/CN=admin.internal</c> satisfies a
+    /// <c>Contains("/CN=admin.internal")</c> check while being a different principal.
+    /// <see cref="PeerCommonName"/> is the value to compare instead.
+    /// </remarks>
     public string? PeerSubject
+    {
+        get
+        {
+            if (_conn == 0)
+            {
+                return null;
+            }
+
+            Span<byte> buffer = stackalloc byte[1024];
+            fixed (byte* p = buffer)
+            {
+                nuint written = Ngtcp2.iq_conn_peer_subject(_conn, p, (nuint)buffer.Length);
+                return written == 0 ? null : System.Text.Encoding.UTF8.GetString(buffer[..(int)written]);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The common name of the validated client certificate, read from the DN structurally rather
+    /// than parsed back out of <see cref="PeerSubject"/>, so no escaping convention sits between
+    /// the certificate and the comparison. This is the value to authorize on - compare it whole,
+    /// with <see cref="StringComparison.Ordinal"/>.
+    ///
+    /// Null when there was no validated certificate, when the subject carries no CN (legitimate:
+    /// modern certificates identify by subjectAltName), or when the CN is empty or contains an
+    /// embedded NUL, which is a name built to be read differently by different consumers.
+    /// </summary>
+    public string? PeerCommonName
     {
         get
         {
@@ -45,7 +80,7 @@ public unsafe partial class QuicEngineConnection : QuicConnection
             Span<byte> buffer = stackalloc byte[256];
             fixed (byte* p = buffer)
             {
-                nuint written = Ngtcp2.iq_conn_peer_subject(_conn, p, (nuint)buffer.Length);
+                nuint written = Ngtcp2.iq_conn_peer_cn(_conn, p, (nuint)buffer.Length);
                 return written == 0 ? null : System.Text.Encoding.UTF8.GetString(buffer[..(int)written]);
             }
         }
@@ -62,10 +97,14 @@ public unsafe partial class QuicEngineConnection : QuicConnection
     // One reusable send scratch datagram (max QUIC payload); the engine writes at most one per call.
     private readonly byte[] _sendBuf = new byte[1452];
 
-    // Set inside iq_conn_read: _recvEnqueued arms the once-per-read IVTS fire, _recvOverflow defers
-    // the teardown until the engine call unwinds (freeing the conn inside its own callback is UB).
+    // Set inside iq_conn_read: arms the once-per-read IVTS fire.
     private bool _recvEnqueued;
-    private bool _recvOverflow;
+
+    // Why this connection must die, recorded from inside a native engine call - a full recv queue,
+    // a callback that threw. It is a note rather than a teardown because freeing the conn from
+    // within its own callback is a use-after-free: EndEngineCycle acts on it once ngtcp2's frames
+    // have unwound. First reason wins; later ones are consequences of it.
+    private string? _deferredFault;
 
     // Set when the handshake completes, raised after the engine call unwinds (firing it from
     // inside the shim callback would re-enter ngtcp2). Client connections depend on this: nothing
@@ -105,7 +144,7 @@ public unsafe partial class QuicEngineConnection : QuicConnection
         }
         else
         {
-            _recvOverflow = true;
+            _deferredFault ??= "recv queue overflow";
         }
     }
 
@@ -122,7 +161,7 @@ public unsafe partial class QuicEngineConnection : QuicConnection
         }
         else
         {
-            _recvOverflow = true;
+            _deferredFault ??= "recv queue overflow";
         }
     }
 
@@ -240,8 +279,7 @@ public unsafe partial class QuicEngineConnection : QuicConnection
         }
         finally
         {
-            _inEngineCycle = false;
-            FlushGso();
+            EndEngineCycle();
         }
     }
 
@@ -295,14 +333,65 @@ public unsafe partial class QuicEngineConnection : QuicConnection
         // Draining and idle-close are normal lifecycle (the peer finished, or vanished and the
         // idle timer reaped the connection - every abandoned benchmark client ends this way);
         // only genuine protocol/engine errors are worth a log line.
-        if (liberr != -Ngtcp2.NGTCP2_ERR_DRAINING && liberr != Ngtcp2.NGTCP2_ERR_DRAINING &&
-            liberr != Ngtcp2.NGTCP2_ERR_IDLE_CLOSE)
+        if (!IsQuietEnding(liberr))
         {
             Console.Error.WriteLine($"[ioxide.ngtcp2] connection closed: {Ngtcp2.StrError(liberr)}");
         }
 
+        Teardown(WriteTransportFarewell(liberr));
+    }
+
+    /// <summary>
+    /// Endings the peer must not be answered about: it has already sent its own CONNECTION_CLOSE
+    /// (draining), we have already sent ours (closing), or it is simply gone and RFC 9000 wants
+    /// the connection discarded silently (idle timeout).
+    /// </summary>
+    private static bool IsQuietEnding(int liberr)
+    {
+        // ngtcp2 codes are negative, but they reach here from both `rv` (negative) and constants
+        // written positively at some call sites, so normalise before comparing.
+        int e = liberr < 0 ? liberr : -liberr;
+        return e == Ngtcp2.NGTCP2_ERR_DRAINING
+            || e == Ngtcp2.NGTCP2_ERR_CLOSING
+            || e == Ngtcp2.NGTCP2_ERR_IDLE_CLOSE;
+    }
+
+    /// <summary>
+    /// Builds the CONNECTION_CLOSE for an engine-side death into <see cref="_sendBuf"/>, so the
+    /// peer learns the connection is over now instead of waiting out its own idle timeout.
+    /// Returns the byte count, or 0 when the peer is not to be told.
+    /// </summary>
+    private int WriteTransportFarewell(int liberr)
+    {
+        if (_conn == 0 || IsQuietEnding(liberr))
+        {
+            return 0;
+        }
+
+        fixed (byte* dest = _sendBuf)
+        {
+            nint written = Ngtcp2.iq_conn_close_liberr(_conn, liberr, dest, (nuint)_sendBuf.Length, NowNs());
+            return (int)written > 0 ? (int)written : 0;
+        }
+    }
+
+    /// <summary>
+    /// The single way a connection ends. Three things have to happen, in this order and once: the
+    /// peer hears why, the transport stops routing datagrams here, and the engine state is freed.
+    /// Routing every death through one place is what keeps them from drifting apart - the farewell
+    /// used to be missing from two of the three paths.
+    /// </summary>
+    /// <param name="farewellLength">Bytes of CONNECTION_CLOSE waiting in <see cref="_sendBuf"/>;
+    /// 0 to say nothing.</param>
+    private void Teardown(int farewellLength)
+    {
+        if (farewellLength > 0)
+        {
+            Send(_sendBuf.AsSpan(0, farewellLength));   // last words: direct, unbatched
+        }
+
         // Close the send gate before the transport wakes the handler (QuicRemoveConnection ->
-        // MarkClosed resumes it inline): a farewell SendStream must not pump an errored conn.
+        // MarkClosed resumes it inline): a farewell SendStream must not pump a dead conn.
         _closed = true;
         _reactor.QuicRemoveConnection(this);   // stop routing every CID to us
         Destroy();

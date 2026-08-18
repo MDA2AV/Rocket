@@ -16,8 +16,7 @@ public unsafe partial class QuicEngineConnection
         }
         finally
         {
-            _inEngineCycle = false;
-            FlushGso();
+            EndEngineCycle();
         }
     }
 
@@ -37,18 +36,6 @@ public unsafe partial class QuicEngineConnection
             CloseFromEngine(rv);
             return;
         }
-        if (_recvOverflow)
-        {
-            // Deferred from OnStreamData: tear down now that the engine call has unwound.
-            Console.Error.WriteLine("[ioxide.ngtcp2] recv queue overflow; closing connection.");
-
-            _closed = true;
-            _reactor.QuicRemoveConnection(this);
-            Destroy();
-
-            return;
-        }
-
         if (!_handshakeDone && Ngtcp2.iq_conn_is_established(_conn) != 0)
         {
             HandshakeCompletedOnce();

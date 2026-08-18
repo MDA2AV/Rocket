@@ -87,6 +87,16 @@ public sealed unsafe class QuicEngine : IDisposable
                 "or drop requireClientCertificate.", nameof(requireClientCertificate));
         }
 
+        // QUIC caps a connection ID at 20 bytes and ngtcp2's ngtcp2_cid is sized to exactly that,
+        // so a longer one would be written past the end of a stack struct while minting the
+        // server's CID. Zero-length is legal QUIC but not here: the reactor demultiplexes inbound
+        // datagrams by CID prefix and has nothing to route on without one.
+        if (cidLength is < 1 or > 20)
+        {
+            throw new ArgumentOutOfRangeException(nameof(cidLength), cidLength,
+                "QUIC connection ID length must be 1..20 bytes.");
+        }
+
         CidLength = cidLength;
         // Clamp to a floor: the pump overshoots the high-water by at most one egress chunk (16 KiB),
         // so a cap below that would wedge a response mid-flight. 256 KiB gives comfortable headroom.

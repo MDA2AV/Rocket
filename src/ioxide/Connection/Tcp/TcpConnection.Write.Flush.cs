@@ -22,8 +22,14 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource
     {
         // TcpConnection already torn down: complete immediately so the handler unwinds
         // to its next ReadAsync, sees IsClosed, and exits.
+        //
+        // The staged bytes are dropped rather than kept. Nothing will ever send them, and leaving
+        // the tail where it was made every later write append to a slab that only ever grew - a
+        // writer that keeps producing against a peer that has gone reaches gigabytes, because
+        // doubling the slab is the one thing that never fails.
         if (Volatile.Read(ref _closed) == 1)
         {
+            WriteTail = 0;
             return default;
         }
 

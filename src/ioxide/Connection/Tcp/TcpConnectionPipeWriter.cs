@@ -49,7 +49,7 @@ public sealed class TcpConnectionPipeWriter : PipeWriter, IValueTaskSource<Flush
         if (_cancelRequested)
         {
             _cancelRequested = false;
-            return new ValueTask<FlushResult>(new FlushResult(isCanceled: true, isCompleted: _completed));
+            return new ValueTask<FlushResult>(new FlushResult(isCanceled: true, isCompleted: _completed || _conn.IsClosed));
         }
 
         _unflushed = 0;
@@ -57,7 +57,7 @@ public sealed class TcpConnectionPipeWriter : PipeWriter, IValueTaskSource<Flush
 
         if (inner.IsCompletedSuccessfully)
         {
-            return new ValueTask<FlushResult>(new FlushResult(isCanceled: false, isCompleted: _completed));
+            return new ValueTask<FlushResult>(new FlushResult(isCanceled: false, isCompleted: _completed || _conn.IsClosed));
         }
 
         _core.Reset();

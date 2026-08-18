@@ -48,6 +48,7 @@ internal static unsafe class Ngtcp2
 
     /// <summary>The verified client identity, or 0 written when the peer offered none.</summary>
     [DllImport(Lib)] internal static extern nuint iq_conn_peer_subject(nint conn, byte* outBuf, nuint outLen);
+    [DllImport(Lib)] internal static extern nuint iq_conn_peer_cn(nint conn, byte* outBuf, nuint outLen);
 
     /// <summary>
     /// Registers a certificate for one SNI name, served instead of the default when a client asks
@@ -98,6 +99,9 @@ internal static unsafe class Ngtcp2
     [DllImport(Lib)] internal static extern nint iq_conn_close(
         nint conn, ulong appErrorCode, byte* dest, nuint destLen, ulong ts);
 
+    [DllImport(Lib)] internal static extern nint iq_conn_close_liberr(
+        nint conn, int libError, byte* dest, nuint destLen, ulong ts);
+
     [DllImport(Lib)] internal static extern ulong iq_conn_expiry(nint conn);
     [DllImport(Lib)] internal static extern int   iq_conn_handle_expiry(nint conn, ulong ts);
     [DllImport(Lib)] internal static extern int   iq_conn_is_established(nint conn);
@@ -141,6 +145,8 @@ internal static unsafe class Ngtcp2
     internal const int NGTCP2_ERR_STREAM_SHUT_WR        = -219;
     internal const int NGTCP2_ERR_STREAM_NOT_FOUND      = -220;
     internal const int NGTCP2_ERR_DRAINING              = -224;
+    internal const int NGTCP2_ERR_CLOSING               = -225;
+    internal const int NGTCP2_ERR_INTERNAL              = -502;
     internal const int NGTCP2_ERR_IDLE_CLOSE            = -238;
 
     internal static string StrError(int liberr) => Marshal.PtrToStringUTF8(iq_strerror(liberr)) ?? liberr.ToString();
