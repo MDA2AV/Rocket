@@ -93,7 +93,11 @@ internal static class TlsPipeTests
             Assert.True(PostBody(port, kilobytes: 32).Contains("headers-only"),
                 "the upload was not answered");
 
-            Assert.True(disposed.Task.Wait(TimeSpan.FromSeconds(10)),
+            // Generous on purpose, and the generosity costs nothing: the failure this catches is a
+            // pump parked forever, which does not complete at ANY deadline. Ten seconds turned out
+            // to be a statement about machine load rather than about the code - it failed one run in
+            // four with a dozen suites running at once, which is a bug in the test, not a wedge.
+            Assert.True(disposed.Task.Wait(TimeSpan.FromSeconds(60)),
                 "DisposeAsync never returned: the pump is parked in FlushAsync and nothing released it");
 
             // Non-vacuous. The pipe must have been PAST its pause threshold when disposal ran,

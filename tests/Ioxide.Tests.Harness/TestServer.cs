@@ -57,7 +57,60 @@ public static class TestServer
     }
 
     /// <summary>Reserve a unique port (e.g. for TcpOptions.ExtraPorts).</summary>
-    public static int NextPort() => Interlocked.Increment(ref _nextPort);
+    public static int NextPort() => ReserveFreePort();
+
+    /// <summary>
+    /// A port on which nothing is currently listening.
+    /// </summary>
+    /// <remarks>
+    /// A bind failure is NOT how a collision shows up here, which is why the retry that used to
+    /// guard this was ineffective. ioxide listeners are opened with SO_REUSEPORT, so a second
+    /// process binding a port another already holds SUCCEEDS - and the kernel then load-balances
+    /// arriving connections between the two servers. A test's client is answered by an unrelated
+    /// process's handler, and the failure surfaces somewhere else entirely as "connection closed
+    /// before headers", in a test that has nothing to do with the one that moved. One reviewer hit
+    /// a run of about 25 such failures and correctly diagnosed it as the harness rather than the
+    /// code under test; that should not have needed diagnosing.
+    ///
+    /// So the port is PROBED rather than assumed: an exclusive bind fails against a port an
+    /// SO_REUSEPORT listener already holds, which is exactly the case that needs detecting. The
+    /// probe socket is closed immediately, leaving a window in which another process could take
+    /// the port - narrow, and combined with per-process windows it makes a collision rare rather
+    /// than certain. Both TCP and UDP are checked, since a QUIC test and a TCP test can otherwise
+    /// pick the same number.
+    /// </remarks>
+    private static int ReserveFreePort()
+    {
+        for (int attempt = 0; attempt < 500; attempt++)
+        {
+            int port = Interlocked.Increment(ref _nextPort);
+            if (IsFree(port, SocketType.Stream, ProtocolType.Tcp)
+                && IsFree(port, SocketType.Dgram, ProtocolType.Udp))
+            {
+                return port;
+            }
+        }
+
+        throw new Exception(
+            "every port in this process's window is already held - too many suites running at once");
+
+        static bool IsFree(int port, SocketType type, ProtocolType protocol)
+        {
+            try
+            {
+                using var probe = new Socket(AddressFamily.InterNetwork, type, protocol)
+                {
+                    ExclusiveAddressUse = true,   // so an SO_REUSEPORT holder is detected, not joined
+                };
+                probe.Bind(new IPEndPoint(IPAddress.Loopback, port));
+                return true;
+            }
+            catch (SocketException)
+            {
+                return false;
+            }
+        }
+    }
 
     // Every server this harness starts, so the runner can shut them down when a test ends.
     private static readonly List<(Reactor Reactor, Thread Thread)> Started = [];
@@ -200,7 +253,7 @@ public static class TestServer
     private static (int Port, Reactor Reactor, Thread Thread) StartConfiguredOnce(
         Func<Reactor, TcpConnection, Task> handle, ServerConfig config, Action<Reactor>? onStart = null)
     {
-        int port = Interlocked.Increment(ref _nextPort);
+        int port = ReserveFreePort();
         config = config with { Tcp = (config.Tcp ?? new TcpOptions()) with { Port = (ushort)port }, ReactorCount = 1 };
 
         // Wrapped so the caller can be told when OnStart has actually RUN - see the wait below.
@@ -262,7 +315,7 @@ public static class TestServer
     /// </summary>
     public static int StartSharded(int reactorCount, Func<int, Reactor, TcpConnection, Task> handle)
     {
-        int port = Interlocked.Increment(ref _nextPort);
+        int port = ReserveFreePort();
         var config = new ServerConfig
         {
             ReactorCount = reactorCount,
@@ -334,8 +387,8 @@ public static class TestServer
         int udpRecvSlots = 16,
         Func<Reactor, QuicConnection, Task>? quicHandle = null)
     {
-        int tcpPort = Interlocked.Increment(ref _nextPort);
-        int udpPort = Interlocked.Increment(ref _nextPort);
+        int tcpPort = ReserveFreePort();
+        int udpPort = ReserveFreePort();
 
         var config = new ServerConfig
         {
@@ -389,7 +442,7 @@ public static class TestServer
     /// </summary>
     public static int StartQuicClientHost(Func<Reactor, TcpConnection, Task> tcpHandle, Action<Reactor> onStart)
     {
-        int tcpPort = Interlocked.Increment(ref _nextPort);
+        int tcpPort = ReserveFreePort();
 
         var config = new ServerConfig
         {
@@ -433,8 +486,8 @@ public static class TestServer
     public static int StartQuicServingH3Driver(
         Func<Reactor, TcpConnection, Task> tcpHandle, QuicConnectionFactory quicFactory, Action<Reactor> onStart)
     {
-        int tcpPort = Interlocked.Increment(ref _nextPort);
-        int udpPort = Interlocked.Increment(ref _nextPort);
+        int tcpPort = ReserveFreePort();
+        int udpPort = ReserveFreePort();
 
         var config = new ServerConfig
         {
