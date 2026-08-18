@@ -23,7 +23,16 @@ public sealed unsafe class QuicEngine : IDisposable
     private nint _engine;   // iq_engine*
 
     // Set once a factory exists, which is the point past which reactors may read the SNI table.
-    private bool _serving;
+    // Volatile because it guards a native use-after-free rather than a wrong answer: AddHost may be
+    // reached from a different thread than CreateFactory, and a stale read there lets
+    // iq_certs_add_host realloc the host array while reactor threads are walking it.
+    private volatile bool _serving;
+
+    // How many names the CURRENT generation answers for. Only ReplaceCertificates can change what a
+    // serving engine serves, and it replaces the whole table - so this is what tells it apart from
+    // a caller who forgot the table entirely. Written under _rotation, plus once from AddHost
+    // before the engine serves anything.
+    private int _hostCount;
 
     // Serialises rotations against each other and against disposal. Handshakes never take it: they
     // read one pointer. Without it two rotations can each publish a generation linking the SAME
@@ -182,10 +191,23 @@ public sealed unsafe class QuicEngine : IDisposable
 
         ArgumentException.ThrowIfNullOrWhiteSpace(host);
 
-        if (Ngtcp2.iq_engine_add_host(_engine, host, certificatePath, keyPath) != 0)
+        // Under the same lock as a rotation and disposal. AddHost is legal only before the engine
+        // serves, but nothing stops it running beside ReplaceCertificates on another thread during
+        // setup - and unsynchronised it appends to a generation the rotation is about to retire, so
+        // the host is silently never served and its certificate leaks with the retired generation.
+        // Disposal is the sharper case: Dispose frees the engine and only then zeroes the handle,
+        // so an AddHost reading it in between hands a dangling pointer to a function that WRITES.
+        lock (_rotation)
         {
-            throw new InvalidOperationException(
-                $"ioxide.ngtcp2: could not serve '{host}' from '{certificatePath}' / '{keyPath}'.");
+            ObjectDisposedException.ThrowIf(_engine == 0, this);
+
+            if (Ngtcp2.iq_engine_add_host(_engine, host, certificatePath, keyPath) != 0)
+            {
+                throw new InvalidOperationException(
+                    $"ioxide.ngtcp2: could not serve '{host}' from '{certificatePath}' / '{keyPath}'.");
+            }
+
+            _hostCount++;
         }
     }
 
@@ -242,7 +264,24 @@ public sealed unsafe class QuicEngine : IDisposable
         lock (_rotation)
         {
             ObjectDisposedException.ThrowIf(_engine == 0, this);
+
+            // Omitting the table on an engine that answers for names is refused, because both
+            // readings are plausible and one of them silently turns off SNI. A renewal hook that
+            // rotates only the default certificate - the obvious thing to write - published a
+            // generation with an EMPTY table, after which every registered host was answered with
+            // the default certificate: no exception, no log line, and a name mismatch at each
+            // client. State the table to keep it, or pass an empty one to mean it.
+            if (certificatesByHost is null && _hostCount > 0)
+            {
+                throw new ArgumentNullException(nameof(certificatesByHost),
+                    $"ioxide.ngtcp2: this engine serves {_hostCount} named host(s), and replacing "
+                    + "certificates replaces the whole table - omitting it would leave every name "
+                    + "answered by the default certificate. Pass the hosts to keep them, or an "
+                    + "empty dictionary to serve only the default.");
+            }
+
             Replace(defaultCertificate, certificatesByHost);
+            _hostCount = certificatesByHost?.Count ?? 0;
         }
     }
 

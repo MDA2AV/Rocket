@@ -58,6 +58,59 @@ internal static class RotationTests
                 "the name should be answered with the certificate the rotation installed");
         });
 
+        runner.Test("rotate/quic: renewing without the host table is refused, not silently applied", () =>
+        {
+            // The shape a renewal hook is written in: the default certificate expired, so rotate
+            // the default certificate. Omitting the table published a generation with NO names in
+            // it, so every registered host was answered with the default certificate from then on -
+            // no exception, no log line, and a name mismatch at each client. Both readings of the
+            // omission are plausible, which is exactly why it has to be stated.
+            (string cert, string key) = TestCert.Ensure();
+            (string alpha, string alphaKey) = TestCert.EnsureNamed("alpha.test");
+
+            using var engine = new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]);
+            engine.AddHost("named.test", alpha, alphaKey);
+
+            int udpPort = Serve(engine);
+            Assert.True(Ask(udpPort, "named.test").Contains("alpha.test"), "the name should start on its own certificate");
+
+            Assert.Throws<ArgumentNullException>(
+                () => engine.ReplaceCertificates(new QuicCertificate(cert, key)),
+                "named host");
+
+            // Refused means unchanged: the engine still answers for the name it was serving.
+            Assert.True(Ask(udpPort, "named.test").Contains("alpha.test"),
+                "a refused rotation must leave the table exactly as it was");
+
+            // And stating the table - even to keep it identical - is accepted.
+            engine.ReplaceCertificates(new QuicCertificate(cert, key), new Dictionary<string, QuicCertificate>
+            {
+                ["named.test"] = new(alpha, alphaKey),
+            });
+
+            Assert.True(Ask(udpPort, "named.test").Contains("alpha.test"),
+                "restating the table should keep the name served");
+        });
+
+        runner.Test("rotate/quic: an empty host table is how you ASK to serve only the default", () =>
+        {
+            // The other half of the refusal above: dropping every name is a legitimate thing to
+            // want, so it has to remain expressible - it just has to be said out loud.
+            (string cert, string key) = TestCert.Ensure();
+            (string alpha, string alphaKey) = TestCert.EnsureNamed("alpha.test");
+
+            using var engine = new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]);
+            engine.AddHost("named.test", alpha, alphaKey);
+
+            int udpPort = Serve(engine);
+            Assert.True(Ask(udpPort, "named.test").Contains("alpha.test"), "the name should start on its own certificate");
+
+            engine.ReplaceCertificates(new QuicCertificate(cert, key), new Dictionary<string, QuicCertificate>());
+
+            Assert.True(Ask(udpPort, "named.test").Contains("localhost"),
+                "with the table emptied on purpose, the name falls back to the default certificate");
+        });
+
         runner.Test("rotate/quic: a name can be added to a serving engine", () =>
         {
             // AddHost refuses once the engine is serving, because it edits the generation in force.
