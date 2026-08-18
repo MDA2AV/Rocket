@@ -705,7 +705,18 @@ public sealed class TlsService
                     }
 
                     int ok = OpenSsl.X509_STORE_add_cert(store, cert);
-                    OpenSsl.X509_free(cert);   // the store took its own reference
+
+                    // Same issuer hint the file route sends. Without it a client holding several
+                    // certificates has nothing to choose by and offers whichever comes first, so
+                    // the two anchor sources would accept different populations of client - which
+                    // is not something the choice between a path and PEM text should decide.
+                    // Not fatal on failure: it costs the hint, not the verification.
+                    if (ok == 1 && OpenSsl.SSL_CTX_add_client_CA(ctx, cert) != 1)
+                    {
+                        OpenSsl.ERR_clear_error();
+                    }
+
+                    OpenSsl.X509_free(cert);   // the store and the CA list took their own references
 
                     if (ok != 1)
                     {

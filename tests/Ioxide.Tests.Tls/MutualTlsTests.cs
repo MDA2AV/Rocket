@@ -210,6 +210,75 @@ internal static class MutualTlsTests
                 "ClientCaPath and ClientCaPem together must be rejected");
         });
 
+        runner.Test("mtls: the common name is reported exactly, not as part of a rendered subject", () =>
+        {
+            (string ca, string serverCert, string serverKey, string clientCert, string clientKey, _, _)
+                = TestCert.EnsureMutualTls();
+
+            int port = TestServer.Start(CommonNameHandler, r => TlsService.Start(r, new TlsOptions
+            {
+                CertificatePath = serverCert,
+                KeyPath = serverKey,
+                ClientCaPath = ca,
+                RequireClientCertificate = true,
+            }));
+
+            (int status, string body) = Client.GetTlsClientCert(port, "/who", clientCert, clientKey);
+
+            Assert.Equal(200, status);
+            // Equality, not Contains: the value is meant to be compared whole.
+            Assert.Equal("alice", body);
+        });
+
+        runner.Test("mtls: a subject crafted to look like another identity does not become one", () =>
+        {
+            // The reason PeerCommonName exists. The rendered subject escapes a literal '/' as
+            // "\\/", which still CONTAINS '/', so this legitimately-issued certificate renders as
+            //     /O=Acme\\/CN=admin.internal/CN=mallory
+            // and satisfies Contains("/CN=admin.internal") while being an entirely different
+            // principal. The structural CN is unmoved by any of that.
+            (_, string serverCert, string serverKey, _, _, _, _) = TestCert.EnsureMutualTls();
+            (string ca, string certPath, string keyPath) =
+                TestCert.EnsureClientCertFromCa("O=Acme/CN=admin.internal, CN=mallory");
+
+            int port = TestServer.Start(CommonNameHandler, r => TlsService.Start(r, new TlsOptions
+            {
+                CertificatePath = serverCert,
+                KeyPath = serverKey,
+                ClientCaPath = ca,
+                RequireClientCertificate = true,
+            }));
+
+            (int status, string body) = Client.GetTlsClientCert(port, "/who", certPath, keyPath);
+
+            Assert.Equal(200, status);
+            Assert.Equal("mallory", body);
+        });
+
+        runner.Test("mtls: the rendered subject is the one that IS confusable", () =>
+        {
+            // The other half of the pair, asserted so the trap is a recorded fact rather than a
+            // remark in a doc comment. If a future change makes the rendered form unambiguous this
+            // test fails, and that is the moment to revisit what the docs promise.
+            (_, string serverCert, string serverKey, _, _, _, _) = TestCert.EnsureMutualTls();
+            (string ca, string certPath, string keyPath) =
+                TestCert.EnsureClientCertFromCa("O=Acme/CN=admin.internal, CN=mallory");
+
+            int port = TestServer.Start(IdentityHandler, r => TlsService.Start(r, new TlsOptions
+            {
+                CertificatePath = serverCert,
+                KeyPath = serverKey,
+                ClientCaPath = ca,
+                RequireClientCertificate = true,
+            }));
+
+            (int status, string body) = Client.GetTlsClientCert(port, "/who", certPath, keyPath);
+
+            Assert.Equal(200, status);
+            Assert.True(body.Contains("/CN=admin.internal"),
+                $"expected the rendered subject to be substring-confusable, got: {body}");
+        });
+
         runner.Test("mtls: an unreadable client CA fails at startup", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
@@ -262,9 +331,17 @@ internal static class MutualTlsTests
         }
     }
 
-    // Answers with the authenticated identity, or "anonymous". Reading PeerSubject is the whole
-    // point of the feature: a server that can only enforce cannot authorise.
-    private static async Task IdentityHandler(Reactor reactor, TcpConnection connection)
+    // Answers with the authenticated identity, or "anonymous". Reading it is the whole point of
+    // the feature: a server that can only enforce cannot authorise.
+    private static Task IdentityHandler(Reactor reactor, TcpConnection connection)
+        => Identity(reactor, connection, static s => s.PeerSubject);
+
+    // The same, reporting the structural CN - the value an application is meant to authorize on.
+    private static Task CommonNameHandler(Reactor reactor, TcpConnection connection)
+        => Identity(reactor, connection, static s => s.PeerCommonName);
+
+    private static async Task Identity(Reactor reactor, TcpConnection connection,
+        Func<TlsSession, string?> report)
     {
         TlsSession? session = null;
         try
@@ -279,7 +356,7 @@ internal static class MutualTlsTests
                     return;
                 }
 
-                string subject = session.PeerSubject is { } peer ? peer : "anonymous";
+                string subject = report(session) ?? "anonymous";
                 byte[] body = Encoding.ASCII.GetBytes(subject);
 
                 session.Write(connection, Encoding.ASCII.GetBytes(

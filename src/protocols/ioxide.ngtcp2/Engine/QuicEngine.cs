@@ -55,16 +55,26 @@ public sealed unsafe class QuicEngine : IDisposable
     /// QUIC settles client authentication during the handshake and RFC 9001 section 4.4 forbids
     /// doing it afterwards, so this is a property of the whole connection: there is no asking for a
     /// certificate later because a request happened to reach a protected route.
+    ///
+    /// What validation covers, matching the TCP side: the chain builds to one of these anchors,
+    /// the signatures verify, and the certificate is inside its validity window. It does NOT cover
+    /// REVOCATION - no CRL is fetched and no OCSP request is made, so a certificate revoked by its
+    /// issuer keeps being accepted until it expires. Bound it another way: short-lived
+    /// certificates, or an application check keyed on
+    /// <see cref="QuicEngineConnection.PeerCommonName"/>.
     /// </param>
     /// <param name="clientCaPem">
     /// The same trust anchors as PEM text - the in-memory alternative to
     /// <paramref name="clientCaPemPath"/>, for a host that carries its CA bundle as data rather than
-    /// as a file. Set at most one of the two.
+    /// as a file. Set at most one of the two. Identical in what it trusts; it differs only in that
+    /// a path is re-read whenever a context is built, whereas PEM text is a value and does not move.
     /// </param>
     /// <param name="requireClientCertificate">
     /// With a CA configured, whether a client offering no certificate is refused during the
     /// handshake. False lets it connect unauthenticated and leaves the decision to the application,
-    /// which can read <see cref="QuicEngineConnection.PeerSubject"/>.
+    /// which can read <see cref="QuicEngineConnection.PeerCommonName"/>. Either way a
+    /// CertificateRequest goes out, so a client that HAS a certificate is asked for one and is
+    /// identified; what this decides is whether an empty answer ends the handshake.
     /// </param>
     public QuicEngine(string certPemPath, string keyPemPath, uint cidLength = 8, string[]? alpn = null,
         long maxSendRetentionBytes = 16L << 20,

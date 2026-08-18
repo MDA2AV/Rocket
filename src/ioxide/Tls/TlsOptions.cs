@@ -68,16 +68,27 @@ public sealed class TlsOptions
     /// validate. Whether a client offering NOTHING is also rejected is
     /// <see cref="RequireClientCertificate"/>.
     ///
-    /// The file's subject names are also sent in the CertificateRequest, so a client holding
-    /// several certificates can pick the one this server accepts rather than guessing. Anchors
-    /// supplied through <see cref="ClientCaPem"/> are trusted identically but send no such hint -
-    /// OpenSSL builds that list from a file.
+    /// The subject names are also sent in the CertificateRequest, so a client holding several
+    /// certificates can pick the one this server accepts rather than guessing.
+    /// <see cref="ClientCaPem"/> sends the same hint.
+    ///
+    /// What validation covers: the chain builds to one of these anchors, the signatures verify,
+    /// and the certificate is inside its validity window. What it does NOT cover is REVOCATION -
+    /// no CRL is fetched and no OCSP request is made, so a certificate revoked by its issuer keeps
+    /// being accepted until it expires. A deployment that needs revocation has to bound it some
+    /// other way: short-lived certificates, or an application check against its own source of
+    /// truth keyed on <see cref="TlsSession.PeerCommonName"/>.
     /// </summary>
     public string? ClientCaPath { get; init; }
 
     /// <summary>
     /// Client trust anchors as PEM text - the in-memory alternative to <see cref="ClientCaPath"/>,
     /// matching how the server's own certificate can come from either. Set at most one of the two.
+    ///
+    /// Equivalent to <see cref="ClientCaPath"/> in what it trusts, in the issuer hint it sends,
+    /// and in not checking revocation. It differs in one thing: a path is re-read whenever a
+    /// context is built, so replacing the file changes who is trusted, whereas PEM text is a value
+    /// and does not move.
     /// </summary>
     public string? ClientCaPem { get; init; }
 
@@ -86,9 +97,9 @@ public sealed class TlsOptions
     /// during the handshake.
     ///
     /// False - the default - lets it connect unauthenticated and leaves the decision to the
-    /// application, which reads <see cref="TlsSession.PeerSubject"/> and can serve a public route
-    /// while refusing a protected one. True refuses at the handshake, before a single byte of
-    /// request has been read.
+    /// application, which reads <see cref="TlsSession.PeerCommonName"/> and can serve a public
+    /// route while refusing a protected one. True refuses at the handshake, before a single byte
+    /// of request has been read.
     ///
     /// Ignored when no anchors are set: there would be nothing to validate against.
     /// </summary>

@@ -1293,6 +1293,49 @@ public static class TestCert
         return (ca, certPath, keyPath);
     }
 
+    /// <summary>
+    /// A CLIENT certificate from the mutual-TLS CA with a subject of the caller's choosing, so a
+    /// test can mint an identity that is legitimately issued and yet renders into something
+    /// awkward - a name containing the very separator the rendered DN uses, for instance.
+    /// </summary>
+    /// <param name="subject">Full distinguished name, e.g. <c>O=Acme, CN=bob</c>.</param>
+    public static (string CaPath, string CertPath, string KeyPath) EnsureClientCertFromCa(string subject)
+    {
+        (string ca, _, _, _, _, _, _) = EnsureMutualTls();
+
+        string dir = Path.Combine(Path.GetTempPath(), "ioxide-e2e-mtls");
+        string tag = Convert.ToHexString(
+            SHA256.HashData(Encoding.UTF8.GetBytes("client\u0000" + subject)))[..8];
+
+        string certPath = Path.Combine(dir, $"client-{tag}.crt");
+        string keyPath = Path.Combine(dir, $"client-{tag}.key");
+
+        if (File.Exists(certPath) && File.Exists(keyPath))
+        {
+            return (ca, certPath, keyPath);
+        }
+
+        using X509Certificate2 caCert = X509Certificate2.CreateFromPemFile(
+            Path.Combine(dir, "ca.crt"), Path.Combine(dir, "ca.key"));
+
+        DateTimeOffset notBefore = DateTimeOffset.UtcNow.AddDays(-1);
+        DateTimeOffset notAfter = notBefore.AddYears(1);
+
+        using var key = RSA.Create(2048);
+        var request = new CertificateRequest(subject, key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        request.CertificateExtensions.Add(
+            new X509EnhancedKeyUsageExtension([new Oid("1.3.6.1.5.5.7.3.2")], false));   // client auth
+
+        byte[] serial = new byte[8];
+        RandomNumberGenerator.Fill(serial);
+        using X509Certificate2 signed = request.Create(caCert, notBefore, notAfter, serial);
+
+        File.WriteAllText(certPath, signed.ExportCertificatePem());
+        File.WriteAllText(keyPath, key.ExportPkcs8PrivateKeyPem());
+
+        return (ca, certPath, keyPath);
+    }
+
     public static (string CertPath, string KeyPath) Ensure()
     {
         string dir = Path.Combine(Path.GetTempPath(), "ioxide-e2e-tls");

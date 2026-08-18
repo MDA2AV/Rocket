@@ -104,6 +104,9 @@ internal static unsafe partial class OpenSsl
 
     [LibraryImport(Ssl)] public static partial void SSL_CTX_set_client_CA_list(nint ctx, nint list);
 
+    /// <summary>Appends one issuer to the CertificateRequest hint. Takes its own reference.</summary>
+    [LibraryImport(Ssl)] public static partial int SSL_CTX_add_client_CA(nint ctx, nint x509);
+
     /// <summary>The peer's leaf certificate, borrowed - no reference taken, so it is not freed.</summary>
     [LibraryImport(Ssl)] public static partial nint SSL_get0_peer_certificate(nint ssl);
 
