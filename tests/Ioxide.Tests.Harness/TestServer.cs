@@ -32,8 +32,11 @@ public static class TestServer
     // 20000 to 32700, which stops short of ip_local_port_range (32768 on Linux by default): a
     // listener bound above that line races the machine's own ephemeral allocations, including the
     // client sockets these very tests open.
-    private const int WindowSize = 100;
-    private const int WindowCount = 127;
+    // A window has to hold a whole suite's servers. The TLS suite already takes 102 - measured, not
+    // estimated - so 100 was being overrun into the neighbouring process's window every run, which
+    // is a collision that looks like a random test failure somewhere else entirely.
+    private const int WindowSize = 250;
+    private const int WindowCount = 50;
 
     private static int PortBaseForThisProcess()
     {
@@ -152,7 +155,49 @@ public static class TestServer
     /// Start with explicit config overrides (Port and ReactorCount are stamped by the harness) and
     /// hand back the reactor + its thread so tests can assert against them or stop cleanly.
     /// </summary>
+    /// <summary>
+    /// Starts a server, moving to another port if the one it picked is taken.
+    /// </summary>
+    /// <remarks>
+    /// A port collision is not a test failure and must not be reported as one. Each process gets a
+    /// window of ports, but the range available is finite (20000 to 32700, below where the kernel
+    /// starts handing out ephemeral ports), so with enough processes running at once two of them
+    /// genuinely land on the same number. Retrying on the next port makes that self-healing rather
+    /// than a flake someone has to try to reproduce - and a flake in a suite this size is expensive
+    /// out of all proportion to the collision that caused it.
+    /// </remarks>
     public static (int Port, Reactor Reactor, Thread Thread) StartConfigured(
+        Func<Reactor, TcpConnection, Task> handle, ServerConfig config, Action<Reactor>? onStart = null)
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return StartConfiguredOnce(handle, config, onStart);
+            }
+            catch (Exception e) when (attempt < 25 && PortTaken(e))
+            {
+                // The next pass takes the next port. Nothing to clean up: the reactor never bound.
+            }
+        }
+    }
+
+    /// <summary>Whether a start failed because something else already holds the port.</summary>
+    private static bool PortTaken(Exception e)
+    {
+        for (Exception? at = e; at is not null; at = at.InnerException)
+        {
+            if (at.Message.Contains("bind failed", StringComparison.Ordinal)
+                || at.Message.Contains("Address already in use", StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static (int Port, Reactor Reactor, Thread Thread) StartConfiguredOnce(
         Func<Reactor, TcpConnection, Task> handle, ServerConfig config, Action<Reactor>? onStart = null)
     {
         int port = Interlocked.Increment(ref _nextPort);
