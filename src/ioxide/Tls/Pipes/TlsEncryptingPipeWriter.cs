@@ -83,7 +83,15 @@ public sealed class TlsEncryptingPipeWriter : PipeWriter
     private async ValueTask<FlushResult> FlushConnectionAsync()
     {
         await _conn.FlushAsync();
-        return new FlushResult(isCanceled: false, isCompleted: _completed || _conn.IsClosed);
+
+        // Report the cancel on the flush it was aimed at, and clear it. CancelPendingFlush cannot
+        // wake a flush already parked on the connection's send - only the completion or a close
+        // releases that - but leaving the flag set was worse than not honouring it: the NEXT
+        // FlushAsync saw it, returned IsCanceled before reaching the encrypt block, and dropped the
+        // plaintext staged for it. A flush nobody cancelled was cancelled, silently and lossily.
+        bool canceled = _cancelRequested;
+        _cancelRequested = false;
+        return new FlushResult(canceled, _completed || _conn.IsClosed);
     }
 
     public override void CancelPendingFlush() => _cancelRequested = true;

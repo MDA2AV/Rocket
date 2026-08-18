@@ -18,6 +18,17 @@ namespace ioxide.tls;
 /// <remarks>Reactor thread only.</remarks>
 public sealed class TlsProloguePipeReader : PipeReader
 {
+    /// <summary>
+    /// How far the carry may grow before the connection is faulted. While the carry is live this
+    /// class copies ring bytes into it and hands the ring buffers straight back, so recv never
+    /// stalls - there is no backpressure on this path at all, unlike the OpenSSL column where the
+    /// inbound Pipe's pause threshold applies. A peer that sends a partial head and then dribbles
+    /// forever kept a caller examining without consuming, and the carry grew for the life of the
+    /// connection. Generous next to the 64 KB the OpenSSL column pauses at, because a legitimate
+    /// caller does examine a whole request head without consuming it - but bounded.
+    /// </summary>
+    private const int MaxCarryBytes = 1 << 20;
+
     private readonly PipeReader _inner;
 
     private byte[] _carry;
@@ -199,6 +210,17 @@ public sealed class TlsProloguePipeReader : PipeReader
             _consumed = 0;
         }
 
+        if (_length + extra > MaxCarryBytes)
+        {
+            // Faulting rather than silently growing. The OpenSSL column would simply stop reading
+            // here, but the ring buffers behind these bytes have already been handed back, so there
+            // is nothing left to apply backpressure with - the only honest answers are to bound it
+            // or to keep buffering, and this transport does not get to keep buffering.
+            throw new IOException(
+                $"the handshake carry reached {MaxCarryBytes} bytes without the reader consuming any of it; "
+                + "refusing to buffer more");
+        }
+
         if (_carry.Length - _length < extra)
         {
             byte[] grown = ArrayPool<byte>.Shared.Rent(Math.Max(_carry.Length * 2, _length + extra));
@@ -213,6 +235,15 @@ public sealed class TlsProloguePipeReader : PipeReader
 
     private void Release()
     {
+        // A cancel that arrived while the carry was live has not been served yet, and from here on
+        // reads go straight to the inner reader - so it has to travel with us. Dropping it left the
+        // caller waiting on a read it had already asked to cancel.
+        if (_cancelRequested)
+        {
+            _cancelRequested = false;
+            _inner.CancelPendingRead();
+        }
+
         if (_carry.Length > 0)
         {
             ArrayPool<byte>.Shared.Return(_carry);
