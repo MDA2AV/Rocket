@@ -213,8 +213,157 @@ public static class Handlers
         }
     }
 
-    // tls: the OpenSSL handshake, then a fixed response written through Wire.Write - which routes
-    // through TlsSession.Write, so this handler is correct under either TLS backend.
+    // Answers with the authenticated identity, or "anonymous". Reading it is the whole point of
+    // the feature: a server that can only enforce cannot authorise.
+    public static Task TlsIdentity(Reactor reactor, TcpConnection connection)
+        => Identity(reactor, connection, static s => s.PeerSubject);
+
+    // The same, reporting the structural CN - the value an application is meant to authorize on.
+    public static Task TlsCommonName(Reactor reactor, TcpConnection connection)
+        => Identity(reactor, connection, static s => s.PeerCommonName);
+
+    private static async Task Identity(Reactor reactor, TcpConnection connection,
+        Func<TlsSession, string?> report)
+    {
+        TlsSession? session = null;
+        try
+        {
+            session = await reactor.GetService<TlsService>()!.AcceptAsync(connection);
+
+            while (true)
+            {
+                RecvSnapshot snapshot = await connection.ReadAsync();
+                if (snapshot.IsClosed)
+                {
+                    return;
+                }
+
+                string subject = report(session) ?? "anonymous";
+                byte[] body = Encoding.ASCII.GetBytes(subject);
+
+                session.Write(connection, Encoding.ASCII.GetBytes(
+                    $"HTTP/1.1 200 OK\r\ncontent-length: {body.Length}\r\n\r\n{subject}"));
+
+                await connection.FlushAsync();
+                connection.ResetRead();
+            }
+        }
+        finally
+        {
+            session?.Dispose();
+            connection.DecRef();
+        }
+    }
+
+    /// <summary>Answers with the client's verified identity, so authentication can be seen.</summary>
+    public static async Task TlsIdentitySendFirst(Reactor reactor, TcpConnection connection)
+    {
+        TlsSession? session = null;
+
+        try
+        {
+            session = await reactor.GetService<TlsService>()!.AcceptAsync(connection);
+
+            // The first request routinely rides in with the handshake's final flight - a TLS 1.3
+            // client sends it immediately after Finished, and those bytes are already decrypted and
+            // gone from the socket by the time AcceptAsync returns. Answering it BEFORE parking on
+            // a read is what the send-first loop means; waiting first hangs, because the bytes
+            // being waited for already arrived.
+            if (!session.DrainPlaintext().IsEmpty)
+            {
+                session.Write(connection, IdentityBytes(session));
+                await connection.FlushAsync();
+            }
+
+            // No ResetRead above: that belongs to a read that was actually issued, and calling it
+            // for one that never happened leaves the connection's read state describing a read
+            // nobody made.
+            while (true)
+            {
+                RecvSnapshot snapshot = await connection.ReadAsync();
+
+                if (snapshot.IsClosed)
+                {
+                    return;
+                }
+
+                byte[] who = System.Text.Encoding.ASCII.GetBytes(session.PeerSubject ?? "anonymous");
+                byte[] head = System.Text.Encoding.ASCII.GetBytes(
+                    $"HTTP/1.1 200 OK\r\ncontent-length: {who.Length}\r\n\r\n");
+
+                session.Write(connection, [.. head, .. who]);
+
+                await connection.FlushAsync();
+                connection.ResetRead();
+            }
+        }
+        finally
+        {
+            session?.Dispose();
+            connection.DecRef();
+        }
+    }
+
+    /// <summary>The identity response: who the client proved itself to be.</summary>
+    private static byte[] IdentityBytes(TlsSession session)
+    {
+        byte[] who = System.Text.Encoding.ASCII.GetBytes(session.PeerSubject ?? "anonymous");
+        byte[] head = System.Text.Encoding.ASCII.GetBytes(
+            $"HTTP/1.1 200 OK\r\ncontent-length: {who.Length}\r\n\r\n");
+
+        return [.. head, .. who];
+    }
+
+    /// <summary>
+    /// Completes the handshake and answers, so a connection is not torn down before the client has
+    /// read the certificate. What it serves does not matter here - the certificate does.
+    /// </summary>
+    public static async Task TlsSendFirst(Reactor reactor, TcpConnection connection)
+    {
+        TlsSession? session = null;
+
+        try
+        {
+            session = await reactor.GetService<TlsService>()!.AcceptAsync(connection);
+
+            // The first request routinely rides in with the handshake's final flight - a TLS 1.3
+            // client sends it immediately after Finished, and those bytes are already decrypted and
+            // gone from the socket by the time AcceptAsync returns. Answering it BEFORE parking on
+            // a read is what the send-first loop means; waiting first hangs, because the bytes
+            // being waited for already arrived.
+            if (!session.DrainPlaintext().IsEmpty)
+            {
+                session.Write(connection, SendFirstResponse);
+                await connection.FlushAsync();
+            }
+
+            // No ResetRead above: that belongs to a read that was actually issued, and calling it
+            // for one that never happened leaves the connection's read state describing a read
+            // nobody made.
+            while (true)
+            {
+                RecvSnapshot snapshot = await connection.ReadAsync();
+
+                if (snapshot.IsClosed)
+                {
+                    return;
+                }
+
+                session.Write(connection, "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok"u8.ToArray());
+
+                await connection.FlushAsync();
+                connection.ResetRead();
+            }
+        }
+        finally
+        {
+            session?.Dispose();
+            connection.DecRef();
+        }
+    }
+
+    private static readonly byte[] SendFirstResponse = "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok"u8.ToArray();
+
     public static async Task Tls(Reactor r, TcpConnection conn)
     {
         TlsSession? tls = null;

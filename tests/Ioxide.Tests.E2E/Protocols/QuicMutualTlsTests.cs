@@ -11,7 +11,7 @@ namespace Ioxide.Tests;
 /// WHICH client it got - a server that only knows "some valid certificate" has a gate, not an
 /// identity.
 /// </summary>
-internal static class MutualTlsTests
+internal static class QuicMutualTlsTests
 {
     public static void Register(Runner runner)
     {

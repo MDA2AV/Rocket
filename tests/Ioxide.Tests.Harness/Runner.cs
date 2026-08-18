@@ -13,6 +13,7 @@ public sealed class Runner
     private int _passed;
     private int _failed;
     private int _skipped;
+    private int _pending;
 
     public void Test(string name, Action body, bool skip = false, int timeoutMs = DefaultTimeoutMs)
     {
@@ -42,6 +43,52 @@ public sealed class Runner
             // makes it look like a bug in whatever they were testing.
             TestServer.StopAll();
         }
+    }
+
+    /// <summary>
+    /// A test that is EXPECTED to fail, because it reproduces a defect that has not been fixed yet.
+    /// It reports PEND while it still fails, and FAILS the run the moment it starts passing.
+    /// </summary>
+    /// <param name="because">
+    /// Why it fails, and where that is being tracked - an issue number, or the finding it came from.
+    /// This is the whole value of the entry, so it is required rather than optional.
+    /// </param>
+    /// <remarks>
+    /// This exists so that "I found a bug" and "I fixed a bug" can be separate pieces of work
+    /// without either one being lost. A finding described in prose is a claim; a test that
+    /// reproduces it is evidence, and the difference between the two is most of what a review is
+    /// worth. Before this, evidence could only be committed by also committing the fix, so anything
+    /// found and not immediately fixed survived as a paragraph somebody had to believe.
+    ///
+    /// The inversion is deliberate: a PEND that starts passing is a FAILURE, not a quiet success.
+    /// Something changed the behaviour, and either the defect is fixed - in which case this becomes
+    /// an ordinary Test and stops being able to regress - or it was masked, which is worth knowing
+    /// immediately rather than whenever somebody next reads the file. An expected-failure marker
+    /// that can rot into a permanently-ignored test is worse than no marker.
+    /// </remarks>
+    public void Pending(string name, Action body, string because, int timeoutMs = DefaultTimeoutMs)
+    {
+        try
+        {
+            RunWithWatchdog(name, body, timeoutMs);
+        }
+        catch (Exception)
+        {
+            // Failed, as expected. The reason is printed rather than the exception: what matters is
+            // WHY this is known to fail, and the exception is just today's symptom of it.
+            Console.WriteLine($"PEND  {name}  ({because})");
+            _pending++;
+            return;
+        }
+        finally
+        {
+            TestServer.StopAll();
+        }
+
+        Console.WriteLine(
+            $"FAIL  {name}: expected to fail ({because}), but it PASSED - if the defect is fixed, "
+            + "make this a Test() so it can never regress; if it was masked, find out what masked it");
+        _failed++;
     }
 
     /// <summary>
@@ -108,7 +155,8 @@ public sealed class Runner
             _failed++;
         }
 
-        Console.WriteLine($"\n{_passed} passed, {_failed} failed, {_skipped} skipped");
+        string pending = _pending > 0 ? $", {_pending} pending" : "";
+        Console.WriteLine($"\n{_passed} passed, {_failed} failed, {_skipped} skipped{pending}");
         return _failed == 0 ? 0 : 1;
     }
 }

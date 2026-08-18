@@ -18,9 +18,9 @@ internal static class Program
         QuicTests.Register(runner);
         QuicEngineTests.Register(runner);
         H3Tests.Register(runner);
-        MutualTlsTests.Register(runner);
-        SniTests.Register(runner);
-        RotationTests.Register(runner);
+        QuicMutualTlsTests.Register(runner);
+        QuicSniTests.Register(runner);
+        QuicRotationTests.Register(runner);
         Http3Tests.Register(runner);
 
         return runner.Summary();

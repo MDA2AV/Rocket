@@ -14,7 +14,7 @@ namespace Ioxide.Tests;
 /// the connection lives - so a generation is published whole and the one it replaced is kept rather
 /// than freed. The load test below is the one that would crash if that were wrong.
 /// </remarks>
-internal static class RotationTests
+internal static class QuicRotationTests
 {
     public static void Register(Runner runner)
     {

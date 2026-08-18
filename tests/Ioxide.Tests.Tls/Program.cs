@@ -22,8 +22,11 @@ internal static class Program
         DecryptFaultTests.Register(runner, ktls);
         TlsPipeTests.Register(runner, ktls);
         MutualTlsTests.Register(runner, ktls);
+        MutualTlsConfigTests.Register(runner);
         SniTests.Register(runner, ktls);
+        SniConfigTests.Register(runner);
         RotationTests.Register(runner, ktls);
+        RotationValidatingClientTests.Register(runner);
         PostureTests.Register(runner);
         FormatTests.Register(runner);
 

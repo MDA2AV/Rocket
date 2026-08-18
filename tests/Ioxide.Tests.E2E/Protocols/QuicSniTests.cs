@@ -16,7 +16,7 @@ namespace Ioxide.Tests;
 /// Unlike TLS over TCP there is no "client sent no name" case to drive: a QUIC client offers one
 /// (RFC 9001), so the default certificate is reached here through a name nobody registered.
 /// </remarks>
-internal static class SniTests
+internal static class QuicSniTests
 {
     public static void Register(Runner runner)
     {

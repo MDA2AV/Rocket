@@ -95,7 +95,7 @@ internal static class SniTests
             (string cert, string key) = TestCert.Ensure();
             (string alphaCert, string alphaKey) = TestCert.EnsureNamed("alpha.test");
 
-            int port = TestServer.Start(OkHandler, r => TlsService.Start(r, new TlsOptions
+            int port = TestServer.Start(Handlers.TlsSendFirst, r => TlsService.Start(r, new TlsOptions
             {
                 CertificatePath = cert,
                 KeyPath = key,
@@ -115,7 +115,7 @@ internal static class SniTests
             // at all, and a named request is answered exactly as it was before.
             (string cert, string key) = TestCert.Ensure();
 
-            int port = TestServer.Start(OkHandler, r => TlsService.Start(r, new TlsOptions
+            int port = TestServer.Start(Handlers.TlsSendFirst, r => TlsService.Start(r, new TlsOptions
             {
                 CertificatePath = cert,
                 KeyPath = key,
@@ -132,7 +132,7 @@ internal static class SniTests
 
             TlsService? service = null;
 
-            TestServer.Start(OkHandler, r => service = TlsService.Start(r, new TlsOptions
+            TestServer.Start(Handlers.TlsSendFirst, r => service = TlsService.Start(r, new TlsOptions
             {
                 CertificatePath = cert,
                 KeyPath = key,
@@ -155,7 +155,7 @@ internal static class SniTests
             (string ca, string serverCert, string serverKey, _, _, _, _) = TestCert.EnsureMutualTls();
             (string alphaCert, string alphaKey) = TestCert.EnsureNamed("alpha.test");
 
-            int port = TestServer.Start(OkHandler, r => TlsService.Start(r, new TlsOptions
+            int port = TestServer.Start(Handlers.TlsSendFirst, r => TlsService.Start(r, new TlsOptions
             {
                 CertificatePath = serverCert,
                 KeyPath = serverKey,
@@ -182,7 +182,7 @@ internal static class SniTests
              string rogueCert, string rogueKey) = TestCert.EnsureMutualTls();
             (string alphaCert, string alphaKey) = TestCert.EnsureNamed("alpha.test");
 
-            int port = TestServer.Start(OkHandler, r => TlsService.Start(r, new TlsOptions
+            int port = TestServer.Start(Handlers.TlsSendFirst, r => TlsService.Start(r, new TlsOptions
             {
                 CertificatePath = serverCert,
                 KeyPath = serverKey,
@@ -215,7 +215,7 @@ internal static class SniTests
             (string cert, string key) = TestCert.Ensure();
             (string alphaCert, string alphaKey) = TestCert.EnsureNamed("alpha.test");
 
-            int port = TestServer.Start(OkHandler, r => TlsService.Start(r, new TlsOptions
+            int port = TestServer.Start(Handlers.TlsSendFirst, r => TlsService.Start(r, new TlsOptions
             {
                 CertificatePath = cert,
                 KeyPath = key,
@@ -242,7 +242,7 @@ internal static class SniTests
             (string cert, string key) = TestCert.Ensure();
             (string alphaCert, string alphaKey) = TestCert.EnsureNamed("alpha.test");
 
-            int port = TestServer.Start(OkHandler, r => TlsService.Start(r, new TlsOptions
+            int port = TestServer.Start(Handlers.TlsSendFirst, r => TlsService.Start(r, new TlsOptions
             {
                 CertificatePath = cert,
                 KeyPath = key,
@@ -273,7 +273,7 @@ internal static class SniTests
                 table[$"h{i}.test"] = new() { CertificatePath = hostCert, KeyPath = hostKey };
             }
 
-            int port = TestServer.Start(OkHandler, r => TlsService.Start(r, new TlsOptions
+            int port = TestServer.Start(Handlers.TlsSendFirst, r => TlsService.Start(r, new TlsOptions
             {
                 CertificatePath = cert,
                 KeyPath = key,
@@ -288,143 +288,6 @@ internal static class SniTests
             Assert.True(Client.ServerCertificateSubject(port, "h12.test").Contains("CN=h12.test"),
                 "the last entry should be reachable");
         });
-
-        runner.Test("sni: a blank host name is refused", () =>
-        {
-            (string cert, string key) = TestCert.Ensure();
-            (string alphaCert, string alphaKey) = TestCert.EnsureNamed("alpha.test");
-
-            Assert.True(StartFails(new TlsOptions
-            {
-                CertificatePath = cert,
-                KeyPath = key,
-                CertificatesByHost = new Dictionary<string, TlsCertificate>
-                {
-                    ["  "] = new() { CertificatePath = alphaCert, KeyPath = alphaKey },
-                },
-            }, "A blank host cannot be asked for by SNI"), "a blank name cannot be asked for and should be refused");
-        });
-
-        runner.Test("sni: a host entry naming no certificate source is refused", () =>
-        {
-            (string cert, string key) = TestCert.Ensure();
-            (_, string alphaKey) = TestCert.EnsureNamed("alpha.test");
-
-            // Neither source is as wrong as both, and reads as an entry someone forgot to finish.
-            Assert.True(StartFails(new TlsOptions
-            {
-                CertificatePath = cert,
-                KeyPath = key,
-                CertificatesByHost = new Dictionary<string, TlsCertificate>
-                {
-                    ["alpha.test"] = new() { KeyPath = alphaKey },
-                },
-            }, "Exactly one certificate source for 'alpha.test'"), "a host entry with no certificate should be refused");
-        });
-
-        runner.Test("sni: a host entry naming two key sources is refused", () =>
-        {
-            (string cert, string key) = TestCert.Ensure();
-            (string alphaCert, string alphaKey) = TestCert.EnsureNamed("alpha.test");
-
-            Assert.True(StartFails(new TlsOptions
-            {
-                CertificatePath = cert,
-                KeyPath = key,
-                CertificatesByHost = new Dictionary<string, TlsCertificate>
-                {
-                    ["alpha.test"] = new()
-                    {
-                        CertificatePath = alphaCert,
-                        KeyPath = alphaKey,
-                        KeyPem = File.ReadAllText(alphaKey),
-                    },
-                },
-            }, "Exactly one key source for 'alpha.test'"), "two key sources for one host should be refused");
-        });
-
-        runner.Test("sni: an unreadable host certificate fails at startup", () =>
-        {
-            (string cert, string key) = TestCert.Ensure();
-
-            Assert.True(StartFails(new TlsOptions
-            {
-                CertificatePath = cert,
-                KeyPath = key,
-                CertificatesByHost = new Dictionary<string, TlsCertificate>
-                {
-                    ["alpha.test"] = new() { CertificatePath = "/nonexistent/alpha.crt", KeyPath = key },
-                },
-            }, "alpha.test"), "a host certificate that cannot be read should fail at startup, not at a handshake");
-        });
-
-        runner.Test("sni: two entries for the same host are refused", () =>
-        {
-            (string cert, string key) = TestCert.Ensure();
-            (string alphaCert, string alphaKey) = TestCert.EnsureNamed("alpha.test");
-
-            string refusal = "";
-
-            try
-            {
-                TestServer.Start(OkHandler, r => TlsService.Start(r, new TlsOptions
-                {
-                    CertificatePath = cert,
-                    KeyPath = key,
-                    CertificatesByHost = new Dictionary<string, TlsCertificate>
-                    {
-                        // Distinct keys to the dictionary, the same host to the handshake. Only the
-                        // first would ever be served, so the second is a certificate that silently
-                        // never answers - refused rather than shadowed.
-                        ["alpha.test"] = new() { CertificatePath = alphaCert, KeyPath = alphaKey },
-                        ["ALPHA.test"] = new() { CertificatePath = cert, KeyPath = key },
-                    },
-                }));
-            }
-            catch (Exception e)
-            {
-                refusal = e.Message;
-            }
-
-            Assert.True(refusal.Contains("Two certificates for the same host"),
-                $"two entries folding to one name should be refused at startup; got: {refusal}");
-        });
-
-        runner.Test("sni: a host entry naming two certificate sources is refused", () =>
-        {
-            (string cert, string key) = TestCert.Ensure();
-            (string alphaCert, string alphaKey) = TestCert.EnsureNamed("alpha.test");
-
-            string refusal = "";
-
-            try
-            {
-                TestServer.Start(OkHandler, r => TlsService.Start(r, new TlsOptions
-                {
-                    CertificatePath = cert,
-                    KeyPath = key,
-                    CertificatesByHost = new Dictionary<string, TlsCertificate>
-                    {
-                        // Both a path and text: two answers to one question.
-                        ["alpha.test"] = new()
-                        {
-                            CertificatePath = alphaCert,
-                            CertificatePem = File.ReadAllText(alphaCert),
-                            KeyPath = alphaKey,
-                        },
-                    },
-                }));
-            }
-            catch (Exception e)
-            {
-                // The reactor raises it on its own thread and the harness reports the failure to
-                // start, so what is asserted is the reason rather than the exception type.
-                refusal = e.Message;
-            }
-
-            Assert.True(refusal.Contains("Exactly one certificate source for 'alpha.test'"),
-                $"naming two certificate sources for one host should be refused at startup; got: {refusal}");
-        });
     }
 
     /// <summary>
@@ -436,7 +299,7 @@ internal static class SniTests
     {
         try
         {
-            TestServer.Start(OkHandler, r => TlsService.Start(r, options));
+            TestServer.Start(Handlers.TlsSendFirst, r => TlsService.Start(r, options));
             return false;
         }
         catch (Exception e)
@@ -452,7 +315,7 @@ internal static class SniTests
         (string alphaCert, string alphaKey) = TestCert.EnsureNamed("alpha.test");
         (string betaCert, string betaKey) = TestCert.EnsureNamed("beta.test");
 
-        return TestServer.Start(OkHandler, r => TlsService.Start(r, new TlsOptions
+        return TestServer.Start(Handlers.TlsSendFirst, r => TlsService.Start(r, new TlsOptions
         {
             CertificatePath = cert,
             KeyPath = key,
@@ -465,53 +328,6 @@ internal static class SniTests
         }));
     }
 
-    /// <summary>
-    /// Completes the handshake and answers, so a connection is not torn down before the client has
-    /// read the certificate. What it serves does not matter here - the certificate does.
-    /// </summary>
-    private static async Task OkHandler(Reactor reactor, TcpConnection connection)
-    {
-        TlsSession? session = null;
-
-        try
-        {
-            session = await reactor.GetService<TlsService>()!.AcceptAsync(connection);
-
-            // The first request routinely rides in with the handshake's final flight - a TLS 1.3
-            // client sends it immediately after Finished, and those bytes are already decrypted and
-            // gone from the socket by the time AcceptAsync returns. Answering it BEFORE parking on
-            // a read is what the send-first loop means; waiting first hangs, because the bytes
-            // being waited for already arrived.
-            if (!session.DrainPlaintext().IsEmpty)
-            {
-                session.Write(connection, Response);
-                await connection.FlushAsync();
-            }
-
-            // No ResetRead above: that belongs to a read that was actually issued, and calling it
-            // for one that never happened leaves the connection's read state describing a read
-            // nobody made.
-            while (true)
-            {
-                RecvSnapshot snapshot = await connection.ReadAsync();
-
-                if (snapshot.IsClosed)
-                {
-                    return;
-                }
-
-                session.Write(connection, "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok"u8.ToArray());
-
-                await connection.FlushAsync();
-                connection.ResetRead();
-            }
-        }
-        finally
-        {
-            session?.Dispose();
-            connection.DecRef();
-        }
-    }
 
     private static IEnumerable<(string Label, bool KernelTx)> Paths(bool ktls)
     {
