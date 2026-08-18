@@ -108,6 +108,7 @@ public sealed unsafe class TlsSession : IDisposable
     {
         PeerSubject = null;
         PeerCommonName = null;
+        PeerCertificateDer = null;
 
         // Borrowed, not owned - get0 takes no reference, so there is nothing to free.
         nint cert = OpenSsl.SSL_get0_peer_certificate(_ssl);
@@ -131,6 +132,58 @@ public sealed unsafe class TlsSession : IDisposable
 
         PeerSubject = RenderSubject(name);
         PeerCommonName = ExtractCommonName(name);
+        PeerCertificateDer = ExportDer(cert);
+    }
+
+    /// <summary>
+    /// The verified peer certificate in DER, or null when the peer presented none. Only populated
+    /// for a certificate that passed verification, on the same terms as <see cref="PeerSubject"/>.
+    /// </summary>
+    /// <remarks>
+    /// Exists because a name is not always enough: hosts that authorize on a SAN, a fingerprint or
+    /// a serial need the certificate itself, and an ASP.NET application on this transport needs one
+    /// to satisfy ITlsConnectionFeature.ClientCertificate at all. Captured only when a peer
+    /// certificate is present, so a server not doing mutual TLS pays nothing.
+    /// </remarks>
+    public byte[]? PeerCertificateDer { get; private set; }
+
+    private static unsafe byte[]? ExportDer(nint cert)
+    {
+        byte* der = null;
+        int length = OpenSsl.i2d_X509(cert, &der);
+        if (length <= 0 || der is null)
+        {
+            OpenSsl.ERR_clear_error();
+            return null;
+        }
+
+        try
+        {
+            return new ReadOnlySpan<byte>(der, length).ToArray();
+        }
+        finally
+        {
+            OpenSsl.CRYPTO_free((nint)der, 0, 0);   // i2d_X509 allocates when handed a null target
+        }
+    }
+
+    /// <summary>
+    /// The protocol version this handshake settled on, as OpenSSL's wire value (0x0303 = TLS 1.2,
+    /// 0x0304 = TLS 1.3), or 0 before the handshake completes.
+    /// </summary>
+    public int NegotiatedProtocolVersion => OpenSsl.SSL_version(_ssl);
+
+    /// <summary>
+    /// The negotiated ciphersuite's IANA id, or 0 if there is none yet. The numbering is the same
+    /// one <c>TlsCipherSuite</c> uses, so callers that must report it need no table.
+    /// </summary>
+    public ushort NegotiatedCipherSuiteId
+    {
+        get
+        {
+            nint cipher = OpenSsl.SSL_get_current_cipher(_ssl);
+            return cipher == 0 ? (ushort)0 : (ushort)OpenSsl.SSL_CIPHER_get_protocol_id(cipher);
+        }
     }
 
     /// <summary>

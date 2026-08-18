@@ -120,6 +120,13 @@ internal static unsafe partial class OpenSsl
     /// <summary>The peer's leaf certificate, borrowed - no reference taken, so it is not freed.</summary>
     [LibraryImport(Ssl)] public static partial nint SSL_get0_peer_certificate(nint ssl);
 
+    // What the handshake actually settled on, for callers that have to REPORT it rather than
+    // assume it - ASP.NET reads both off ITlsHandshakeFeature.
+    [LibraryImport(Ssl)] public static partial int SSL_version(nint ssl);
+    [LibraryImport(Ssl)] public static partial nint SSL_get_current_cipher(nint ssl);
+    [LibraryImport(Ssl)] public static partial uint SSL_CIPHER_get_protocol_id(nint cipher);
+    [LibraryImport(Crypto)] public static partial int i2d_X509(nint x509, byte** outBuf);
+
     /// <summary>X509_V_OK, or why the chain was rejected.</summary>
     [LibraryImport(Ssl)] public static partial long SSL_get_verify_result(nint ssl);
 
