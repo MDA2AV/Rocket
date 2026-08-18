@@ -175,10 +175,118 @@ internal static class MutualTlsTests
             Assert.Equal("anonymous", body);
         });
 
+        RegisterBadClientCertificates(runner);
         RegisterConfigurationErrors(runner);
     }
 
     // Configuration mistakes that should fail where they are written, not at some later handshake.
+    /// <summary>
+    /// Certificates that are legitimately issued by the trusted CA and still must not get in. Every
+    /// other fixture in this suite is a clean, in-date, correctly-purposed leaf, so nothing here
+    /// pinned the checks OpenSSL performs beyond the signature - a server that verified the chain
+    /// and ignored everything else passed the whole suite.
+    /// </summary>
+    private static void RegisterBadClientCertificates(Runner runner)
+    {
+        (string Label, TestCert.ClientCertSpec Spec, string Why)[] rejects =
+        [
+            ("an expired client certificate", new TestCert.ClientCertSpec
+            {
+                Subject = "CN=expired-alice",
+                // Inside the CA's own window: .NET refuses to issue a leaf that predates its
+                // issuer, and the CA here starts a day ago.
+                NotBefore = TimeSpan.FromHours(-23),
+                NotAfter = TimeSpan.FromHours(-1),
+            }, "validity is checked, not just the signature"),
+
+            ("a client certificate that is not valid yet", new TestCert.ClientCertSpec
+            {
+                Subject = "CN=future-alice",
+                NotBefore = TimeSpan.FromDays(1),
+                NotAfter = TimeSpan.FromDays(30),
+            }, "notBefore is checked as well as notAfter"),
+
+            ("a client certificate for the wrong purpose", new TestCert.ClientCertSpec
+            {
+                Subject = "CN=server-alice",
+                ExtendedKeyUsage = "1.3.6.1.5.5.7.3.1",   // serverAuth only
+            }, "the extended key usage decides what a certificate may be USED for"),
+        ];
+
+        foreach ((string label, TestCert.ClientCertSpec spec, string why) in rejects)
+        {
+            runner.Test($"mtls: {label} is refused", () =>
+            {
+                (string ca, string cert, string key) = TestCert.EnsureClientCert(spec);
+                (string serverCert, string serverKey) = ServerFor(ca);
+
+                int port = TestServer.Start(IdentityHandler, r => TlsService.Start(r, new TlsOptions
+                {
+                    CertificatePath = serverCert,
+                    KeyPath = serverKey,
+                    ClientCaPath = ca,
+                    RequireClientCertificate = true,
+                }));
+
+                Client.TlsOutcome outcome = Client.TryGetTls(port, "/who", cert, key);
+                Assert.True(outcome != Client.TlsOutcome.Served, $"{label} was SERVED - {why}");
+                Assert.True(outcome != Client.TlsOutcome.TimedOut, $"{label} made the server hang rather than refuse it");
+            });
+        }
+
+        runner.Test("mtls: a client certificate that chains through an intermediate is accepted", () =>
+        {
+            // Every other fixture is signed DIRECTLY by the anchor, so a server that never built a
+            // chain at all would pass all of them. Here the anchor is the root and the client sends
+            // leaf + intermediate, which is what any real internal PKI looks like.
+            (string anchors, string cert, string key) = TestCert.EnsureChainedClientCert();
+            (string serverCert, string serverKey) = ServerFor(anchors);
+
+            int port = TestServer.Start(CommonNameHandler, r => TlsService.Start(r, new TlsOptions
+            {
+                CertificatePath = serverCert,
+                KeyPath = serverKey,
+                ClientCaPath = anchors,   // root AND intermediate
+                RequireClientCertificate = true,
+            }));
+
+            (int status, string body) = Client.GetTlsClientCert(port, "/who", cert, key);
+            Assert.Equal(200, status);
+            Assert.True(body.Contains("chained-alice"), $"expected the leaf's CN to reach the handler, got: {body}");
+        });
+
+        runner.Test("mtls: an EC client certificate is accepted", () =>
+        {
+            // Every fixture in this suite is RSA, so nothing here would notice a server that only
+            // worked with RSA client keys.
+            (string ca, string cert, string key) = TestCert.EnsureClientCert(new TestCert.ClientCertSpec
+            {
+                Subject = "CN=ec-alice",
+                EllipticCurve = true,
+            });
+            (string serverCert, string serverKey) = ServerFor(ca);
+
+            int port = TestServer.Start(CommonNameHandler, r => TlsService.Start(r, new TlsOptions
+            {
+                CertificatePath = serverCert,
+                KeyPath = serverKey,
+                ClientCaPath = ca,
+                RequireClientCertificate = true,
+            }));
+
+            (int status, string body) = Client.GetTlsClientCert(port, "/who", cert, key);
+            Assert.Equal(200, status);
+            Assert.True(body.Contains("ec-alice"), $"expected CN=ec-alice, got: {body}");
+        });
+    }
+
+    /// <summary>The server half of the mutual-TLS fixture, for tests that only vary the client.</summary>
+    private static (string CertPath, string KeyPath) ServerFor(string ca)
+    {
+        (_, string serverCert, string serverKey, _, _, _, _) = TestCert.EnsureMutualTls();
+        return (serverCert, serverKey);
+    }
+
     private static void RegisterConfigurationErrors(Runner runner)
     {
         runner.Test("mtls: a trust bundle with a corrupt block is refused, not silently truncated", () =>

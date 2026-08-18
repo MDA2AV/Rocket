@@ -663,6 +663,80 @@ public static class Client
     /// another to drive a client certificate and a named host TOGETHER, which is what proves that
     /// selecting a certificate by name cannot also select its way out of client verification.
     /// </param>
+    /// <summary>
+    /// How an attempt to be served ended. The distinction is the point: a test asserting "the
+    /// server refused this client" is satisfied, by a bare try/catch, by the server hanging, by the
+    /// server crashing, and by the port being bound by something else entirely - so the assertion
+    /// passes while the behaviour it names is broken.
+    /// </summary>
+    public enum TlsOutcome
+    {
+        /// <summary>Served. The handshake completed and the request was answered.</summary>
+        Served,
+
+        /// <summary>Refused with a TLS alert. The only outcome that means the server said no.</summary>
+        Refused,
+
+        /// <summary>Went away without an alert - dropped, reset, or the far side died.</summary>
+        Dropped,
+
+        /// <summary>Nothing came back in time. A server that hangs has not refused anything.</summary>
+        TimedOut,
+    }
+
+    /// <summary>
+    /// Attempts a full TLS request and classifies the outcome instead of merely reporting that
+    /// something threw.
+    /// </summary>
+    /// <remarks>
+    /// The request matters, and is not incidental. Under TLS 1.3 the client's Certificate is sent
+    /// after the server's Finished, so a server rejecting it has nothing left to interrupt -
+    /// AuthenticateAsClient returns happily and the alert only arrives when the client next reads.
+    /// A helper that watched the handshake alone would report every rejected client certificate as
+    /// a success.
+    /// </remarks>
+    public static TlsOutcome TryGetTls(int port, string path, string? certPath, string? keyPath,
+        int timeoutMs = 6000, string host = "localhost")
+    {
+        try
+        {
+            (int status, _) = GetTlsClientCert(port, path, certPath, keyPath, timeoutMs, host);
+            return status > 0 ? TlsOutcome.Served : TlsOutcome.Dropped;
+        }
+        catch (AuthenticationException)
+        {
+            return TlsOutcome.Refused;
+        }
+        catch (Exception e) when (e is IOException && Inner<AuthenticationException>(e) is not null)
+        {
+            return TlsOutcome.Refused;
+        }
+        catch (Exception e) when (Inner<SocketException>(e) is { SocketErrorCode: SocketError.TimedOut })
+        {
+            return TlsOutcome.TimedOut;
+        }
+        catch (IOException)
+        {
+            return TlsOutcome.Dropped;
+        }
+        catch (Exception e) when (e.Message.Contains("closed before headers", StringComparison.Ordinal))
+        {
+            return TlsOutcome.Dropped;
+        }
+
+        static T? Inner<T>(Exception e) where T : Exception
+        {
+            for (Exception? at = e; at is not null; at = at.InnerException)
+            {
+                if (at is T match)
+                {
+                    return match;
+                }
+            }
+            return null;
+        }
+    }
+
     public static (int Status, string Body) GetTlsClientCert(
         int port, string path, string? certPath, string? keyPath, int timeoutMs = 6000,
         string host = "localhost")

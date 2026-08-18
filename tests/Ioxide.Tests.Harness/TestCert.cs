@@ -357,4 +357,257 @@ public static class TestCert
 
         return (certPath, keyPath);
     }
+
+    // ---- awkward certificates ---------------------------------------------------------------
+    //
+    // Everything above mints ONE clean shape: an in-date RSA leaf with the right EKU, a single CN,
+    // a PKCS#8 key and LF line endings. That is why so little of the verification code is actually
+    // pinned by the suite - a mutation that accepts an expired certificate, ignores the EKU, takes
+    // the first CN instead of the last, or drops chain building survives every test here, because
+    // no fixture can tell the difference.
+
+    /// <summary>How a test wants a client certificate to be awkward.</summary>
+    public sealed record ClientCertSpec
+    {
+        public string Subject { get; init; } = "CN=alice";
+
+        /// <summary>Relative to now. Positive NotBefore = not yet valid; negative NotAfter = expired.</summary>
+        public TimeSpan NotBefore { get; init; } = TimeSpan.FromDays(-1);
+        public TimeSpan NotAfter { get; init; } = TimeSpan.FromDays(365);
+
+        /// <summary>clientAuth by default; serverAuth is the one a client must NOT be accepted on.</summary>
+        public string? ExtendedKeyUsage { get; init; } = "1.3.6.1.5.5.7.3.2";
+
+        /// <summary>An EC key instead of RSA - a different signature algorithm on the wire.</summary>
+        public bool EllipticCurve { get; init; }
+
+        internal string Tag => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"{Subject}|{NotBefore}|{NotAfter}|{ExtendedKeyUsage}|{EllipticCurve}")))[..10];
+    }
+
+    /// <summary>
+    /// A client certificate issued by the same CA <see cref="EnsureMutualTls"/> mints, shaped by
+    /// <paramref name="spec"/>. Legitimately issued in every case - the point is that a correct
+    /// server refuses it for a reason OTHER than its signature.
+    /// </summary>
+    public static (string CaPath, string CertPath, string KeyPath) EnsureClientCert(ClientCertSpec spec)
+    {
+        (string ca, _, _, _, _, _, _) = EnsureMutualTls();
+
+        string dir = Path.Combine(Path.GetTempPath(), "ioxide-e2e-mtls");
+        string certPath = Path.Combine(dir, $"spec-{spec.Tag}.crt");
+        string keyPath = Path.Combine(dir, $"spec-{spec.Tag}.key");
+
+        using FileStream guard = Lock(dir, "spec");
+
+        // Deliberately NOT the Fresh() check: half of these are supposed to be outside their
+        // validity window, and re-minting an expired fixture on every run would defeat the test.
+        if (File.Exists(certPath) && File.Exists(keyPath))
+        {
+            return (ca, certPath, keyPath);
+        }
+
+        using X509Certificate2 caCert = X509Certificate2.CreateFromPemFile(
+            Path.Combine(dir, "ca.crt"), Path.Combine(dir, "ca.key"));
+
+        DateTimeOffset notBefore = DateTimeOffset.UtcNow + spec.NotBefore;
+        DateTimeOffset notAfter = DateTimeOffset.UtcNow + spec.NotAfter;
+
+        CertificateRequest request;
+        AsymmetricAlgorithm key;
+        if (spec.EllipticCurve)
+        {
+            ECDsa ec = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+            key = ec;
+            request = new CertificateRequest(spec.Subject, ec, HashAlgorithmName.SHA256);
+        }
+        else
+        {
+            RSA rsa = RSA.Create(2048);
+            key = rsa;
+            request = new CertificateRequest(spec.Subject, rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        }
+
+        try
+        {
+            if (spec.ExtendedKeyUsage is { } eku)
+            {
+                request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension([new Oid(eku)], false));
+            }
+
+            byte[] serial = new byte[8];
+            RandomNumberGenerator.Fill(serial);
+
+            // Signed through an explicit generator rather than Create(issuer, ...). That overload
+            // derives the signature algorithm from the REQUEST's key, so an EC leaf issued by this
+            // RSA CA is refused outright - which has nothing to do with what is being tested.
+            using RSA caKey = caCert.GetRSAPrivateKey()!;
+            X509SignatureGenerator generator = X509SignatureGenerator.CreateForRSA(caKey, RSASignaturePadding.Pkcs1);
+            using X509Certificate2 signed = request.Create(
+                caCert.SubjectName, generator, notBefore, notAfter, serial);
+
+            WriteAtomic(certPath, signed.ExportCertificatePem());
+            WriteAtomic(keyPath, key switch
+            {
+                RSA rsa => rsa.ExportPkcs8PrivateKeyPem(),
+                ECDsa ec => ec.ExportPkcs8PrivateKeyPem(),
+                _ => throw new InvalidOperationException("unreachable"),
+            });
+        }
+        finally
+        {
+            key.Dispose();
+        }
+
+        return (ca, certPath, keyPath);
+    }
+
+    /// <summary>
+    /// Root -> intermediate -> leaf. The returned anchor file holds BOTH the root and the
+    /// intermediate, and the client presents the leaf alone.
+    /// </summary>
+    /// <remarks>
+    /// Two things neither of which any other fixture covers. The leaf is not signed by the anchor
+    /// the server was configured with, so it can only be accepted by building a chain - every other
+    /// client certificate here is signed directly by the anchor, which a server that never chained
+    /// at all would still accept. And the anchor file carries two certificates, so it also pins
+    /// that a multi-certificate CA bundle is loaded in full rather than stopping at the first.
+    /// </remarks>
+    public static (string AnchorsPath, string CertPath, string KeyPath) EnsureChainedClientCert()
+    {
+        (string ca, _, _, _, _, _, _) = EnsureMutualTls();
+
+        string dir = Path.Combine(Path.GetTempPath(), "ioxide-e2e-mtls");
+        string anchorsPath = Path.Combine(dir, "chain-anchors.pem");
+        string certPath = Path.Combine(dir, "chained-client.crt");
+        string keyPath = Path.Combine(dir, "chained-client.key");
+
+        using FileStream guard = Lock(dir, "chain");
+
+        if (Fresh(certPath, anchorsPath, keyPath))
+        {
+            return (anchorsPath, certPath, keyPath);
+        }
+
+        using X509Certificate2 root = X509Certificate2.CreateFromPemFile(
+            Path.Combine(dir, "ca.crt"), Path.Combine(dir, "ca.key"));
+
+        DateTimeOffset notBefore = root.NotBefore.ToUniversalTime();
+        DateTimeOffset notAfter = notBefore.AddDays(200);
+
+        using var intermediateKey = RSA.Create(2048);
+        var intermediateRequest = new CertificateRequest(
+            "CN=ioxide test intermediate", intermediateKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        intermediateRequest.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, true, 0, true));
+
+        byte[] intermediateSerial = new byte[8];
+        RandomNumberGenerator.Fill(intermediateSerial);
+        using X509Certificate2 intermediate = intermediateRequest.Create(root, notBefore, notAfter, intermediateSerial);
+        using X509Certificate2 intermediateWithKey = intermediate.CopyWithPrivateKey(intermediateKey);
+
+        using var leafKey = RSA.Create(2048);
+        var leafRequest = new CertificateRequest(
+            "CN=chained-alice", leafKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        leafRequest.CertificateExtensions.Add(
+            new X509EnhancedKeyUsageExtension([new Oid("1.3.6.1.5.5.7.3.2")], false));
+
+        byte[] leafSerial = new byte[8];
+        RandomNumberGenerator.Fill(leafSerial);
+        using X509Certificate2 leaf = leafRequest.Create(
+            intermediateWithKey, notBefore, notAfter.AddDays(-1), leafSerial);
+
+        WriteAtomic(anchorsPath, File.ReadAllText(ca).TrimEnd() + "\n" + intermediate.ExportCertificatePem() + "\n");
+        WriteAtomic(certPath, leaf.ExportCertificatePem());
+        WriteAtomic(keyPath, leafKey.ExportPkcs8PrivateKeyPem());
+
+        return (anchorsPath, certPath, keyPath);
+    }
+
+    /// <summary>How a test wants a server certificate's FILES to be awkward, rather than its content.</summary>
+    public enum PemShape
+    {
+        /// <summary>PKCS#8 key, LF endings - what every other fixture writes.</summary>
+        Plain,
+        /// <summary>"BEGIN RSA PRIVATE KEY": the older PKCS#1 encoding, still what many tools emit.</summary>
+        Pkcs1Key,
+        /// <summary>CRLF line endings, which is what a file that has been through Windows looks like.</summary>
+        CrlfEndings,
+        /// <summary>A UTF-8 BOM ahead of the first BEGIN line, which editors add silently.</summary>
+        Utf8Bom,
+        /// <summary>Human-readable text before the certificate, as openssl x509 -text emits.</summary>
+        LeadingText,
+        /// <summary>An EC key and certificate rather than RSA.</summary>
+        EcKey,
+    }
+
+    /// <summary>
+    /// A self-signed server certificate written in a particular PEM dialect. These are the shapes a
+    /// real deployment hands the library - exported by another tool, edited on another platform,
+    /// pasted through a secrets store - and none of them were represented.
+    /// </summary>
+    public static (string CertPath, string KeyPath) EnsureServerCert(PemShape shape)
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "ioxide-e2e-tls");
+        string certPath = Path.Combine(dir, $"shape-{shape}.crt");
+        string keyPath = Path.Combine(dir, $"shape-{shape}.key");
+
+        using FileStream guard = Lock(dir, "shape");
+
+        if (Fresh(certPath, keyPath))
+        {
+            return (certPath, keyPath);
+        }
+
+        var names = new SubjectAlternativeNameBuilder();
+        names.AddDnsName("localhost");
+        names.AddIpAddress(System.Net.IPAddress.Loopback);
+
+        string certPem;
+        string keyPem;
+
+        if (shape == PemShape.EcKey)
+        {
+            using ECDsa ec = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+            var request = new CertificateRequest("CN=localhost", ec, HashAlgorithmName.SHA256);
+            request.CertificateExtensions.Add(names.Build());
+            using X509Certificate2 cert = request.CreateSelfSigned(
+                DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
+
+            certPem = cert.ExportCertificatePem();
+            keyPem = ec.ExportPkcs8PrivateKeyPem();
+        }
+        else
+        {
+            using RSA rsa = RSA.Create(2048);
+            var request = new CertificateRequest("CN=localhost", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+            request.CertificateExtensions.Add(names.Build());
+            using X509Certificate2 cert = request.CreateSelfSigned(
+                DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
+
+            certPem = cert.ExportCertificatePem();
+            keyPem = shape == PemShape.Pkcs1Key ? rsa.ExportRSAPrivateKeyPem() : rsa.ExportPkcs8PrivateKeyPem();
+        }
+
+        switch (shape)
+        {
+            case PemShape.CrlfEndings:
+                certPem = certPem.ReplaceLineEndings("\r\n");
+                keyPem = keyPem.ReplaceLineEndings("\r\n");
+                break;
+
+            case PemShape.Utf8Bom:
+                certPem = "\uFEFF" + certPem;
+                keyPem = "\uFEFF" + keyPem;
+                break;
+
+            case PemShape.LeadingText:
+                certPem = $"Certificate:\n    Issuer: CN=localhost\n    Subject: CN=localhost\n{certPem}";
+                break;
+        }
+
+        WriteAtomic(certPath, certPem);
+        WriteAtomic(keyPath, keyPem);
+        return (certPath, keyPath);
+    }
+
 }
