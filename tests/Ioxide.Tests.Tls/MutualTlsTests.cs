@@ -239,7 +239,7 @@ internal static class MutualTlsTests
             // Every other fixture is signed DIRECTLY by the anchor, so a server that never built a
             // chain at all would pass all of them. Here the anchor is the root and the client sends
             // leaf + intermediate, which is what any real internal PKI looks like.
-            (string anchors, string cert, string key) = TestCert.EnsureChainedClientCert();
+            (string anchors, _, string cert, string key) = TestCert.EnsureChainedClientCert();
             (string serverCert, string serverKey) = ServerFor(anchors);
 
             int port = TestServer.Start(CommonNameHandler, r => TlsService.Start(r, new TlsOptions

@@ -228,6 +228,105 @@ internal static class RotationTests
                 "and the table it had should be untouched");
         });
 
+        runner.Test("rotate: trust anchors are re-read, so who may connect can be changed", () =>
+        {
+            // TlsOptions documents this as the way to revoke an issuer: ClientCaPath is re-read
+            // whenever a context is built, and a rotation rebuilds every context. It is the only
+            // documented mechanism for changing who is allowed in without restarting, and nothing
+            // tested it - while the QUIC side, whose parameter doc claims the same behaviour, does
+            // not actually do it.
+            //
+            // Driven with a chain, because that makes the anchor set the ONLY variable: the client
+            // certificate, the server certificate and the CA all stay exactly the same, and the
+            // only thing that changes is whether the file names the intermediate needed to build
+            // the chain.
+            (string anchorsWithIntermediate, string intermediate, string clientCert, string clientKey)
+                = TestCert.EnsureChainedClientCert();
+            (string ca, string serverCert, string serverKey, _, _, _, _) = TestCert.EnsureMutualTls();
+
+            string anchors = Path.Combine(Path.GetTempPath(), $"ioxide-rotate-anchors-{Environment.ProcessId}.pem");
+            File.WriteAllText(anchors, File.ReadAllText(ca));   // the root alone
+
+            try
+            {
+                var options = new TlsOptions
+                {
+                    CertificatePath = serverCert,
+                    KeyPath = serverKey,
+                    ClientCaPath = anchors,
+                    RequireClientCertificate = true,
+                };
+
+                TlsService? service = null;
+                int port = TestServer.Start(Handlers.Tls, r => service = TlsService.Start(r, options));
+
+                // The root alone cannot build this client's chain: the issuing intermediate is
+                // neither anchored nor sent.
+                Assert.True(Client.TryGetTls(port, "/", clientCert, clientKey) != Client.TlsOutcome.Served,
+                    "a leaf whose issuer is not anchored should not be served");
+
+                // Now name the intermediate as well and rotate. Nothing else changes.
+                File.WriteAllText(anchors, File.ReadAllText(anchorsWithIntermediate));
+                service!.ReplaceCertificates(new TlsCertificate
+                {
+                    CertificatePath = serverCert,
+                    KeyPath = serverKey,
+                });
+
+                Assert.Equal(Client.TlsOutcome.Served, Client.TryGetTls(port, "/", clientCert, clientKey));
+            }
+            finally
+            {
+                File.Delete(anchors);
+            }
+        });
+
+        runner.Test("rotate: an anchor file emptied under a rotation stops admitting anyone", () =>
+        {
+            // The direction that matters for revocation, and the one an operator would actually
+            // perform. Same client, same server certificate; the anchor file loses the CA that
+            // issued the client, and the rotation must make that take effect rather than keep
+            // serving whoever was admissible when the process started.
+            (string ca, string serverCert, string serverKey, string clientCert, string clientKey, _, _)
+                = TestCert.EnsureMutualTls();
+            (string unrelated, _) = TestCert.EnsureNamed("not-the-client-ca.test");
+
+            string anchors = Path.Combine(Path.GetTempPath(), $"ioxide-revoke-anchors-{Environment.ProcessId}.pem");
+            File.WriteAllText(anchors, File.ReadAllText(ca));
+
+            try
+            {
+                var options = new TlsOptions
+                {
+                    CertificatePath = serverCert,
+                    KeyPath = serverKey,
+                    ClientCaPath = anchors,
+                    RequireClientCertificate = true,
+                };
+
+                TlsService? service = null;
+                int port = TestServer.Start(Handlers.Tls, r => service = TlsService.Start(r, options));
+
+                Assert.Equal(Client.TlsOutcome.Served, Client.TryGetTls(port, "/", clientCert, clientKey));
+
+                // Replace the issuer with an unrelated self-signed certificate: still a valid
+                // anchor file, just not one that admits this client.
+                File.WriteAllText(anchors, File.ReadAllText(unrelated));
+                service!.ReplaceCertificates(new TlsCertificate
+                {
+                    CertificatePath = serverCert,
+                    KeyPath = serverKey,
+                });
+
+                Assert.True(Client.TryGetTls(port, "/", clientCert, clientKey) != Client.TlsOutcome.Served,
+                    "the client's issuer was removed from the anchors and the rotation should have applied it");
+            }
+            finally
+            {
+                File.Delete(anchors);
+            }
+        });
+
         runner.Test("rotate: renewing a certificate does not drop mutual TLS", () =>
         {
             // Every context in a new generation is rebuilt, client verification included. If that

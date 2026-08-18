@@ -473,20 +473,21 @@ public static class TestCert
     /// at all would still accept. And the anchor file carries two certificates, so it also pins
     /// that a multi-certificate CA bundle is loaded in full rather than stopping at the first.
     /// </remarks>
-    public static (string AnchorsPath, string CertPath, string KeyPath) EnsureChainedClientCert()
+    public static (string AnchorsPath, string IntermediatePath, string CertPath, string KeyPath) EnsureChainedClientCert()
     {
         (string ca, _, _, _, _, _, _) = EnsureMutualTls();
 
         string dir = Path.Combine(Path.GetTempPath(), "ioxide-e2e-mtls");
         string anchorsPath = Path.Combine(dir, "chain-anchors.pem");
+        string intermediatePath = Path.Combine(dir, "chain-intermediate.crt");
         string certPath = Path.Combine(dir, "chained-client.crt");
         string keyPath = Path.Combine(dir, "chained-client.key");
 
         using FileStream guard = Lock(dir, "chain");
 
-        if (Fresh(certPath, anchorsPath, keyPath))
+        if (Fresh(certPath, anchorsPath, intermediatePath, keyPath))
         {
-            return (anchorsPath, certPath, keyPath);
+            return (anchorsPath, intermediatePath, certPath, keyPath);
         }
 
         using X509Certificate2 root = X509Certificate2.CreateFromPemFile(
@@ -517,10 +518,11 @@ public static class TestCert
             intermediateWithKey, notBefore, notAfter.AddDays(-1), leafSerial);
 
         WriteAtomic(anchorsPath, File.ReadAllText(ca).TrimEnd() + "\n" + intermediate.ExportCertificatePem() + "\n");
+        WriteAtomic(intermediatePath, intermediate.ExportCertificatePem());
         WriteAtomic(certPath, leaf.ExportCertificatePem());
         WriteAtomic(keyPath, leafKey.ExportPkcs8PrivateKeyPem());
 
-        return (anchorsPath, certPath, keyPath);
+        return (anchorsPath, intermediatePath, certPath, keyPath);
     }
 
     /// <summary>How a test wants a server certificate's FILES to be awkward, rather than its content.</summary>

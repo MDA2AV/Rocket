@@ -75,8 +75,16 @@ public sealed unsafe class QuicEngine : IDisposable
     /// <param name="clientCaPem">
     /// The same trust anchors as PEM text - the in-memory alternative to
     /// <paramref name="clientCaPemPath"/>, for a host that carries its CA bundle as data rather than
-    /// as a file. Set at most one of the two. Identical in what it trusts; it differs only in that
-    /// a path is re-read whenever a context is built, whereas PEM text is a value and does not move.
+    /// as a file. Set at most one of the two. Identical in what it trusts.
+    ///
+    /// Note the two forms behave the SAME here, unlike on the TCP side. Both are read exactly once,
+    /// when the engine is constructed: the verifier belongs to the engine and every certificate
+    /// generation points at it, which is what stops a renewal from quietly changing who may
+    /// connect. Editing the file afterwards therefore changes nothing, and neither does
+    /// <see cref="ReplaceCertificates"/> - changing the anchors on QUIC needs a new engine. The
+    /// sentence that used to be here said a path is re-read whenever a context is built; that is
+    /// true of TlsOptions.ClientCaPem on the TCP side, where it is the documented way to revoke an
+    /// issuer, and it was copied to a stack where it is not true.
     /// </param>
     /// <param name="requireClientCertificate">
     /// With a CA configured, whether a client offering no certificate is refused during the
