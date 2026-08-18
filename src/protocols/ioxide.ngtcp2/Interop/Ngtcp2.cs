@@ -37,6 +37,7 @@ internal static unsafe class Ngtcp2
     /// unchanged. <paramref name="requireClientCert"/> decides whether a client offering none is
     /// refused outright or merely arrives unauthenticated.
     /// </summary>
+    [DllImport(Lib)] internal static extern void iq_engine_set_handshake_timeout(nint engine, ulong ns);
     [DllImport(Lib)] internal static extern nint iq_engine_new_mtls(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string certPemPath,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string keyPemPath,

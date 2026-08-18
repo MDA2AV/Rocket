@@ -85,11 +85,17 @@ public sealed unsafe class QuicEngine : IDisposable
     /// CertificateRequest goes out, so a client that HAS a certificate is asked for one and is
     /// identified; what this decides is whether an empty answer ends the handshake.
     /// </param>
+    /// <param name="handshakeTimeoutMs">
+    /// How long a connection may spend NOT finishing its handshake before the engine drops it; 0
+    /// disables the bound. Defaults to 10 seconds, matching the TCP side's TlsOptions.
+    /// </param>
     public QuicEngine(string certPemPath, string keyPemPath, uint cidLength = 8, string[]? alpn = null,
         long maxSendRetentionBytes = 16L << 20,
         string? clientCaPemPath = null, bool requireClientCertificate = false,
-        string? clientCaPem = null)
+        string? clientCaPem = null, int handshakeTimeoutMs = 10_000)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(handshakeTimeoutMs);
+
         if (clientCaPemPath is not null && clientCaPem is not null)
         {
             throw new ArgumentException(
@@ -147,6 +153,13 @@ public sealed unsafe class QuicEngine : IDisposable
                 + (clientCaPemPath is not null ? $", client CA '{clientCaPemPath}')"
                     : clientCaPem is not null ? ", client CA from PEM text)" : ")"));
         }
+
+        // The one part of a QUIC server reachable before anything is authenticated. ngtcp2 leaves
+        // handshake_timeout at UINT64_MAX and max_idle_timeout disabled, so without this the only
+        // bound was the transport's sliding idle sweep - and a sweep keyed on last-seen is refreshed
+        // by any datagram, including ones ngtcp2 discards. One packet under the interval held a
+        // half-open handshake, its ngtcp2 conn, its picotls session and its CID routes, forever.
+        Ngtcp2.iq_engine_set_handshake_timeout(_engine, (ulong)handshakeTimeoutMs * 1_000_000UL);
     }
 
     /// <summary>

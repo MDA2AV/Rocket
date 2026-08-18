@@ -104,6 +104,20 @@ typedef struct iq_engine {
      * what happens when the client answers with an empty certificate list. */
     ptls_openssl_override_verify_certificate_t allow_anonymous;
     int                             require_client_cert;
+    /* Acceptable-issuer hint for the CertificateRequest, built once from the trust store. picotls
+     * sends certificate_authorities ONLY from this field, and without it a client holding several
+     * client certificates has nothing to choose by: it guesses, and a wrong guess is a refused
+     * handshake. The TCP side has always sent the hint from both anchor sources, so a
+     * configuration that worked there silently accepted a narrower set of clients here. Owned by
+     * the engine and pointed at by every context, so it outlives any generation. */
+    ptls_iovec_t                   *ca_names;
+    size_t                          ca_name_count;
+    /* Absolute bound on a handshake that never finishes, in nanoseconds; 0 leaves it unbounded.
+     * ngtcp2's own default is UINT64_MAX and max_idle_timeout defaults to disabled, so before this
+     * the only bound was the transport's sliding idle sweep - which any datagram refreshes, so a
+     * peer trickling one packet under the interval held a half-open handshake, and its ngtcp2
+     * conn, picotls session and CID routes, indefinitely. */
+    ngtcp2_duration                 handshake_timeout;
     iq_callbacks                    cbs;
     size_t                          cidlen;
     uint8_t                         alpn[256];   /* allowlist, wire format (len-prefixed entries) */
@@ -768,6 +782,51 @@ static int iq_cb_get_new_connection_id_noreport(ngtcp2_conn *conn, ngtcp2_cid *c
 
 /* ---- engine ----------------------------------------------------------------------------- */
 
+/* The subject DNs of every anchor in the store, DER-encoded, for the CertificateRequest's
+ * certificate_authorities extension. Best effort by design: the hint helps a client PICK among the
+ * certificates it holds, and a client with one certificate does not need it - so a failure here
+ * costs selection help, never verification, and must not fail the engine. */
+static void iq_build_ca_names(iq_engine *e, X509_STORE *store)
+{
+    STACK_OF(X509_OBJECT) *objects = X509_STORE_get0_objects(store);
+    int count = objects != NULL ? sk_X509_OBJECT_num(objects) : 0;
+    if (count <= 0) {
+        return;
+    }
+
+    ptls_iovec_t *list = calloc((size_t)count, sizeof(*list));
+    if (list == NULL) {
+        return;
+    }
+
+    size_t filled = 0;
+    for (int i = 0; i < count; i++) {
+        X509 *cert = X509_OBJECT_get0_X509(sk_X509_OBJECT_value(objects, i));
+        if (cert == NULL) {
+            continue;   /* a CRL entry, not a certificate */
+        }
+
+        unsigned char *der = NULL;
+        int len = i2d_X509_NAME(X509_get_subject_name(cert), &der);
+        if (len <= 0 || der == NULL) {
+            ERR_clear_error();
+            continue;
+        }
+
+        list[filled].base = der;   /* OPENSSL_malloc'd; released in iq_engine_free */
+        list[filled].len  = (size_t)len;
+        filled++;
+    }
+
+    if (filled == 0) {
+        free(list);
+        return;
+    }
+
+    e->ca_names      = list;
+    e->ca_name_count = filled;
+}
+
 iq_engine *iq_engine_new_mtls(const char *cert_pem_path, const char *key_pem_path,
                               size_t cidlen, const uint8_t *alpn, size_t alpn_len,
                               const char *client_ca_pem_path, const char *client_ca_pem,
@@ -851,6 +910,7 @@ static int iq_certs_add_host(iq_certs *certs, const char *host, const char *cert
      * on the old verifier, which is the bypass this comment exists to prevent. */
     h->ptls_ctx.verify_certificate            = certs->ptls_ctx.verify_certificate;
     h->ptls_ctx.require_client_authentication = certs->ptls_ctx.require_client_authentication;
+    h->ptls_ctx.client_ca_names               = certs->ptls_ctx.client_ca_names;
 
     /* Not read again for this handshake - picotls consults it only on a first flight, and the swap
      * happens inside that one call. Carried anyway so a host context is a faithful stand-in for the
@@ -932,6 +992,8 @@ static iq_certs *iq_certs_new(iq_engine *e, const char *cert_pem_path, const cha
     certs->ptls_ctx.require_client_authentication = e->certs != NULL
         ? e->certs->ptls_ctx.require_client_authentication
         : 0;
+    certs->ptls_ctx.client_ca_names.list          = e->ca_names;
+    certs->ptls_ctx.client_ca_names.count         = e->ca_name_count;
 
     return certs;
 
@@ -1068,6 +1130,9 @@ iq_engine *iq_engine_new_mtls(const char *cert_pem_path, const char *key_pem_pat
             X509_STORE_free(store);
             goto fail;
         }
+        /* Before the store changes owner: the hint is read out of it, not kept from it. */
+        iq_build_ca_names(e, store);
+
         /* The store is owned by the verifier from here; freeing it separately would double-free. */
         if (ptls_openssl_init_verify_certificate(&e->verify_cert, store) != 0) {
             fprintf(stderr, "[ioxide.ngtcp2] failed to init client certificate verification\n");
@@ -1115,6 +1180,16 @@ fail:
     return NULL;
 }
 
+/* Nanoseconds; 0 disables. Separate from iq_engine_new_mtls on purpose: adding a parameter there
+ * would change a signature the managed side already binds, and a mismatched .so would then be a
+ * silent argument shift rather than a missing export. */
+void iq_engine_set_handshake_timeout(iq_engine *e, uint64_t ns)
+{
+    if (e != NULL) {
+        e->handshake_timeout = (ngtcp2_duration)ns;
+    }
+}
+
 void iq_engine_free(iq_engine *e)
 {
     if (e == NULL) {
@@ -1135,6 +1210,12 @@ void iq_engine_free(iq_engine *e)
     if (e->peer_verify.cb != NULL) {
         ptls_openssl_dispose_verify_certificate(&e->verify_cert);
     }
+
+    /* Each DN was allocated by i2d_X509_NAME, the array by us. */
+    for (size_t i = 0; i < e->ca_name_count; i++) {
+        OPENSSL_free((void *)e->ca_names[i].base);
+    }
+    free(e->ca_names);
 
     free(e);
 }
@@ -1167,6 +1248,18 @@ iq_conn *iq_accept(iq_engine *e,
     c->cbs = e->cbs;
     c->user   = user;
 
+    /* Clamped at the entry point, like every other caller-supplied length here. The destinations
+     * are ngtcp2_sockaddr_union - 28 bytes, sa/in/in6 only, NOT sockaddr_storage - and the field
+     * immediately after them is the ngtcp2_path whose members ngtcp2 dereferences. The kernel
+     * bounds an AF_INET/AF_INET6 recvmsg to 28, so this is not reachable today; the managed side
+     * hands over a 128-byte name buffer, which is the gap that makes it worth stating. */
+    if (local_salen > sizeof(c->local_addr) || remote_salen > sizeof(c->remote_addr)) {
+        fprintf(stderr, "[ioxide.ngtcp2] refusing a sockaddr longer than %zu bytes\n",
+                sizeof(c->local_addr));
+        free(c);
+        return NULL;
+    }
+
     memcpy(&c->local_addr, local_sa, local_salen);
     memcpy(&c->remote_addr, remote_sa, remote_salen);
     c->path.local.addr     = &c->local_addr.sa;
@@ -1198,6 +1291,9 @@ iq_conn *iq_accept(iq_engine *e,
     ngtcp2_settings settings;
     ngtcp2_settings_default(&settings);
     settings.initial_ts = ts;
+    /* UINT64_MAX is how ngtcp2 spells "no bound"; 0 would mean initial_ts + 0, i.e. expired on
+       arrival, so the disabled case has to be mapped explicitly rather than passed through. */
+    settings.handshake_timeout = e->handshake_timeout != 0 ? e->handshake_timeout : UINT64_MAX;
 
     ngtcp2_transport_params params;
     ngtcp2_transport_params_default(&params);
@@ -1533,6 +1629,18 @@ iq_conn *iq_client_connect(iq_client_engine *e,
     }
     c->user = user;
     c->cbs = e->cbs;
+
+    /* Clamped at the entry point, like every other caller-supplied length here. The destinations
+     * are ngtcp2_sockaddr_union - 28 bytes, sa/in/in6 only, NOT sockaddr_storage - and the field
+     * immediately after them is the ngtcp2_path whose members ngtcp2 dereferences. The kernel
+     * bounds an AF_INET/AF_INET6 recvmsg to 28, so this is not reachable today; the managed side
+     * hands over a 128-byte name buffer, which is the gap that makes it worth stating. */
+    if (local_salen > sizeof(c->local_addr) || remote_salen > sizeof(c->remote_addr)) {
+        fprintf(stderr, "[ioxide.ngtcp2] refusing a sockaddr longer than %zu bytes\n",
+                sizeof(c->local_addr));
+        free(c);
+        return NULL;
+    }
 
     memcpy(&c->local_addr, local_sa, local_salen);
     memcpy(&c->remote_addr, remote_sa, remote_salen);

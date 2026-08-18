@@ -83,6 +83,58 @@ internal static class QuicEngineTests
             Assert.Equal("hello-quic-echo", echoed);
         });
 
+        runner.Test("quic: a handshake that never finishes is dropped", () =>
+        {
+            // The one part of a QUIC server reachable before anything is authenticated. ngtcp2
+            // leaves handshake_timeout at UINT64_MAX and max_idle_timeout disabled, so the only
+            // bound used to be the transport's idle sweep - which is keyed on last-seen and so is
+            // refreshed by any datagram, including ones ngtcp2 discards. A peer sending one packet
+            // under the interval held an ngtcp2 conn, a picotls session and its CID routes forever.
+            //
+            // Asserted on the HANDLER exiting, not on the client failing to reconnect: a dropped
+            // half-open handshake does not stop the client's retransmit from starting a fresh one
+            // that completes perfectly well, so "the client cannot connect afterwards" would be
+            // false even with a working bound. The handler runs from accept, and it returns when
+            // the connection is torn down.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, handshakeTimeoutMs: 1_000);
+
+            var torndown = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: SignalOnExit(torndown));
+
+            using var client = new QuicTestClient("127.0.0.1", udpPort);
+            client.Connect();
+            client.SendFirstFlight();   // the server now holds a handshake that will never finish
+
+            Assert.True(torndown.Task.Wait(TimeSpan.FromSeconds(6)),
+                "the server should have torn down a handshake that stalled past its bound");
+        });
+
+        runner.Test("control: with the bound disabled the same stalled handshake is kept", () =>
+        {
+            // The control that makes the test above mean something: same silence, same client. If
+            // the connection went away here too, that assertion would be proving nothing about the
+            // bound - only that a quiet peer gets dropped by something, somewhere.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, handshakeTimeoutMs: 0);
+
+            var torndown = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: SignalOnExit(torndown));
+
+            using var client = new QuicTestClient("127.0.0.1", udpPort);
+            client.Connect();
+            client.SendFirstFlight();
+
+            Assert.True(!torndown.Task.Wait(TimeSpan.FromSeconds(4)),
+                "with no bound the half-open handshake should still be held");
+        });
+
         runner.Test("quic: a handler that answers and closes in one cycle still delivers the answer", () =>
         {
             // The ordinary shape of a server that answers and says goodbye - an h3 graceful
@@ -203,6 +255,38 @@ internal static class QuicEngineTests
         }
     }
 
+    /// <summary>
+    /// Drains and discards, and reports when it RETURNS - which happens when the transport tears
+    /// the connection down. The handler starts at accept, so it is already running while the
+    /// handshake is in flight, which is what makes it an observer of a pre-handshake teardown.
+    /// </summary>
+    private static Func<Reactor, QuicConnection, Task> SignalOnExit(TaskCompletionSource torndown)
+        => async (_, conn) =>
+        {
+            try
+            {
+                while (true)
+                {
+                    QuicRecvSnapshot snap = await conn.ReadAsync();
+                    while (conn.TryGetDelivery(in snap, out QuicRecvRing.Delivery item))
+                    {
+                        conn.ReturnBuffer(in item);
+                    }
+
+                    if (snap.IsClosed)
+                    {
+                        break;
+                    }
+                    conn.ResetRead();
+                }
+            }
+            finally
+            {
+                torndown.TrySetResult();
+                conn.DecRef();
+            }
+        };
+
     private static async Task EchoHandler(Reactor reactor, QuicConnection conn)
     {
         try
@@ -282,6 +366,12 @@ internal sealed unsafe class QuicTestClient : IDisposable
     }
 
     // Drive the handshake: write client datagrams out, read server datagrams in, until established.
+    /// <summary>
+    /// Sends the client's first flight and stops, leaving the server holding a handshake that will
+    /// never finish - the state a pre-authentication bound exists to reclaim.
+    /// </summary>
+    public void SendFirstFlight() => FlushOut();
+
     public bool CompleteHandshake(int timeoutMs)
     {
         long deadline = Environment.TickCount64 + timeoutMs;
