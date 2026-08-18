@@ -53,6 +53,15 @@ tests written during the last review passed against the very defect they were wr
 of them asserted something that could never have been true. The commit message should say it was
 confirmed both ways.
 
+**Never break the source to prove a test fails.** Reverting a fix to watch a test go red is the
+right instinct and the wrong method here: the working tree is shared, and anyone building while it
+is broken - CI, another contributor, another reviewer - gets results that are quietly wrong and no
+reason to suspect it. Show the test discriminates from inside your own file instead: assert the
+*defect's* expectation, confirm it fails against real observed values, then restore the assertion.
+Where that is impossible, write the test against the behaviour as it is and say in the commit that
+the red-check needs the pre-fix source, describing the exact change. A described red-check is worth
+more than one that corrupted somebody else's run.
+
 **A finding without a fix is still worth committing.** Use `runner.Pending`:
 
 ```csharp
