@@ -38,6 +38,13 @@ public sealed unsafe class H3TestClient : IDisposable
     public string ServerName { get; init; } = "localhost";
 
     /// <summary>
+    /// The ALPN token to offer. "h3" is the only one an HTTP/3 server may serve, so this exists to
+    /// drive the NEGATIVE case: a server that confirms whatever it is asked for must still not hand
+    /// a non-h3 connection to an h3 handler.
+    /// </summary>
+    public string Alpn { get; init; } = "h3";
+
+    /// <summary>
     /// Ask for the subject of the certificate the server serves. Off by default: it costs a
     /// verify callback on the handshake, and only a test asking WHICH certificate came back needs
     /// it. The certificate is accepted either way - this client never validated one.
@@ -68,8 +75,8 @@ public sealed unsafe class H3TestClient : IDisposable
             OnStreamData = &OnQuicStreamData,
         };
         _clientEngine = _certPath is null
-            ? iq_client_engine_new_mtls("h3", null, null, quicCbs)
-            : iq_client_engine_new_mtls("h3", _certPath, _keyPath!, quicCbs);
+            ? iq_client_engine_new_mtls(Alpn, null, null, quicCbs)
+            : iq_client_engine_new_mtls(Alpn, _certPath, _keyPath!, quicCbs);
         Assert.True(_clientEngine != 0, "client engine init failed");
 
         if (RecordServerCertificate)
@@ -88,7 +95,7 @@ public sealed unsafe class H3TestClient : IDisposable
             // 16-byte CIDs, the length this client has always ended up with. It reads one
             // connection off its own socket rather than demultiplexing, so the value only has to
             // be legal - but it is stated rather than left to a default.
-            _conn = iq_client_connect(_clientEngine, l, 16, r, 16, ServerName, "h3",
+            _conn = iq_client_connect(_clientEngine, l, 16, r, 16, ServerName, Alpn,
                                       16, NowNs(), (void*)GCHandle.ToIntPtr(_self), null);
         }
         Assert.True(_conn != 0, "client connect failed");
