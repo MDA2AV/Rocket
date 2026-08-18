@@ -6,8 +6,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <RootNamespace>Playground.Http2.StreamedRequest</RootNamespace>
-    <AssemblyName>Playground.Http2.StreamedRequest</AssemblyName>
+    <RootNamespace>Playground.Http2.ManagedStreamedRequest</RootNamespace>
+    <AssemblyName>Playground.Http2.ManagedStreamedRequest</AssemblyName>
   </PropertyGroup>
 
   <ItemGroup>

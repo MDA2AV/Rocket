@@ -4,14 +4,14 @@ using ioxide.ngtcp2;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  http3-buffered - HTTP/3 in PURE C#, dispatched BUFFERED: the handler runs once the request
+//  http3-managed-buffered - HTTP/3 in PURE C#, dispatched BUFFERED: the handler runs once the request
 //  has fully arrived, so request.Body already holds the whole body. Frames, QPACK and Huffman
 //  are all managed code, so nothing native ships but the QUIC transport underneath.
 //
 //  The same server as Playground/Http3/Nghttp3Request otherwise - the diff is the package and the type
 //  names - which is what makes the two directly comparable:
 //
-//      dotnet run -c Release --project Playground/Http3/Buffered
+//      dotnet run -c Release --project Playground/Http3/ManagedBuffered
 //      curl --http3-only -k https://127.0.0.1:8443/
 //
 //  Needs: ioxide, ioxide.ngtcp2, ioxide.http3
@@ -80,7 +80,7 @@ for (int i = 0; i < threads.Length; i++)
     threads[i].Start();
 }
 
-Console.WriteLine($"[h3-managed] {config.ReactorCount} reactors, h3 on udp :{config.Quic!.Port} "
+Console.WriteLine($"[http3-managed-buffered] {config.ReactorCount} reactors, h3 on udp :{config.Quic!.Port} "
                 + $"(pure C#), {bodyBytes}-byte body, cert {certPath}");
 
 foreach (Thread thread in threads)

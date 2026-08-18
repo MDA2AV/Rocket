@@ -5,7 +5,7 @@ using ioxide.ngtcp2;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  http3-streamed-both - HTTP/3 in pure C# with BOTH directions streamed.
+//  http3-managed-streamed-both - HTTP/3 in pure C# with BOTH directions streamed.
 //
 //  The request body arrives through Http3Request.BodyReader, pulled a chunk at a time under
 //  flow control, so a large upload is never held whole. The response body goes out through an
@@ -19,7 +19,7 @@ using Playground.Shared;
 //  and hand it to the QUIC stream. There is no data-reader callback to answer and nothing to
 //  defer - which is the difference from the nghttp3 version of this in Playground/Http3/Nghttp3Response.
 //
-//      dotnet run -c Release --project Playground/Http3/StreamedBoth
+//      dotnet run -c Release --project Playground/Http3/ManagedStreamedBoth
 //      curl --http3-only -k https://127.0.0.1:8443/          # chunked download
 //      curl --http3-only -kN https://127.0.0.1:8443/feed     # endless; ctrl-c to stop
 //      curl --http3-only -k --data-binary @big.bin https://127.0.0.1:8443/upload
@@ -149,7 +149,7 @@ for (int i = 0; i < threads.Length; i++)
     threads[i].Start();
 }
 
-Console.WriteLine($"[h3-managed-streamed] {config.ReactorCount} reactors, h3 on udp :{config.Quic!.Port} "
+Console.WriteLine($"[http3-managed-streamed-both] {config.ReactorCount} reactors, h3 on udp :{config.Quic!.Port} "
                 + $"(pure C#), {chunkCount} x {chunkBytes}-byte chunks, cert {certPath}");
 
 foreach (Thread thread in threads)

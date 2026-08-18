@@ -139,15 +139,16 @@ bad_run() {
 registry() { grep -vE '^\s*#|^\s*$' bench/samples.tsv; }
 
 if [ "${1:-}" = "--list" ]; then
-  printf '%-24s %-6s %-6s %-9s %-20s %s\n' SAMPLE PROTO PORT PATH ORIGIN RUNNABLE
+  printf '%-26s %-7s %-6s %-11s %-20s %s\n' SAMPLE PROTO PORT PATH ORIGIN RUNNABLE
   while read -r sample proto port path origin extra; do
     r=yes
-    [ "$proto" = driver ] && skip="it IS a driver, not a server workload"
-  [ "$proto" = echo ] && [ ! -x Playground/Clients/Quic/bin/Release/net11.0/Playground.Clients.Quic ] \
+    [ "$proto" = driver ] && r="no (it IS a driver, not a server workload)"
+    [ "$proto" = none ] && r="no (no load generator here can drive it)"
+    [ "$proto" = echo ] && [ ! -x Playground/Clients/Quic/bin/Release/net11.0/Playground.Clients.Quic ] \
         && r="no (Clients/Quic not built)"
     [ "$proto" = h3 ] && [ ! -x "$H3X" ] && r="no (h3x missing)"
     [ -z "$(binary "$sample")" ] && r="no (not built)"
-    printf '%-24s %-6s %-6s %-9s %-20s %s\n' "$sample" "$proto" "$port" "$path" "$origin" "$r"
+    printf '%-26s %-7s %-6s %-11s %-20s %s\n' "$sample" "$proto" "$port" "$path" "$origin" "$r"
   done < <(registry)
   exit 0
 fi
@@ -180,6 +181,7 @@ while read -r sample proto port path origin extra; do
 
   skip=""
   [ "$proto" = driver ] && skip="a load driver, not a server workload"
+  [ "$proto" = none ] && skip="no load generator here can drive it"
   [ "$proto" = echo ] && [ ! -x Playground/Clients/Quic/bin/Release/net11.0/Playground.Clients.Quic ] \
       && skip="Clients/Quic (the driver) not built"
   [ "$proto" = h3 ] && [ ! -x "$H3X" ] && skip="h3x missing"

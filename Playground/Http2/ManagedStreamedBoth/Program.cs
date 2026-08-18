@@ -3,10 +3,10 @@ using ioxide.http2;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  http2-streamed-both - HTTP/2 with BOTH directions streamed: the request body pulled a chunk at
+//  http2-managed-streamed-both - HTTP/2 with BOTH directions streamed: the request body pulled a chunk at
 //  a time, the response body pushed a chunk at a time, in the same handler.
 //
-//      dotnet run -c Release --project Playground/Http2/StreamedBoth
+//      dotnet run -c Release --project Playground/Http2/ManagedStreamedBoth
 //      curl --http2-prior-knowledge -N http://127.0.0.1:8080/feed          # never ends
 //      head -c 50000000 /dev/zero | curl --http2-prior-knowledge --data-binary @- \
 //        http://127.0.0.1:8080/echo                                        # neither side held
@@ -127,7 +127,7 @@ for (int i = 0; i < threads.Length; i++)
     threads[i].Start();
 }
 
-Console.WriteLine($"[http2-streamed-both] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
+Console.WriteLine($"[http2-managed-streamed-both] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
                 + $"request pulled and response pushed ({chunkBytes}-byte chunks on /feed)");
 
 foreach (Thread thread in threads)

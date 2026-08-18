@@ -46,7 +46,7 @@
 
   <Folder Name="/apps/playground/tls/">
     <Project Path="Playground/Tls/Ktls/Playground.Tls.Ktls.csproj" />
-    <Project Path="Playground/Tls/Hybrid/Playground.Tls.Hybrid.csproj" />
+    <Project Path="Playground/Tls/KtlsTx/Playground.Tls.KtlsTx.csproj" />
     <Project Path="Playground/Tls/KtlsPipes/Playground.Tls.KtlsPipes.csproj" />
     <Project Path="Playground/Tls/MtlsKtlsPipes/Playground.Tls.MtlsKtlsPipes.csproj" />
     <Project Path="Playground/Tls/MtlsOpenSslPipes/Playground.Tls.MtlsOpenSslPipes.csproj" />
@@ -58,24 +58,27 @@
   </Folder>
 
   <Folder Name="/apps/playground/http2/">
-    <Project Path="Playground/Http2/Buffered/Playground.Http2.Buffered.csproj" />
+    <Project Path="Playground/Http2/ManagedBuffered/Playground.Http2.ManagedBuffered.csproj" />
     <Project Path="Playground/Http2/Nghttp2Buffered/Playground.Http2.Nghttp2Buffered.csproj" />
     <Project Path="Playground/Http2/Nghttp2Response/Playground.Http2.Nghttp2Response.csproj" />
-    <Project Path="Playground/Http2/StreamedResponse/Playground.Http2.StreamedResponse.csproj" />
-    <Project Path="Playground/Http2/StreamedRequest/Playground.Http2.StreamedRequest.csproj" />
-    <Project Path="Playground/Http2/StreamedBoth/Playground.Http2.StreamedBoth.csproj" />
+    <Project Path="Playground/Http2/ManagedStreamedResponse/Playground.Http2.ManagedStreamedResponse.csproj" />
+    <Project Path="Playground/Http2/ManagedStreamedRequest/Playground.Http2.ManagedStreamedRequest.csproj" />
+    <Project Path="Playground/Http2/ManagedStreamedBoth/Playground.Http2.ManagedStreamedBoth.csproj" />
     <Project Path="Playground/Http2/Tls/Playground.Http2.Tls.csproj" />
     <Project Path="Playground/Http2/SslStream/Playground.Http2.SslStream.csproj" />
+    <Project Path="Playground/Http2/Sni/Playground.Http2.Sni.csproj" />
+    <Project Path="Playground/Http2/Rotate/Playground.Http2.Rotate.csproj" />
   </Folder>
 
   <Folder Name="/apps/playground/http3/">
     <Project Path="Playground/Http3/Nghttp3Request/Playground.Http3.Nghttp3Request.csproj" />
     <Project Path="Playground/Http3/Nghttp3Buffered/Playground.Http3.Nghttp3Buffered.csproj" />
-    <Project Path="Playground/Http3/Buffered/Playground.Http3.Buffered.csproj" />
-    <Project Path="Playground/Http3/StreamedBoth/Playground.Http3.StreamedBoth.csproj" />
+    <Project Path="Playground/Http3/ManagedBuffered/Playground.Http3.ManagedBuffered.csproj" />
+    <Project Path="Playground/Http3/ManagedStreamedBoth/Playground.Http3.ManagedStreamedBoth.csproj" />
     <Project Path="Playground/Http3/MutualTls/Playground.Http3.MutualTls.csproj" />
     <Project Path="Playground/Http3/Nghttp3Response/Playground.Http3.Nghttp3Response.csproj" />
     <Project Path="Playground/Http3/Sni/Playground.Http3.Sni.csproj" />
+    <Project Path="Playground/Http3/Rotate/Playground.Http3.Rotate.csproj" />
   </Folder>
 
   <Folder Name="/apps/playground/quic/">

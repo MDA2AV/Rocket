@@ -8,7 +8,7 @@ using Playground.Shared;
 //  tls-ktls - FULL kernel TLS: the OpenSSL handshake runs over the ring, then both directions
 //  are handed to the kernel - the handler writes plaintext, the kernel makes the records, and
 //  recv delivers plaintext straight into ring memory. Experimental (see KernelRx below);
-//  Tls/Hybrid is the deployable drop-back - kernel TX, OpenSSL RX - and Tls/OpenSsl the default.
+//  Tls/KtlsTx is the deployable drop-back - kernel TX, OpenSSL RX - and Tls/OpenSsl the default.
 //
 //      sudo modprobe tls                             # needs the Linux 'tls' module + OpenSSL 3
 //      dotnet run -c Release --project Playground/Tls/Ktls
@@ -73,7 +73,7 @@ var tlsOptions = new TlsOptions
 
     // Full kTLS: the kernel decrypts inbound too. Experimental - about one first connection in
     // twelve fails outright, and a client sending a TLS 1.3 KeyUpdate loses the connection.
-    // Tls/Hybrid is this same server without this line: kernel TX, OpenSSL RX, deployable today.
+    // Tls/KtlsTx is this same server without this line: kernel TX, OpenSSL RX, deployable today.
     KernelRx        = true,
 };
 

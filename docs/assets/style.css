@@ -213,6 +213,14 @@ nav.top .links a.gh svg { display: block; }
 #tab-tlsosslpipe:checked ~ .ex-menu label[for="tab-tlsosslpipe"],
 #tab-tlsossl:checked ~ .ex-menu label[for="tab-tlsossl"],
 #tab-tlsmulti:checked ~ .ex-menu label[for="tab-tlsmulti"],
+#tab-tlssni:checked ~ .ex-menu label[for="tab-tlssni"],
+#tab-tlsmtls:checked ~ .ex-menu label[for="tab-tlsmtls"],
+#tab-tlsmtlsktls:checked ~ .ex-menu label[for="tab-tlsmtlsktls"],
+#tab-h2sni:checked ~ .ex-menu label[for="tab-h2sni"],
+#tab-h2rotate:checked ~ .ex-menu label[for="tab-h2rotate"],
+#tab-h3sni:checked ~ .ex-menu label[for="tab-h3sni"],
+#tab-h3rotate:checked ~ .ex-menu label[for="tab-h3rotate"],
+#tab-aspnet:checked ~ .ex-menu label[for="tab-aspnet"],
 #tab-tlsbcl:checked ~ .ex-menu label[for="tab-tlsbcl"],
 #tab-big:checked ~ .ex-menu label[for="tab-big"],
 #tab-hop:checked ~ .ex-menu label[for="tab-hop"],
@@ -347,6 +355,14 @@ nav.top .links a.gh svg { display: block; }
 #tab-tlsosslpipe:checked ~ .pane-tlsosslpipe { display: block; }
 #tab-tlsossl:checked ~ .pane-tlsossl { display: block; }
 #tab-tlsmulti:checked ~ .pane-tlsmulti { display: block; }
+#tab-tlssni:checked ~ .pane-tlssni { display: block; }
+#tab-tlsmtls:checked ~ .pane-tlsmtls { display: block; }
+#tab-tlsmtlsktls:checked ~ .pane-tlsmtlsktls { display: block; }
+#tab-h2sni:checked ~ .pane-h2sni { display: block; }
+#tab-h2rotate:checked ~ .pane-h2rotate { display: block; }
+#tab-h3sni:checked ~ .pane-h3sni { display: block; }
+#tab-h3rotate:checked ~ .pane-h3rotate { display: block; }
+#tab-aspnet:checked ~ .pane-aspnet { display: block; }
 #tab-tlsbcl:checked ~ .pane-tlsbcl { display: block; }
 #tab-big:checked ~ .pane-big { display: block; }
 #tab-hop:checked ~ .pane-hop { display: block; }
@@ -486,6 +502,14 @@ nav.top .links a.gh svg { display: block; }
   #tab-tlsosslpipe:checked ~ .ex-menu label[for="tab-tlsosslpipe"],
   #tab-tlsossl:checked ~ .ex-menu label[for="tab-tlsossl"],
   #tab-tlsmulti:checked ~ .ex-menu label[for="tab-tlsmulti"],
+  #tab-tlssni:checked ~ .ex-menu label[for="tab-tlssni"],
+  #tab-tlsmtls:checked ~ .ex-menu label[for="tab-tlsmtls"],
+  #tab-tlsmtlsktls:checked ~ .ex-menu label[for="tab-tlsmtlsktls"],
+  #tab-h2sni:checked ~ .ex-menu label[for="tab-h2sni"],
+  #tab-h2rotate:checked ~ .ex-menu label[for="tab-h2rotate"],
+  #tab-h3sni:checked ~ .ex-menu label[for="tab-h3sni"],
+  #tab-h3rotate:checked ~ .ex-menu label[for="tab-h3rotate"],
+  #tab-aspnet:checked ~ .ex-menu label[for="tab-aspnet"],
   #tab-tlsbcl:checked ~ .ex-menu label[for="tab-tlsbcl"],
   #tab-big:checked ~ .ex-menu label[for="tab-big"],
   #tab-hop:checked ~ .ex-menu label[for="tab-hop"],

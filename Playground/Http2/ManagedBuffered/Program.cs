@@ -4,23 +4,15 @@ using ioxide.http2;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  http2-streamed-response - HTTP/2 with the RESPONSE BODY STREAMED: the handler pushes
-//  bytes as it produces them and each flush becomes a DATA frame, instead of returning a finished
-//  Http2Response.
+//  http2-managed-buffered - an HTTP/2 server in pure C#: framing, HPACK and flow control; ioxide owns the
+//  ring, the loop and the connection, so a response is written straight into the write slab.
 //
-//  That is what "/feed" shows - an endless response has no final byte, so a buffered API cannot
-//  express it at all. It is also what lets a large file be served without ever holding it whole.
+//      dotnet run -c Release --project Playground/Http2/ManagedBuffered
+//      curl --http2-prior-knowledge http://127.0.0.1:8080/hello
 //
-//  The flow-control story is the part HTTP/3 does not have. Every stream here shares one TCP
-//  connection, so a write needs credit in BOTH the stream's window and the connection's, and
-//  FlushAsync waits for a WINDOW_UPDATE rather than failing. That wait is the backpressure: a
-//  peer that stops reading stops the producer instead of growing a queue behind it.
-//
-//      dotnet run -c Release --project Playground/Http2/StreamedResponse
-//      curl --http2-prior-knowledge http://127.0.0.1:8080/         # chunked
-//      curl --http2-prior-knowledge -N http://127.0.0.1:8080/feed  # never ends
-//
-//  Needs: ioxide, ioxide.http2
+//  This is h2c with PRIOR KNOWLEDGE: the peer opens with the HTTP/2 connection preface and no
+//  upgrade dance. For h2 over TLS, terminate with ioxide's TlsService (ALPN "h2") and feed the
+//  decrypted bytes in the same way. Needs: ioxide, ioxide.http2
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 // ── Knobs ────────────────────────────────────────────────────────────────────────────────────
@@ -31,7 +23,7 @@ using Playground.Shared;
 
 ushort port      = 8080;
 int    reactors  = Environment.ProcessorCount;
-int    bodyBytes = 2;   // unused here: the body is produced chunk by chunk
+int    bodyBytes = 2;
 
 Env.Override(ref port, ref reactors, ref bodyBytes);
 
@@ -40,13 +32,6 @@ Env.Override(ref port, ref reactors, ref bodyBytes);
 bool incrementalBuffers = false;
 
 Env.OverrideIncremental(ref incrementalBuffers);
-
-// Chunks written per response on "/", and the size of each. Their product is never held at once.
-int chunkCount = 64;
-int chunkBytes = 16 * 1024;
-
-Env.Override(ref chunkCount, "PLAYGROUND_CHUNKS");
-Env.Override(ref chunkBytes, "PLAYGROUND_CHUNK_BYTES");
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 var config = new ServerConfig
@@ -78,8 +63,6 @@ byte[] body = bodyBytes == 2
 
 var threads = new Thread[config.ReactorCount];
 
-byte[] chunk = Encoding.ASCII.GetBytes(new string('x', chunkBytes - 1) + "\n");
-
 for (int i = 0; i < threads.Length; i++)
 {
     var reactor = new Reactor(i, config);
@@ -88,25 +71,12 @@ for (int i = 0; i < threads.Length; i++)
     {
         try
         {
-            await new Http2Connection(conn).RunAsync(async (request, writer) =>
+            // The connection owns the read loop from here: it parses frames, dispatches each
+            // request once its stream ends, and flushes the batch in one write.
+            await new Http2Connection(conn).RunBufferedAsync(_ => new Http2Response
             {
-                bool endless = request.Path.Span.SequenceEqual("/feed"u8);
-
-                // Headers first and once. No content-length: the length is not known yet, and for
-                // /feed never will be - END_STREAM is what marks the end instead.
-                var response = new Http2Response { Status = 200 };
-                response.Headers.Add("content-type"u8.ToArray(),
-                    endless ? "text/event-stream"u8.ToArray() : "text/plain"u8.ToArray());
-                writer.WriteHeaders(response);
-
-                for (int n = 0; endless || n < chunkCount; n++)
-                {
-                    chunk.CopyTo(writer.GetSpan(chunk.Length));
-                    writer.Advance(chunk.Length);
-
-                    // Waits when either window is exhausted, and resumes on the WINDOW_UPDATE.
-                    await writer.FlushAsync();
-                }
+                Status = 200,
+                Body = body,
             });
         }
         finally
@@ -119,8 +89,8 @@ for (int i = 0; i < threads.Length; i++)
     threads[i].Start();
 }
 
-Console.WriteLine($"[http2-streamed-response] {config.ReactorCount} reactors on :{config.Tcp!.Port} "
-                + $"(pure C#), {chunkCount} x {chunkBytes}-byte chunks per response");
+Console.WriteLine($"[http2-managed-buffered] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
+                + $"{body.Length}-byte body (h2c prior knowledge)");
 
 foreach (Thread thread in threads)
 {

@@ -13,12 +13,84 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 # pane slug -> (sample, title, packages, run lines, trailing note)
 PANES = {
+    "tlssni": (
+        "Tls/Sni", "SNI &middot; a certificate per host", "ioxide",
+        ["curl -ks --resolve alpha.test:8443:127.0.0.1 https://alpha.test:8443/",
+         "curl -s --cacert alpha.test.pem --resolve alpha.test:8443:127.0.0.1 \\",
+         "     https://alpha.test:8443/    # and this proves WHICH certificate came back"],
+        "One port, several names, a certificate each - chosen inside the handshake, before a byte "
+        "of your protocol exists. The certificate at the top stays the DEFAULT: a client that sends "
+        "no name (anything connecting by IP) or asks for one that is not registered gets it rather "
+        "than a dead connection. Each entry is one OpenSSL context built at startup, so choosing "
+        "one per handshake is a lookup that allocates nothing - ten names cost what one does. "
+        "The same feature on h2 is "
+        "<label for=\"tab-h2sni\" class=\"ex-jump\">a cert per host &middot; h2</label>, and on QUIC "
+        "<label for=\"tab-h3sni\" class=\"ex-jump\">h3</label>."),
+    "h2sni": (
+        "Http2/Sni", "h2 &middot; a certificate per host", "ioxide + ioxide.http2",
+        ["curl -k --http2 --resolve alpha.test:8443:127.0.0.1 https://alpha.test:8443/"],
+        "<b>Two different names, at two different layers.</b> SNI in the handshake picks the "
+        "CERTIFICATE; <code>:authority</code> on each request picks the SITE. Nothing makes them "
+        "agree - HTTP/2 lets a client reuse one connection for any origin the certificate covers, "
+        "so authorization belongs on <code>:authority</code>, which is per request, and never on "
+        "the name that chose the certificate."),
+    "h3sni": (
+        "Http3/Sni", "h3 &middot; a certificate per host", "ioxide + ioxide.ngtcp2 + ioxide.http3",
+        ["curl --http3-only -k --resolve alpha.test:8443:127.0.0.1 https://alpha.test:8443/"],
+        "The QUIC side, where TLS lives INSIDE the transport: no <code>TlsService</code>, one "
+        "shared <code>QuicEngine</code>, and names registered before it starts serving - "
+        "<code>AddHost</code> refuses afterwards, because the table is read during handshakes on "
+        "every reactor at once. Client verification carries over to every host, so a name cannot "
+        "be a way around the mutual TLS the engine was built with."),
+    "h2rotate": (
+        "Http2/Rotate", "h2 &middot; certificate renewal", "ioxide + ioxide.http2",
+        ["kill -HUP <pid>            # what an ACME hook sends after rewriting the PEM",
+         "curl -s --cacert alpha.test.pem --resolve alpha.test:8443:127.0.0.1 \\",
+         "     https://alpha.test:8443/    # succeeds before the rotation, fails after"],
+        "Replacing a certificate without dropping a connection. Three things decide whether an "
+        "automated renewal is safe: it replaces the WHOLE set, so passing only the default leaves "
+        "every name answered by the default certificate; a <code>TlsService</code> belongs to ONE "
+        "reactor, so all of them have to be rotated and there is no instant at which they flip "
+        "together; and it builds before it publishes, so a half-written PEM throws and <b>leaves "
+        "the service serving what it was</b>. Live connections never notice - their certificate "
+        "was chosen at handshake. Compare "
+        "<label for=\"tab-h3rotate\" class=\"ex-jump\">renewal &middot; h3</label>, where one "
+        "shared engine makes it a single call."),
+    "h3rotate": (
+        "Http3/Rotate", "h3 &middot; certificate renewal", "ioxide + ioxide.ngtcp2 + ioxide.http3",
+        ["kill -HUP <pid>            # what an ACME hook sends after rewriting the PEM",
+         "curl --http3-only -s --cacert alpha.test.pem \\",
+         "     --resolve alpha.test:8443:127.0.0.1 https://alpha.test:8443/"],
+        "The same operational need with a different shape under it: ONE engine shared by every "
+        "reactor, so a rotation is a single call and a handshake sees either every old certificate "
+        "or every new one - never a mixture. The engine also REFUSES to replace the default alone "
+        "while it answers for names, because that hook (renew the default, forget the rest) "
+        "silently published an empty table. What a rotation may never change on either stack: the "
+        "client trust anchors, and whether a client certificate is required."),
+    "tlsmtls": (
+        "Tls/MtlsOpenSslPipes", "mutual TLS &middot; openssl &middot; pipes", "ioxide",
+        ["curl -k --cert client.pem --key client.key https://127.0.0.1:8443/"],
+        "The client proves who it is too, and the handler is told which peer it got. Everything "
+        "below the identity check is the ordinary pipe server."),
+    "tlsmtlsktls": (
+        "Tls/MtlsKtlsPipes", "mutual TLS &middot; kernel tx &middot; pipes", "ioxide",
+        ["sudo modprobe tls",
+         "curl -k --cert client.pem --key client.key https://127.0.0.1:8443/"],
+        "The same mutual TLS with the kernel encrypting outbound records. Verifying the peer and "
+        "choosing who does the crypto are independent choices."),
+    "aspnet": (
+        "AspNet", "ASP.NET Core on the ioxide transport", "ioxide + ioxide.Kestrel",
+        ["dotnet run                      # TRANSPORT=ioxide is the default",
+         "TRANSPORT=sockets dotnet run    # the stock Kestrel transport, for comparison"],
+        "Not an ioxide server: an ordinary ASP.NET Core app with ioxide underneath Kestrel as its "
+        "transport. <code>UseIoxide</code> is the whole integration, and <code>TRANSPORT=</code> "
+        "switches back to stock sockets so the same app can be measured both ways."),
     "tls": (
         "Tls/Ktls", "kTLS &middot; raw ring", "ioxide",
         ["sudo modprobe tls        # kTLS needs the Linux 'tls' module + OpenSSL 3",
          "curl -k https://127.0.0.1:8443/"],
         "<b>Opt-in - and FULL kTLS</b>: both directions in the kernel, set right on the options. "
-        "Kernel RX is experimental, so <code>Tls/Hybrid</code> in the repo is this server minus "
+        "Kernel RX is experimental, so <code>Tls/KtlsTx</code> in the repo is this server minus "
         "the <code>KernelRx</code> line - the half you would deploy today. The KernelTx line is what "
         "makes the <code>conn.Write</code> below legal: it puts PLAINTEXT into the slab and the "
         "kernel turns it into records. Without it the same call would put <b>cleartext on the "
@@ -26,7 +98,7 @@ PANES = {
         "correct in either mode. Compare "
         "<label for=\"tab-tlsossl\" class=\"ex-jump\">openssl &middot; raw</label>."),
     "tlshybrid": (
-        "Tls/Hybrid", "hybrid &middot; raw ring", "ioxide",
+        "Tls/KtlsTx", "hybrid &middot; raw ring", "ioxide",
         ["sudo modprobe tls        # the kernel half still needs the module",
          "curl -k https://127.0.0.1:8443/"],
         "The deployable kernel mode: <b>kernel TX, OpenSSL RX</b>. The handler still writes "
@@ -129,7 +201,7 @@ PANES = {
         "directly, over ioxide's TLS, or over <code>SslStream</code> - the transport is a "
         "constructor argument, not a branch inside the protocol."),
     "h3cs": (
-        "Http3/Buffered", "HTTP/3 &middot; buffered", "ioxide + ioxide.ngtcp2 + ioxide.http3",
+        "Http3/ManagedBuffered", "HTTP/3 &middot; buffered", "ioxide + ioxide.ngtcp2 + ioxide.http3",
         ["curl --http3-only -k https://127.0.0.1:8443/"],
         "HTTP/3 with <b>no native library above the transport</b> - frames, QPACK and Huffman are "
         "all managed code, and only QUIC itself stays native. Drop-in for "
@@ -152,7 +224,7 @@ PANES = {
         "PULLS body bytes rather than accepting pushes, which is why this carries a resume and a "
         "drain the pure-C# writer does not need."),
     "h3csstream": (
-        "Http3/StreamedBoth", "HTTP/3 &middot; request + response streamed", "ioxide + ioxide.ngtcp2 + ioxide.http3",
+        "Http3/ManagedStreamedBoth", "HTTP/3 &middot; request + response streamed", "ioxide + ioxide.ngtcp2 + ioxide.http3",
         ["curl --http3-only -k https://127.0.0.1:8443/",
          "curl --http3-only -kN https://127.0.0.1:8443/feed        # never ends",
          "curl --http3-only -k --data-binary @big.bin https://127.0.0.1:8443/echo"],
@@ -239,7 +311,7 @@ PANES = {
         "contiguous. Costs memory per connection - see "
         "<label for=\"tab-vs\" class=\"ex-jump\">shared vs incremental</label>."),
     "h2cs": (
-        "Http2/Buffered", "HTTP/2 &middot; buffered", "ioxide + ioxide.http2",
+        "Http2/ManagedBuffered", "HTTP/2 &middot; buffered", "ioxide + ioxide.http2",
         ["curl --http2-prior-knowledge http://127.0.0.1:8080/"],
         "<b>h2c with prior knowledge</b>: the peer opens with the HTTP/2 connection preface and "
         "there is no upgrade dance. For h2 over TLS see "
@@ -251,7 +323,7 @@ PANES = {
         "<code>Http2Response</code>. That is the right default, and the wrong one for a large "
         "upload or an endless response - the three tabs after it are those cases."),
     "h2sresp": (
-        "Http2/StreamedResponse", "HTTP/2 &middot; response streamed", "ioxide + ioxide.http2",
+        "Http2/ManagedStreamedResponse", "HTTP/2 &middot; response streamed", "ioxide + ioxide.http2",
         ["curl --http2-prior-knowledge http://127.0.0.1:8080/",
          "curl --http2-prior-knowledge -N http://127.0.0.1:8080/feed   # never ends"],
         "The RESPONSE body produced over time instead of returned whole - each flush becomes a "
@@ -263,7 +335,7 @@ PANES = {
         "is SHARED: every stream rides one TCP connection, so a flush waits on whichever of the "
         "stream and connection windows runs out first, and a WINDOW_UPDATE for either wakes it."),
     "h2sreq": (
-        "Http2/StreamedRequest", "HTTP/2 &middot; request streamed", "ioxide + ioxide.http2",
+        "Http2/ManagedStreamedRequest", "HTTP/2 &middot; request streamed", "ioxide + ioxide.http2",
         ["head -c 50000000 /dev/zero | curl --http2-prior-knowledge --data-binary @- \\",
          "  http://127.0.0.1:8080/upload"],
         "The other direction, and a different problem. <code>StreamRequestBodies</code> dispatches "
@@ -275,7 +347,7 @@ PANES = {
         "and stops sending - backpressure the peer takes part in, rather than a buffer you hope is "
         "big enough."),
     "h2sboth": (
-        "Http2/StreamedBoth", "HTTP/2 &middot; both directions streamed", "ioxide + ioxide.http2",
+        "Http2/ManagedStreamedBoth", "HTTP/2 &middot; both directions streamed", "ioxide + ioxide.http2",
         ["curl --http2-prior-knowledge -N http://127.0.0.1:8080/feed",
          "head -c 50000000 /dev/zero | curl --http2-prior-knowledge --data-binary @- \\",
          "  http://127.0.0.1:8080/echo"],

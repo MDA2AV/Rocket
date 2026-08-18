@@ -4,10 +4,10 @@ using ioxide.http2;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  http2-streamed-request - HTTP/2 where the REQUEST body arrives a chunk at a time instead of
+//  http2-managed-streamed-request - HTTP/2 where the REQUEST body arrives a chunk at a time instead of
 //  assembled. The handler runs as soon as the headers are in, while the upload is still coming.
 //
-//      dotnet run -c Release --project Playground/Http2/StreamedRequest
+//      dotnet run -c Release --project Playground/Http2/ManagedStreamedRequest
 //      head -c 50000000 /dev/zero | curl --http2-prior-knowledge --data-binary @- \
 //        http://127.0.0.1:8080/upload
 //
@@ -19,7 +19,7 @@ using Playground.Shared;
 //  than a buffer you hope is big enough.
 //
 //  Note the response is still returned whole here - one direction at a time, so the difference is
-//  the only thing on screen. Playground/Http2/StreamedBoth does both.
+//  the only thing on screen. Playground/Http2/ManagedStreamedBoth does both.
 //  Needs: ioxide, ioxide.http2
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -112,7 +112,7 @@ for (int i = 0; i < threads.Length; i++)
     threads[i].Start();
 }
 
-Console.WriteLine($"[http2-streamed-request] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
+Console.WriteLine($"[http2-managed-streamed-request] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
                 + $"request bodies streamed, {streamWindow / 1024} KiB window per stream");
 
 foreach (Thread thread in threads)

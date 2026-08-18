@@ -5,13 +5,13 @@ using ioxide.utils;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  tls-hybrid - the deployable kernel mode: the OpenSSL handshake runs over the ring, transmit
+//  tls-ktls-tx - the deployable kernel mode: the OpenSSL handshake runs over the ring, transmit
 //  is handed to KERNEL TLS (the handler writes plaintext, the kernel makes the records), and
 //  receive stays in OpenSSL. Tls/Ktls is this plus kernel receive (experimental); Tls/OpenSsl
 //  is the default, with the kernel in neither direction.
 //
 //      sudo modprobe tls                             # needs the Linux 'tls' module + OpenSSL 3
-//      dotnet run -c Release --project Playground/Tls/Hybrid
+//      dotnet run -c Release --project Playground/Tls/KtlsTx
 //      curl -ks https://127.0.0.1:8443/ | head -c 40
 //
 //  PLAYGROUND_TLS_CERT/_KEY point at a real PEM pair; otherwise a self-signed localhost cert is
@@ -80,7 +80,7 @@ var tlsOptions = new TlsOptions
 };
 
 byte[] body = new byte[bodyBytes];
-ReadOnlySpan<byte> fill = "ioxide-hybrid-tls "u8;
+ReadOnlySpan<byte> fill = "ioxide-ktls-tx "u8;
 for (int i = 0; i < bodyBytes; i++)
 {
     body[i] = fill[i % fill.Length];
@@ -149,7 +149,7 @@ for (int i = 0; i < threads.Length; i++)
         {
             // Handlers run fire-and-forget, so a thrown handshake error would vanish silently -
             // and a missing 'tls' kernel module manifests exactly here.
-            Console.Error.WriteLine($"[tls-hybrid] connection failed: {e.Message}");
+            Console.Error.WriteLine($"[tls-ktls-tx] connection failed: {e.Message}");
         }
         finally
         {
@@ -162,7 +162,7 @@ for (int i = 0; i < threads.Length; i++)
     threads[i].Start();
 }
 
-Console.WriteLine($"[tls-hybrid] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
+Console.WriteLine($"[tls-ktls-tx] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
                 + $"{bodyBytes}-byte body, tx=kernel, rx=openssl, cert {certPath}");
 
 foreach (Thread thread in threads)

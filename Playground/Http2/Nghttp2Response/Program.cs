@@ -17,7 +17,7 @@ using Playground.Shared;
 //  so it PULLS body bytes when it is ready to send them rather than accepting them when you have
 //  them: the writer buffers a chunk natively and resumes the stream, and nghttp2's read callback
 //  defers whenever nothing is queued. So a flush here means "handed over", not "on the wire" -
-//  where Playground/Http2/StreamedResponse writes a DATA frame the moment a chunk is staged.
+//  where Playground/Http2/ManagedStreamedResponse writes a DATA frame the moment a chunk is staged.
 //  Needs: ioxide, ioxide.nghttp2
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 

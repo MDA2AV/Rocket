@@ -6,8 +6,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <RootNamespace>Playground.Http2.Buffered</RootNamespace>
-    <AssemblyName>Playground.Http2.Buffered</AssemblyName>
+    <RootNamespace>Playground.Http2.Rotate</RootNamespace>
+    <AssemblyName>Playground.Http2.Rotate</AssemblyName>
   </PropertyGroup>
 
   <ItemGroup>
