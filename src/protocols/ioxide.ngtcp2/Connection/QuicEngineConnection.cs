@@ -385,6 +385,14 @@ public unsafe partial class QuicEngineConnection : QuicConnection
     /// 0 to say nothing.</param>
     private void Teardown(int farewellLength)
     {
+        // Anything this cycle coalesced goes out FIRST. QuicRemoveConnection below frees PeerAddr
+        // and Send is a no-op without it, so a batch still sitting in _gsoBuf when we get there is
+        // discarded - and a handler resumed inline by FireRecv runs inside the cycle, so its
+        // response is exactly what is sitting there. That silently dropped the last response of a
+        // graceful h3 shutdown: the peer saw only the CONNECTION_CLOSE. EndEngineCycle already
+        // flushes before its own deferred teardown; this makes every path agree.
+        FlushGso();
+
         if (farewellLength > 0)
         {
             Send(_sendBuf.AsSpan(0, farewellLength));   // last words: direct, unbatched

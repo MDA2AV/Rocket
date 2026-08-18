@@ -272,15 +272,31 @@ public sealed unsafe partial class Reactor
         _quicSweepScratch.AddRange(_quicConnSet);
         foreach (QuicConnection conn in _quicSweepScratch)
         {
-            long deadline = conn.GetNextTimeout(now);
-            if (deadline <= now)
+            // One connection's fault must not take the loop down with it. This runs bare in both
+            // loop bodies and nothing above it catches, so an exception out of a protocol engine
+            // killed the reactor thread and every connection on it. The recv path has been guarded
+            // since it existed; the timer path never was.
+            //
+            // The faulted connection is dropped rather than skipped, because its deadline is still
+            // in the past: leaving it would re-fire the same fault on every single pass, turning a
+            // one-off into a busy loop.
+            try
             {
-                conn.OnTimer(now);
-                deadline = conn.GetNextTimeout(now);
+                long deadline = conn.GetNextTimeout(now);
+                if (deadline <= now)
+                {
+                    conn.OnTimer(now);
+                    deadline = conn.GetNextTimeout(now);
+                }
+                if (deadline < next)
+                {
+                    next = deadline;
+                }
             }
-            if (deadline < next)
+            catch (Exception e)
             {
-                next = deadline;
+                Console.Error.WriteLine($"[r{_id}] quic timer faulted, dropping the connection: {e}");
+                QuicRemoveConnection(conn);
             }
         }
         _quicNextTimeoutMs = next;

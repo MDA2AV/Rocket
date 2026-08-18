@@ -83,6 +83,29 @@ internal static class QuicEngineTests
             Assert.Equal("hello-quic-echo", echoed);
         });
 
+        runner.Test("quic: a handler that answers and closes in one cycle still delivers the answer", () =>
+        {
+            // The ordinary shape of a server that answers and says goodbye - an h3 graceful
+            // shutdown is exactly this. The handler is resumed inline from inside the engine cycle,
+            // so its response is COALESCED into the GSO batch rather than sent; teardown then frees
+            // the peer address, after which the flush is a silent no-op. Pre-fix the peer received
+            // only the CONNECTION_CLOSE and the response was dropped on the floor.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: EchoThenCloseHandler);
+
+            using var client = new QuicTestClient("127.0.0.1", udpPort);
+            client.Connect();
+            Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");
+
+            byte[] sent = Encoding.ASCII.GetBytes("answer-then-close");
+            Assert.Equal("answer-then-close", client.RequestEcho(sent, timeoutMs: 5000));
+        });
+
         runner.Test("quic: dual-pipe (PipeReader/PipeWriter) stream echo (loopback)", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
@@ -139,6 +162,47 @@ internal static class QuicEngineTests
     }
 
     // Server side, the delegate model: await stream events, echo each back on its own stream.
+    /// <summary>
+    /// Echoes, then closes the connection in the SAME engine cycle. The close is what makes this
+    /// different from <see cref="EchoHandler"/>: the response is still sitting in the coalesced GSO
+    /// batch when teardown runs, so it only reaches the wire if teardown flushes that batch before
+    /// the connection stops being sendable.
+    /// </summary>
+    private static async Task EchoThenCloseHandler(Reactor reactor, QuicConnection conn)
+    {
+        try
+        {
+            while (true)
+            {
+                QuicRecvSnapshot snap = await conn.ReadAsync();
+
+                bool answered = false;
+                while (conn.TryGetDelivery(in snap, out QuicRecvRing.Delivery item))
+                {
+                    conn.SendStream(item.StreamId, item.AsSpan(), item.Fin);
+                    conn.ReturnBuffer(in item);
+                    answered = true;
+                }
+
+                if (answered)
+                {
+                    conn.Close(0);   // same cycle as the SendStream above
+                    return;
+                }
+
+                if (snap.IsClosed)
+                {
+                    break;
+                }
+                conn.ResetRead();
+            }
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    }
+
     private static async Task EchoHandler(Reactor reactor, QuicConnection conn)
     {
         try
