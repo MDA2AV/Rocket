@@ -23,6 +23,18 @@ internal static class Program
         QuicRotationTests.Register(runner);
         Http3Tests.Register(runner);
 
+        // Areas reserved for the failing-test review pass; empty until one lands.
+        QuicIdentityCapTests.Register(runner);
+        QuicTeardownWireTests.Register(runner);
+        QuicDeferredFaultTests.Register(runner);
+        QuicStreamAllowanceTests.Register(runner);
+        QuicTimerTests.Register(runner);
+        QuicSniHostileTests.Register(runner);
+        QuicClientCertTimingTests.Register(runner);
+        H3BodyTruncationTests.Register(runner);
+        H3ErrorCodeTests.Register(runner);
+        H3AlpnTests.Register(runner);
+
         return runner.Summary();
     }
 }
