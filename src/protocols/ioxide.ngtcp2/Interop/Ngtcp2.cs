@@ -141,12 +141,19 @@ internal static unsafe class Ngtcp2
     [DllImport(Lib)] internal static extern nint iq_strerror(int liberr);
 
     // ngtcp2 error codes the write/read loops branch on (include/ngtcp2/ngtcp2.h).
+    //
+    // Hand-copied from a header the build script fetches by ref, so a wrong value here is silent:
+    // it does not fail to compile, it makes a branch match the wrong error. CLOSING was -225 and
+    // INTERNAL was -502, which are TRANSPORT_PARAM and CALLBACK_FAILURE - so a client-triggerable
+    // transport-parameter violation was classified as a quiet ending and got no CONNECTION_CLOSE,
+    // which is the exact gap the farewell was added to close. Every constant below is asserted
+    // against iq_strerror by 'quic: the ngtcp2 error constants match the shipped library'.
     internal const int NGTCP2_ERR_STREAM_DATA_BLOCKED   = -208;
     internal const int NGTCP2_ERR_STREAM_SHUT_WR        = -219;
     internal const int NGTCP2_ERR_STREAM_NOT_FOUND      = -220;
+    internal const int NGTCP2_ERR_CLOSING               = -223;
     internal const int NGTCP2_ERR_DRAINING              = -224;
-    internal const int NGTCP2_ERR_CLOSING               = -225;
-    internal const int NGTCP2_ERR_INTERNAL              = -502;
+    internal const int NGTCP2_ERR_INTERNAL              = -228;
     internal const int NGTCP2_ERR_IDLE_CLOSE            = -238;
 
     internal static string StrError(int liberr) => Marshal.PtrToStringUTF8(iq_strerror(liberr)) ?? liberr.ToString();

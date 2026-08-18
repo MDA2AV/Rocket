@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using ioxide;
@@ -17,6 +18,50 @@ internal static class QuicEngineTests
 {
     public static void Register(Runner runner)
     {
+        runner.Test("quic: the ngtcp2 error constants match the shipped library", () =>
+        {
+            // These are hand-copied from a header the build script fetches by ref, so a wrong value
+            // does not fail to compile - it makes a branch match a DIFFERENT error. Two were wrong:
+            // CLOSING held TRANSPORT_PARAM's value and INTERNAL held CALLBACK_FAILURE's, so a
+            // transport-parameter violation - which a client triggers with one edited parameter -
+            // was classified as a quiet ending and the peer got no CONNECTION_CLOSE at all. That is
+            // the exact gap the farewell exists to close, reintroduced by a typo.
+            //
+            // ngtcp2_strerror returns the symbolic name for a code, so the shipped library can be
+            // asked rather than trusted. Reflecting over every NGTCP2_ERR_* field means a constant
+            // added later is covered without anyone remembering to extend this test.
+            Type interop = typeof(QuicEngine).Assembly.GetType("ioxide.ngtcp2.Ngtcp2")
+                ?? throw new Exception("could not reflect the ngtcp2 interop type");
+
+            MethodInfo strError =
+                interop.GetMethod("StrError", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static)
+                ?? throw new Exception("could not reflect Ngtcp2.StrError");
+
+            FieldInfo[] codes = interop
+                .GetFields(BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static)
+                .Where(f => f.IsLiteral && f.Name.StartsWith("NGTCP2_ERR_", StringComparison.Ordinal))
+                .ToArray();
+
+            // Vacuity guard: a renamed prefix would otherwise make this pass by checking nothing.
+            Assert.True(codes.Length >= 7, $"expected the interop to declare error codes, found {codes.Length}");
+
+            var wrong = new List<string>();
+            foreach (FieldInfo code in codes)
+            {
+                int value = (int)code.GetRawConstantValue()!;
+                string expected = code.Name["NGTCP2_".Length..];          // NGTCP2_ERR_CLOSING -> ERR_CLOSING
+                string actual = (string)strError.Invoke(null, [value])!;
+
+                if (actual != expected)
+                {
+                    wrong.Add($"{code.Name} = {value}, but the library calls {value} {actual}");
+                }
+            }
+
+            Assert.True(wrong.Count == 0,
+                "constants disagree with the shipped ngtcp2: " + string.Join("; ", wrong));
+        });
+
         runner.Test("quic: full ngtcp2 handshake + encrypted stream echo (loopback)", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
