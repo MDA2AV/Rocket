@@ -130,6 +130,8 @@ public sealed unsafe class QuicEngine : IDisposable
                 "QUIC connection ID length must be 1..20 bytes.");
         }
 
+        Ngtcp2.RequireAbi();
+
         CidLength = cidLength;
         // Clamp to a floor: the pump overshoots the high-water by at most one egress chunk (16 KiB),
         // so a cap below that would wedge a response mid-flight. 256 KiB gives comfortable headroom.

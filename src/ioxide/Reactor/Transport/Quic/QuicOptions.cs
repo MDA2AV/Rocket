@@ -10,6 +10,13 @@ public sealed record QuicOptions
     /// </summary>
     public int LocalCidLength { get; init; } = 8;
 
+    /// <summary>
+    /// How a datagram reaches the reactor that owns its connection when several reactors share the
+    /// port. Defaults to <see cref="QuicRouting.Forward"/>, which costs nothing until a client
+    /// changes address; see <see cref="QuicRouting"/> for the measured trade.
+    /// </summary>
+    public QuicRouting Routing { get; init; } = QuicRouting.Forward;
+
     public QuicConnectionFactory? ConnectionFactory { get; init; }
 
     /// <summary>

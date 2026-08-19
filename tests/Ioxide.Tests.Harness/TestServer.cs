@@ -374,6 +374,87 @@ public static class TestServer
         return port;
     }
 
+    /// <summary>
+    /// A QUIC server spread across <paramref name="reactorCount"/> reactors, all sharing one
+    /// SO_REUSEPORT'd UDP port - the shape ioxide actually ships, and the one every other QUIC
+    /// entry point here avoids by pinning a single reactor.
+    ///
+    /// It exists for connection-id steering. With one reactor a datagram cannot land in the wrong
+    /// place, so a single-reactor test cannot tell correct routing from no routing at all; only a
+    /// fleet can. The reactors share ONE ServerConfig instance, which is also what the steering
+    /// gate keys on to order their binds.
+    /// </summary>
+    /// <param name="reactorCount">How many reactors share the port. Two is enough to discriminate.</param>
+    /// <returns>
+    /// The QUIC UDP port and the reactors themselves - the latter because the property under test
+    /// is WHICH reactor a datagram reached, which is only visible from inside them
+    /// (<see cref="Reactor.QuicUnroutedDatagrams"/>).
+    /// </returns>
+    public static (int Port, Reactor[] Reactors) StartQuicSharded(int reactorCount,
+        QuicConnectionFactory quicFactory,
+        Func<Reactor, QuicConnection, Task>? quicHandle = null, int quicIdleMs = 60_000,
+        QuicRouting routing = QuicRouting.Forward)
+    {
+        int tcpPort = ReserveFreePort();
+        int udpPort = ReserveFreePort();
+
+        var config = new ServerConfig
+        {
+            ReactorCount = reactorCount,
+            RecvBufferSize = 4096,
+            RecvSlots = 256,
+            Tcp = new TcpOptions
+            {
+                Port = (ushort)tcpPort,
+                WriteSlabSize = 16 * 1024,
+                PoolMax = 64,
+                RecvQueueEntries = 64,
+            },
+            Udp = new UdpOptions { RecvSlots = 16, Ports = [] },
+            Quic = new QuicOptions
+            {
+                Port = (ushort)udpPort,
+                LocalCidLength = 8,
+                ConnectionFactory = quicFactory,
+                IdleTimeoutMs = quicIdleMs,
+                Routing = routing,
+            },
+        };
+
+        using var ready = new CountdownEvent(reactorCount);
+        var reactors = new Reactor[reactorCount];
+
+        for (int i = 0; i < reactorCount; i++)
+        {
+            int shard = i;
+            var reactor = new Reactor(shard, config)
+            {
+                TcpHandle = static (_, _) => Task.CompletedTask,
+                QuicHandle = quicHandle,
+                OnStart = _ => ready.Signal(),
+            };
+            reactors[shard] = reactor;
+
+            var thread = new Thread(RunGuarded(reactor, tcpPort))
+            {
+                IsBackground = true,
+                Name = $"test-quic-shard-{udpPort}-{shard}",
+            };
+            thread.Start();
+            Track(reactor, thread);
+        }
+
+        // Every reactor has to be past OnStart before the port is usable: the binds are ORDERED
+        // when steering is on, so an early reactor is listening while a later one has not bound
+        // yet - and the filter is not attached until the last one is in.
+        if (!ready.Wait(20_000))
+        {
+            WaitForListen(tcpPort);
+        }
+
+        return (udpPort, reactors);
+    }
+
     /// <summary>Incremental mode (IOU_PBUF_RING_INC) needs 6.12+; tests skip below that.</summary>
     public static bool KernelAtLeast(int major, int minor)
     {

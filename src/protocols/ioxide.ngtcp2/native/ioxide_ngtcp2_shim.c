@@ -37,6 +37,12 @@
 #include <openssl/evp.h>
 #include <openssl/err.h>
 
+/* Exported-surface revision. Bump on any change to an exported signature or a struct crossing the
+ * boundary; iq_abi() hands it to the managed side, which refuses to start on a mismatch.
+ *   1 - iq_callbacks gained struct_size and on_path_change
+ *   2 - iq_accept gained shard / shard_count for connection-id steering */
+#define IQ_ABI 2
+
 /* ---- callback table into C# ------------------------------------------------------------- */
 
 typedef struct iq_callbacks {
@@ -154,6 +160,11 @@ typedef struct iq_conn {
     ngtcp2_path                 path;
     ngtcp2_ccerr                last_error;
     void                       *user;
+    /* Which reactor owns this connection, and how many there are. Stamped into every CID it
+     * mints so the SO_REUSEPORT filter can route by connection id instead of by 4-tuple - the
+     * difference between surviving a client's address change and dropping it. */
+    uint32_t                    shard;
+    uint32_t                    shard_count;
     ptls_raw_extension_t        exts[2];   /* [0] QUIC transport params (filled by ngtcp2), [1] terminator */
     char                        alpn[64];  /* client: the single protocol we offer */
     ptls_iovec_t                alpn_vec;  /* points into alpn[], handed to picotls for the CH */
@@ -775,12 +786,32 @@ static int iq_cb_acked_stream_data_offset(ngtcp2_conn *conn, int64_t stream_id, 
     return 0;
 }
 
+/* Stamp the owning reactor into the first CID byte. The kernel filter routes on cid[0] %
+ * shard_count, so the byte is picked to leave exactly `shard` as the remainder while staying
+ * otherwise random - the CID keeps its unpredictability, it just stops being uniform.
+ *
+ * shard_count <= 1 is a single-reactor server: nothing to steer, so the CID is left fully random.
+ * A count above 256 cannot be encoded in one byte, and the caller disables steering for it. */
+static void iq_stamp_shard(uint8_t *cid, uint32_t shard, uint32_t shard_count)
+{
+    if (shard_count <= 1 || shard_count > 256 || shard >= shard_count) {
+        return;
+    }
+
+    unsigned v = (unsigned)cid[0] - ((unsigned)cid[0] % shard_count) + shard;
+    if (v > 255) {
+        v -= shard_count;   /* still congruent to shard mod shard_count, and back inside a byte */
+    }
+    cid[0] = (uint8_t)v;
+}
+
 static int iq_cb_get_new_connection_id(ngtcp2_conn *conn, ngtcp2_cid *cid, uint8_t *token,
                                        size_t cidlen, void *user_data)
 {
     (void)conn;
     iq_conn *c = user_data;
     ptls_openssl_random_bytes(cid->data, cidlen);
+    iq_stamp_shard(cid->data, c->shard, c->shard_count);
     cid->datalen = cidlen;
     ptls_openssl_random_bytes(token, NGTCP2_STATELESS_RESET_TOKENLEN);
     if (c->cbs.on_new_cid) c->cbs.on_new_cid(c->user, cid->data, cid->datalen);
@@ -1280,16 +1311,29 @@ const char *iq_version(void)
     return ngtcp2_version(0)->version_str;
 }
 
+/* Bumped whenever an exported signature or struct layout changes. The managed binding checks this
+ * when it builds an engine, so a stale libioxide_ngtcp2.so left in a build output fails at startup
+ * with a clear message rather than silently passing garbage across the boundary. */
+uint32_t iq_abi(void)
+{
+    return IQ_ABI;
+}
+
 /* ---- connection ------------------------------------------------------------------------- */
 
 /* Validate the first datagram of a new connection and build the server conn for it.
  * scid_out receives the connection ID this server minted (engine->cidlen bytes) so the caller
- * can register the route. Returns NULL if the packet is not an acceptable Initial. */
+ * can register the route. shard / shard_count identify the reactor calling this, and are stamped
+ * into that CID and every later one this connection issues, so the kernel's SO_REUSEPORT filter
+ * routes the connection's datagrams back here even after the client changes address. Pass
+ * shard 0, count 1 for a single-reactor server: the CID is then left fully random.
+ * Returns NULL if the packet is not an acceptable Initial. */
 iq_conn *iq_accept(iq_engine *e,
                    const void *local_sa, size_t local_salen,
                    const void *remote_sa, size_t remote_salen,
                    const uint8_t *pkt, size_t pktlen,
-                   uint64_t ts, void *user, uint8_t *scid_out)
+                   uint64_t ts, void *user,
+                   uint32_t shard, uint32_t shard_count, uint8_t *scid_out)
 {
     ngtcp2_pkt_hd hd;
     if (ngtcp2_accept(&hd, pkt, pktlen) != 0) {
@@ -1302,6 +1346,9 @@ iq_conn *iq_accept(iq_engine *e,
     }
     c->cbs = e->cbs;
     c->user   = user;
+    /* Set before ngtcp2_conn_server_new, because the CID generator callback can fire during it. */
+    c->shard       = shard;
+    c->shard_count = shard_count;
 
     /* Clamped at the entry point, like every other caller-supplied length here. The destinations
      * are ngtcp2_sockaddr_union - 28 bytes, sa/in/in6 only, NOT sockaddr_storage - and the field
@@ -1376,6 +1423,7 @@ iq_conn *iq_accept(iq_engine *e,
     ngtcp2_cid scid;
     scid.datalen = e->cidlen;   /* bounded to 1..NGTCP2_MAX_CIDLEN when the engine was created */
     ptls_openssl_random_bytes(scid.data, scid.datalen);
+    iq_stamp_shard(scid.data, shard, shard_count);
 
     if (ngtcp2_conn_server_new(&c->conn, &hd.scid, &scid, &c->path, hd.version,
                                &callbacks, &settings, &params, NULL, c) != 0) {
@@ -1442,6 +1490,38 @@ void iq_conn_free(iq_conn *c)
  * ngtcp2 fills the path we hand to writev_stream with the destination it chose for THAT datagram,
  * which for a PATH_RESPONSE or a PATH_CHALLENGE probe is not the current path at all. Calling this
  * before the datagram is handed back is what lets the caller send it where ngtcp2 meant it to go. */
+/* ngtcp2's own sockaddr comparison lives in lib/ngtcp2_addr.h, which is INTERNAL - it is not
+ * shipped under lib/includes, so calling it compiled only by implicit declaration and stops
+ * building outright on GCC 14+, where that is an error rather than a warning. This mirrors it
+ * using the public types.
+ *
+ * A plain memcmp is not a substitute: sockaddr_in carries sin_zero padding and sockaddr_in6
+ * carries flowinfo and scope_id, so two spellings of the same peer can differ byte-wise and would
+ * read as an address change - firing a migration callback on a connection that never moved. */
+static int iq_sockaddr_eq(const ngtcp2_sockaddr *a, const ngtcp2_sockaddr *b)
+{
+    if (a->sa_family != b->sa_family) {
+        return 0;
+    }
+
+    switch (a->sa_family) {
+    case NGTCP2_AF_INET: {
+        const ngtcp2_sockaddr_in *ai = (const ngtcp2_sockaddr_in *)(const void *)a;
+        const ngtcp2_sockaddr_in *bi = (const ngtcp2_sockaddr_in *)(const void *)b;
+        return ai->sin_port == bi->sin_port &&
+               memcmp(&ai->sin_addr, &bi->sin_addr, sizeof(ai->sin_addr)) == 0;
+    }
+    case NGTCP2_AF_INET6: {
+        const ngtcp2_sockaddr_in6 *ai = (const ngtcp2_sockaddr_in6 *)(const void *)a;
+        const ngtcp2_sockaddr_in6 *bi = (const ngtcp2_sockaddr_in6 *)(const void *)b;
+        return ai->sin6_port == bi->sin6_port &&
+               memcmp(&ai->sin6_addr, &bi->sin6_addr, sizeof(ai->sin6_addr)) == 0;
+    }
+    default:
+        return 0;   /* cannot arrive from a UDP recvmsg; re-reporting is harmless if it ever does */
+    }
+}
+
 static void iq_sync_path(iq_conn *c)
 {
     if (c->path.remote.addrlen == 0) {
@@ -1449,7 +1529,7 @@ static void iq_sync_path(iq_conn *c)
     }
 
     if (c->path.remote.addrlen == c->reported_addrlen &&
-        ngtcp2_sockaddr_eq(&c->reported_addr.sa, c->path.remote.addr)) {
+        iq_sockaddr_eq(&c->reported_addr.sa, c->path.remote.addr)) {
         return;
     }
 

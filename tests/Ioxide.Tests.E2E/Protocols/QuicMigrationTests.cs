@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using ioxide;
 using ioxide.nghttp3;
 using ioxide.ngtcp2;
 
@@ -66,6 +67,131 @@ internal static class QuicMigrationTests
             Assert.True(forwarder.FromServerAfterSwap > 0,
                 "the server never sent anything to the client's NEW address: it kept answering the "
                 + "address the connection was accepted on, which is the connection blackholing");
+        });
+
+        runner.Test("quic/migration: a fleet serves a client whose packets moved to another reactor", () =>
+        {
+            // The multi-reactor case, which every other QUIC test here is blind to: they pin
+            // ReactorCount = 1, where a datagram has nowhere wrong to land. Issue #205.
+            //
+            // Note what does NOT prove anything here. "The request still succeeded" is satisfied by
+            // QUIC retransmitting until something gets through, so it passes even against a server
+            // that drops every migrated packet - measured, not assumed. And the handler's reactor
+            // cannot differ before and after, because one connection is served by one handler on
+            // one reactor, so asserting that asserts nothing.
+            //
+            // What is real is whether the datagrams actually arrived somewhere else and were
+            // handed on. So the test drives the address until they do, then asserts the exchange
+            // continues from there.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+
+            const int reactors = 4;
+
+            (int serverPort, Reactor[] fleet) = TestServer.StartQuicSharded(reactors,
+                engine.CreateFactory(),
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                    static _ => Nghttp3Response.Text("migrated-ok")),
+                routing: QuicRouting.Forward);
+
+            long Forwarded()
+            {
+                long n = 0;
+                foreach (Reactor reactor in fleet) { n += reactor.QuicForwardsSent; }
+                return n;
+            }
+
+            long Dropped()
+            {
+                long n = 0;
+                foreach (Reactor reactor in fleet) { n += reactor.QuicForwardsDropped; }
+                return n;
+            }
+
+            using var forwarder = new UdpForwarder(serverPort);
+            using var client = new H3TestClient("127.0.0.1", forwarder.Port);
+
+            client.Connect();
+            Assert.True(client.CompleteHandshake(10_000), "the handshake through the forwarder did not complete");
+
+            (int status, string body) = client.Request("GET", "/before", null, 10_000);
+            Assert.Equal(200, status);
+            Assert.Equal("migrated-ok", body);
+
+            // Change address until the kernel actually hands this connection to a DIFFERENT
+            // reactor, which is the situation under test. Each change has a 1-in-4 chance of
+            // landing back on the owner, so this settles at once in practice; the loop is here so
+            // the test never rests on that coin.
+            int swaps = 0;
+            while (Forwarded() == 0 && swaps < 8)
+            {
+                swaps++;
+                forwarder.SwapUpstream();
+
+                (int afterStatus, string afterBody) = client.Request("GET", $"/after-{swaps}", null, 15_000);
+
+                Assert.Equal(200, afterStatus);
+                Assert.Equal("migrated-ok", afterBody);
+            }
+
+            Assert.True(Forwarded() > 0,
+                $"after {swaps} address changes no datagram ever reached a reactor that did not own "
+                + "the connection, so the routing was never exercised");
+
+            // And it keeps working now that the packets are arriving at the wrong reactor every time.
+            Assert.Equal(200, client.Request("GET", "/steady", null, 15_000).Status);
+
+            Assert.Equal(0L, Dropped());
+            Assert.True(forwarder.FromServerAfterSwap > 0,
+                "the server never sent anything to the client's new address, so nothing migrated");
+        });
+
+        runner.Test("quic/migration: kernel steering delivers a migrated client without any forwarding", () =>
+        {
+            // The other half of QuicRouting. Under Forward the datagrams arrive at the wrong
+            // reactor and are handed on; under KernelFilter they should never arrive wrong in the
+            // first place, so the forward path stays untouched. Asserting zero is only meaningful
+            // alongside the sibling test above, which shows the same scenario produces forwards
+            // when the kernel is not doing the routing.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+
+            const int reactors = 4;
+
+            (int serverPort, Reactor[] fleet) = TestServer.StartQuicSharded(reactors,
+                engine.CreateFactory(),
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                    static _ => Nghttp3Response.Text("migrated-ok")),
+                routing: QuicRouting.KernelFilter);
+
+            // Without this the rest passes vacuously on any machine where the program will not
+            // load - it would simply be measuring Forward again under another name.
+            bool attached = false;
+            foreach (Reactor reactor in fleet) { attached |= reactor.QuicKernelSteeringAttached; }
+            Assert.True(attached, "the steering program never attached, so this ran as Forward");
+
+            using var forwarder = new UdpForwarder(serverPort);
+            using var client = new H3TestClient("127.0.0.1", forwarder.Port);
+
+            client.Connect();
+            Assert.True(client.CompleteHandshake(10_000), "the handshake through the forwarder did not complete");
+
+            Assert.Equal(200, client.Request("GET", "/before", null, 10_000).Status);
+
+            for (int swap = 1; swap <= 3; swap++)
+            {
+                forwarder.SwapUpstream();
+
+                (int status, string body) = client.Request("GET", $"/after-{swap}", null, 15_000);
+
+                Assert.Equal(200, status);
+                Assert.Equal("migrated-ok", body);
+            }
+
+            long forwarded = 0;
+            foreach (Reactor reactor in fleet) { forwarded += reactor.QuicForwardsSent; }
+
+            Assert.Equal(0L, forwarded);
         });
 
         runner.Test("control: the same exchange through a forwarder that never swaps", () =>

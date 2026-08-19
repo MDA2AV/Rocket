@@ -100,12 +100,33 @@ public sealed unsafe partial class Reactor
 
         InitUdpBufRing();
 
-        for (int i = 0; i < ports; i++)
+        // Ordered across the fleet ONLY when QuicRouting.KernelFilter is asked for: that program
+        // answers with a position in the reuseport group and the position is bind order, so
+        // reactor N's socket has to be the Nth one in. Under the default routing this returns null
+        // immediately and startup is exactly as it was. See Reactor.Udp.Steering.cs.
+        QuicSteeringGate? gate = QuicSteeringBegin();
+        int quicFd = -1;
+
+        try
         {
-            ushort port = udpPorts[i];
-            _udpFds[i]     = OpenUdpSocket(port, _config.DualStack, _udp.Gro, _udp.SocketBufferBytes);
-            _udpFdPorts[i] = port;
-            ArmUdpRecv(i);   // one multishot per socket, all sharing the ring
+            for (int i = 0; i < ports; i++)
+            {
+                ushort port = udpPorts[i];
+                _udpFds[i]     = OpenUdpSocket(port, _config.DualStack, _udp.Gro, _udp.SocketBufferBytes);
+                _udpFdPorts[i] = port;
+                ArmUdpRecv(i);   // one multishot per socket, all sharing the ring
+
+                if (_config.Quic is { } configured && port == configured.Port)
+                {
+                    quicFd = _udpFds[i];
+                }
+            }
+        }
+        finally
+        {
+            // Hands the turn on whatever happened. A reactor that threw reports -1, which abandons
+            // steering for the fleet rather than attaching a filter whose indices are now wrong.
+            QuicSteeringRelease(gate, quicFd);
         }
     }
 
