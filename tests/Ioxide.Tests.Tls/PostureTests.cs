@@ -81,6 +81,40 @@ internal static class PostureTests
             }, "set_ciphersuites"), "an unknown ciphersuite should be refused at startup");
         });
 
+        runner.Test("posture: kTLS accepts a CipherSuites list that states the suite it pins", () =>
+        {
+            // The mode derives its kernel keys from exactly one suite, so a list naming THAT suite
+            // agrees with the mode - it does not contradict it. Refusing it, which this used to do,
+            // rejected a configuration that works, and rejected it for saying out loud the thing an
+            // operator pinning a posture is supposed to say. Only a list asking for something else
+            // is a real contradiction, which the next test pins.
+            (string certPath, string keyPath) = TestCert.Ensure();
+
+            Assert.True(!StartFails(new TlsOptions
+            {
+                CertificatePath = certPath,
+                KeyPath = keyPath,
+                KernelTx = true,
+                CipherSuites = "TLS_AES_128_GCM_SHA256",
+            }, ""), "kTLS with a list naming the suite it pins should start, not be refused");
+        });
+
+        runner.Test("posture: kTLS refuses a CipherSuites list asking for a suite it cannot use", () =>
+        {
+            // The control for the test above, and the case the refusal is actually for: kTLS cannot
+            // derive kernel keys from this suite, so honouring the list and honouring the mode are
+            // two different servers. Named at startup rather than discovered at the first handshake.
+            (string certPath, string keyPath) = TestCert.Ensure();
+
+            Assert.True(StartFails(new TlsOptions
+            {
+                CertificatePath = certPath,
+                KeyPath = keyPath,
+                KernelTx = true,
+                CipherSuites = "TLS_AES_256_GCM_SHA384",
+            }, "cannot ask for anything else"), "kTLS with a conflicting suite list should be refused at startup");
+        });
+
         runner.Test("posture: a ciphersuite list that is merely MOSTLY right fails at startup", () =>
         {
             // The dangerous shape, because OpenSSL reports success for it. set_ciphersuites ignores

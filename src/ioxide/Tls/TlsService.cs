@@ -91,6 +91,9 @@ public sealed class TlsService
 
     // A per-SSL ex_data slot holds a GCHandle to the TlsSession, so the static keylog callback can
     // find the right session for an SSL without a process-global, recycled-pointer-keyed map.
+    /// <summary>The one suite kTLS can derive kernel keys from; see <see cref="TlsOptions.KernelTx"/>.</summary>
+    private const string KernelTlsSuite = "TLS_AES_128_GCM_SHA256";
+
     private static readonly int SslSessionIndex =
         OpenSsl.CRYPTO_get_ex_new_index(OpenSsl.CRYPTO_EX_INDEX_SSL, 0, 0, 0, 0, 0);
 
@@ -221,11 +224,16 @@ public sealed class TlsService
                 "Drop one of the two.", nameof(options));
         }
 
-        if (options.KernelTx && options.CipherSuites is not null)
+        // kTLS derives its keys from exactly one suite, so a list that STATES that suite agrees
+        // with the mode rather than contradicting it - and stating the posture out loud is the
+        // thing this option exists for. Only a list that asks for something else is refused.
+        if (options.KernelTx && options.CipherSuites is not null
+            && options.CipherSuites.Trim() != KernelTlsSuite)
         {
             throw new ArgumentException(
-                "KernelTx requires exactly TLS_AES_128_GCM_SHA256 to derive kernel keys, so " +
-                "CipherSuites cannot be set alongside it. Drop one of the two.", nameof(options));
+                $"KernelTx requires exactly {KernelTlsSuite} to derive kernel keys, so CipherSuites "
+                + $"cannot ask for anything else. Set it to \"{KernelTlsSuite}\", or drop one of the two.",
+                nameof(options));
         }
 
         // The certificate and key each come from exactly one place - a path or in-memory PEM.
@@ -995,6 +1003,22 @@ public sealed class TlsService
                     nint extra = OpenSsl.PEM_read_bio_X509(bio, 0, 0, 0);
                     if (extra == 0)
                     {
+                        // Exhausted, or stopped on a malformed block - the same distinction
+                        // AddTrustAnchorsPem makes, and for a worse reason here. Reading both as
+                        // end-of-data publishes the leaf with the chain silently cut at the tear,
+                        // ReplaceCertificates returns normally, SSL_CTX_check_private_key passes
+                        // (the leaf does match the key), and every client that needs the missing
+                        // intermediate fails path-building while the operator's only signal - did
+                        // the rotation throw - says it went fine. A renewal read mid-write is the
+                        // ordinary way to produce exactly this file. SSL_CTX_use_certificate_chain_file,
+                        // which the path route uses and this mirrors, refuses it outright.
+                        if (!OpenSsl.ErrorIsEndOfPem())
+                        {
+                            throw new IOException(
+                                "CertificatePem is malformed after the leaf; the rest of the chain "
+                                + "would have been ignored and the certificate served without it.");
+                        }
+
                         OpenSsl.ERR_clear_error();   // end-of-data queues PEM_R_NO_START_LINE
                         break;
                     }
