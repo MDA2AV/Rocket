@@ -24,12 +24,21 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource
         // to its next ReadAsync, sees IsClosed, and exits.
         //
         // The staged bytes are dropped rather than kept. Nothing will ever send them, and leaving
-        // the tail where it was made every later write append to a slab that only ever grew - a
-        // writer that keeps producing against a peer that has gone reaches gigabytes, because
+        // the tail where it was made made every later write append to a slab that only ever grew -
+        // a writer that keeps producing against a peer that has gone reaches gigabytes, because
         // doubling the slab is the one thing that never fails.
+        //
+        // Segmented needs its own release, and zeroing the tail alone did nothing for it: once
+        // _inOverflow is set every write is routed to overflow rather than to the slab, so the
+        // growth continued one pooled slab per fill. Clear() has always released them on recycle;
+        // this is the same release on the path that never reaches recycle.
         if (Volatile.Read(ref _closed) == 1)
         {
             WriteTail = 0;
+            if (_ovCount > 0)
+            {
+                ReleaseOverflow();
+            }
             return default;
         }
 

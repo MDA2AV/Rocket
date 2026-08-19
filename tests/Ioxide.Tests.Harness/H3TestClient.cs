@@ -112,7 +112,11 @@ public sealed unsafe class H3TestClient : IDisposable
     /// </remarks>
     public string ServerCertificateSubject()
     {
-        Span<byte> buf = stackalloc byte[256];
+        // 1024, matching the shim's own peer_subject buffer: the entry point refuses rather than
+        // truncates, so a buffer smaller than the shim's turns a long DN into an empty string and
+        // the caller cannot tell that from a connection that recorded no name. Asking for the same
+        // size the shim holds means the only empty answer is a genuinely absent one.
+        Span<byte> buf = stackalloc byte[1024];
 
         fixed (byte* p = buf)
         {

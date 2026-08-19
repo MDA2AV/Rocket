@@ -241,7 +241,12 @@ public sealed unsafe class QuicEngine : IDisposable
     /// The certificate for a client that sends no name, or asks for one not in
     /// <paramref name="certificatesByHost"/>.
     /// </param>
-    /// <param name="certificatesByHost">The certificates chosen by name, or null to serve only the default.</param>
+    /// <param name="certificatesByHost">
+    /// The certificates chosen by name. Null is accepted only while this engine serves no names;
+    /// once <see cref="AddHost"/> has registered any, null is REFUSED, because replacing the whole
+    /// set with one that has no table would answer every registered name with the default
+    /// certificate and say nothing. Pass the names to keep them, or an empty dictionary to mean it.
+    /// </param>
     /// <remarks>
     /// What renewal needs. An ACME client rewrites its PEM every couple of months, and without this
     /// the only way to serve the new one is to restart - so pass the same paths and their new

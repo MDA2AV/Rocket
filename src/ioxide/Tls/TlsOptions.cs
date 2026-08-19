@@ -135,10 +135,18 @@ public sealed class TlsOptions
     /// Client trust anchors as PEM text - the in-memory alternative to <see cref="ClientCaPath"/>,
     /// matching how the server's own certificate can come from either. Set at most one of the two.
     ///
-    /// Equivalent to <see cref="ClientCaPath"/> in what it trusts, in the issuer hint it sends,
-    /// and in not checking revocation. It differs in one thing: a path is re-read whenever a
-    /// context is built, so replacing the file changes who is trusted, whereas PEM text is a value
-    /// and does not move.
+    /// Neither source checks revocation. The one difference to design around is lifetime: a path is
+    /// re-read whenever a context is built, so replacing the file changes who is trusted at the next
+    /// rotation, whereas PEM text is a value and does not move.
+    ///
+    /// The two are NOT byte-for-byte interchangeable, and a bundle that loads from a path can be
+    /// refused as text. This route parses the PEM itself rather than handing the bytes to OpenSSL's
+    /// file loader, so today it reads only <c>CERTIFICATE</c> blocks - a <c>TRUSTED CERTIFICATE</c>
+    /// block, which is what an OpenSSL trust store or <c>x509 -trustout</c> emits, is skipped - it
+    /// converts as ASCII, so a byte-order mark makes the first block unreadable, and it sends one
+    /// issuer hint per certificate where the file loader de-duplicates by subject. A malformed
+    /// block is refused outright rather than silently ending the bundle, which the file route also
+    /// does. If a bundle is rejected here and works as a path, that list is where to look.
     /// </summary>
     public string? ClientCaPem { get; init; }
 

@@ -33,6 +33,7 @@
 
 #include <openssl/bio.h>
 #include <openssl/pem.h>
+#include <openssl/pemerr.h>
 #include <openssl/evp.h>
 #include <openssl/err.h>
 
@@ -623,7 +624,13 @@ static size_t iq_copy_subject(iq_conn *c, char *out, size_t outlen, int allowed)
     }
     size_t n = strlen(c->peer_subject);
     if (n >= outlen) {
-        n = outlen - 1;
+        /* No name beats a different one - the same rule iq_conn_peer_cn states below, and the rule
+         * iq_record_subject already applies when the DN will not fit peer_subject at all. Handing
+         * back a prefix is the one outcome an identity must never produce: a truncated DN is
+         * plausible, comparable, and can equal a DIFFERENT principal's prefix. Widening
+         * peer_subject to 1024 is what made this reachable - below that, strlen could not exceed
+         * a caller's buffer. */
+        return 0;
     }
     memcpy(out, c->peer_subject, n);
     out[n] = '\0';
@@ -1057,7 +1064,23 @@ static int iq_store_add_pem(X509_STORE *store, const char *pem)
     int added = 0;
     X509 *cert;
 
-    while ((cert = PEM_read_bio_X509(bio, NULL, NULL, NULL)) != NULL) {
+    for (;;) {
+        ERR_clear_error();
+        cert = PEM_read_bio_X509(bio, NULL, NULL, NULL);
+        if (cert == NULL) {
+            /* Exhausted, or stopped on a malformed block - and only the first is an end of bundle.
+             * Reading both as "done" trusted the anchors BEFORE the bad block and silently dropped
+             * everything after it, so a client issued by a later anchor was refused with nothing
+             * said. The TCP side tells the two apart (TlsService.AddTrustAnchorsPem); this did not,
+             * and X509_STORE_load_locations - the path route right above the caller - refuses such
+             * a bundle outright. */
+            if (ERR_GET_REASON(ERR_peek_last_error()) != PEM_R_NO_START_LINE) {
+                ERR_clear_error();
+                BIO_free(bio);
+                return -1;
+            }
+            break;
+        }
         if (X509_STORE_add_cert(store, cert) == 1) {
             added++;
         } else if (ERR_GET_REASON(ERR_peek_last_error()) == X509_R_CERT_ALREADY_IN_HASH_TABLE) {
@@ -1125,10 +1148,16 @@ iq_engine *iq_engine_new_mtls(const char *cert_pem_path, const char *key_pem_pat
                 X509_STORE_free(store);
                 goto fail;
             }
-        } else if (iq_store_add_pem(store, client_ca_pem) == 0) {
-            fprintf(stderr, "[ioxide.ngtcp2] the client CA PEM text held no usable certificate\n");
-            X509_STORE_free(store);
-            goto fail;
+        } else {
+            int added = iq_store_add_pem(store, client_ca_pem);
+            if (added <= 0) {
+                fprintf(stderr, added < 0
+                    ? "[ioxide.ngtcp2] the client CA PEM text is malformed; the rest of the bundle "
+                      "would have been ignored\n"
+                    : "[ioxide.ngtcp2] the client CA PEM text held no usable certificate\n");
+                X509_STORE_free(store);
+                goto fail;
+            }
         }
         /* Before the store changes owner: the hint is read out of it, not kept from it. */
         iq_build_ca_names(e, store);
