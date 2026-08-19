@@ -166,9 +166,20 @@ public sealed unsafe partial class Reactor
                 return false;
             }
             int len = packet[5];
-            if (len > QuicCid.MaxLength || packet.Length < 6 + len)
+            if (len == 0 || len > QuicCid.MaxLength || packet.Length < 6 + len)
             {
-                return false;   // >20 is legal on the wire but never one of ours - not routable
+                // Both ends of the range are legal on the wire and neither can be one of ours, so
+                // neither is routable. Zero matters more than 21 does: QuicEngine enforces a CID
+                // length of 1..20, so nothing this server issues is ever empty - but an empty CID
+                // is still a perfectly good dictionary key, so accepting it let the FIRST peer to
+                // send one install a route that every later empty-CID packet, from any peer, was
+                // then delivered into. Initial keys derive from the client's original DCID, so a
+                // second peer sending an empty one derives the same keys: not a misdelivery but
+                // two peers sharing one connection state, with replies going to whoever arrived
+                // first. ngtcp2_accept does not stop it either - it skips its minimum-DCID guard
+                // whenever a packet carries a token, and this server issues no tokens and checks
+                // none, so one junk byte is enough.
+                return false;
             }
             dcid = new QuicCid(packet.Slice(6, len));
             return true;

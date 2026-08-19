@@ -30,6 +30,7 @@ internal static class Program
         QuicStreamAllowanceTests.Register(runner);
         QuicTimerTests.Register(runner);
         QuicSniHostileTests.Register(runner);
+        QuicDemuxRoutingTests.Register(runner);
         QuicClientCertTimingTests.Register(runner);
         H3BodyTruncationTests.Register(runner);
         H3ErrorCodeTests.Register(runner);

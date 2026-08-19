@@ -65,15 +65,20 @@ internal static class DemuxParseTests
                 "CID longer than QuicCid.MaxLength");
         });
 
-        runner.Test("demux: a zero-length long-header CID parses as empty", () =>
+        runner.Test("demux: a zero-length long-header CID is refused, like an over-long one", () =>
         {
-            // Legal: a client may address a server by an empty CID.
+            // Legal on the wire - a peer that needs no connection id of its own sends an empty one
+            // - and still never routable HERE, for the same reason 21 is not: QuicEngine enforces
+            // a CID length of 1..20, so nothing this server issues can be empty, and a packet
+            // addressed to an id nobody issued belongs to nobody.
+            //
+            // It used to parse and become a route key, which QuicDemuxRoutingTests showed the
+            // consequence of end to end: the server answered such an Initial with a ServerHello.
             byte[] packet = [0xC0, 0, 0, 0, 1, 0, 0x11, 0x22];
 
-            Assert.True(Reactor.TryExtractDcid(packet, ShortCidLen, out QuicCid cid, out bool longHeader),
-                "should parse");
-            Assert.True(longHeader, "long header");
-            Assert.Equal(0, cid.Length);
+            Assert.True(!Reactor.TryExtractDcid(packet, ShortCidLen, out _, out bool longHeader),
+                "a zero-length CID is not routable");
+            Assert.True(longHeader, "and it is still recognised as a long header");
         });
 
         runner.Test("demux: equal CIDs compare and hash alike", () =>
