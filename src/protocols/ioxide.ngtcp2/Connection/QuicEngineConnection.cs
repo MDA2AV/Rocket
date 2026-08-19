@@ -39,6 +39,11 @@ public unsafe partial class QuicEngineConnection : QuicConnection
     /// whose organisation is <c>Acme\/CN=admin.internal</c> satisfies a
     /// <c>Contains("/CN=admin.internal")</c> check while being a different principal.
     /// <see cref="PeerCommonName"/> is the value to compare instead.
+    ///
+    /// Null also when the DN does not fit the 1024 bytes the shim records, which is a refusal
+    /// rather than an omission: a truncated DN is plausible, comparable, and can equal a DIFFERENT
+    /// principal's prefix, so no name is reported instead of a partial one. Nothing here ever
+    /// hands back a shortened identity.
     /// </remarks>
     public string? PeerSubject
     {
@@ -65,8 +70,11 @@ public unsafe partial class QuicEngineConnection : QuicConnection
     /// with <see cref="StringComparison.Ordinal"/>.
     ///
     /// Null when there was no validated certificate, when the subject carries no CN (legitimate:
-    /// modern certificates identify by subjectAltName), or when the CN is empty or contains an
-    /// embedded NUL, which is a name built to be read differently by different consumers.
+    /// modern certificates identify by subjectAltName), when the CN is empty or contains an
+    /// embedded NUL - a name built to be read differently by different consumers - or when it
+    /// exceeds the 256 bytes recorded for it, which is four times RFC 5280's ub-common-name of 64.
+    /// Every one of those is a refusal rather than an omission: the accessor never reports a name
+    /// it had to shorten, because a prefix can belong to someone else.
     /// </summary>
     public string? PeerCommonName
     {
