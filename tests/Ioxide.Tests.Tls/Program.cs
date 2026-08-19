@@ -27,6 +27,7 @@ internal static class Program
         SniConfigTests.Register(runner);
         RotationTests.Register(runner, ktls);
         RotationLifecycleTests.Register(runner);
+        KeyAndPostureReportingTests.Register(runner);
         RotationValidatingClientTests.Register(runner);
         PostureTests.Register(runner);
         FormatTests.Register(runner);
