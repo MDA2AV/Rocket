@@ -205,6 +205,29 @@ public sealed class TlsService
     /// </param>
     public static TlsService Start(Reactor reactor, TlsOptions options, bool register = true)
     {
+        // Scalars first, because the checks below reason about COMBINATIONS and a value outside its
+        // own domain makes that reasoning meaningless. Both of these resolve to something plausible
+        // rather than failing, which is the shape worth refusing: an undefined version maps to the
+        // TLS 1.2 floor through a not-Tls13 ternary, and a negative timeout disables the handshake
+        // sweep entirely because both readers guard on "> 0" - so the one bound on a peer that
+        // connects and then says nothing is silently off. No config binder validates an enum
+        // (Enum.Parse<TlsProtocolVersion>("3") succeeds), so neither value needs a cast to arrive.
+        if (!Enum.IsDefined(options.MinProtocolVersion))
+        {
+            throw new ArgumentException(
+                $"MinProtocolVersion is {(int)options.MinProtocolVersion}, which is not one of "
+                + "Default, Tls12 or Tls13. Name the floor you want rather than leaving it to be "
+                + "resolved.", nameof(options));
+        }
+
+        if (options.HandshakeTimeoutMs < 0)
+        {
+            throw new ArgumentException(
+                $"HandshakeTimeoutMs is {options.HandshakeTimeoutMs}. Zero disables the handshake "
+                + "sweep; a negative value would disable it too, which is worth saying rather than "
+                + "arriving at by accident.", nameof(options));
+        }
+
         // RX alone cannot be programmed: the handoff shares the TCP_ULP that EnableTx installs.
         // Refuse loudly rather than silently serving the userspace path the caller opted out of.
         if (options.KernelRx && !options.KernelTx)

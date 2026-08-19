@@ -68,7 +68,7 @@ internal static class QuicIdentityCapTests
             Assert.Equal("alice-fits", commonName);
         });
 
-        runner.Pending("mtls/quic: a verified client is named in the subject however long its name is", () =>
+        runner.Test("mtls/quic: a DN too long to record is reported as no name, never as a prefix", () =>
         {
             // 24 organisational units: a rendered DN of 1456 bytes, which is large but is the shape
             // an enterprise PKI actually issues. The shim's field is 1024.
@@ -87,17 +87,17 @@ internal static class QuicIdentityCapTests
             // certificate was verified, iq_record_subject ran, and this connection HAS an identity.
             Assert.Equal("alice-longdn", commonName);
 
-            Assert.True(subject is not null,
-                "PeerSubject is null for a client the same connection names 'alice-longdn' through "
-                + "PeerCommonName - and null is documented as 'the peer offered none'");
-            Assert.True(subject!.Contains("alice-longdn", StringComparison.Ordinal),
-                $"the subject must name the client that was verified, got: {subject}");
-        },
-        because: "iq_record_subject drops a DN of 1024 bytes or more (peer_subject[1024]), so PeerSubject "
-               + "reports null - documented as 'the peer offered none' - for a certificate the server "
-               + "accepted only because it verified, and which TLS over TCP renders in full");
+            // Reviewed as a defect and kept, because it fails CLOSED and deliberately so: the
+            // buffer-taking form of X509_NAME_oneline was rejected for this very reason, since it
+            // returns a valid-looking prefix WITH THE CN MISSING and two clients agreeing on their
+            // leading attributes then render identically. No name beats a name that may belong to
+            // someone else. The accessor's doc now says so rather than calling null "the peer
+            // offered none"; what is worth pinning is that nothing hands back a shortened identity.
+            Assert.True(subject is null,
+                $"a DN too long to record must be reported as no name, not as a prefix, got: {subject}");
+        });
 
-        runner.Pending("mtls/quic: a verified client is named by its CN however long the CN is", () =>
+        runner.Test("mtls/quic: a CN too long to record is reported as no name, never as a prefix", () =>
         {
             // The mirror image, and the quiet one: the subject case at least prints to stderr, the
             // CN case drops the name in silence. The whole DN is ~300 bytes, so it fits the subject
@@ -119,14 +119,13 @@ internal static class QuicIdentityCapTests
             Assert.True(subject is not null && subject.Contains(commonNameValue, StringComparison.Ordinal),
                 $"the subject should carry the CN this test signed, got: {subject ?? "<null>"}");
 
-            Assert.True(commonName is not null,
-                "PeerCommonName is null while PeerSubject on the same connection carries the CN - an "
-                + "application that authorizes on it sees an anonymous peer, and is told nothing");
-            Assert.Equal(commonNameValue, commonName);
-        },
-        because: "peer_cn[256] silently drops a longer CN - no stderr line, unlike the subject case - so "
-               + "PeerCommonName is null for a name PeerSubject reports on the same connection, and for "
-               + "none of the three reasons its documentation gives");
+            // Same rule, and the same verdict. peer_cn holds 256 bytes, four times RFC 5280's
+            // ub-common-name of 64, so a CN that does not fit was hand-built rather than issued -
+            // and this is the value applications AUTHORIZE on, where reporting a prefix would be
+            // the one failure that actually grants something. Null denies; a prefix might not.
+            Assert.True(commonName is null,
+                $"a CN too long to record must be reported as no name, not as a prefix, got: {commonName}");
+        });
     }
 
     // ---- the recorded server name ---------------------------------------------------------------
