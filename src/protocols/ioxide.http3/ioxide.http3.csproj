@@ -29,6 +29,7 @@
              invisible from outside, since the response still decodes to the right thing on a peer
              that happens to agree. -->
         <InternalsVisibleTo Include="Ioxide.Tests.Unit" />
+        <InternalsVisibleTo Include="Ioxide.Fuzz" />
     </ItemGroup>
 
 </Project>
