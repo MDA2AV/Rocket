@@ -183,8 +183,9 @@ reactor.QuicHandle = (r, conn) => new Nghttp3Connection(conn, h3Options).RunBuff
       <em>long-header</em> packet is a new handshake: the factory runs <code>iq_accept</code>
       (validates the Initial, creates the ngtcp2 conn, mints our SCID), the reactor snapshots the
       peer address, registers the CIDs, inits the two-owner refcount, and launches your
-      <code>QuicHandle</code> fault-observed. Unknown short-header packets are dropped - stale
-      traffic from dead connections.</li>
+      <code>QuicHandle</code> fault-observed. An unknown <em>short-header</em> packet is either
+      stale traffic from a dead connection or a live one whose client changed address - see
+      <a href="#routing">Multi-reactor routing</a>, which is how the two are told apart.</li>
       <li><b>Engine read.</b> <code>OnDatagram</code> feeds the payload to
       <code>iq_conn_read</code>. ngtcp2 decrypts, handles ACKs and flow control, and fires
       callbacks mid-call - the important one being <em>stream data</em>.</li>
@@ -204,6 +205,38 @@ reactor.QuicHandle = (r, conn) => new Nghttp3Connection(conn, h3Options).RunBuff
     handler would run - and call <code>SendStream</code>, re-entering ngtcp2 - while ngtcp2 is
     still executing <code>iq_conn_read</code> above it on the same stack. Deferring the wake to
     after the engine call makes reentrancy impossible by construction.</div>
+
+    <h2 id="routing">Multi-reactor routing, and the client that moves</h2>
+    <p>Everything above describes one reactor. A real server runs one per core, all bound to the
+    same UDP port through <code>SO_REUSEPORT</code>, and the kernel decides which of them gets each
+    datagram by hashing the sender's address. That is a perfectly good answer right up until the
+    address changes.</p>
+
+    <p>It changes more often than "the user switched networks" suggests: home and mobile NATs
+    recycle UDP mappings after fairly short idle periods, so a connection that goes quiet and speaks
+    again can come back from a different port without the client having moved at all. The hash then
+    picks a <em>different</em> reactor - one that has never heard of this connection. Its packets
+    carry a short header, so there is no handshake to accept and nothing to look up. Historically
+    they were dropped, and the connection died on the reactor that could still have served it.</p>
+
+    <div class="note"><b>The connection cannot come to the packet.</b> The <code>ngtcp2_conn</code>,
+    the picotls session, the open streams and their ring-bound buffers are owned by one reactor
+    thread, and <code>QuicConnection</code> is reactor-thread-only throughout. Moving live state to
+    whichever reactor a datagram happened to land on is the one thing shared-nothing forbids. So the
+    <em>datagram</em> moves instead - which is not a violation but the model working as intended,
+    the same message passing <code>ScheduleOnReactor</code> already exists for.</div>
+
+    <p>Both routing modes rest on one trick: ioxide mints its own connection ids, so it can write
+    the owning reactor into them. The first byte is chosen so that <code>cid[0] % ReactorCount</code>
+    is the owner, while the remaining randomness is untouched. The id travels with the connection, so
+    it keeps naming the right reactor no matter what the address does.</p>
+
+    <p>Two modes decide who does the routing. <code>QuicRouting.Forward</code>, the default, lets
+    the kernel hash as before and has the receiving reactor hand a stranger to its owner over the
+    post queue - so nothing is paid until a client actually moves. <code>QuicRouting.KernelFilter</code>
+    attaches a classic-BPF program to the reuseport group so the kernel reads the shard byte itself.
+    The full comparison, with numbers, is on
+    <a href="../how-ioxide-does-h3.html">How ioxide does HTTP/3</a>.</p>
 
     <h2>The read surface</h2>
     <p>The handler-facing API deliberately mirrors <code>TcpConnection</code> - the arm flag, the
