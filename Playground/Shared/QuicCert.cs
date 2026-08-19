@@ -42,6 +42,42 @@ public static class QuicCert
     }
 
     /// <summary>
+    /// A SECOND certificate for the same host name - what a renewal produces. Same subject and the
+    /// same SAN, a different key and serial, so a client cannot tell them apart by name and can
+    /// tell them apart completely by trust: each is self-signed, so pinning one with --cacert
+    /// accepts that one and refuses the other. That is what makes a rotation visible from outside.
+    /// </summary>
+    public static (string CertPath, string KeyPath) EnsureRenewed(string host)
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "ioxide-playground-quic");
+        Directory.CreateDirectory(dir);
+
+        string safe = host.Replace('.', '_');
+        string certPath = Path.Combine(dir, $"sni-{safe}-renewed.crt");
+        string keyPath = Path.Combine(dir, $"sni-{safe}-renewed.key");
+
+        if (File.Exists(certPath) && File.Exists(keyPath))
+        {
+            return (certPath, keyPath);
+        }
+
+        using var rsa = RSA.Create(2048);
+        var request = new CertificateRequest($"CN={host}", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+
+        var names = new SubjectAlternativeNameBuilder();
+        names.AddDnsName(host);
+        request.CertificateExtensions.Add(names.Build());
+
+        using X509Certificate2 cert = request.CreateSelfSigned(
+            DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
+
+        File.WriteAllText(certPath, cert.ExportCertificatePem());
+        File.WriteAllText(keyPath, rsa.ExportPkcs8PrivateKeyPem());
+
+        return (certPath, keyPath);
+    }
+
+    /// <summary>
     /// Returns the configured cert/key pair, generating a self-signed one under the temp directory
     /// when <c>PLAYGROUND_QUIC_CERT</c>/<c>_KEY</c> are not set.
     /// </summary>

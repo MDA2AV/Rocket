@@ -99,21 +99,29 @@ public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
         // unflushed plaintext into the slab, and the flush carries it out. The read side's disposal
         // marks the connection closed (nothing else releases a pump parked on a quiet peer), and
         // after that a flush is a no-op - so this order is load-bearing, not stylistic.
-        _writer.Complete();
-        await _conn.FlushAsync();
-
-        if (_pump is not null)
+        try
         {
-            await _pump.DisposeAsync();
+            _writer.Complete();
+            await _conn.FlushAsync();
         }
-        else
+        finally
         {
-            Input.Complete();
-        }
+            // Releasing the connection is not conditional on the write side having gone well. It
+            // used to be: a decrypt fault leaves the session unable to encrypt, Complete threw from
+            // the first line, and everything below - the pump, the session, the fd - was skipped.
+            if (_pump is not null)
+            {
+                await _pump.DisposeAsync();
+            }
+            else
+            {
+                Input.Complete();
+            }
 
-        if (_ownsSession)
-        {
-            _tls.Dispose();   // sends close_notify when the peer has not already closed, both modes
+            if (_ownsSession)
+            {
+                _tls.Dispose();   // sends close_notify when the peer has not already closed, both modes
+            }
         }
     }
 }

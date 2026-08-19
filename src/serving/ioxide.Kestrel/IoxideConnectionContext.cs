@@ -56,7 +56,7 @@ internal sealed class IoxideConnectionContext : ConnectionContext,
         {
             // TLS terminated in the transport (kTLS): present the connection to Kestrel as HTTPS with the
             // negotiated ALPN, in place of UseHttps()/SslStream.
-            var tlsFeature = new IoxideTlsFeature(Encoding.ASCII.GetBytes(alpn ?? "http/1.1"));
+            var tlsFeature = new IoxideTlsFeature(Encoding.ASCII.GetBytes(alpn ?? "http/1.1"), session);
             _features.Set<ITlsConnectionFeature>(tlsFeature);
             _features.Set<ITlsHandshakeFeature>(tlsFeature);
             _features.Set<ITlsApplicationProtocolFeature>(tlsFeature);

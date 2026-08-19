@@ -84,6 +84,7 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
     private async Task RecvPumpAsync()
     {
         PipeWriter writer = _inbound.Writer;
+        Exception? fault = null;
         try
         {
             // TLS: the client's first request can ride in bundled with its Finished flight (already
@@ -136,14 +137,18 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
                 }
             }
         }
-        catch
+        catch (Exception e)
         {
-            /* swallow client/protocol faults;
-            teardown in finally */;
+            // Kept, not swallowed. This pump decrypts, so the exceptions reaching here include a
+            // bad MAC and a truncated record - and completing the pipe CLEANLY on those makes an
+            // attack that cuts a connection short indistinguishable from a peer hanging up
+            // politely. That is precisely the property TlsDecryptingPipeReader documents, and this
+            // is its Kestrel twin, which had the opposite behaviour.
+            fault = e;
         }
         finally
         {
-            await writer.CompleteAsync();
+            await writer.CompleteAsync(fault);
         }
     }
 
@@ -164,6 +169,7 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
     private async Task SendPumpAsync()
     {
         PipeReader reader = _outbound.Reader;
+        Exception? fault = null;
         try
         {
             while (true)
@@ -201,14 +207,14 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
                 }
             }
         }
-        catch
+        catch (Exception e)
         {
-            /* swallow;
-            teardown in finally */;
+            // Same reasoning as the recv pump: a failed encrypt is not a drained stream.
+            fault = e;
         }
         finally
         {
-            await reader.CompleteAsync();
+            await reader.CompleteAsync(fault);
         }
     }
 

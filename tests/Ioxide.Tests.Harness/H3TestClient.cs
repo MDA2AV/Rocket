@@ -38,6 +38,13 @@ public sealed unsafe class H3TestClient : IDisposable
     public string ServerName { get; init; } = "localhost";
 
     /// <summary>
+    /// The ALPN token to offer. "h3" is the only one an HTTP/3 server may serve, so this exists to
+    /// drive the NEGATIVE case: a server that confirms whatever it is asked for must still not hand
+    /// a non-h3 connection to an h3 handler.
+    /// </summary>
+    public string Alpn { get; init; } = "h3";
+
+    /// <summary>
     /// Ask for the subject of the certificate the server serves. Off by default: it costs a
     /// verify callback on the handshake, and only a test asking WHICH certificate came back needs
     /// it. The certificate is accepted either way - this client never validated one.
@@ -68,8 +75,8 @@ public sealed unsafe class H3TestClient : IDisposable
             OnStreamData = &OnQuicStreamData,
         };
         _clientEngine = _certPath is null
-            ? iq_client_engine_new("h3", quicCbs)
-            : iq_client_engine_new_mtls("h3", _certPath, _keyPath!, quicCbs);
+            ? iq_client_engine_new_mtls(Alpn, null, null, quicCbs)
+            : iq_client_engine_new_mtls(Alpn, _certPath, _keyPath!, quicCbs);
         Assert.True(_clientEngine != 0, "client engine init failed");
 
         if (RecordServerCertificate)
@@ -85,8 +92,11 @@ public sealed unsafe class H3TestClient : IDisposable
         fixed (byte* l = local)
         fixed (byte* r = remote)
         {
-            _conn = iq_client_connect(_clientEngine, l, 16, r, 16, ServerName, "h3",
-                                      0, NowNs(), (void*)GCHandle.ToIntPtr(_self), null);
+            // 16-byte CIDs, the length this client has always ended up with. It reads one
+            // connection off its own socket rather than demultiplexing, so the value only has to
+            // be legal - but it is stated rather than left to a default.
+            _conn = iq_client_connect(_clientEngine, l, 16, r, 16, ServerName, Alpn,
+                                      16, NowNs(), (void*)GCHandle.ToIntPtr(_self), null);
         }
         Assert.True(_conn != 0, "client connect failed");
     }
@@ -102,7 +112,11 @@ public sealed unsafe class H3TestClient : IDisposable
     /// </remarks>
     public string ServerCertificateSubject()
     {
-        Span<byte> buf = stackalloc byte[256];
+        // 1024, matching the shim's own peer_subject buffer: the entry point refuses rather than
+        // truncates, so a buffer smaller than the shim's turns a long DN into an empty string and
+        // the caller cannot tell that from a connection that recorded no name. Asking for the same
+        // size the shim holds means the only empty answer is a genuinely absent one.
+        Span<byte> buf = stackalloc byte[1024];
 
         fixed (byte* p = buf)
         {
@@ -122,6 +136,10 @@ public sealed unsafe class H3TestClient : IDisposable
                 return true;
             }
             PumpIn();
+            if (_peerClosed)
+            {
+                return false;
+            }
         }
         return false;
     }
@@ -187,13 +205,14 @@ public sealed unsafe class H3TestClient : IDisposable
         }
 
         long deadline = Environment.TickCount64 + timeoutMs;
-        while (Environment.TickCount64 < deadline && !_done)
+        while (Environment.TickCount64 < deadline && !_done && !_peerClosed)
         {
             DrainH3Out();
             FlushOut();
             PumpIn();
         }
 
+        // Status 0 = never answered, which is what a refused connection looks like from here.
         return (_status, Encoding.UTF8.GetString(_body.ToArray()));
     }
 
@@ -234,7 +253,7 @@ public sealed unsafe class H3TestClient : IDisposable
         int off = 0;
         bool finPending = fin;
 
-        while (off < data.Length || finPending)
+        while ((off < data.Length || finPending) && !_peerClosed)
         {
             Assert.True(Environment.TickCount64 < deadline, "client write stalled (window never reopened)");
 
@@ -297,6 +316,17 @@ public sealed unsafe class H3TestClient : IDisposable
         }
     }
 
+    /// <summary>
+    /// Set once the engine reports the connection is over - which, after a server refuses the
+    /// handshake, is how its CONNECTION_CLOSE arrives here. Tracked because every pump loop below
+    /// otherwise reads "cannot send" as "flow-control window is shut" and waits out its deadline,
+    /// reporting a stalled window for a connection that is simply dead.
+    /// </summary>
+    private bool _peerClosed;
+
+    /// <summary>Whether the peer ended the connection. A refusal test asserts on this.</summary>
+    public bool PeerClosed => _peerClosed;
+
     private void PumpIn()
     {
         try
@@ -305,7 +335,12 @@ public sealed unsafe class H3TestClient : IDisposable
             byte[] pkt = _udp.Receive(ref from);
             fixed (byte* p = pkt)
             {
-                iq_conn_read(_conn, null, 0, p, (nuint)pkt.Length, 0, NowNs());
+                // Nonzero covers draining, closing and every protocol error: in all of them the
+                // connection is finished and no later datagram changes that.
+                if (iq_conn_read(_conn, null, 0, p, (nuint)pkt.Length, 0, NowNs()) != 0)
+                {
+                    _peerClosed = true;
+                }
             }
         }
         catch (SocketException)
@@ -433,13 +468,12 @@ public sealed unsafe class H3TestClient : IDisposable
     }
 
     private const string QuicLib = "ioxide_ngtcp2";
-    [DllImport(QuicLib)] private static extern nint iq_client_engine_new([MarshalAs(UnmanagedType.LPUTF8Str)] string alpn, IqCallbacks cbs);
     [DllImport(QuicLib)] private static extern void iq_client_engine_free(nint e);
     [DllImport(QuicLib)] private static extern nint iq_client_connect(nint e, byte* localSa, nuint localLen, byte* remoteSa, nuint remoteLen, [MarshalAs(UnmanagedType.LPUTF8Str)] string serverName, [MarshalAs(UnmanagedType.LPUTF8Str)] string alpn, nuint scidLen, ulong ts, void* user, byte* scidOut);
     [DllImport(QuicLib)] private static extern nint iq_client_engine_new_mtls(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string alpn,
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string certPath,
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string keyPath, IqCallbacks cbs);
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? certPath,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? keyPath, IqCallbacks cbs);
     [DllImport(QuicLib)] private static extern long iq_client_open_bidi(nint conn);
     [DllImport(QuicLib)] private static extern long iq_conn_open_uni(nint conn);
     [DllImport(QuicLib)] private static extern nint iq_conn_write(nint conn, byte* dest, nuint destLen, long streamId, byte* data, nuint dataLen, int fin, long* pConsumed, ulong ts);

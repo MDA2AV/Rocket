@@ -19,6 +19,23 @@ public sealed partial class Http3Connection
 {
     private readonly QuicConnection _quicConnection;
     private bool _fatal;
+
+    // RFC 9114 section 8.1. The code a protocol error closes the connection with; the peer is
+    // entitled to know WHY it was dropped, and until now it was told nothing at all.
+    private const ulong H3GeneralProtocolError = 0x0101;
+    private const ulong H3FrameError = 0x0106;
+    private const ulong H3ExcessiveLoad = 0x0107;
+    private const ulong QpackDecompressionFailed = 0x0200;
+
+    private ulong _fatalCode = H3GeneralProtocolError;
+
+    // The transport reported the connection closed. Tracked here because the run loop is where it
+    // is observable - QuicConnection keeps its own closed flag private - and because IsBroken has
+    // to include it: a streamed writer parked on send capacity is released by nothing else.
+    private bool _peerGone;
+
+    // ALPN is settled once, and only once the handshake has finished.
+    private bool _alpnChecked;
     private bool _streaming;
     private bool _controlSent;
 
@@ -96,10 +113,31 @@ public sealed partial class Http3Connection
             while (true)
             {
                 QuicRecvSnapshot snap = await _quicConnection.ReadAsync();
+                _peerGone |= snap.IsClosed;
 
                 if (!_controlSent && !_fatal)
                 {
                     SendControlStream();
+                }
+
+                // RFC 9114 section 3.1: h3 runs over a connection that negotiated the "h3" token,
+                // and RFC 9001 section 8.1 makes ALPN mandatory for QUIC. A QuicEngine built with
+                // no allow list confirms whatever the client asked for - including nothing at all -
+                // so without this an engine created from the constructor's own doc example served
+                // HTTP/3 to a client that never claimed to speak it. Pinning ["h3"] on the engine
+                // refuses those clients properly during the handshake, with no_application_protocol;
+                // this is the backstop for an engine that did not.
+                //
+                // Checked HERE rather than on entry because the handler runs before the handshake
+                // completes, when there is no negotiated protocol to read yet. An open control
+                // stream means uni streams are openable, which means the handshake finished.
+                if (_controlSent && !_alpnChecked)
+                {
+                    _alpnChecked = true;
+                    if (_quicConnection.NegotiatedProtocol != "h3")
+                    {
+                        Fatal($"negotiated '{_quicConnection.NegotiatedProtocol ?? "(none)"}', not h3");
+                    }
                 }
 
                 while (_quicConnection.TryGetDelivery(in snap, out QuicRecvRing.Delivery item))
@@ -140,6 +178,15 @@ public sealed partial class Http3Connection
             }
             FireBodyWakes();
             _requests.Clear();
+
+            // Tell the peer why. A protocol error used to end the handler and leave the connection
+            // registered and routable: no H3 error code ever reached the client, and the connection
+            // sat there until the transport's idle sweep - up to a minute per abusive peer, and
+            // with nothing on the wire to explain a request that simply stopped.
+            if (_fatal)
+            {
+                _quicConnection.Close(_fatalCode);
+            }
 
             _quicConnection.DecRef();
         }
@@ -229,7 +276,7 @@ public sealed partial class Http3Connection
                     {
                         if (have == rs.Carry.Length)
                         {
-                            Fatal("oversized frame header");
+                            Fatal("oversized frame header", H3FrameError);
                             return;
                         }
                         rs.CarryLen = have;
@@ -254,7 +301,7 @@ public sealed partial class Http3Connection
                     {
                         if (!rs.HeadersDone)
                         {
-                            Fatal("DATA before HEADERS");
+                            Fatal("DATA before HEADERS", H3FrameError);
                             return;
                         }
                         rs.State = len == 0 ? ParseState.FrameHeader : ParseState.DataPayload;
@@ -264,7 +311,7 @@ public sealed partial class Http3Connection
                     {
                         if (len > MaxHeaderSection)
                         {
-                            Fatal("header section too large");
+                            Fatal("header section too large", H3ExcessiveLoad);
                             return;
                         }
                         rs.HeadersBuf = ArrayPool<byte>.Shared.Rent((int)len);
@@ -273,13 +320,13 @@ public sealed partial class Http3Connection
                         rs.Remaining = len;
                         if (len == 0)
                         {
-                            Fatal("empty HEADERS frame");
+                            Fatal("empty HEADERS frame", H3FrameError);
                             return;
                         }
                     }
                     else if (type is 0x3 or 0x4 or 0x5 or 0x7 or 0xD)
                     {
-                        Fatal($"frame 0x{type:x} unexpected on a request stream");
+                        Fatal($"frame 0x{type:x} unexpected on a request stream", H3FrameError);
                         return;
                     }
                     else
@@ -360,7 +407,7 @@ public sealed partial class Http3Connection
         {
             if (rs.State != ParseState.FrameHeader || rs.CarryLen != 0)
             {
-                Fatal("stream ended mid-frame");
+                Fatal("stream ended mid-frame", H3FrameError);
                 return;
             }
             rs.Finished = true;
@@ -387,7 +434,7 @@ public sealed partial class Http3Connection
 
         if (!Qpack.TryDecodeFieldSection(rs.HeadersBuf.AsSpan(0, rs.HeadersLen), rs.Request))
         {
-            Fatal("malformed field section");
+            Fatal("malformed field section", QpackDecompressionFailed);
             return;
         }
         rs.HeadersDone = true;
@@ -447,7 +494,7 @@ public sealed partial class Http3Connection
                 {
                     if (have == us.Carry.Length)
                     {
-                        Fatal("oversized control frame header");
+                        Fatal("oversized control frame header", H3FrameError);
                         return;
                     }
                     us.CarryLen = have;
@@ -684,10 +731,11 @@ public sealed partial class Http3Connection
         _bodyWakes.Clear();
     }
 
-    private void Fatal(string reason)
+    private void Fatal(string reason, ulong code = H3GeneralProtocolError)
     {
         Console.Error.WriteLine($"[ioxide.http3] protocol error: {reason}");
         _fatal = true;
+        _fatalCode = code;
     }
 
     private static void ReleaseParseBuffers(ReqStream rs)

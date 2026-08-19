@@ -1,6 +1,7 @@
 using System.Net.Security;
 using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
+using ioxide.tls;
 using Microsoft.AspNetCore.Connections.Features;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Server.Kestrel.Core.Features;
@@ -11,21 +12,59 @@ namespace ioxide.Kestrel;
 /// The TLS connection features Kestrel reads when a connection is already TLS-terminated by the transport
 /// (kTLS via ioxide.tls) instead of by <c>UseHttps()</c>/SslStream. Setting these on the
 /// <see cref="IoxideConnectionContext"/> makes Kestrel treat the connection as HTTPS (scheme, IsHttps) and
-/// pick the application protocol from ALPN. Values are fixed by ioxide.tls (TLS 1.3, AES-128-GCM-SHA256,
-/// no client certificates / mTLS).
+/// pick the application protocol from ALPN.
+///
+/// These values are READ from the session rather than assumed. They used to be constants - TLS 1.3,
+/// AES-128-GCM-SHA256, no client certificate - which was true only while kTLS-TX was the default,
+/// because kTLS pins exactly those. Once kTLS became opt-in the transport negotiated whatever the
+/// options allowed, and this feature went on reporting the old pinned values to ASP.NET: a TLS 1.2
+/// or AES-256 or ChaCha20 connection was logged and policy-checked as TLS 1.3 AES-128. And with
+/// mutual TLS shipped, ClientCertificate stayed permanently null, so the standard certificate
+/// authentication handler denied every verified peer.
 /// </summary>
 internal sealed class IoxideTlsFeature : ITlsConnectionFeature, ITlsHandshakeFeature, ITlsApplicationProtocolFeature
 {
-    public IoxideTlsFeature(ReadOnlyMemory<byte> applicationProtocol)
+    private readonly TlsSession? _session;
+    private X509Certificate2? _clientCertificate;
+    private bool _clientCertificateRead;
+
+    public IoxideTlsFeature(ReadOnlyMemory<byte> applicationProtocol, TlsSession? session = null)
     {
         ApplicationProtocol = applicationProtocol;
+        _session = session;
     }
 
     // ITlsApplicationProtocolFeature - the negotiated ALPN (HTTP/1.1 in Phase 1).
     public ReadOnlyMemory<byte> ApplicationProtocol { get; }
 
-    // ITlsConnectionFeature - ioxide.tls never requests a client certificate.
-    public X509Certificate2? ClientCertificate { get; set; }
+    /// <summary>
+    /// The verified client certificate, or null when the peer presented none. Materialised on first
+    /// read: a server not doing mutual TLS never parses one, and a server that is pays for it once.
+    /// </summary>
+    public X509Certificate2? ClientCertificate
+    {
+        get
+        {
+            if (_clientCertificateRead)
+            {
+                return _clientCertificate;
+            }
+
+            _clientCertificateRead = true;
+            byte[]? der = _session?.PeerCertificateDer;
+            if (der is not null)
+            {
+                _clientCertificate = X509CertificateLoader.LoadCertificate(der);
+            }
+
+            return _clientCertificate;
+        }
+        set
+        {
+            _clientCertificateRead = true;
+            _clientCertificate = value;
+        }
+    }
 
     public Task<X509Certificate2?> GetClientCertificateAsync(CancellationToken cancellationToken)
         => Task.FromResult(ClientCertificate);
@@ -33,8 +72,15 @@ internal sealed class IoxideTlsFeature : ITlsConnectionFeature, ITlsHandshakeFea
     // ITlsHandshakeFeature - fixed by ioxide.tls's single TLS 1.3 ciphersuite. NegotiatedCipherSuite is the
     // modern accessor; the legacy CipherAlgorithm/HashAlgorithm/KeyExchangeAlgorithm (+ *Strength) properties
     // are obsolete (SYSLIB0058) but still required interface members, so implement and suppress the warning.
-    public SslProtocols Protocol => SslProtocols.Tls13;
-    public TlsCipherSuite NegotiatedCipherSuite => TlsCipherSuite.TLS_AES_128_GCM_SHA256;
+    public SslProtocols Protocol => _session?.NegotiatedProtocolVersion switch
+    {
+        0x0304 => SslProtocols.Tls13,
+        0x0303 => SslProtocols.Tls12,
+        _ => SslProtocols.None,
+    };
+
+    // OpenSSL reports the suite by its IANA id, which is exactly how TlsCipherSuite is numbered.
+    public TlsCipherSuite NegotiatedCipherSuite => (TlsCipherSuite)(_session?.NegotiatedCipherSuiteId ?? 0);
     public string HostName => string.Empty;
 #pragma warning disable SYSLIB0058 // legacy ITlsHandshakeFeature cipher properties are obsolete but required
     public CipherAlgorithmType CipherAlgorithm => CipherAlgorithmType.Aes128;

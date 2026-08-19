@@ -67,7 +67,7 @@ public sealed class TlsEncryptingPipeWriter : PipeWriter
         if (_cancelRequested)
         {
             _cancelRequested = false;
-            return new ValueTask<FlushResult>(new FlushResult(isCanceled: true, isCompleted: _completed));
+            return new ValueTask<FlushResult>(new FlushResult(isCanceled: true, isCompleted: _completed || _conn.IsClosed));
         }
 
         if (_staged > 0)
@@ -83,7 +83,15 @@ public sealed class TlsEncryptingPipeWriter : PipeWriter
     private async ValueTask<FlushResult> FlushConnectionAsync()
     {
         await _conn.FlushAsync();
-        return new FlushResult(isCanceled: false, isCompleted: _completed);
+
+        // Report the cancel on the flush it was aimed at, and clear it. CancelPendingFlush cannot
+        // wake a flush already parked on the connection's send - only the completion or a close
+        // releases that - but leaving the flag set was worse than not honouring it: the NEXT
+        // FlushAsync saw it, returned IsCanceled before reaching the encrypt block, and dropped the
+        // plaintext staged for it. A flush nobody cancelled was cancelled, silently and lossily.
+        bool canceled = _cancelRequested;
+        _cancelRequested = false;
+        return new FlushResult(canceled, _completed || _conn.IsClosed);
     }
 
     public override void CancelPendingFlush() => _cancelRequested = true;
@@ -102,7 +110,18 @@ public sealed class TlsEncryptingPipeWriter : PipeWriter
         // committing half a response on an error would dress a failure up as a short success.
         if (exception is null && _staged > 0)
         {
-            _tls.WriteEncrypted(_conn, _staging.AsSpan(0, _staged));
+            try
+            {
+                _tls.WriteEncrypted(_conn, _staging.AsSpan(0, _staged));
+            }
+            catch (IOException)
+            {
+                // Best effort, because Complete is a notification and PipeWriter forbids it from
+                // throwing. Encrypting can fail for one reason - the session is already dead, from
+                // a decrypt fault or a peer that vanished - and on a connection being torn down
+                // there is nobody left to tell. Letting it escape aborted the caller's teardown
+                // mid-way and leaked the SSL, its BIOs and the handle rooting the session.
+            }
         }
         _staged = 0;
 

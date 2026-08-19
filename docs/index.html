@@ -63,6 +63,14 @@
   <input type="radio" name="mode-tabs" id="tab-files">
   <input type="radio" name="mode-tabs" id="tab-qclient">
   <input type="radio" name="mode-tabs" id="tab-https">
+  <input type="radio" name="mode-tabs" id="tab-tlssni">
+  <input type="radio" name="mode-tabs" id="tab-tlsmtls">
+  <input type="radio" name="mode-tabs" id="tab-tlsmtlsktls">
+  <input type="radio" name="mode-tabs" id="tab-h2sni">
+  <input type="radio" name="mode-tabs" id="tab-h2rotate">
+  <input type="radio" name="mode-tabs" id="tab-h3sni">
+  <input type="radio" name="mode-tabs" id="tab-h3rotate">
+  <input type="radio" name="mode-tabs" id="tab-aspnet">
   <nav class="ex-menu" aria-label="Examples">
     <label class="ex-home" for="tab-none">overview</label>
 
@@ -82,12 +90,24 @@
     <details class="ex-sect">
       <summary>tls</summary>
       <label for="tab-tls">ktls &middot; raw</label>
-      <label for="tab-tlshybrid">hybrid &middot; raw</label>
+      <label for="tab-tlshybrid">kernel tx &middot; raw</label>
       <label for="tab-tlsossl">openssl &middot; raw</label>
       <label for="tab-tlspipe">ktls &middot; pipes</label>
       <label for="tab-tlsosslpipe">openssl &middot; pipes</label>
       <label for="tab-tlsmulti">plaintext + tls</label>
       <label for="tab-tlsbcl">sslstream</label>
+    </details>
+
+    <details class="ex-sect">
+      <summary>certificates</summary>
+      <label for="tab-tlssni">a cert per host &middot; h1</label>
+      <label for="tab-h2sni">a cert per host &middot; h2</label>
+      <label for="tab-h3sni">a cert per host &middot; h3</label>
+      <label for="tab-h2rotate">renewal &middot; h2</label>
+      <label for="tab-h3rotate">renewal &middot; h3</label>
+      <label for="tab-tlsmtls">mutual TLS &middot; openssl</label>
+      <label for="tab-tlsmtlsktls">mutual TLS &middot; kernel tx</label>
+      <label for="tab-h3mtls">mutual TLS &middot; h3</label>
     </details>
 
     <details class="ex-sect">
@@ -101,10 +121,10 @@
 
     <details class="ex-sect">
       <summary>http/2</summary>
-      <label for="tab-h2cs">h2c &middot; buffered</label>
-      <label for="tab-h2sresp">h2c &middot; response streamed</label>
-      <label for="tab-h2sreq">h2c &middot; request streamed</label>
-      <label for="tab-h2sboth">h2c &middot; both streamed</label>
+      <label for="tab-h2cs">h2c &middot; buffered (pure C#)</label>
+      <label for="tab-h2sresp">h2c &middot; response streamed (pure C#)</label>
+      <label for="tab-h2sreq">h2c &middot; request streamed (pure C#)</label>
+      <label for="tab-h2sboth">h2c &middot; both streamed (pure C#)</label>
       <label for="tab-h2ng">h2c &middot; buffered (nghttp2)</label>
       <label for="tab-h2ngs">h2c &middot; response streamed (nghttp2)</label>
       <label for="tab-h2cstls">h2 &middot; tls &amp; alpn</label>
@@ -113,9 +133,8 @@
 
     <details class="ex-sect">
       <summary>http/3</summary>
-      <label for="tab-h3cs">h3 &middot; buffered</label>
-      <label for="tab-h3csstream">h3 &middot; request + response streamed</label>
-      <label for="tab-h3mtls">h3 &middot; mutual TLS</label>
+      <label for="tab-h3cs">h3 &middot; buffered (pure C#)</label>
+      <label for="tab-h3csstream">h3 &middot; request + response streamed (pure C#)</label>
       <label for="tab-h3buf">h3 &middot; buffered (nghttp3)</label>
       <label for="tab-h3">h3 &middot; request streamed (nghttp3)</label>
       <label for="tab-h3stream">h3 &middot; response streamed (nghttp3)</label>
@@ -128,6 +147,11 @@
       <label for="tab-pxh2toh1">h2 &rarr; h1</label>
       <label for="tab-pxh3toh1">h3 &rarr; h1</label>
       <label for="tab-http">auto &middot; alt-svc</label>
+    </details>
+
+    <details class="ex-sect">
+      <summary>asp.net</summary>
+      <label for="tab-aspnet">kestrel transport</label>
     </details>
 
     <details class="ex-sect">
@@ -178,6 +202,1229 @@
     </p>
 
     <p class="ex-hint">Pick an example to see the code</p>
+  </div>
+  <div class="pane pane-tlssni">
+    <div class="pane-head">
+      <h3>SNI &middot; a certificate per host</h3>
+      <span class="pane-pkg">ioxide</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+//   curl -ks --resolve alpha.test:8443:127.0.0.1 https://alpha.test:8443/
+//   curl -s --cacert alpha.test.pem --resolve alpha.test:8443:127.0.0.1 \
+//        https://alpha.test:8443/    # and this proves WHICH certificate came back
+
+using System.Text;
+using ioxide;
+using ioxide.tls;
+using ioxide.utils;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort port      = 8443;                        // https://127.0.0.1:8443/
+int    reactors  = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+int    bodyBytes = 8 * 1024;                    // response size
+
+
+// A real PEM pair for the DEFAULT certificate, or null to generate a self-signed localhost one.
+string? certOverride = null;
+string? keyOverride  = null;
+
+// The names this port answers for, beside the default. Add a line and it is served.
+string[] hosts = [&quot;alpha.test&quot;, &quot;beta.test&quot;];
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+const string certPath = &quot;cert.pem&quot;;   // any PEM pair
+const string keyPath  = &quot;key.pem&quot;;
+
+var byHost = new Dictionary&lt;string, TlsCertificate&gt;();
+foreach (string host in hosts)
+{
+    (string hostCert, string hostKey) = ($&quot;{host}.pem&quot;, $&quot;{host}.key&quot;);
+    byHost[host] = new TlsCertificate { CertificatePath = hostCert, KeyPath = hostKey };
+}
+
+var config = new ServerConfig
+{
+    ReactorCount   = reactors,                             // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                 // SQ/CQ depth per ring
+    DualStack      = false,                                // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
+    RecvSlots      = 4096,                                 // shared recv buffer-ring depth
+    Udp            = null,                                 // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                 // no QUIC transport - see Http3/Sni for the QUIC side
+    Tcp = new TcpOptions
+    {
+        Port             = port,
+        ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
+    },
+};
+
+var tlsOptions = new TlsOptions
+{
+    CertificatePath = certPath,                            // the DEFAULT: no name asked for, or a name not below
+    KeyPath         = keyPath,
+    Alpn            = [&quot;http/1.1&quot;],                        // protocols this port serves, most-preferred first
+
+    // The table. Each entry is one host name and the certificate to answer it with; a host may
+    // give PEM text instead of paths (CertificatePem/KeyPem) for material kept out of the
+    // filesystem. Two entries for the same name, in any casing, are refused at startup rather
+    // than one of them silently never being served.
+    CertificatesByHost = byHost,
+
+    KernelTx        = false,                               // kernel TLS transmit - see Tls/Ktls
+    KernelRx        = false,                               // kTLS receive (experimental; requires KernelTx)
+};
+
+byte[] body = new byte[bodyBytes];
+ReadOnlySpan&lt;byte&gt; fill = &quot;ioxide-sni-payload &quot;u8;
+for (int i = 0; i &lt; bodyBytes; i++)
+{
+    body[i] = fill[i % fill.Length];
+}
+byte[] response =
+[
+    .. Encoding.ASCII.GetBytes($&quot;HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {bodyBytes}\r\n\r\n&quot;),
+    .. body,
+];
+
+var threads = new Thread[config.ReactorCount];
+
+for (int i = 0; i &lt; threads.Length; i++)
+{
+    var reactor = new Reactor(i, config);
+
+    // One TlsService per reactor: it owns the contexts - the default and one per name - and drives
+    // handshakes on this ring.
+    reactor.OnStart = r =&gt; TlsService.Start(r, tlsOptions);
+
+    reactor.TcpHandle = async (r, conn) =&gt;
+    {
+        TlsSession? tls = null;
+
+        try
+        {
+            // The certificate is chosen inside this handshake, from the name the client sent.
+            // Nothing after it changes: the session reads and writes the same either way.
+            tls = await r.GetService&lt;TlsService&gt;()!.AcceptAsync(conn);
+
+            while (true)
+            {
+                RecvSnapshot snapshot = await conn.ReadAsync();
+                if (snapshot.IsClosed)
+                {
+                    return;
+                }
+
+                tls.Write(conn, response);
+                await conn.FlushAsync();
+                conn.ResetRead();
+            }
+        }
+        finally
+        {
+            tls?.Dispose();
+            conn.DecRef();
+        }
+    };
+
+    threads[i] = new Thread(reactor.Run) { IsBackground = false, Name = $&quot;reactor-{i}&quot; };
+    threads[i].Start();
+}
+
+Console.WriteLine($&quot;tls-sni on https://127.0.0.1:{port}/  default + {string.Join(&quot;, &quot;, hosts)}&quot;);
+
+foreach (Thread t in threads)
+{
+    t.Join();
+}</code></pre>
+    <p class="ex-foot">One port, several names, a certificate each - chosen inside the handshake, before a byte of your protocol exists. The certificate at the top stays the DEFAULT: a client that sends no name (anything connecting by IP) or asks for one that is not registered gets it rather than a dead connection. Each entry is one OpenSSL context built at startup, so choosing one per handshake is a lookup that allocates nothing - ten names cost what one does. The same feature on h2 is <label for="tab-h2sni" class="ex-jump">a cert per host &middot; h2</label>, and on QUIC <label for="tab-h3sni" class="ex-jump">h3</label>.</p>
+  </div>
+  <div class="pane pane-tlsmtls">
+    <div class="pane-head">
+      <h3>mutual TLS &middot; openssl &middot; pipes</h3>
+      <span class="pane-pkg">ioxide</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+//   curl -k --cert client.pem --key client.key https://127.0.0.1:8443/
+
+using System.Buffers;
+using System.IO.Pipelines;
+using System.Text;
+using ioxide;
+using ioxide.tls;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort port      = 8443;                        // https://127.0.0.1:8443/
+int    reactors  = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+int    bodyBytes = 8 * 1024;                    // TLS cost is per-byte, so a 2-byte &quot;ok&quot; would hide it
+
+
+// The server&#x27;s own certificate and key. Null generates a self-signed pair on first run.
+string? certOverride = null;
+string? keyOverride  = null;
+
+
+// The CA that CLIENT certificates are checked against - the switch that turns mTLS on.
+string? clientCaPath = Environment.GetEnvironmentVariable(&quot;PLAYGROUND_CLIENT_CA&quot;);
+
+// Refuse a client offering no certificate, during the handshake. Off by default: see the header.
+bool requireClientCertificate = Environment.GetEnvironmentVariable(&quot;PLAYGROUND_REQUIRE_CLIENT_CERT&quot;) == &quot;1&quot;;
+
+// Per-connection recv buffer rings (kernel 6.12+) instead of one shared ring per reactor.
+bool incrementalBuffers = false;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+if (clientCaPath is null)
+{
+    Console.Error.WriteLine(
+        &quot;set PLAYGROUND_CLIENT_CA to a PEM bundle of the CA that signs your client certificates.&quot;);
+    return 1;
+}
+
+const string certPath = &quot;cert.pem&quot;;   // any PEM pair
+const string keyPath  = &quot;key.pem&quot;;
+
+var config = new ServerConfig
+{
+    ReactorCount   = reactors,                             // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                 // SQ/CQ depth per ring
+    DualStack      = false,                                // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
+    RecvSlots      = 4096,                                 // shared recv buffer-ring depth
+    Incremental    = incrementalBuffers ? new IncrementalOptions { MaxConnections = 1024, RecvSlots = 8, RecvBufferSize = 16 * 1024 } : null,
+    Udp            = null,                                 // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                 // no QUIC transport - see Http3/*
+    Tcp = new TcpOptions
+    {
+        Port             = port,
+        ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
+    },
+};
+
+var tlsOptions = new TlsOptions
+{
+    CertificatePath = certPath,                            // PEM chain file (or CertificatePem for in-memory)
+    KeyPath         = keyPath,                             // PEM key file (or KeyPem for in-memory)
+    Alpn            = [&quot;http/1.1&quot;],                        // protocols this port serves, most-preferred first
+
+    ClientCaPath    = clientCaPath,                        // trust anchors for CLIENT certificates (or ClientCaPem)
+    RequireClientCertificate = requireClientCertificate,   // refuse a client with none, at the handshake
+
+    // KernelTx stays false (the default). OpenSSL encrypts and decrypts, so nothing here needs the
+    // &#x27;tls&#x27; kernel module. Client verification is unaffected by that choice either way - the
+    // certificate is exchanged during the handshake, which OpenSSL always performs.
+    KernelTx        = false,
+    KernelRx        = false,                               // kTLS receive (experimental; requires KernelTx)
+};
+
+byte[] body = new byte[bodyBytes];
+&quot;ioxide-mtls &quot;u8.CopyTo(body);
+for (int i = &quot;ioxide-mtls &quot;u8.Length; i &lt; bodyBytes; i++)
+{
+    body[i] = (byte)(&#x27;a&#x27; + (i % 26));
+}
+
+// What an unauthenticated peer gets. Only reachable with RequireClientCertificate off - with it on
+// that client never completed a handshake, so nothing here ever runs for it.
+const string denied = &quot;client certificate required&quot;;
+byte[] forbidden = Encoding.ASCII.GetBytes(
+    $&quot;HTTP/1.1 403 Forbidden\r\nContent-Length: {denied.Length}\r\n\r\n{denied}&quot;);
+
+var threads = new Thread[config.ReactorCount];
+
+for (int i = 0; i &lt; threads.Length; i++)
+{
+    var reactor = new Reactor(i, config);
+
+    reactor.OnStart = r =&gt; TlsService.Start(r, tlsOptions);
+
+    reactor.TcpHandle = async (r, conn) =&gt;
+    {
+        TlsSession? tls = null;
+        try
+        {
+            tls = await r.GetService&lt;TlsService&gt;().AcceptAsync(conn);
+
+            // Who connected. Null means the peer offered no certificate, which only happens when
+            // RequireClientCertificate is off - a certificate that failed to verify never reaches
+            // here, because that fails the handshake.
+            //
+            // This is the whole point of the feature: enforcing an identity is half of it, and a
+            // server that can only enforce cannot authorise.
+            byte[] response = tls.PeerSubject is { } subject
+                ? [.. Encoding.ASCII.GetBytes(
+                        $&quot;HTTP/1.1 200 OK\r\nContent-Length: {bodyBytes}\r\nX-Client: {subject}\r\n\r\n&quot;),
+                   .. body]
+                : forbidden;
+
+            await using var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
+
+            while (true)
+            {
+                ReadResult read = await pipe.Input.ReadAsync();
+
+                // Answer per REQUEST, not per read. TLS hands back RECORDS, so one request split
+                // across two records would otherwise draw two responses.
+                int answered = 0;
+                SequencePosition consumed = read.Buffer.Start;
+
+                var reader = new SequenceReader&lt;byte&gt;(read.Buffer);
+                while (reader.TryReadTo(out ReadOnlySequence&lt;byte&gt; _, &quot;\r\n\r\n&quot;u8, advancePastDelimiter: true))
+                {
+                    consumed = reader.Position;
+                    answered++;
+                }
+
+                // Consumed only whole requests; examined everything, so a partial head parks
+                // until more arrives instead of spinning on the same bytes.
+                pipe.Input.AdvanceTo(consumed, read.Buffer.End);
+
+                for (int n = 0; n &lt; answered; n++)
+                {
+                    // The identity is a property of the CONNECTION, so it is the same for every
+                    // request on it - decided once, above the loop, not per request.
+                    pipe.Output.Write(response);
+                }
+
+                if (answered &gt; 0)
+                {
+                    await pipe.Output.FlushAsync();
+                }
+
+                if (read.IsCompleted || read.IsCanceled)
+                {
+                    return;
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($&quot;[tls-mtls-openssl-pipes] connection failed: {e.Message}&quot;);
+        }
+        finally
+        {
+            tls?.Dispose();
+            conn.DecRef();
+        }
+    };
+
+    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
+    threads[i].Start();
+}
+
+Console.WriteLine($&quot;[tls-mtls-openssl-pipes] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
+                + $&quot;client CA {clientCaPath}, &quot;
+                + $&quot;{(requireClientCertificate ? &quot;certificate REQUIRED&quot; : &quot;certificate optional&quot;)}, tx=openssl&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}
+
+return 0;</code></pre>
+    <p class="ex-foot">The client proves who it is too, and the handler is told which peer it got. Everything below the identity check is the ordinary pipe server.</p>
+  </div>
+  <div class="pane pane-tlsmtlsktls">
+    <div class="pane-head">
+      <h3>mutual TLS &middot; kernel tx &middot; pipes</h3>
+      <span class="pane-pkg">ioxide</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+//   sudo modprobe tls
+//   curl -k --cert client.pem --key client.key https://127.0.0.1:8443/
+
+using System.Buffers;
+using System.IO.Pipelines;
+using System.Text;
+using ioxide;
+using ioxide.tls;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort port      = 8443;                        // https://127.0.0.1:8443/
+int    reactors  = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+int    bodyBytes = 8 * 1024;                    // TLS cost is per-byte, so a 2-byte &quot;ok&quot; would hide it
+
+
+// The server&#x27;s own certificate and key. Null generates a self-signed pair on first run.
+string? certOverride = null;
+string? keyOverride  = null;
+
+
+// The CA that CLIENT certificates are checked against - the switch that turns mTLS on.
+string? clientCaPath = Environment.GetEnvironmentVariable(&quot;PLAYGROUND_CLIENT_CA&quot;);
+
+// Refuse a client offering no certificate, during the handshake. Off by default: see the header.
+bool requireClientCertificate = Environment.GetEnvironmentVariable(&quot;PLAYGROUND_REQUIRE_CLIENT_CERT&quot;) == &quot;1&quot;;
+
+// Per-connection recv buffer rings (kernel 6.12+) instead of one shared ring per reactor.
+bool incrementalBuffers = false;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+if (clientCaPath is null)
+{
+    Console.Error.WriteLine(
+        &quot;set PLAYGROUND_CLIENT_CA to a PEM bundle of the CA that signs your client certificates.&quot;);
+    return 1;
+}
+
+const string certPath = &quot;cert.pem&quot;;   // any PEM pair
+const string keyPath  = &quot;key.pem&quot;;
+
+var config = new ServerConfig
+{
+    ReactorCount   = reactors,                             // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                 // SQ/CQ depth per ring
+    DualStack      = false,                                // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
+    RecvSlots      = 4096,                                 // shared recv buffer-ring depth
+    Incremental    = incrementalBuffers ? new IncrementalOptions { MaxConnections = 1024, RecvSlots = 8, RecvBufferSize = 16 * 1024 } : null,
+    Udp            = null,                                 // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                 // no QUIC transport - see Http3/*
+    Tcp = new TcpOptions
+    {
+        Port             = port,
+        ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
+    },
+};
+
+var tlsOptions = new TlsOptions
+{
+    CertificatePath = certPath,                            // PEM chain file (or CertificatePem for in-memory)
+    KeyPath         = keyPath,                             // PEM key file (or KeyPem for in-memory)
+    Alpn            = [&quot;http/1.1&quot;],                        // protocols this port serves, most-preferred first
+
+    ClientCaPath    = clientCaPath,                        // trust anchors for CLIENT certificates (or ClientCaPem)
+    RequireClientCertificate = requireClientCertificate,   // refuse a client with none, at the handshake
+
+    // The one line that differs from Playground/Tls/MtlsOpenSslPipes. The kernel encrypts outbound
+    // records, which needs `sudo modprobe tls` and pins this port to TLS 1.3, one ciphersuite, and
+    // no session resumption.
+    //
+    // It does NOT change anything above it. The client certificate is exchanged and verified during
+    // the HANDSHAKE, which OpenSSL performs either way - the kernel only takes over record crypto
+    // afterwards - so ClientCaPath, RequireClientCertificate and PeerSubject behave identically.
+    KernelTx        = true,
+    KernelRx        = false,                               // kTLS receive (experimental; requires KernelTx)
+};
+
+byte[] body = new byte[bodyBytes];
+&quot;ioxide-mtls &quot;u8.CopyTo(body);
+for (int i = &quot;ioxide-mtls &quot;u8.Length; i &lt; bodyBytes; i++)
+{
+    body[i] = (byte)(&#x27;a&#x27; + (i % 26));
+}
+
+// What an unauthenticated peer gets. Only reachable with RequireClientCertificate off - with it on
+// that client never completed a handshake, so nothing here ever runs for it.
+const string denied = &quot;client certificate required&quot;;
+byte[] forbidden = Encoding.ASCII.GetBytes(
+    $&quot;HTTP/1.1 403 Forbidden\r\nContent-Length: {denied.Length}\r\n\r\n{denied}&quot;);
+
+var threads = new Thread[config.ReactorCount];
+
+for (int i = 0; i &lt; threads.Length; i++)
+{
+    var reactor = new Reactor(i, config);
+
+    reactor.OnStart = r =&gt; TlsService.Start(r, tlsOptions);
+
+    reactor.TcpHandle = async (r, conn) =&gt;
+    {
+        TlsSession? tls = null;
+        try
+        {
+            tls = await r.GetService&lt;TlsService&gt;().AcceptAsync(conn);
+
+            // Who connected. Null means the peer offered no certificate, which only happens when
+            // RequireClientCertificate is off - a certificate that failed to verify never reaches
+            // here, because that fails the handshake.
+            //
+            // This is the whole point of the feature: enforcing an identity is half of it, and a
+            // server that can only enforce cannot authorise.
+            byte[] response = tls.PeerSubject is { } subject
+                ? [.. Encoding.ASCII.GetBytes(
+                        $&quot;HTTP/1.1 200 OK\r\nContent-Length: {bodyBytes}\r\nX-Client: {subject}\r\n\r\n&quot;),
+                   .. body]
+                : forbidden;
+
+            await using var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
+
+            while (true)
+            {
+                ReadResult read = await pipe.Input.ReadAsync();
+
+                // Answer per REQUEST, not per read. TLS hands back RECORDS, so one request split
+                // across two records would otherwise draw two responses.
+                int answered = 0;
+                SequencePosition consumed = read.Buffer.Start;
+
+                var reader = new SequenceReader&lt;byte&gt;(read.Buffer);
+                while (reader.TryReadTo(out ReadOnlySequence&lt;byte&gt; _, &quot;\r\n\r\n&quot;u8, advancePastDelimiter: true))
+                {
+                    consumed = reader.Position;
+                    answered++;
+                }
+
+                // Consumed only whole requests; examined everything, so a partial head parks
+                // until more arrives instead of spinning on the same bytes.
+                pipe.Input.AdvanceTo(consumed, read.Buffer.End);
+
+                for (int n = 0; n &lt; answered; n++)
+                {
+                    // The identity is a property of the CONNECTION, so it is the same for every
+                    // request on it - decided once, above the loop, not per request.
+                    pipe.Output.Write(response);
+                }
+
+                if (answered &gt; 0)
+                {
+                    await pipe.Output.FlushAsync();
+                }
+
+                if (read.IsCompleted || read.IsCanceled)
+                {
+                    return;
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($&quot;[tls-mtls-ktls-pipes] connection failed: {e.Message}&quot;);
+        }
+        finally
+        {
+            tls?.Dispose();
+            conn.DecRef();
+        }
+    };
+
+    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
+    threads[i].Start();
+}
+
+Console.WriteLine($&quot;[tls-mtls-ktls-pipes] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
+                + $&quot;client CA {clientCaPath}, &quot;
+                + $&quot;{(requireClientCertificate ? &quot;certificate REQUIRED&quot; : &quot;certificate optional&quot;)}, tx=kernel&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}
+
+return 0;</code></pre>
+    <p class="ex-foot">The same mutual TLS with the kernel encrypting outbound records. Verifying the peer and choosing who does the crypto are independent choices.</p>
+  </div>
+  <div class="pane pane-h2sni">
+    <div class="pane-head">
+      <h3>h2 &middot; a certificate per host</h3>
+      <span class="pane-pkg">ioxide + ioxide.http2</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+// dotnet add package ioxide.http2
+//   curl -k --http2 --resolve alpha.test:8443:127.0.0.1 https://alpha.test:8443/
+
+using ioxide;
+using ioxide.http2;
+using ioxide.tls;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort port     = 8443;                        // https://127.0.0.1:8443/
+int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+
+
+// A real PEM pair for the DEFAULT certificate, or null to generate a self-signed localhost one.
+string? certOverride = null;
+string? keyOverride  = null;
+
+
+// The names this port answers for, beside the default. Add a line and it is served.
+string[] hosts = [&quot;alpha.test&quot;, &quot;beta.test&quot;];
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+const string certPath = &quot;cert.pem&quot;;   // any PEM pair
+const string keyPath  = &quot;key.pem&quot;;
+
+var byHost = new Dictionary&lt;string, TlsCertificate&gt;();
+foreach (string host in hosts)
+{
+    (string hostCert, string hostKey) = ($&quot;{host}.pem&quot;, $&quot;{host}.key&quot;);
+    byHost[host] = new TlsCertificate { CertificatePath = hostCert, KeyPath = hostKey };
+}
+
+var config = new ServerConfig
+{
+    ReactorCount   = reactors,                             // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                 // SQ/CQ depth per ring
+    DualStack      = false,                                // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
+    RecvSlots      = 4096,                                 // shared recv buffer-ring depth
+    Udp            = null,                                 // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                 // no QUIC transport - see Http3/Sni for that side
+    Tcp = new TcpOptions
+    {
+        Port             = port,
+        ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
+    },
+};
+
+var tlsOptions = new TlsOptions
+{
+    CertificatePath = certPath,                            // the DEFAULT: no name asked for, or a name not below
+    KeyPath         = keyPath,
+    Alpn            = [&quot;h2&quot;],                              // h2 only here; add &quot;http/1.1&quot; to serve both, as Http2/Tls does
+
+    // The table. One entry per host name, and the certificate to answer it with; an entry may
+    // give PEM text instead of paths (CertificatePem/KeyPem) for material kept off the filesystem.
+    // Two entries for the same name, in any casing, are refused at startup rather than one of them
+    // silently never being served. Names are ASCII host names in full - SNI carries no port, an IP
+    // address is not a legal value, and an international name belongs here in its xn-- form.
+    CertificatesByHost = byHost,
+
+    KernelTx = false,                                      // kernel TLS transmit - see Tls/Ktls
+    KernelRx = false,                                      // kTLS receive (experimental; requires KernelTx)
+};
+
+var threads = new Thread[config.ReactorCount];
+
+for (int i = 0; i &lt; threads.Length; i++)
+{
+    var reactor = new Reactor(i, config);
+
+    // One TlsService per reactor. It owns the contexts - the default and one per name - and picks
+    // between them during each handshake on this ring. Each entry costs one OpenSSL context, built
+    // once at startup; choosing one per handshake is a lookup that allocates nothing, so serving
+    // ten names costs what serving one does.
+    reactor.OnStart = r =&gt; TlsService.Start(r, tlsOptions);
+
+    reactor.TcpHandle = async (r, conn) =&gt;
+    {
+        TlsSession? tls = null;
+
+        try
+        {
+            // The certificate is chosen inside this call, from the name the client sent. Nothing
+            // after it changes: the HTTP/2 code below is what the h2c sample runs.
+            tls = await r.GetService&lt;TlsService&gt;()!.AcceptAsync(conn);
+
+            await using var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
+
+            await new Http2Connection(pipe).RunBufferedAsync(request =&gt;
+            {
+                // :authority is HTTP/2&#x27;s Host header, and this is where site routing belongs -
+                // per request, not per connection. It is NOT proof of which certificate was
+                // served; pin one with --cacert for that.
+                string authority = System.Text.Encoding.ASCII.GetString(request.Authority.Span);
+
+                return Http2Response.Text(authority.Length == 0
+                    ? &quot;no :authority\n&quot;
+                    : $&quot;site: {authority}\n&quot;);
+            });
+        }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($&quot;[http2-sni] connection failed: {e.Message}&quot;);
+        }
+        finally
+        {
+            tls?.Dispose();
+            conn.DecRef();
+        }
+    };
+
+    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
+    threads[i].Start();
+}
+
+Console.WriteLine($&quot;[http2-sni] {config.ReactorCount} reactors on :{port}, ALPN h2, &quot;
+                + $&quot;default {certPath} + {string.Join(&quot;, &quot;, hosts)}&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}</code></pre>
+    <p class="ex-foot"><b>Two different names, at two different layers.</b> SNI in the handshake picks the CERTIFICATE; <code>:authority</code> on each request picks the SITE. Nothing makes them agree - HTTP/2 lets a client reuse one connection for any origin the certificate covers, so authorization belongs on <code>:authority</code>, which is per request, and never on the name that chose the certificate.</p>
+  </div>
+  <div class="pane pane-h2rotate">
+    <div class="pane-head">
+      <h3>h2 &middot; certificate renewal</h3>
+      <span class="pane-pkg">ioxide + ioxide.http2</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+// dotnet add package ioxide.http2
+//   kill -HUP &lt;pid&gt;            # what an ACME hook sends after rewriting the PEM
+//   curl -s --cacert alpha.test.pem --resolve alpha.test:8443:127.0.0.1 \
+//        https://alpha.test:8443/    # succeeds before the rotation, fails after
+
+using ioxide;
+using ioxide.http2;
+using ioxide.tls;
+using System.Runtime.InteropServices;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort port     = 8443;                        // https://127.0.0.1:8443/
+int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+
+
+// Seconds between automatic rotations, so the sample shows its own feature. 0 = only on SIGHUP,
+// which is the shape a real deployment has: the ACME hook writes the PEM, then signals.
+int rotateEverySeconds = 10;
+
+
+// The names this port answers for, beside the default. Every one of them rotates.
+string[] hosts = [&quot;alpha.test&quot;, &quot;beta.test&quot;];
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+// Two generations of the same identity: same subject, same SAN, different key and serial. This is
+// what a renewal produces. The originals are what the server starts on.
+const string certPath = &quot;cert.pem&quot;;   // any PEM pair
+const string keyPath  = &quot;key.pem&quot;;
+(string renewedCert, string renewedKey) = (&quot;localhost-renewed.pem&quot;, &quot;localhost-renewed.key&quot;);
+
+var config = new ServerConfig
+{
+    ReactorCount   = reactors,                             // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                 // SQ/CQ depth per ring
+    DualStack      = false,                                // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
+    RecvSlots      = 4096,                                 // shared recv buffer-ring depth
+    Udp            = null,                                 // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                 // no QUIC transport - see Http3/Rotate for that side
+    Tcp = new TcpOptions
+    {
+        Port             = port,
+        ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 64,                             // per-connection recv completion queue depth
+    },
+};
+
+// The two sets, resolved once. Each is a whole generation - the default certificate and every
+// name - and a rotation swaps one for the other. Only the PATHS are held here: ReplaceCertificates
+// re-reads the files, which is what makes &quot;same path, new contents&quot; the normal ACME shape.
+var originalTable = new Dictionary&lt;string, TlsCertificate&gt;();
+var renewedTable = new Dictionary&lt;string, TlsCertificate&gt;();
+
+foreach (string host in hosts)
+{
+    (string hostCert, string hostKey) = ($&quot;{host}.pem&quot;, $&quot;{host}.key&quot;);
+    (string hostRenewedCert, string hostRenewedKey) = ($&quot;{host}-renewed.pem&quot;, $&quot;{host}-renewed.key&quot;);
+
+    originalTable[host] = new TlsCertificate { CertificatePath = hostCert, KeyPath = hostKey };
+    renewedTable[host] = new TlsCertificate { CertificatePath = hostRenewedCert, KeyPath = hostRenewedKey };
+}
+
+var tlsOptions = new TlsOptions
+{
+    CertificatePath    = certPath,                         // the DEFAULT: no name asked for, or a name not in the table
+    KeyPath            = keyPath,
+    Alpn               = [&quot;h2&quot;],                           // what a rotation may NOT change - see below
+    CertificatesByHost = originalTable,
+    KernelTx           = false,                            // kernel TLS transmit - see Tls/Ktls
+    KernelRx           = false,                            // kTLS receive (experimental; requires KernelTx)
+};
+
+// One service per reactor, each published by that reactor as it starts. Rotation reads this array
+// from another thread, so the writes are volatile and a slot that is still null is simply skipped:
+// a reactor that has not started yet has not served a handshake either.
+var services = new TlsService?[config.ReactorCount];
+
+int generation = 0;
+object rotationGate = new();
+
+void Rotate(string trigger)
+{
+    // SIGHUP and the timer can land together, and the pair of &quot;which generation&quot; and &quot;publish it&quot;
+    // has to be atomic between them. ReplaceCertificates takes its own lock; this one is about
+    // the decision, not the publish.
+    lock (rotationGate)
+    {
+        int next = Interlocked.Increment(ref generation);
+        bool renewed = next % 2 == 1;
+
+        var certificate = renewed
+            ? new TlsCertificate { CertificatePath = renewedCert, KeyPath = renewedKey }
+            : new TlsCertificate { CertificatePath = certPath, KeyPath = keyPath };
+
+        Dictionary&lt;string, TlsCertificate&gt; table = renewed ? renewedTable : originalTable;
+        int rotated = 0;
+
+        for (int i = 0; i &lt; services.Length; i++)
+        {
+            TlsService? service = Volatile.Read(ref services[i]);
+            if (service is null)
+            {
+                continue;   // that reactor has not started; it will start on the current set
+            }
+
+            try
+            {
+                // The whole set, every time. Handing this the default alone would empty the table.
+                service.ReplaceCertificates(certificate, table);
+                rotated++;
+            }
+            catch (Exception e)
+            {
+                // This reactor kept the certificates it had, and is still serving. Say so and
+                // carry on - a renewal that half-failed must not take the server with it.
+                Console.Error.WriteLine($&quot;[http2-rotate] reactor {i} kept its certificates: {e.Message}&quot;);
+            }
+        }
+
+        Console.WriteLine($&quot;[http2-rotate] generation {next} ({trigger}): {rotated}/{services.Length} reactors &quot;
+                        + $&quot;now serving {(renewed ? &quot;renewed&quot; : &quot;original&quot;)} - pin &quot;
+                        + $&quot;{table[hosts[0]].CertificatePath}&quot;);
+    }
+}
+
+var threads = new Thread[config.ReactorCount];
+
+for (int i = 0; i &lt; threads.Length; i++)
+{
+    int id = i;
+    var reactor = new Reactor(i, config);
+
+    reactor.OnStart = r =&gt; Volatile.Write(ref services[id], TlsService.Start(r, tlsOptions));
+
+    reactor.TcpHandle = async (r, conn) =&gt;
+    {
+        TlsSession? tls = null;
+
+        try
+        {
+            // Whichever generation is published at this instant. A connection that is already up
+            // keeps what it handshook with.
+            tls = await r.GetService&lt;TlsService&gt;()!.AcceptAsync(conn);
+
+            await using var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
+
+            await new Http2Connection(pipe).RunBufferedAsync(_ =&gt;
+            {
+                // What the SERVER believes it published. The client&#x27;s view is the certificate it
+                // just validated, and only pinning with --cacert can tell you that.
+                int served = Volatile.Read(ref generation);
+                return Http2Response.Text($&quot;generation {served} ({(served % 2 == 1 ? &quot;renewed&quot; : &quot;original&quot;)})\n&quot;);
+            });
+        }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($&quot;[http2-rotate] connection failed: {e.Message}&quot;);
+        }
+        finally
+        {
+            tls?.Dispose();
+            conn.DecRef();
+        }
+    };
+
+    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
+    threads[i].Start();
+}
+
+// SIGHUP is what an ACME hook sends after writing the PEM. Cancel = true keeps the default action
+// - terminating the process - from running after the handler.
+using var sighup = PosixSignalRegistration.Create(PosixSignal.SIGHUP, context =&gt;
+{
+    context.Cancel = true;
+    Rotate(&quot;SIGHUP&quot;);
+});
+
+using var timer = rotateEverySeconds &gt; 0
+    ? new Timer(_ =&gt; Rotate(&quot;timer&quot;), null, rotateEverySeconds * 1000, rotateEverySeconds * 1000)
+    : null;
+
+Console.WriteLine($&quot;[http2-rotate] pid {Environment.ProcessId}, {config.ReactorCount} reactors on :{port}, ALPN h2, &quot;
+                + $&quot;default + {string.Join(&quot;, &quot;, hosts)}, &quot;
+                + $&quot;rotating {(rotateEverySeconds &gt; 0 ? $&quot;every {rotateEverySeconds}s and &quot; : &quot;&quot;)}on SIGHUP&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}</code></pre>
+    <p class="ex-foot">Replacing a certificate without dropping a connection. Three things decide whether an automated renewal is safe: it replaces the WHOLE set, so passing only the default leaves every name answered by the default certificate; a <code>TlsService</code> belongs to ONE reactor, so all of them have to be rotated and there is no instant at which they flip together; and it builds before it publishes, so a half-written PEM throws and <b>leaves the service serving what it was</b>. Live connections never notice - their certificate was chosen at handshake. Compare <label for="tab-h3rotate" class="ex-jump">renewal &middot; h3</label>, where one shared engine makes it a single call.</p>
+  </div>
+  <div class="pane pane-h3sni">
+    <div class="pane-head">
+      <h3>h3 &middot; a certificate per host</h3>
+      <span class="pane-pkg">ioxide + ioxide.ngtcp2 + ioxide.http3</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+// dotnet add package ioxide.ngtcp2
+// dotnet add package ioxide.http3
+//   curl --http3-only -k --resolve alpha.test:8443:127.0.0.1 https://alpha.test:8443/
+
+using System.Text;
+using ioxide;
+using ioxide.http3;
+using ioxide.ngtcp2;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort quicPort = 8443;                        // https://127.0.0.1:8443/ over QUIC
+int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+
+if (ushort.TryParse(Environment.GetEnvironmentVariable(&quot;PLAYGROUND_QUIC_PORT&quot;), out ushort p))
+{
+    quicPort = p;
+}
+if (int.TryParse(Environment.GetEnvironmentVariable(&quot;PLAYGROUND_REACTORS&quot;), out int r) &amp;&amp; r &gt; 0)
+{
+    reactors = r;
+}
+
+// A real PEM pair for the DEFAULT certificate, or null to generate a self-signed localhost one.
+string? certOverride = null;
+string? keyOverride  = null;
+
+// The names this port answers for, beside the default. Add a line and it is served.
+string[] hosts = [&quot;alpha.test&quot;, &quot;beta.test&quot;];
+
+// UDP receive slots per reactor: how many datagrams the ring can have outstanding at once.
+int udpRecvSlots = 16;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+const string certPath = &quot;cert.pem&quot;;   // any PEM pair
+const string keyPath  = &quot;key.pem&quot;;
+
+using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: [&quot;h3&quot;]);
+
+// PEM paths, because ngtcp2 loads certificates by path.
+foreach (string host in hosts)
+{
+    (string hostCert, string hostKey) = ($&quot;{host}.pem&quot;, $&quot;{host}.key&quot;);
+    engine.AddHost(host, hostCert, hostKey);
+}
+
+var config = new ServerConfig
+{
+    ReactorCount = reactors,
+    Tcp = null,                                        // QUIC only
+    Udp = new UdpOptions { RecvSlots = udpRecvSlots },
+    Quic = new QuicOptions
+    {
+        Port = quicPort,
+        LocalCidLength = 8,
+        // From here the host table is live and closed to further additions.
+        ConnectionFactory = engine.CreateFactory(),
+    },
+};
+
+var threads = new Thread[config.ReactorCount];
+
+for (int i = 0; i &lt; threads.Length; i++)
+{
+    var reactor = new Reactor(i, config);
+
+    reactor.QuicHandle = (_, connection) =&gt;
+        new Http3Connection(connection).RunAsync(_ =&gt;
+        {
+            // The certificate was chosen during the handshake, before this ever runs. Routing a
+            // request to the right site is a separate job, and the :authority header is where you
+            // would do it - the name in the handshake picked the certificate, nothing more.
+            var response = new Http3Response { Body = Encoding.UTF8.GetBytes(&quot;ok\n&quot;) };
+            response.Headers.Add((&quot;content-type&quot;u8.ToArray(), &quot;text/plain&quot;u8.ToArray()));
+            return response;
+        });
+
+    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
+    threads[i].Start();
+}
+
+Console.WriteLine($&quot;[http3-sni] {config.ReactorCount} reactors on :{quicPort}, &quot;
+                + $&quot;default + {string.Join(&quot;, &quot;, hosts)}&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}</code></pre>
+    <p class="ex-foot">The QUIC side, where TLS lives INSIDE the transport: no <code>TlsService</code>, one shared <code>QuicEngine</code>, and names registered before it starts serving - <code>AddHost</code> refuses afterwards, because the table is read during handshakes on every reactor at once. Client verification carries over to every host, so a name cannot be a way around the mutual TLS the engine was built with.</p>
+  </div>
+  <div class="pane pane-h3rotate">
+    <div class="pane-head">
+      <h3>h3 &middot; certificate renewal</h3>
+      <span class="pane-pkg">ioxide + ioxide.ngtcp2 + ioxide.http3</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+// dotnet add package ioxide.ngtcp2
+// dotnet add package ioxide.http3
+//   kill -HUP &lt;pid&gt;            # what an ACME hook sends after rewriting the PEM
+//   curl --http3-only -s --cacert alpha.test.pem \
+//        --resolve alpha.test:8443:127.0.0.1 https://alpha.test:8443/
+
+using System.Text;
+using ioxide;
+using ioxide.http3;
+using ioxide.ngtcp2;
+using System.Runtime.InteropServices;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort quicPort = 8443;                        // https://127.0.0.1:8443/ over QUIC
+int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+
+
+// Seconds between automatic rotations, so the sample shows its own feature. 0 = only on SIGHUP,
+// which is the shape a real deployment has: the ACME hook writes the PEM, then signals.
+int rotateEverySeconds = 10;
+
+
+// The names this port answers for, beside the default. Every one of them rotates.
+string[] hosts = [&quot;alpha.test&quot;, &quot;beta.test&quot;];
+
+// UDP receive slots per reactor: how many datagrams the ring can have outstanding at once.
+int udpRecvSlots = 16;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+// Two generations of the same identity: same subject, same SAN, different key and serial. This is
+// what a renewal produces. The originals are what the server starts on.
+const string certPath = &quot;cert.pem&quot;;   // any PEM pair
+const string keyPath  = &quot;key.pem&quot;;
+(string renewedCert, string renewedKey) = (&quot;localhost-renewed.pem&quot;, &quot;localhost-renewed.key&quot;);
+
+// ONE engine, shared by every reactor - this is the whole difference from Http2/Rotate.
+using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: [&quot;h3&quot;]);
+
+// Names are registered before CreateFactory, as they must be: once the engine is serving, AddHost
+// refuses. Rotation is the supported way to change the table afterwards, and it replaces rather
+// than edits, which is why it can be safe while AddHost cannot.
+var originalTable = new Dictionary&lt;string, QuicCertificate&gt;();
+var renewedTable = new Dictionary&lt;string, QuicCertificate&gt;();
+
+foreach (string host in hosts)
+{
+    (string hostCert, string hostKey) = ($&quot;{host}.pem&quot;, $&quot;{host}.key&quot;);
+    (string hostRenewedCert, string hostRenewedKey) = ($&quot;{host}-renewed.pem&quot;, $&quot;{host}-renewed.key&quot;);
+
+    engine.AddHost(host, hostCert, hostKey);
+
+    // The two sets, resolved once. Only the PATHS are held: ReplaceCertificates re-reads the
+    // files, which is what makes &quot;same path, new contents&quot; the normal ACME shape.
+    originalTable[host] = new QuicCertificate(hostCert, hostKey);
+    renewedTable[host] = new QuicCertificate(hostRenewedCert, hostRenewedKey);
+}
+
+var config = new ServerConfig
+{
+    ReactorCount = reactors,
+    Tcp = null,                                        // QUIC only
+    Udp = new UdpOptions { RecvSlots = udpRecvSlots },
+    Quic = new QuicOptions
+    {
+        Port = quicPort,
+        LocalCidLength = 8,
+        // From here the host table is live, and only ReplaceCertificates may change it.
+        ConnectionFactory = engine.CreateFactory(),
+    },
+};
+
+int generation = 0;
+object rotationGate = new();
+
+void Rotate(string trigger)
+{
+    // SIGHUP and the timer can land together, so the pair of &quot;which generation&quot; and &quot;publish it&quot;
+    // is taken atomically here. The engine takes its own lock around the publish.
+    lock (rotationGate)
+    {
+        int next = Interlocked.Increment(ref generation);
+        bool renewed = next % 2 == 1;
+
+        var certificate = renewed
+            ? new QuicCertificate(renewedCert, renewedKey)
+            : new QuicCertificate(certPath, keyPath);
+
+        Dictionary&lt;string, QuicCertificate&gt; table = renewed ? renewedTable : originalTable;
+
+        try
+        {
+            // One call, every reactor. The table goes with it because the set is replaced whole.
+            engine.ReplaceCertificates(certificate, table);
+        }
+        catch (Exception e)
+        {
+            // The engine is still serving the previous set, on every reactor. Nothing to undo.
+            Console.Error.WriteLine($&quot;[http3-rotate] generation {next} refused, still serving the previous set: {e.Message}&quot;);
+            return;
+        }
+
+        Console.WriteLine($&quot;[http3-rotate] generation {next} ({trigger}): serving &quot;
+                        + $&quot;{(renewed ? &quot;renewed&quot; : &quot;original&quot;)} - pin &quot;
+                        + $&quot;{table[hosts[0]].CertificatePath}&quot;);
+    }
+}
+
+var threads = new Thread[config.ReactorCount];
+
+for (int i = 0; i &lt; threads.Length; i++)
+{
+    var reactor = new Reactor(i, config);
+
+    reactor.QuicHandle = (_, connection) =&gt;
+        new Http3Connection(connection).RunAsync(_ =&gt;
+        {
+            // What the SERVER believes it published. The client&#x27;s view is the certificate it just
+            // validated, and only pinning with --cacert can tell you that.
+            int served = Volatile.Read(ref generation);
+
+            var response = new Http3Response
+            {
+                Body = Encoding.UTF8.GetBytes($&quot;generation {served} ({(served % 2 == 1 ? &quot;renewed&quot; : &quot;original&quot;)})\n&quot;),
+            };
+            response.Headers.Add((&quot;content-type&quot;u8.ToArray(), &quot;text/plain&quot;u8.ToArray()));
+            return response;
+        });
+
+    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
+    threads[i].Start();
+}
+
+// SIGHUP is what an ACME hook sends after writing the PEM. Cancel = true keeps the default action
+// - terminating the process - from running after the handler.
+using var sighup = PosixSignalRegistration.Create(PosixSignal.SIGHUP, context =&gt;
+{
+    context.Cancel = true;
+    Rotate(&quot;SIGHUP&quot;);
+});
+
+using var timer = rotateEverySeconds &gt; 0
+    ? new Timer(_ =&gt; Rotate(&quot;timer&quot;), null, rotateEverySeconds * 1000, rotateEverySeconds * 1000)
+    : null;
+
+Console.WriteLine($&quot;[http3-rotate] pid {Environment.ProcessId}, {config.ReactorCount} reactors on :{quicPort}, &quot;
+                + $&quot;default + {string.Join(&quot;, &quot;, hosts)}, &quot;
+                + $&quot;rotating {(rotateEverySeconds &gt; 0 ? $&quot;every {rotateEverySeconds}s and &quot; : &quot;&quot;)}on SIGHUP&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}</code></pre>
+    <p class="ex-foot">The same operational need with a different shape under it: ONE engine shared by every reactor, so a rotation is a single call and a handshake sees either every old certificate or every new one - never a mixture. The engine also REFUSES to replace the default alone while it answers for names, because that hook (renew the default, forget the rest) silently published an empty table. What a rotation may never change on either stack: the client trust anchors, and whether a client certificate is required.</p>
+  </div>
+  <div class="pane pane-aspnet">
+    <div class="pane-head">
+      <h3>ASP.NET Core on the ioxide transport</h3>
+      <span class="pane-pkg">ioxide + ioxide.Kestrel</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+// dotnet add package ioxide.Kestrel
+//   dotnet run                      # TRANSPORT=ioxide is the default
+//   TRANSPORT=sockets dotnet run    # the stock Kestrel transport, for comparison
+
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using ioxide.Kestrel;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.Extensions.Logging;
+
+// A minimal ASP.NET Core app that runs on either the ioxide io_uring transport or Kestrel&#x27;s stock
+// sockets transport. Pick with the TRANSPORT environment variable (default: ioxide):
+//
+//   TRANSPORT=ioxide  dotnet run     # ioxide.Kestrel transport (io_uring, one reactor per core)
+//   TRANSPORT=sockets dotnet run     # stock Kestrel sockets transport (the framework default)
+//   TRANSPORT=h3      dotnet run     # stock Kestrel + HTTP/3 over msquic on udp :8443 - the
+//                                    # ASP.NET twin of the ioxide `quic-h3` example, same port,
+//                                    # for side-by-side h2load/h3x runs. Needs libmsquic
+//                                    # (sudo apt install libmsquic). TLS is mandatory for h3,
+//                                    # so the endpoint rides a self-signed localhost cert.
+//
+// Then: curl http://localhost:8080/  and  curl http://localhost:8080/plaintext
+// h3:   curl --http3-only -k https://localhost:8443/plaintext
+//       h2load --alpn-list=h3 -n 100000 -c 32 -m 32 https://127.0.0.1:8443/plaintext
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Logging.ClearProviders();   // turn off all logging (no per-request info: lines)
+
+var transport = (Environment.GetEnvironmentVariable(&quot;TRANSPORT&quot;) ?? &quot;ioxide&quot;).Trim().ToLowerInvariant();
+
+builder.WebHost.ConfigureKestrel(o =&gt; o.ListenAnyIP(8080));
+
+switch (transport)
+{
+    case &quot;ioxide&quot;:
+        builder.WebHost.UseIoxide(o =&gt; o.ReactorCount = 16);   // io_uring transport, 16 reactors (one ring per thread)
+        break;
+
+    case &quot;sockets&quot;:
+    case &quot;kestrel&quot;:
+        // Stock Kestrel sockets transport — the framework default, nothing to wire up.
+        break;
+
+    case &quot;h3&quot;:
+        // HTTP/3 rides Kestrel&#x27;s msquic multiplexed transport, so this mode is necessarily the
+        // stock stack (the ioxide transport is TCP-only). :8443 serves h1+h2 over TCP and h3
+        // over UDP on the same port (Alt-Svc advertises the upgrade); :8080 stays plain h1.
+        // Don&#x27;t run this alongside the ioxide quic-h3 example - both bind udp :8443.
+        if (!System.Net.Quic.QuicListener.IsSupported)
+        {
+            Console.Error.WriteLine(&quot;[Examples.AspNet] warning: QUIC is not supported on this box &quot; +
+                                    &quot;(libmsquic missing? try: sudo apt install libmsquic) - :8443 will serve h1/h2 only&quot;);
+        }
+
+        builder.WebHost.ConfigureKestrel(o =&gt; o.ListenAnyIP(8443, ep =&gt;
+        {
+            ep.Protocols = HttpProtocols.Http1AndHttp2AndHttp3;
+            ep.UseHttps(H3Cert());
+        }));
+        break;
+
+    default:
+        Console.Error.WriteLine($&quot;Unknown TRANSPORT &#x27;{transport}&#x27;. Use &#x27;ioxide&#x27;, &#x27;sockets&#x27; or &#x27;h3&#x27;.&quot;);
+        return;
+}
+
+var app = builder.Build();
+
+app.MapGet(&quot;/&quot;, () =&gt; $&quot;Hello from ioxide.Kestrel! transport={transport}&quot;);
+app.MapGet(&quot;/plaintext&quot;, () =&gt; &quot;Hello, World!&quot;);
+
+Console.WriteLine(transport == &quot;h3&quot;
+    ? &quot;[Examples.AspNet] listening on http://localhost:8080 and https://localhost:8443 (h1+h2+h3, msquic)&quot;
+    : $&quot;[Examples.AspNet] listening on http://localhost:8080  (transport={transport})&quot;);
+app.Run();
+return;
+
+// Self-signed localhost cert for the h3 endpoint. The PKCS#12 round-trip re-imports the ephemeral
+// private key in the shape the TLS stacks (msquic included) accept.
+static X509Certificate2 H3Cert()
+{
+    using var rsa = RSA.Create(2048);
+    var request = new CertificateRequest(&quot;CN=localhost&quot;, rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+    using var cert = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
+    return X509CertificateLoader.LoadPkcs12(cert.Export(X509ContentType.Pkcs12), null);
+}</code></pre>
+    <p class="ex-foot">Not an ioxide server: an ordinary ASP.NET Core app with ioxide underneath Kestrel as its transport. <code>UseIoxide</code> is the whole integration, and <code>TRANSPORT=</code> switches back to stock sockets so the same app can be measured both ways.</p>
   </div>
   <div class="pane pane-tlsmulti">
     <div class="pane-head">
@@ -1163,7 +2410,7 @@ for (int i = 0; i &lt; threads.Length; i++)
     threads[i].Start();
 }
 
-Console.WriteLine($&quot;[h3-managed] {config.ReactorCount} reactors, h3 on udp :{config.Quic!.Port} &quot;
+Console.WriteLine($&quot;[http3-managed-buffered] {config.ReactorCount} reactors, h3 on udp :{config.Quic!.Port} &quot;
                 + $&quot;(pure C#), {bodyBytes}-byte body, cert {certPath}&quot;);
 
 foreach (Thread thread in threads)
@@ -1405,7 +2652,7 @@ for (int i = 0; i &lt; threads.Length; i++)
     threads[i].Start();
 }
 
-Console.WriteLine($&quot;[h3-managed-streamed] {config.ReactorCount} reactors, h3 on udp :{config.Quic!.Port} &quot;
+Console.WriteLine($&quot;[http3-managed-streamed-both] {config.ReactorCount} reactors, h3 on udp :{config.Quic!.Port} &quot;
                 + $&quot;(pure C#), {chunkCount} x {chunkBytes}-byte chunks, cert {certPath}&quot;);
 
 foreach (Thread thread in threads)
@@ -1449,9 +2696,13 @@ string? certOverride = null;
 string? keyOverride  = null;
 
 
-// The CA that client certificates are checked against. This is what turns mTLS ON - leave it null
+// The CA that client certificates are checked against. This is what turns mTLS ON - leave both null
 // and the server verifies nothing about the client, exactly as the other h3 samples do.
+//
+// Either the bundle&#x27;s path, or the bundle itself as PEM text for a host that keeps its CA in a
+// secrets store rather than on disk. Set one, not both.
 string? clientCaPath = Environment.GetEnvironmentVariable(&quot;PLAYGROUND_CLIENT_CA&quot;);
+string? clientCaPem  = Environment.GetEnvironmentVariable(&quot;PLAYGROUND_CLIENT_CA_PEM&quot;);
 
 // Refuse a client that offers no certificate, during the handshake. Off, so a client without one
 // still connects and the handler decides what it may see - which is the more useful default when
@@ -1465,14 +2716,16 @@ int udpRecvSlots = 16;
 const string certPath = &quot;cert.pem&quot;;   // any PEM pair
 const string keyPath  = &quot;key.pem&quot;;
 
-if (clientCaPath is null)
+if (clientCaPath is null &amp;&amp; clientCaPem is null)
 {
-    Console.Error.WriteLine(&quot;set PLAYGROUND_CLIENT_CA to a PEM bundle of the CA that signs your client certificates.&quot;);
+    Console.Error.WriteLine(&quot;set PLAYGROUND_CLIENT_CA to a PEM bundle of the CA that signs your client &quot;
+                          + &quot;certificates, or PLAYGROUND_CLIENT_CA_PEM to that bundle as text.&quot;);
     return 1;
 }
 
 using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: [&quot;h3&quot;],
-    clientCaPemPath: clientCaPath, requireClientCertificate: requireClientCertificate);
+    clientCaPemPath: clientCaPath, requireClientCertificate: requireClientCertificate,
+    clientCaPem: clientCaPem);
 
 var config = new ServerConfig
 {
@@ -1515,7 +2768,7 @@ for (int i = 0; i &lt; threads.Length; i++)
 }
 
 Console.WriteLine($&quot;[http3-mtls] {config.ReactorCount} reactors on :{quicPort}, &quot;
-                + $&quot;client CA {clientCaPath}, &quot;
+                + $&quot;client CA {clientCaPath ?? &quot;from PEM text&quot;}, &quot;
                 + $&quot;client certificate {(requireClientCertificate ? &quot;REQUIRED&quot; : &quot;optional&quot;)}&quot;);
 
 foreach (Thread thread in threads)
@@ -2596,7 +3849,7 @@ var tlsOptions = new TlsOptions
 
     // Full kTLS: the kernel decrypts inbound too. Experimental - about one first connection in
     // twelve fails outright, and a client sending a TLS 1.3 KeyUpdate loses the connection.
-    // Tls/Hybrid is this same server without this line: kernel TX, OpenSSL RX, deployable today.
+    // Tls/KtlsTx is this same server without this line: kernel TX, OpenSSL RX, deployable today.
     KernelRx        = true,
 };
 
@@ -2746,7 +3999,7 @@ sealed class Carry
         _len -= count;
     }
 }</code></pre>
-    <p class="ex-foot"><b>Opt-in - and FULL kTLS</b>: both directions in the kernel, set right on the options. Kernel RX is experimental, so <code>Tls/Hybrid</code> in the repo is this server minus the <code>KernelRx</code> line - the half you would deploy today. The KernelTx line is what makes the <code>conn.Write</code> below legal: it puts PLAINTEXT into the slab and the kernel turns it into records. Without it the same call would put <b>cleartext on the wire</b>, which is why every other sample goes through <code>TlsSession.Write</code> - correct in either mode. Compare <label for="tab-tlsossl" class="ex-jump">openssl &middot; raw</label>.</p>
+    <p class="ex-foot"><b>Opt-in - and FULL kTLS</b>: both directions in the kernel, set right on the options. Kernel RX is experimental, so <code>Tls/KtlsTx</code> in the repo is this server minus the <code>KernelRx</code> line - the half you would deploy today. The KernelTx line is what makes the <code>conn.Write</code> below legal: it puts PLAINTEXT into the slab and the kernel turns it into records. Without it the same call would put <b>cleartext on the wire</b>, which is why every other sample goes through <code>TlsSession.Write</code> - correct in either mode. Compare <label for="tab-tlsossl" class="ex-jump">openssl &middot; raw</label>.</p>
   </div>
 
   <div class="pane pane-tlspipe">
@@ -2972,7 +4225,7 @@ var tlsOptions = new TlsOptions
 };
 
 byte[] body = new byte[bodyBytes];
-ReadOnlySpan&lt;byte&gt; fill = &quot;ioxide-hybrid-tls &quot;u8;
+ReadOnlySpan&lt;byte&gt; fill = &quot;ioxide-ktls-tx &quot;u8;
 for (int i = 0; i &lt; bodyBytes; i++)
 {
     body[i] = fill[i % fill.Length];
@@ -3041,7 +4294,7 @@ for (int i = 0; i &lt; threads.Length; i++)
         {
             // Handlers run fire-and-forget, so a thrown handshake error would vanish silently -
             // and a missing &#x27;tls&#x27; kernel module manifests exactly here.
-            Console.Error.WriteLine($&quot;[tls-hybrid] connection failed: {e.Message}&quot;);
+            Console.Error.WriteLine($&quot;[tls-ktls-tx] connection failed: {e.Message}&quot;);
         }
         finally
         {
@@ -3054,7 +4307,7 @@ for (int i = 0; i &lt; threads.Length; i++)
     threads[i].Start();
 }
 
-Console.WriteLine($&quot;[tls-hybrid] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
+Console.WriteLine($&quot;[tls-ktls-tx] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
                 + $&quot;{bodyBytes}-byte body, tx=kernel, rx=openssl, cert {certPath}&quot;);
 
 foreach (Thread thread in threads)
@@ -3568,7 +4821,7 @@ for (int i = 0; i &lt; threads.Length; i++)
     threads[i].Start();
 }
 
-Console.WriteLine($&quot;[http2-buffered] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
+Console.WriteLine($&quot;[http2-managed-buffered] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
                 + $&quot;{body.Length}-byte body (h2c prior knowledge)&quot;);
 
 foreach (Thread thread in threads)
@@ -3678,7 +4931,7 @@ for (int i = 0; i &lt; threads.Length; i++)
     threads[i].Start();
 }
 
-Console.WriteLine($&quot;[http2-streamed-response] {config.ReactorCount} reactors on :{config.Tcp!.Port} &quot;
+Console.WriteLine($&quot;[http2-managed-streamed-response] {config.ReactorCount} reactors on :{config.Tcp!.Port} &quot;
                 + $&quot;(pure C#), {chunkCount} x {chunkBytes}-byte chunks per response&quot;);
 
 foreach (Thread thread in threads)
@@ -3788,7 +5041,7 @@ for (int i = 0; i &lt; threads.Length; i++)
     threads[i].Start();
 }
 
-Console.WriteLine($&quot;[http2-streamed-request] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
+Console.WriteLine($&quot;[http2-managed-streamed-request] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
                 + $&quot;request bodies streamed, {streamWindow / 1024} KiB window per stream&quot;);
 
 foreach (Thread thread in threads)
@@ -3905,7 +5158,7 @@ for (int i = 0; i &lt; threads.Length; i++)
     threads[i].Start();
 }
 
-Console.WriteLine($&quot;[http2-streamed-both] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
+Console.WriteLine($&quot;[http2-managed-streamed-both] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
                 + $&quot;request pulled and response pushed ({chunkBytes}-byte chunks on /feed)&quot;);
 
 foreach (Thread thread in threads)

@@ -16,6 +16,12 @@ internal static class Program
         HttpClientTests.Register(runner);
         TlsClientTests.Register(runner);
 
+        // Areas reserved for the failing-test review pass; empty until one lands.
+        TlsClientVerificationTests.Register(runner);
+        TlsClientErrorQueueTests.Register(runner);
+        TlsClientPostureTests.Register(runner);
+        CrossStackParityTests.Register(runner);
+
         return runner.Summary();
     }
 }

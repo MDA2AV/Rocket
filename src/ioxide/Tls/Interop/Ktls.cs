@@ -73,51 +73,34 @@ internal static unsafe class Ktls
     /// those records are gone from the socket by the time we get here.
     /// </param>
     public static void EnableRx(int fd, byte[] clientTrafficSecret, ulong recordSequence)
-    {
-        byte[] key = ExpandLabel(clientTrafficSecret, "key", 16);
-        byte[] nonce = ExpandLabel(clientTrafficSecret, "iv", 12);
-
-        var info = new CryptoInfoAesGcm128
-        {
-            Version = TLS_1_3_VERSION,
-            CipherType = TLS_CIPHER_AES_GCM_128,
-        };
-
-        try
-        {
-            for (int i = 0; i < 16; i++) info.Key[i] = key[i];
-            for (int i = 0; i < 4; i++) info.Salt[i] = nonce[i];
-            for (int i = 0; i < 8; i++) info.Iv[i] = nonce[4 + i];
-
-            // Big-endian, like everything else on the wire.
-            for (int i = 0; i < 8; i++)
-            {
-                info.RecSeq[i] = (byte)(recordSequence >> ((7 - i) * 8));
-            }
-
-            // TCP_ULP is already set by EnableTx; setting it twice returns EEXIST, so RX assumes
-            // TX ran first. That ordering is also what the caller wants - a half-enabled socket
-            // with RX but no TX would send cleartext.
-            if (setsockopt(fd, SOL_TLS, TLS_RX, &info, (uint)sizeof(CryptoInfoAesGcm128)) != 0)
-            {
-                throw new IOException($"kTLS: TLS_RX failed (errno {Marshal.GetLastPInvokeError()})");
-            }
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(key);
-            CryptographicOperations.ZeroMemory(nonce);
-            CryptographicOperations.ZeroMemory(clientTrafficSecret);
-            CryptoInfoAesGcm128* ip = &info;
-            CryptographicOperations.ZeroMemory(new Span<byte>(ip, sizeof(CryptoInfoAesGcm128)));
-        }
-    }
+        => Program(fd, TLS_RX, "TLS_RX", clientTrafficSecret, recordSequence, installUlp: false);
 
     /// <summary>Enable kTLS TX with keys derived from the TLS 1.3 server traffic secret.</summary>
+    /// <remarks>
+    /// Runs first. TX installs the TCP_ULP that RX then rides on, and a socket with RX enabled and
+    /// TX not would send cleartext.
+    /// </remarks>
     public static void EnableTx(int fd, byte[] serverTrafficSecret)
+        // Record sequence 0: session tickets are disabled under kTLS, so no server record went out
+        // under the application traffic key before the handoff.
+        => Program(fd, TLS_TX, "TLS_TX", serverTrafficSecret, recordSequence: 0, installUlp: true);
+
+    /// <summary>
+    /// Derives the AES-128-GCM key material from a TLS 1.3 traffic secret and programs it into one
+    /// direction of the socket.
+    /// </summary>
+    /// <remarks>
+    /// One body for both directions, because they only ever differed in three things: which
+    /// direction to program, whether the record sequence is non-zero, and whether TCP_ULP has to be
+    /// installed first. Everything else - the two HKDF expansions, the layout of the crypto info,
+    /// and above all the zeroing of every copy of the key material in the finally - was written
+    /// twice, which is one place too many for a routine that handles keys.
+    /// </remarks>
+    private static void Program(int fd, int optname, string what, byte[] trafficSecret,
+        ulong recordSequence, bool installUlp)
     {
-        byte[] key = ExpandLabel(serverTrafficSecret, "key", 16);
-        byte[] nonce = ExpandLabel(serverTrafficSecret, "iv", 12);
+        byte[] key = ExpandLabel(trafficSecret, "key", 16);
+        byte[] nonce = ExpandLabel(trafficSecret, "iv", 12);
 
         var info = new CryptoInfoAesGcm128
         {
@@ -130,22 +113,29 @@ internal static unsafe class Ktls
             for (int i = 0; i < 16; i++) info.Key[i] = key[i];
             for (int i = 0; i < 4; i++) info.Salt[i] = nonce[i];      // nonce[0..4]
             for (int i = 0; i < 8; i++) info.Iv[i] = nonce[4 + i];    // nonce[4..12]
-            // RecSeq stays 0: session tickets are disabled, so no server record was
-            // sent under the application traffic key before the handoff.
 
-            ReadOnlySpan<byte> ulp = "tls"u8;
-            fixed (byte* p = ulp)
+            // Big-endian, like everything else on the wire.
+            for (int i = 0; i < 8; i++)
             {
-                if (setsockopt(fd, SOL_TCP, TCP_ULP, p, 3) != 0)
+                info.RecSeq[i] = (byte)(recordSequence >> ((7 - i) * 8));
+            }
+
+            if (installUlp)
+            {
+                ReadOnlySpan<byte> ulp = "tls"u8;
+                fixed (byte* p = ulp)
                 {
-                    throw new IOException(
-                        $"kTLS: TCP_ULP failed (errno {Marshal.GetLastPInvokeError()}); is the 'tls' kernel module available?");
+                    if (setsockopt(fd, SOL_TCP, TCP_ULP, p, 3) != 0)
+                    {
+                        throw new IOException(
+                            $"kTLS: TCP_ULP failed (errno {Marshal.GetLastPInvokeError()}); is the 'tls' kernel module available?");
+                    }
                 }
             }
 
-            if (setsockopt(fd, SOL_TLS, TLS_TX, &info, (uint)sizeof(CryptoInfoAesGcm128)) != 0)
+            if (setsockopt(fd, SOL_TLS, optname, &info, (uint)sizeof(CryptoInfoAesGcm128)) != 0)
             {
-                throw new IOException($"kTLS: TLS_TX failed (errno {Marshal.GetLastPInvokeError()})");
+                throw new IOException($"kTLS: {what} failed (errno {Marshal.GetLastPInvokeError()})");
             }
         }
         finally
@@ -153,7 +143,7 @@ internal static unsafe class Ktls
             // The keys are in the kernel now - don't leave copies on the heap/stack.
             CryptographicOperations.ZeroMemory(key);
             CryptographicOperations.ZeroMemory(nonce);
-            CryptographicOperations.ZeroMemory(serverTrafficSecret);
+            CryptographicOperations.ZeroMemory(trafficSecret);
             CryptoInfoAesGcm128* ip = &info;
             CryptographicOperations.ZeroMemory(new Span<byte>(ip, sizeof(CryptoInfoAesGcm128)));
         }

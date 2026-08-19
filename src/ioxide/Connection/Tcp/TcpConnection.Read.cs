@@ -28,6 +28,12 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
 
     private readonly SpscRecvRing _recv;   // sized by TcpOptions.RecvQueueEntries
 
+    /// <summary>
+    /// Whether this connection has been torn down. A writer needs this: once it is true nothing
+    /// will ever drain what it stages, so continuing to buffer is not backpressure, it is a leak.
+    /// </summary>
+    public bool IsClosed => Volatile.Read(ref _closed) == 1;
+
     public ValueTask<RecvSnapshot> ReadAsync()
     {
         if (!_recv.IsEmpty() || Volatile.Read(ref _pending) == 1)

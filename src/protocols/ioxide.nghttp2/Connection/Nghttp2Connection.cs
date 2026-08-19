@@ -44,6 +44,10 @@ public sealed partial class Nghttp2Connection : IDisposable
     private bool _disposed;
     private bool _failed;
 
+    // The first exception a native callback raised, kept for the log line; _failed carries the
+    // decision out to the loops, since teardown cannot happen inside a callback.
+    private Exception? _callbackFault;
+
     // Requests still being assembled, keyed by stream. A request only leaves here when its stream
     // ends, which is when it becomes dispatchable.
     private readonly Dictionary<int, PendingRequest> _pending = new();

@@ -49,7 +49,7 @@ public sealed class TcpConnectionPipeWriter : PipeWriter, IValueTaskSource<Flush
         if (_cancelRequested)
         {
             _cancelRequested = false;
-            return new ValueTask<FlushResult>(new FlushResult(isCanceled: true, isCompleted: _completed));
+            return new ValueTask<FlushResult>(new FlushResult(isCanceled: true, isCompleted: _completed || _conn.IsClosed));
         }
 
         _unflushed = 0;
@@ -57,7 +57,7 @@ public sealed class TcpConnectionPipeWriter : PipeWriter, IValueTaskSource<Flush
 
         if (inner.IsCompletedSuccessfully)
         {
-            return new ValueTask<FlushResult>(new FlushResult(isCanceled: false, isCompleted: _completed));
+            return new ValueTask<FlushResult>(new FlushResult(isCanceled: false, isCompleted: _completed || _conn.IsClosed));
         }
 
         _core.Reset();
@@ -73,7 +73,14 @@ public sealed class TcpConnectionPipeWriter : PipeWriter, IValueTaskSource<Flush
 
         bool canceled = _cancelRequested;
         _cancelRequested = false;
-        _core.SetResult(new FlushResult(canceled, _completed));
+
+        // IsCompleted must include a closed connection, exactly as both synchronous paths above
+        // report it. This one did not, so a flush that PARKED on a real send and was then released
+        // by teardown told the caller the pipe was still open - and a caller doing the ordinary
+        // "write until IsCompleted" loop kept producing against a peer that had gone, which is the
+        // unbounded growth TcpConnection.FlushAsync's own comment warns about. It was fixed in the
+        // TLS writer and missed here, so the kTLS-TX column of the dual pipe still had it.
+        _core.SetResult(new FlushResult(canceled, _completed || _conn.IsClosed));
     }
 
     public override void CancelPendingFlush() => _cancelRequested = true;

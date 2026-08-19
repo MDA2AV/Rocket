@@ -29,10 +29,6 @@ internal static unsafe class Ngtcp2
         public delegate* unmanaged<void*, long, ulong, ulong, void>     OnAckedStreamData;
     }
 
-    [DllImport(Lib)] internal static extern nint iq_engine_new(
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string certPemPath,
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string keyPemPath,
-        nuint cidLen, byte* alpn, nuint alpnLen, Callbacks cbs);
 
     /// <summary>
     /// Engine with client-certificate verification. Client certificates are validated against
@@ -41,6 +37,7 @@ internal static unsafe class Ngtcp2
     /// unchanged. <paramref name="requireClientCert"/> decides whether a client offering none is
     /// refused outright or merely arrives unauthenticated.
     /// </summary>
+    [DllImport(Lib)] internal static extern void iq_engine_set_handshake_timeout(nint engine, ulong ns);
     [DllImport(Lib)] internal static extern nint iq_engine_new_mtls(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string certPemPath,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string keyPemPath,
@@ -52,6 +49,7 @@ internal static unsafe class Ngtcp2
 
     /// <summary>The verified client identity, or 0 written when the peer offered none.</summary>
     [DllImport(Lib)] internal static extern nuint iq_conn_peer_subject(nint conn, byte* outBuf, nuint outLen);
+    [DllImport(Lib)] internal static extern nuint iq_conn_peer_cn(nint conn, byte* outBuf, nuint outLen);
 
     /// <summary>
     /// Registers a certificate for one SNI name, served instead of the default when a client asks
@@ -62,6 +60,22 @@ internal static unsafe class Ngtcp2
         [MarshalAs(UnmanagedType.LPUTF8Str)] string host,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string certPemPath,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string keyPemPath);
+
+    /// <summary>
+    /// Replaces every certificate the engine serves, on a running server: the default, then one per
+    /// entry of the three parallel arrays. Returns 0, or -1 with the reason on stderr. Nothing is
+    /// published unless all of it built, so a failure leaves the engine serving what it had.
+    /// </summary>
+    /// <remarks>
+    /// The three host arrays are passed as raw pointers rather than <c>string[]</c>: the runtime
+    /// marshaller cannot pair an array with UTF-8 elements, and everything else in this shim takes
+    /// UTF-8. The caller owns the strings for the length of the call and nothing outlives it - the
+    /// shim copies what it keeps.
+    /// </remarks>
+    [DllImport(Lib)] internal static extern int iq_engine_replace_certificates(nint engine,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string certPemPath,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string keyPemPath,
+        nint* hosts, nint* hostCerts, nint* hostKeys, nuint hostCount);
 
     [DllImport(Lib)] internal static extern void iq_engine_free(nint engine);
 
@@ -85,13 +99,13 @@ internal static unsafe class Ngtcp2
 
     [DllImport(Lib)] internal static extern nint iq_conn_close(
         nint conn, ulong appErrorCode, byte* dest, nuint destLen, ulong ts);
-    [DllImport(Lib)] internal static extern nint iq_conn_write_close(
-        nint conn, byte* dest, nuint destLen, ulong ts);
+
+    [DllImport(Lib)] internal static extern nint iq_conn_close_liberr(
+        nint conn, int libError, byte* dest, nuint destLen, ulong ts);
 
     [DllImport(Lib)] internal static extern ulong iq_conn_expiry(nint conn);
     [DllImport(Lib)] internal static extern int   iq_conn_handle_expiry(nint conn, ulong ts);
     [DllImport(Lib)] internal static extern int   iq_conn_is_established(nint conn);
-    [DllImport(Lib)] internal static extern int   iq_conn_in_draining(nint conn);
     [DllImport(Lib)] internal static extern long  iq_conn_open_uni(nint conn);
     [DllImport(Lib)] internal static extern void  iq_conn_set_stream_paced(nint conn, long streamId, int on);
     [DllImport(Lib)] internal static extern void  iq_conn_consume(nint conn, long streamId, ulong n);
@@ -99,8 +113,19 @@ internal static unsafe class Ngtcp2
 
     // --- client side (ioxide.httpclient / QuicClientEngine) ---------------------------------
 
-    [DllImport(Lib)] internal static extern nint iq_client_engine_new(
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string alpn, Callbacks callbacks);
+    /// <summary>
+    /// Client engine. The certificate and key are what this client PRESENTS when a server asks for
+    /// one - both null to present nothing, which is the ordinary case.
+    /// </summary>
+    /// <remarks>
+    /// This client does not authenticate the server: it accepts whatever certificate it is sent.
+    /// </remarks>
+    [DllImport(Lib)] internal static extern nint iq_client_engine_new_mtls(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string alpn,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? certPemPath,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? keyPemPath,
+        Callbacks cbs);
+
     [DllImport(Lib)] internal static extern void iq_client_engine_free(nint engine);
 
     /// <summary>Open a client connection. scidLen must equal the demux slice of whoever routes our
@@ -117,10 +142,19 @@ internal static unsafe class Ngtcp2
     [DllImport(Lib)] internal static extern nint iq_strerror(int liberr);
 
     // ngtcp2 error codes the write/read loops branch on (include/ngtcp2/ngtcp2.h).
+    //
+    // Hand-copied from a header the build script fetches by ref, so a wrong value here is silent:
+    // it does not fail to compile, it makes a branch match the wrong error. CLOSING was -225 and
+    // INTERNAL was -502, which are TRANSPORT_PARAM and CALLBACK_FAILURE - so a client-triggerable
+    // transport-parameter violation was classified as a quiet ending and got no CONNECTION_CLOSE,
+    // which is the exact gap the farewell was added to close. Every constant below is asserted
+    // against iq_strerror by 'quic: the ngtcp2 error constants match the shipped library'.
     internal const int NGTCP2_ERR_STREAM_DATA_BLOCKED   = -208;
     internal const int NGTCP2_ERR_STREAM_SHUT_WR        = -219;
     internal const int NGTCP2_ERR_STREAM_NOT_FOUND      = -220;
+    internal const int NGTCP2_ERR_CLOSING               = -223;
     internal const int NGTCP2_ERR_DRAINING              = -224;
+    internal const int NGTCP2_ERR_INTERNAL              = -228;
     internal const int NGTCP2_ERR_IDLE_CLOSE            = -238;
 
     internal static string StrError(int liberr) => Marshal.PtrToStringUTF8(iq_strerror(liberr)) ?? liberr.ToString();

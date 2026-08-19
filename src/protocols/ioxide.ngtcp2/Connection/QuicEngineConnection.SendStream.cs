@@ -85,9 +85,11 @@ public unsafe partial class QuicEngineConnection
         if (_outRetained > OutRetainedCeiling)
         {
             Console.Error.WriteLine("[ioxide.ngtcp2] send retention backstop exceeded (producer ignored backpressure); closing connection.");
-            _closed = true;
-            _reactor.QuicRemoveConnection(this);
-            Destroy();
+
+            // Through Teardown, so the peer is told. This was a fourth death path that freed the
+            // connection without a CONNECTION_CLOSE - the abort is ours, not the peer's, so it
+            // hears INTERNAL_ERROR rather than waiting out a timeout for silence.
+            Teardown(WriteTransportFarewell(Ngtcp2.NGTCP2_ERR_INTERNAL));
             return;
         }
 
@@ -160,6 +162,16 @@ public unsafe partial class QuicEngineConnection
                 os.Pending = false;
             }
         }
+
+        // PumpOut can end the connection (a fatal engine error tears down), and Destroy clears
+        // _outPending - so Count is 0 while keep still counts survivors, and RemoveRange would be
+        // asked for a negative count. That throws, and on the timer path it used to escape into
+        // the reactor loop and take the whole thread with it.
+        if (_closed)
+        {
+            return;
+        }
+
         _outPending.RemoveRange(keep, _outPending.Count - keep);
     }
 

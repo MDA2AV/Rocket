@@ -38,8 +38,10 @@ public sealed class TlsOptions
     /// byte for byte and so would simply never be asked for. Two keys differing only in case are
     /// refused, since only the first could ever be served.
     ///
-    /// Each entry costs one OpenSSL context, built once when the service starts. Selection at
-    /// handshake time is a dictionary lookup on the reactor thread, with no managed allocation.
+    /// Each entry costs one OpenSSL context. Selection at handshake time is a short linear scan
+    /// over the names as UTF-8 bytes, on the reactor thread, with no managed allocation - a
+    /// dictionary would mean decoding the name into a string first, which is the allocation the
+    /// shape exists to avoid. Contexts are rebuilt whenever the certificates are replaced.
     /// </remarks>
     public IReadOnlyDictionary<string, TlsCertificate>? CertificatesByHost { get; init; }
 
@@ -58,6 +60,56 @@ public sealed class TlsOptions
     public string[] Alpn { get; init; } = ["http/1.1"];
 
     /// <summary>
+    /// How long a connection may take to finish its TLS handshake before the server gives up on
+    /// it, in milliseconds. 0 disables the sweep.
+    ///
+    /// The default exists because the handshake read has no deadline of its own: a peer that opens
+    /// a connection and then sends nothing, or dribbles a ClientHello a byte at a time, otherwise
+    /// holds a connection, its SSL object and its BIOs for as long as it cares to. That is cheap
+    /// to do and not cheap to absorb, and it is the one part of a TLS server reachable before any
+    /// authentication has happened.
+    ///
+    /// Enforced on the reactor's timer, so the granularity is the tick (~250 ms) and a connection
+    /// is closed at the first tick after its deadline rather than exactly on it.
+    /// </summary>
+    public int HandshakeTimeoutMs { get; init; } = 10_000;
+
+    /// <summary>
+    /// Lowest TLS version this server will negotiate.
+    ///
+    /// <see cref="TlsProtocolVersion.Default"/> keeps OpenSSL's own floor, which on a current
+    /// build is TLS 1.2. <see cref="TlsProtocolVersion.Tls13"/> turns the server into 1.3-only,
+    /// which is what a deployment that has to state a posture usually wants: it removes every
+    /// TLS 1.2 ciphersuite, renegotiation, and static-RSA key exchange in one setting rather than
+    /// leaving them to be excluded one at a time through <see cref="CipherList"/>.
+    ///
+    /// <see cref="KernelTx"/> already pins 1.3, so setting this to
+    /// <see cref="TlsProtocolVersion.Tls12"/> alongside it is a contradiction and is refused at
+    /// <see cref="TlsService.Start"/> rather than silently losing to whichever runs last.
+    /// </summary>
+    public TlsProtocolVersion MinProtocolVersion { get; init; } = TlsProtocolVersion.Default;
+
+    /// <summary>
+    /// TLS 1.3 ciphersuites to offer, in preference order and in OpenSSL's naming, e.g.
+    /// <c>"TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384"</c>. Null keeps OpenSSL's defaults.
+    ///
+    /// Separate from <see cref="CipherList"/> because OpenSSL keeps the two lists separate: a 1.3
+    /// suite named here does not restrict a 1.2 handshake and vice versa, so a server that means
+    /// to constrain both has to say both - or set <see cref="MinProtocolVersion"/> to
+    /// <see cref="TlsProtocolVersion.Tls13"/> and be done.
+    ///
+    /// Refused together with <see cref="KernelTx"/>, which requires exactly
+    /// <c>TLS_AES_128_GCM_SHA256</c> to derive kernel keys.
+    /// </summary>
+    public string? CipherSuites { get; init; }
+
+    /// <summary>
+    /// Ciphers for TLS 1.2 and below, in OpenSSL's cipher-list syntax. Null keeps OpenSSL's
+    /// defaults. Has no effect on a 1.3 handshake - see <see cref="CipherSuites"/>.
+    /// </summary>
+    public string? CipherList { get; init; }
+
+    /// <summary>
     /// PEM bundle of trust anchors that CLIENT certificates are validated against - mutual TLS.
     /// Null (the default) means no client certificate is ever requested and the handshake is
     /// exactly what it was.
@@ -66,16 +118,35 @@ public sealed class TlsOptions
     /// validate. Whether a client offering NOTHING is also rejected is
     /// <see cref="RequireClientCertificate"/>.
     ///
-    /// The file's subject names are also sent in the CertificateRequest, so a client holding
-    /// several certificates can pick the one this server accepts rather than guessing. Anchors
-    /// supplied through <see cref="ClientCaPem"/> are trusted identically but send no such hint -
-    /// OpenSSL builds that list from a file.
+    /// The subject names are also sent in the CertificateRequest, so a client holding several
+    /// certificates can pick the one this server accepts rather than guessing.
+    /// <see cref="ClientCaPem"/> sends the same hint.
+    ///
+    /// What validation covers: the chain builds to one of these anchors, the signatures verify,
+    /// and the certificate is inside its validity window. What it does NOT cover is REVOCATION -
+    /// no CRL is fetched and no OCSP request is made, so a certificate revoked by its issuer keeps
+    /// being accepted until it expires. A deployment that needs revocation has to bound it some
+    /// other way: short-lived certificates, or an application check against its own source of
+    /// truth keyed on <see cref="TlsSession.PeerCommonName"/>.
     /// </summary>
     public string? ClientCaPath { get; init; }
 
     /// <summary>
     /// Client trust anchors as PEM text - the in-memory alternative to <see cref="ClientCaPath"/>,
     /// matching how the server's own certificate can come from either. Set at most one of the two.
+    ///
+    /// Neither source checks revocation. The one difference to design around is lifetime: a path is
+    /// re-read whenever a context is built, so replacing the file changes who is trusted at the next
+    /// rotation, whereas PEM text is a value and does not move.
+    ///
+    /// The two are NOT byte-for-byte interchangeable, and a bundle that loads from a path can be
+    /// refused as text. This route parses the PEM itself rather than handing the bytes to OpenSSL's
+    /// file loader, so today it reads only <c>CERTIFICATE</c> blocks - a <c>TRUSTED CERTIFICATE</c>
+    /// block, which is what an OpenSSL trust store or <c>x509 -trustout</c> emits, is skipped - it
+    /// converts as ASCII, so a byte-order mark makes the first block unreadable, and it sends one
+    /// issuer hint per certificate where the file loader de-duplicates by subject. A malformed
+    /// block is refused outright rather than silently ending the bundle, which the file route also
+    /// does. If a bundle is rejected here and works as a path, that list is where to look.
     /// </summary>
     public string? ClientCaPem { get; init; }
 
@@ -84,9 +155,9 @@ public sealed class TlsOptions
     /// during the handshake.
     ///
     /// False - the default - lets it connect unauthenticated and leaves the decision to the
-    /// application, which reads <see cref="TlsSession.PeerSubject"/> and can serve a public route
-    /// while refusing a protected one. True refuses at the handshake, before a single byte of
-    /// request has been read.
+    /// application, which reads <see cref="TlsSession.PeerCommonName"/> and can serve a public
+    /// route while refusing a protected one. True refuses at the handshake, before a single byte
+    /// of request has been read.
     ///
     /// Ignored when no anchors are set: there would be nothing to validate against.
     /// </summary>

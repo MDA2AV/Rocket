@@ -166,9 +166,20 @@ public sealed unsafe partial class Reactor
                 return false;
             }
             int len = packet[5];
-            if (len > QuicCid.MaxLength || packet.Length < 6 + len)
+            if (len == 0 || len > QuicCid.MaxLength || packet.Length < 6 + len)
             {
-                return false;   // >20 is legal on the wire but never one of ours - not routable
+                // Both ends of the range are legal on the wire and neither can be one of ours, so
+                // neither is routable. Zero matters more than 21 does: QuicEngine enforces a CID
+                // length of 1..20, so nothing this server issues is ever empty - but an empty CID
+                // is still a perfectly good dictionary key, so accepting it let the FIRST peer to
+                // send one install a route that every later empty-CID packet, from any peer, was
+                // then delivered into. Initial keys derive from the client's original DCID, so a
+                // second peer sending an empty one derives the same keys: not a misdelivery but
+                // two peers sharing one connection state, with replies going to whoever arrived
+                // first. ngtcp2_accept does not stop it either - it skips its minimum-DCID guard
+                // whenever a packet carries a token, and this server issues no tokens and checks
+                // none, so one junk byte is enough.
+                return false;
             }
             dcid = new QuicCid(packet.Slice(6, len));
             return true;
@@ -272,15 +283,40 @@ public sealed unsafe partial class Reactor
         _quicSweepScratch.AddRange(_quicConnSet);
         foreach (QuicConnection conn in _quicSweepScratch)
         {
-            long deadline = conn.GetNextTimeout(now);
-            if (deadline <= now)
+            // One connection's fault must not take the loop down with it. This runs bare in both
+            // loop bodies and nothing above it catches, so an exception out of a protocol engine
+            // killed the reactor thread and every connection on it. The recv path has been guarded
+            // since it existed; the timer path never was.
+            //
+            // The faulted connection is dropped rather than skipped, because its deadline is still
+            // in the past: leaving it would re-fire the same fault on every single pass, turning a
+            // one-off into a busy loop.
+            try
             {
-                conn.OnTimer(now);
-                deadline = conn.GetNextTimeout(now);
+                long deadline = conn.GetNextTimeout(now);
+                if (deadline <= now)
+                {
+                    conn.OnTimer(now);
+                    deadline = conn.GetNextTimeout(now);
+                }
+                if (deadline < next)
+                {
+                    next = deadline;
+                }
             }
-            if (deadline < next)
+            catch (Exception e)
             {
-                next = deadline;
+                Console.Error.WriteLine($"[r{_id}] quic timer faulted, dropping the connection: {e}");
+
+                // Paired with OnEvicted, exactly as QuicSweep and TeardownQuic pair them. Removing
+                // without evicting looks like it frees the connection and does not: OnEvicted is
+                // the only caller of the engine binding's Destroy, which frees the retained send
+                // chunks, calls iq_conn_free (ngtcp2_conn_del and the picotls session) and releases
+                // the GCHandle. Worse, removal is what makes the leak permanent - the connection is
+                // out of _quicConnSet and every CID route, so neither the idle sweep nor teardown
+                // can ever reach it again, and the GCHandle keeps the managed object rooted too.
+                QuicRemoveConnection(conn);
+                conn.OnEvicted(QuicEvictReason.TimerFault);
             }
         }
         _quicNextTimeoutMs = next;

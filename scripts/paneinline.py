@@ -18,6 +18,17 @@ KNOBS = re.compile(r"^// ── Knobs ─+\n.*?^// ─{20,}\n\n", re.S | re.M)
 ENV_DEFAULTS = {"StrOrNull": "null", "Flag": "false"}
 
 
+class _Suffixed:
+    """A regex match with the file-name suffix the rule wants, so both rules share one formatter."""
+
+    def __init__(self, match, suffix: str):
+        self._m = match
+        self.suffix = suffix
+
+    def group(self, key):
+        return self.suffix if key == "suffix" else self._m.group(key)
+
+
 def inline_env(code: str) -> str:
     while (m := re.search(r"Env\.(\w+)\(", code)) is not None:
         func = m.group(1)
@@ -83,6 +94,22 @@ def inline(code: str) -> str:
                   'const string certPath = "cert.pem";   // any PEM pair\n'
                   'const string keyPath  = "key.pem";\n', code, flags=re.S)
 
+    # The SNI and rotation samples mint a pair per host name, and a second pair for the same name
+    # to renew to. A pane cannot call the generator, so each becomes the paths a reader would
+    # actually have: whatever their ACME client writes per name.
+    def _pair(match: "re.Match[str]") -> str:
+        first, second, arg, suffix = match.group(1), match.group(2), match.group(3).strip(), match.group("suffix")
+        if arg.startswith('"') and arg.endswith('"'):          # a literal name: "localhost"
+            stem = arg[1:-1]
+            return f'(string {first}, string {second}) = ("{stem}{suffix}.pem", "{stem}{suffix}.key");'
+        return (f'(string {first}, string {second}) = '
+                f'($"{{{arg}}}{suffix}.pem", $"{{{arg}}}{suffix}.key");')
+
+    code = re.sub(r"\(string (\w+), string (\w+)\) = QuicCert\.EnsureRenewed\(([^()]*)\);",
+                  lambda m: _pair(_Suffixed(m, "-renewed")), code)
+    code = re.sub(r"\(string (\w+), string (\w+)\) = QuicCert\.EnsureNamed\(([^()]*)\);",
+                  lambda m: _pair(_Suffixed(m, "")), code)
+
     # PLAYGROUND_INCREMENTAL is a bench escape hatch (per-connection recv rings); the pane shows the
     # sample's default - the shared ring - just like the other Env knobs collapse to their literals.
     code = re.sub(r'Env\.Flag\("PLAYGROUND_INCREMENTAL"\) \? new IncrementalOptions \{[^}]*\} : null', "null", code)
@@ -101,7 +128,9 @@ def inline(code: str) -> str:
 
     # Everything Playground.Shared provides has to be gone, or the pane is not a program anyone
     # can paste and run - which is the only thing a pane is for.
-    leaked = [n for n in ("Env.", "QuicCert", "SampleAssets") if n in code]
+    # "QuicCert." with the dot: QuicCertificate is a real ioxide.ngtcp2 type and belongs in a pane,
+    # while every use of the Playground helper is a static call through it.
+    leaked = [n for n in ("Env.", "QuicCert.", "SampleAssets") if n in code]
     assert not leaked, "harness plumbing survived: " + "; ".join(
         l.strip() for l in code.splitlines() if any(n in l for n in leaked))
     return code.strip()

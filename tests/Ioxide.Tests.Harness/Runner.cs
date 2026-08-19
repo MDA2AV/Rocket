@@ -13,6 +13,7 @@ public sealed class Runner
     private int _passed;
     private int _failed;
     private int _skipped;
+    private int _pending;
 
     public void Test(string name, Action body, bool skip = false, int timeoutMs = DefaultTimeoutMs)
     {
@@ -34,6 +35,60 @@ public sealed class Runner
             Console.WriteLine($"FAIL  {name}: {e.Message}");
             _failed++;
         }
+        finally
+        {
+            // Servers do not outlive the test that started them. A reactor busy-polls its ring, so
+            // leaving them up means a long suite ends with dozens of them competing for the box -
+            // and the tests that notice are whichever ones happen to be timing-sensitive, which
+            // makes it look like a bug in whatever they were testing.
+            TestServer.StopAll();
+        }
+    }
+
+    /// <summary>
+    /// A test that is EXPECTED to fail, because it reproduces a defect that has not been fixed yet.
+    /// It reports PEND while it still fails, and FAILS the run the moment it starts passing.
+    /// </summary>
+    /// <param name="because">
+    /// Why it fails, and where that is being tracked - an issue number, or the finding it came from.
+    /// This is the whole value of the entry, so it is required rather than optional.
+    /// </param>
+    /// <remarks>
+    /// This exists so that "I found a bug" and "I fixed a bug" can be separate pieces of work
+    /// without either one being lost. A finding described in prose is a claim; a test that
+    /// reproduces it is evidence, and the difference between the two is most of what a review is
+    /// worth. Before this, evidence could only be committed by also committing the fix, so anything
+    /// found and not immediately fixed survived as a paragraph somebody had to believe.
+    ///
+    /// The inversion is deliberate: a PEND that starts passing is a FAILURE, not a quiet success.
+    /// Something changed the behaviour, and either the defect is fixed - in which case this becomes
+    /// an ordinary Test and stops being able to regress - or it was masked, which is worth knowing
+    /// immediately rather than whenever somebody next reads the file. An expected-failure marker
+    /// that can rot into a permanently-ignored test is worse than no marker.
+    /// </remarks>
+    public void Pending(string name, Action body, string because, int timeoutMs = DefaultTimeoutMs)
+    {
+        try
+        {
+            RunWithWatchdog(name, body, timeoutMs);
+        }
+        catch (Exception)
+        {
+            // Failed, as expected. The reason is printed rather than the exception: what matters is
+            // WHY this is known to fail, and the exception is just today's symptom of it.
+            Console.WriteLine($"PEND  {name}  ({because})");
+            _pending++;
+            return;
+        }
+        finally
+        {
+            TestServer.StopAll();
+        }
+
+        Console.WriteLine(
+            $"FAIL  {name}: expected to fail ({because}), but it PASSED - if the defect is fixed, "
+            + "make this a Test() so it can never regress; if it was masked, find out what masked it");
+        _failed++;
     }
 
     /// <summary>
@@ -100,7 +155,8 @@ public sealed class Runner
             _failed++;
         }
 
-        Console.WriteLine($"\n{_passed} passed, {_failed} failed, {_skipped} skipped");
+        string pending = _pending > 0 ? $", {_pending} pending" : "";
+        Console.WriteLine($"\n{_passed} passed, {_failed} failed, {_skipped} skipped{pending}");
         return _failed == 0 ? 0 : 1;
     }
 }
@@ -121,5 +177,37 @@ public static class Assert
         {
             throw new Exception(message);
         }
+    }
+
+    /// <summary>
+    /// Runs <paramref name="action"/> and requires it to throw <typeparamref name="T"/>, optionally
+    /// with <paramref name="because"/> somewhere in the message.
+    /// </summary>
+    /// <remarks>
+    /// The reason to pass a fragment: a test that only asserts "it threw" passes when something
+    /// else entirely went wrong - a port already bound, a reactor that died - and reports the
+    /// refusal it was looking for. Naming the reason is what makes the test about the reason.
+    /// </remarks>
+    public static void Throws<T>(Action action, string? because = null) where T : Exception
+    {
+        try
+        {
+            action();
+        }
+        catch (T e)
+        {
+            if (because is not null && !e.Message.Contains(because))
+            {
+                throw new Exception($"threw {typeof(T).Name} as expected, but for the wrong reason: {e.Message}");
+            }
+
+            return;
+        }
+        catch (Exception e)
+        {
+            throw new Exception($"expected {typeof(T).Name}, got {e.GetType().Name}: {e.Message}");
+        }
+
+        throw new Exception($"expected {typeof(T).Name}{(because is null ? "" : $" ({because})")}, but nothing was thrown");
     }
 }

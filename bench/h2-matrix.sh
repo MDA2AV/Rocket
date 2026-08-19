@@ -87,7 +87,7 @@ echo "== h2: nghttp2 vs pure C#   ($REACTORS reactors, $CONNS conns, $STREAMS st
 for pass in $(seq "$PASSES"); do
   echo "-- pass $pass/$PASSES"
   cell nghttp2-h2c   Http2/Nghttp2    8080 0
-  cell managed-h2c   Http2/Buffered    8080 0
+  cell managed-h2c   Http2/ManagedBuffered    8080 0
   cell nghttp2-tls   Http2/Tls        8443 1
   cell managed-tls   Http2/Tls 8443 1
 done

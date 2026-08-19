@@ -75,11 +75,55 @@ internal static unsafe partial class OpenSsl
     [LibraryImport(Ssl)] public static partial void SSL_free(nint ssl);
     [LibraryImport(Ssl)] public static partial void SSL_set_connect_state(nint ssl);
     [LibraryImport(Ssl)] public static partial void SSL_set_bio(nint ssl, nint rbio, nint wbio);
-    [LibraryImport(Ssl)] public static partial int SSL_connect(nint ssl);
-    [LibraryImport(Ssl)] public static partial int SSL_read(nint ssl, byte* buf, int num);
-    [LibraryImport(Ssl)] public static partial int SSL_write(nint ssl, byte* buf, int num);
+    [LibraryImport(Ssl)] private static partial int SSL_connect(nint ssl);
+    [LibraryImport(Ssl)] private static partial int SSL_read(nint ssl, byte* buf, int num);
+    [LibraryImport(Ssl)] private static partial int SSL_write(nint ssl, byte* buf, int num);
     [LibraryImport(Ssl)] public static partial int SSL_shutdown(nint ssl);
-    [LibraryImport(Ssl)] public static partial int SSL_get_error(nint ssl, int ret);
+    [LibraryImport(Ssl)] private static partial int SSL_get_error(nint ssl, int ret);
+    [LibraryImport(Ssl)] public static partial int SSL_in_init(nint ssl);
+    [LibraryImport(Crypto)] public static partial void ERR_clear_error();
+
+    /// <summary>
+    /// The three operations whose result has to be classified, each performed from a CLEAN error
+    /// queue and returning what the classification said.
+    /// </summary>
+    /// <remarks>
+    /// The clear, the call and the classify are one operation and are deliberately not offered
+    /// apart - the raw entry points above are private so that they cannot be.
+    ///
+    /// OpenSSL's error queue belongs to the THREAD, which here is a reactor shared by every pooled
+    /// upstream connection on it, and SSL_get_error consults that queue BEFORE asking the SSL
+    /// whether it merely wants more data. So a residue left by any other connection - most
+    /// reliably by a teardown calling SSL_shutdown on a handshake that never finished - is read as
+    /// THIS connection's fatal error and kills it. The server half of ioxide was given this shape
+    /// after exactly that; this copy of the bindings never got it, and had no ERR_clear_error call
+    /// anywhere at all.
+    /// </remarks>
+    public static unsafe int Connect(nint ssl, out int error)
+    {
+        ERR_clear_error();
+        int ret = SSL_connect(ssl);
+        error = ret == 1 ? SSL_ERROR_NONE : SSL_get_error(ssl, ret);
+        return ret;
+    }
+
+    /// <inheritdoc cref="Connect"/>
+    public static unsafe int Read(nint ssl, byte* buf, int num, out int error)
+    {
+        ERR_clear_error();
+        int n = SSL_read(ssl, buf, num);
+        error = n > 0 ? SSL_ERROR_NONE : SSL_get_error(ssl, n);
+        return n;
+    }
+
+    /// <inheritdoc cref="Connect"/>
+    public static unsafe int Write(nint ssl, byte* buf, int num, out int error)
+    {
+        ERR_clear_error();
+        int n = SSL_write(ssl, buf, num);
+        error = n > 0 ? SSL_ERROR_NONE : SSL_get_error(ssl, n);
+        return n;
+    }
     [LibraryImport(Ssl)] public static partial long SSL_ctrl(nint ssl, int cmd, long larg, nint parg);
 
     /// <summary>

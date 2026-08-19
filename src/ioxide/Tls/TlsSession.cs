@@ -67,23 +67,53 @@ public sealed unsafe class TlsSession : IDisposable
     }
 
     /// <summary>
-    /// Subject of the client certificate this peer presented, or null when it presented none -
-    /// which is possible whenever <see cref="TlsOptions.ClientCaPath"/> is set but
+    /// Subject of the client certificate this peer presented, rendered for people: logs, audit
+    /// trails, error messages. Null when the peer presented none - which is possible whenever
+    /// <see cref="TlsOptions.ClientCaPath"/> is set but
     /// <see cref="TlsOptions.RequireClientCertificate"/> is not.
     ///
     /// A value here means the chain VALIDATED: an invalid one fails the handshake, so a connection
     /// that reached a handler never carries a certificate that was merely offered. Null means
     /// unauthenticated, and is the whole decision a handler serving a mixed port has to make.
     /// </summary>
+    /// <remarks>
+    /// Do not authorize on a substring of this. The format escapes a literal '/' in an attribute
+    /// as "\/", which still contains '/', so a client whose organisation is
+    /// <c>Acme\/CN=admin.internal</c> renders as
+    /// <c>/O=Acme\/CN=admin.internal/CN=whoever.example</c> and satisfies a
+    /// <c>Contains("/CN=admin.internal")</c> check while being an entirely different principal.
+    /// <see cref="PeerCommonName"/> is the value to compare instead.
+    /// </remarks>
     public string? PeerSubject { get; private set; }
+
+    /// <summary>
+    /// The common name of the validated client certificate, taken from the DN structurally rather
+    /// than parsed back out of <see cref="PeerSubject"/>, so no escaping convention sits between
+    /// the certificate and the comparison. This is the value to authorize on - compare it whole,
+    /// with <see cref="StringComparison.Ordinal"/>.
+    ///
+    /// Null when there was no validated certificate, when the subject carries no CN (legitimate:
+    /// modern certificates identify by subjectAltName), or when the CN is not usable as an
+    /// identity - see the remarks.
+    /// </summary>
+    /// <remarks>
+    /// A CN containing an embedded NUL is refused rather than truncated at it. The attack is old
+    /// and specific: a certificate for <c>admin.example\0.attacker.test</c> that a lax CA issues
+    /// because it only reads the tail, which then compares equal to <c>admin.example</c> in any
+    /// consumer that stops at the NUL.
+    /// </remarks>
+    public string? PeerCommonName { get; private set; }
 
     internal void CapturePeerCertificate()
     {
+        PeerSubject = null;
+        PeerCommonName = null;
+        PeerCertificateDer = null;
+
         // Borrowed, not owned - get0 takes no reference, so there is nothing to free.
         nint cert = OpenSsl.SSL_get0_peer_certificate(_ssl);
         if (cert == 0)
         {
-            PeerSubject = null;
             return;
         }
 
@@ -91,20 +121,167 @@ public sealed unsafe class TlsSession : IDisposable
         // handshake on a bad chain, so this cannot report a name that was not verified.
         if (OpenSsl.SSL_get_verify_result(_ssl) != OpenSsl.X509_V_OK)
         {
-            PeerSubject = null;
             return;
         }
 
         nint name = OpenSsl.X509_get_subject_name(cert);
         if (name == 0)
         {
-            PeerSubject = null;
             return;
         }
 
-        byte* buffer = stackalloc byte[256];
-        nint result = OpenSsl.X509_NAME_oneline(name, buffer, 256);
-        PeerSubject = result == 0 ? null : Marshal.PtrToStringUTF8((nint)buffer);
+        PeerSubject = RenderSubject(name);
+        PeerCommonName = ExtractCommonName(name);
+        PeerCertificateDer = ExportDer(cert);
+    }
+
+    /// <summary>
+    /// The verified peer certificate in DER, or null when the peer presented none. Only populated
+    /// for a certificate that passed verification, on the same terms as <see cref="PeerSubject"/>.
+    /// </summary>
+    /// <remarks>
+    /// Exists because a name is not always enough: hosts that authorize on a SAN, a fingerprint or
+    /// a serial need the certificate itself, and an ASP.NET application on this transport needs one
+    /// to satisfy ITlsConnectionFeature.ClientCertificate at all. Captured only when a peer
+    /// certificate is present, so a server not doing mutual TLS pays nothing.
+    /// </remarks>
+    public byte[]? PeerCertificateDer { get; private set; }
+
+    private static unsafe byte[]? ExportDer(nint cert)
+    {
+        byte* der = null;
+        int length = OpenSsl.i2d_X509(cert, &der);
+        if (length <= 0 || der is null)
+        {
+            OpenSsl.ERR_clear_error();
+            return null;
+        }
+
+        try
+        {
+            return new ReadOnlySpan<byte>(der, length).ToArray();
+        }
+        finally
+        {
+            OpenSsl.CRYPTO_free((nint)der, 0, 0);   // i2d_X509 allocates when handed a null target
+        }
+    }
+
+    /// <summary>
+    /// The protocol version this handshake settled on, as OpenSSL's wire value (0x0303 = TLS 1.2,
+    /// 0x0304 = TLS 1.3), or 0 before the handshake completes.
+    /// </summary>
+    public int NegotiatedProtocolVersion => OpenSsl.SSL_version(_ssl);
+
+    /// <summary>
+    /// The negotiated ciphersuite's IANA id, or 0 if there is none yet. The numbering is the same
+    /// one <c>TlsCipherSuite</c> uses, so callers that must report it need no table.
+    /// </summary>
+    public ushort NegotiatedCipherSuiteId
+    {
+        get
+        {
+            nint cipher = OpenSsl.SSL_get_current_cipher(_ssl);
+            return cipher == 0 ? (ushort)0 : (ushort)OpenSsl.SSL_CIPHER_get_protocol_id(cipher);
+        }
+    }
+
+    /// <summary>
+    /// Renders the DN at whatever length it actually is. The buffer-taking form of
+    /// X509_NAME_oneline cannot be used for an identity: handed a buffer too small it still
+    /// reports success, and writes as many whole attributes as fit. A subject longer than the
+    /// buffer therefore comes back as a valid-looking prefix WITH THE CN MISSING, and two clients
+    /// that agree on their leading attributes and differ later render identically - one string for
+    /// two principals, which is the one thing an identity must never do.
+    /// </summary>
+    private static string? RenderSubject(nint name)
+    {
+        nint rendered = OpenSsl.X509_NAME_oneline(name, null, 0);
+        if (rendered == 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            return Marshal.PtrToStringUTF8(rendered);
+        }
+        finally
+        {
+            OpenSsl.CRYPTO_free(rendered, 0, 0);
+        }
+    }
+
+    private static string? ExtractCommonName(nint name)
+    {
+        // The LAST CN, matching what every X.509 consumer does with a multi-CN subject: -1 starts
+        // the scan, and each result seeds the next until there are no more.
+        int index = -1;
+        for (int next = OpenSsl.X509_NAME_get_index_by_NID(name, OpenSsl.NID_commonName, -1);
+             next >= 0;
+             next = OpenSsl.X509_NAME_get_index_by_NID(name, OpenSsl.NID_commonName, next))
+        {
+            index = next;
+        }
+
+        if (index < 0)
+        {
+            return null;
+        }
+
+        nint entry = OpenSsl.X509_NAME_get_entry(name, index);
+        if (entry == 0)
+        {
+            return null;
+        }
+
+        nint asn1 = OpenSsl.X509_NAME_ENTRY_get_data(entry);
+        if (asn1 == 0)
+        {
+            return null;
+        }
+
+        // Decoded rather than read raw: a CN is PrintableString, UTF8String or BMPString depending
+        // on the issuer, and only this normalises all three to UTF-8.
+        nint utf8;
+        int length = OpenSsl.ASN1_STRING_to_UTF8(&utf8, asn1);
+        if (length < 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            var span = new ReadOnlySpan<byte>((void*)utf8, length);
+            if (length == 0 || span.IndexOf((byte)0) >= 0)
+            {
+                // Empty is not an identity, and an embedded NUL is an attempt to be read as two
+                // different names by two different consumers. Neither is reported as a name.
+                return null;
+            }
+
+            string common = System.Text.Encoding.UTF8.GetString(span);
+
+            // No control characters. This is the value documented as the one to authorize on, and
+            // the thing callers do next to authorizing is log it - so a CN carrying CR or LF forges
+            // log lines, and one carrying it into a header splits the response. PeerSubject escapes
+            // these on its way through X509_NAME_oneline, which left the accessor sold as the safe
+            // one as the only raw one. Refusing beats sanitising: a name that had to be rewritten
+            // to be safe is not the name that was presented.
+            foreach (char c in common)
+            {
+                if (char.IsControl(c))
+                {
+                    return null;
+                }
+            }
+
+            return common;
+        }
+        finally
+        {
+            OpenSsl.CRYPTO_free(utf8, 0, 0);
+        }
     }
 
     internal TlsSession(nint ssl, nint rbio, nint wbio)
@@ -176,11 +353,11 @@ public sealed unsafe class TlsSession : IDisposable
             // SSL_read calls. This is the protocol's own bound, not a tuning knob.
             Span<byte> destination = writer.GetSpan(MaxRecordPlaintext);
 
-            int n;
+            int n, error;
             fixed (byte* p = destination)
             {
                 // Synchronous, so the pin lasts only for the call.
-                n = OpenSsl.SSL_read(_ssl, p, destination.Length);
+                n = OpenSsl.Read(_ssl, p, destination.Length, out error);
             }
 
             if (n > 0)
@@ -190,7 +367,7 @@ public sealed unsafe class TlsSession : IDisposable
                 continue;
             }
 
-            if (!ShouldKeepReading(n))
+            if (!ShouldKeepReading(error))
             {
                 return total;
             }
@@ -293,7 +470,7 @@ public sealed unsafe class TlsSession : IDisposable
     {
         fixed (byte* p = plaintext)
         {
-            if (OpenSsl.SSL_write(_ssl, p, plaintext.Length) <= 0)
+            if (OpenSsl.Write(_ssl, p, plaintext.Length, out _) <= 0)
             {
                 throw new IOException($"TLS encrypt failed: {OpenSsl.LastError()}");
             }
@@ -324,10 +501,16 @@ public sealed unsafe class TlsSession : IDisposable
         }
     }
 
-    private bool ShouldKeepReading(int result)
+    /// <summary>
+    /// Classify a non-positive read. False means stop and wait for more ciphertext; a genuine
+    /// protocol failure throws.
+    /// </summary>
+    /// <remarks>
+    /// Takes the error the operation itself reported rather than asking again: the queue is shared
+    /// by every connection on this reactor, so a second look can answer about somebody else.
+    /// </remarks>
+    private bool ShouldKeepReading(int err)
     {
-        int err = OpenSsl.SSL_get_error(_ssl, result);
-
         switch (err)
         {
             case OpenSsl.SSL_ERROR_WANT_READ:
@@ -356,10 +539,10 @@ public sealed unsafe class TlsSession : IDisposable
                 Array.Resize(ref _plain, Math.Min(_plain.Length * 2, MaxPlaintextBytes));
             }
 
-            int n;
+            int n, error;
             fixed (byte* p = _plain)
             {
-                n = OpenSsl.SSL_read(_ssl, p + _plainLen, _plain.Length - _plainLen);
+                n = OpenSsl.Read(_ssl, p + _plainLen, _plain.Length - _plainLen, out error);
             }
 
             if (n > 0)
@@ -368,7 +551,7 @@ public sealed unsafe class TlsSession : IDisposable
                 continue;
             }
 
-            if (!ShouldKeepReading(n))
+            if (!ShouldKeepReading(error))
             {
                 return;
             }
@@ -429,21 +612,50 @@ public sealed unsafe class TlsSession : IDisposable
     /// </summary>
     private void SendCloseNotifyOpenSsl()
     {
-        if (OpenSsl.SSL_shutdown(_ssl) < 0)
+        // Nothing to close down politely if the handshake never completed - there is no session
+        // to end, and SSL_shutdown says so by failing and leaving "shutdown while in init" on the
+        // shared queue, where it becomes the next connection's problem.
+        if (OpenSsl.SSL_in_init(_ssl) != 0)
         {
             return;
         }
 
-        // A TLS 1.3 close_notify record is ~24 bytes: 5 header + 2 alert + 1 inner type + 16 tag.
-        byte* record = stackalloc byte[64];
-        int n = OpenSsl.BIO_read(_wbio, record, 64);
-        if (n > 0)
+        if (OpenSsl.SSL_shutdown(_ssl) < 0)
         {
-            _ = send(_fd, record, (nuint)n, MSG_NOSIGNAL);
+            // Whatever it queued is ours to clean up; leaving it makes the next connection on this
+            // reactor report an error it never caused.
+            OpenSsl.ERR_clear_error();
+            return;
+        }
+
+        // Drain the record rather than assuming its size. A TLS 1.3 close_notify is ~24 bytes, but
+        // this server speaks TLS 1.2 by default, where a CBC-SHA256/384 suite makes it 69 or 85 - and
+        // a single fixed-size read put a header on the wire announcing more than followed, which is
+        // exactly the truncation that close_notify exists to disprove. Whatever else is pending
+        // goes too: it is already encrypted and the peer is entitled to it.
+        //
+        // MSG_DONTWAIT because accepted sockets are BLOCKING - the accept SQE asks for no
+        // SOCK_NONBLOCK and nothing sets it afterwards. Without it, a peer that has stopped reading
+        // parks the REACTOR THREAD here during teardown and every other connection on it stops.
+        // The kTLS sibling has always passed it.
+        byte* record = stackalloc byte[512];
+        while (true)
+        {
+            int n = OpenSsl.BIO_read(_wbio, record, 512);
+            if (n <= 0)
+            {
+                break;
+            }
+
+            if (send(_fd, record, (nuint)n, MSG_NOSIGNAL | MSG_DONTWAIT) != n)
+            {
+                break;   // best effort: this is teardown and nothing here awaits a retry
+            }
         }
     }
 
     private const int MSG_NOSIGNAL = 0x4000;   // a dead peer must not SIGPIPE the process
+    private const int MSG_DONTWAIT = 0x40;     // teardown must never park the reactor thread
 
     [DllImport("libc")]
     private static extern nint send(int sockfd, byte* buf, nuint len, int flags);

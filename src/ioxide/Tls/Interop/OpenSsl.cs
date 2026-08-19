@@ -15,6 +15,7 @@ internal static unsafe partial class OpenSsl
     public const int SSL_CTRL_SET_MIN_PROTO_VERSION = 123;
     public const int SSL_CTRL_SET_MAX_PROTO_VERSION = 124;
     public const int SSL_CTRL_EXTRA_CHAIN_CERT = 14;
+    public const int TLS1_2_VERSION = 0x0303;
     public const int TLS1_3_VERSION = 0x0304;
     public const int SSL_TLSEXT_ERR_OK = 0;
     public const int SSL_TLSEXT_ERR_NOACK = 3;
@@ -28,7 +29,6 @@ internal static unsafe partial class OpenSsl
     public const int CRYPTO_EX_INDEX_SSL = 0;
 
     // Client-certificate verification (mutual TLS).
-    public const int SSL_VERIFY_NONE = 0x00;
     public const int SSL_VERIFY_PEER = 0x01;
     public const int SSL_VERIFY_FAIL_IF_NO_PEER_CERT = 0x02;
     public const long X509_V_OK = 0;
@@ -39,8 +39,13 @@ internal static unsafe partial class OpenSsl
     public static partial int SSL_CTX_use_certificate_chain_file(nint ctx, string file);
     [LibraryImport(Ssl, StringMarshalling = StringMarshalling.Utf8)]
     public static partial int SSL_CTX_use_PrivateKey_file(nint ctx, string file, int type);
+    /// <summary>TLS 1.3 suites, e.g. "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384".</summary>
     [LibraryImport(Ssl, StringMarshalling = StringMarshalling.Utf8)]
     public static partial int SSL_CTX_set_ciphersuites(nint ctx, string list);
+
+    /// <summary>TLS 1.2 and below. A separate list from the 1.3 one, in OpenSSL and here.</summary>
+    [LibraryImport(Ssl, StringMarshalling = StringMarshalling.Utf8)]
+    public static partial int SSL_CTX_set_cipher_list(nint ctx, string list);
     [LibraryImport(Ssl)] public static partial long SSL_CTX_ctrl(nint ctx, int cmd, long arg, nint parg);
     [LibraryImport(Ssl)] public static partial int SSL_CTX_set_num_tickets(nint ctx, nuint num);
     /// <summary>
@@ -49,8 +54,19 @@ internal static unsafe partial class OpenSsl
     /// carries a second ClientHello - a second chance to pick a different certificate mid-connection.
     /// </summary>
     public const ulong SSL_OP_NO_RENEGOTIATION = 1UL << 30;
+    public const ulong SSL_OP_CIPHER_SERVER_PREFERENCE = 0x00400000UL;
+
+    /// <summary>PEM's "the BIO holds no further object", i.e. an ordinary end of bundle.</summary>
+    public const int PEM_R_NO_START_LINE = 108;
 
     [LibraryImport(Ssl)] public static partial ulong SSL_CTX_set_options(nint ctx, ulong options);
+
+    /// <summary>
+    /// Drops one reference. Contexts that are SERVING are never freed - a handshake may be between
+    /// reading one and using it - so this is for contexts that were built and then not published,
+    /// which nothing can have a reference to.
+    /// </summary>
+    [LibraryImport(Ssl)] public static partial void SSL_CTX_free(nint ctx);
 
     [LibraryImport(Ssl)] public static partial void SSL_CTX_set_keylog_callback(nint ctx, nint cb);
     [LibraryImport(Ssl)] public static partial void SSL_CTX_set_alpn_select_cb(nint ctx, nint cb, nint arg);
@@ -98,30 +114,111 @@ internal static unsafe partial class OpenSsl
 
     [LibraryImport(Ssl)] public static partial void SSL_CTX_set_client_CA_list(nint ctx, nint list);
 
+    /// <summary>Appends one issuer to the CertificateRequest hint. Takes its own reference.</summary>
+    [LibraryImport(Ssl)] public static partial int SSL_CTX_add_client_CA(nint ctx, nint x509);
+
     /// <summary>The peer's leaf certificate, borrowed - no reference taken, so it is not freed.</summary>
     [LibraryImport(Ssl)] public static partial nint SSL_get0_peer_certificate(nint ssl);
+
+    // What the handshake actually settled on, for callers that have to REPORT it rather than
+    // assume it - ASP.NET reads both off ITlsHandshakeFeature.
+    [LibraryImport(Ssl)] public static partial int SSL_version(nint ssl);
+    [LibraryImport(Ssl)] public static partial nint SSL_get_current_cipher(nint ssl);
+    [LibraryImport(Ssl)] public static partial uint SSL_CIPHER_get_protocol_id(nint cipher);
+    [LibraryImport(Crypto)] public static partial int i2d_X509(nint x509, byte** outBuf);
 
     /// <summary>X509_V_OK, or why the chain was rejected.</summary>
     [LibraryImport(Ssl)] public static partial long SSL_get_verify_result(nint ssl);
 
     [LibraryImport(Crypto)] public static partial nint X509_get_subject_name(nint x509);
+
+    /// <summary>
+    /// The legacy one-line rendering of a DN. Called with a NULL buffer it allocates the exact
+    /// size and the caller frees it with <see cref="CRYPTO_free"/>; called with a buffer too small
+    /// it reports SUCCESS and writes a truncated prefix, which is why nothing here passes one.
+    /// </summary>
     [LibraryImport(Crypto)] public static partial nint X509_NAME_oneline(nint name, byte* buf, int size);
+
+    /// <summary>OPENSSL_free. The macro passes __FILE__/__LINE__, which may be NULL/0.</summary>
+    [LibraryImport(Crypto)] public static partial void CRYPTO_free(nint ptr, nint file, int line);
+
+    // Structural access to one attribute of a DN, so an identity can be compared as a value
+    // instead of matched inside a rendered string. See TlsSession.PeerCommonName.
+    public const int NID_commonName = 13;
+
+    [LibraryImport(Crypto)] public static partial int  X509_NAME_get_index_by_NID(nint name, int nid, int lastpos);
+    [LibraryImport(Crypto)] public static partial nint X509_NAME_get_entry(nint name, int loc);
+    [LibraryImport(Crypto)] public static partial nint X509_NAME_ENTRY_get_data(nint entry);
+
+    /// <summary>Decodes an ASN.1 string to UTF-8 whatever it was encoded as. Returns the length
+    /// and allocates through <paramref name="outBuf"/>, which the caller frees.</summary>
+    [LibraryImport(Crypto)] public static partial int ASN1_STRING_to_UTF8(nint* outBuf, nint asn1Str);
 
     [LibraryImport(Ssl)] public static partial nint SSL_new(nint ctx);
     [LibraryImport(Ssl)] public static partial void SSL_free(nint ssl);
     [LibraryImport(Ssl)] public static partial void SSL_set_accept_state(nint ssl);
     [LibraryImport(Ssl)] public static partial void SSL_set_bio(nint ssl, nint rbio, nint wbio);
-    [LibraryImport(Ssl)] public static partial int SSL_accept(nint ssl);
-    [LibraryImport(Ssl)] public static partial int SSL_read(nint ssl, byte* buf, int num);
-    [LibraryImport(Ssl)] public static partial int SSL_write(nint ssl, byte* buf, int num);
+    [LibraryImport(Ssl)] private static partial int SSL_accept(nint ssl);
+    [LibraryImport(Ssl)] private static partial int SSL_read(nint ssl, byte* buf, int num);
+    [LibraryImport(Ssl)] private static partial int SSL_write(nint ssl, byte* buf, int num);
     [LibraryImport(Ssl)] public static partial int SSL_shutdown(nint ssl);
-    [LibraryImport(Ssl)] public static partial int SSL_get_error(nint ssl, int ret);
 
     /// <summary>
-    /// Plaintext already decrypted and waiting, in bytes. Distinguishes "the destination filled but
-    /// there is more" from "that was everything", which a zero-length SSL_read cannot.
+    /// The three OpenSSL operations whose result has to be classified, each performed from a clean
+    /// error queue and returning what the classification said.
     /// </summary>
-    [LibraryImport(Ssl)] public static partial int SSL_pending(nint ssl);
+    /// <remarks>
+    /// The clear, the call and the classify are one operation and are deliberately not offered
+    /// apart - the raw entry points above are private so that they cannot be.
+    ///
+    /// The reason is that OpenSSL's error queue belongs to the THREAD, and here a thread is a
+    /// reactor shared by every connection it serves. SSL_get_error consults that queue BEFORE it
+    /// asks the SSL whether it merely wants more data, so a residue any other connection left -
+    /// an aborted handshake, a refused client, a port scan - is read as THIS connection's fatal
+    /// error and kills it. Clearing at each call site works until someone adds the next call site;
+    /// this shape means there is no next call site to forget.
+    /// </remarks>
+    public static unsafe int Accept(nint ssl, out int error)
+    {
+        ERR_clear_error();
+        int ret = SSL_accept(ssl);
+        error = ret == 1 ? 0 : SSL_get_error(ssl, ret);
+        return ret;
+    }
+
+    /// <inheritdoc cref="Accept"/>
+    public static unsafe int Read(nint ssl, byte* buf, int num, out int error)
+    {
+        ERR_clear_error();
+        int n = SSL_read(ssl, buf, num);
+        error = n > 0 ? 0 : SSL_get_error(ssl, n);
+        return n;
+    }
+
+    /// <inheritdoc cref="Accept"/>
+    public static unsafe int Write(nint ssl, byte* buf, int num, out int error)
+    {
+        ERR_clear_error();
+        int n = SSL_write(ssl, buf, num);
+        error = n > 0 ? 0 : SSL_get_error(ssl, n);
+        return n;
+    }
+
+    /// <summary>Whether the handshake is still running - SSL_shutdown on one that is has nothing
+    /// to say and only raises an error nobody asked for.</summary>
+    [LibraryImport(Ssl)] public static partial int SSL_in_init(nint ssl);
+
+    /// <summary>
+    /// Scopes a session to this server, so a resumption offered to a different one is declined.
+    /// </summary>
+    /// <remarks>
+    /// Not optional once client certificates are asked for: OpenSSL treats an unset id context
+    /// under SSL_VERIFY_PEER as fatal to the HANDSHAKE, not merely to the resumption, so a client
+    /// that returns with a ticket is refused outright.
+    /// </remarks>
+    [LibraryImport(Ssl)] public static partial int SSL_CTX_set_session_id_context(nint ctx, byte* sid, uint len);
+    [LibraryImport(Ssl)] private static partial int SSL_get_error(nint ssl, int ret);
+
 
     /// <summary>What ALPN settled on, or nothing when the client offered none we serve.</summary>
     [LibraryImport(Ssl)] public static partial void SSL_get0_alpn_selected(nint ssl, byte** data, uint* length);
@@ -146,6 +243,7 @@ internal static unsafe partial class OpenSsl
     [LibraryImport(Crypto)] public static partial void ERR_clear_error();
     [LibraryImport(Ssl)] public static partial int SSL_CTX_use_certificate(nint ctx, nint x509);
     [LibraryImport(Ssl)] public static partial int SSL_CTX_use_PrivateKey(nint ctx, nint pkey);
+    [LibraryImport(Ssl)] public static partial int SSL_CTX_check_private_key(nint ctx);
     [LibraryImport(Crypto)] public static partial int BIO_write(nint bio, byte* data, int dlen);
     [LibraryImport(Crypto)] public static partial int BIO_read(nint bio, byte* data, int dlen);
     [LibraryImport(Crypto)] public static partial nuint BIO_ctrl_pending(nint bio);
@@ -160,6 +258,33 @@ internal static unsafe partial class OpenSsl
     [LibraryImport(Crypto)] public static partial long BIO_ctrl(nint bio, int cmd, long larg, byte** parg);
     [LibraryImport(Crypto)] public static partial ulong ERR_get_error();
     [LibraryImport(Crypto)] public static partial void ERR_error_string_n(ulong e, byte* buf, nuint len);
+
+    /// <summary>
+    /// Drains the queue and reports whether it held ONLY "no start line" - PEM's way of saying the
+    /// BIO is exhausted. Anything else means the read stopped on a malformed block, which is the
+    /// difference between "that was the last certificate in the bundle" and "the rest of the bundle
+    /// was silently dropped".
+    /// </summary>
+    public static bool ErrorIsEndOfPem()
+    {
+        bool sawEnd = false;
+        bool sawOther = false;
+
+        ulong code;
+        while ((code = ERR_get_error()) != 0)
+        {
+            if ((int)(code & 0xFFF) == PEM_R_NO_START_LINE)
+            {
+                sawEnd = true;
+            }
+            else
+            {
+                sawOther = true;   // keep draining: a half-read queue becomes the next caller's bug
+            }
+        }
+
+        return sawEnd && !sawOther;
+    }
 
     public static string LastError()
     {

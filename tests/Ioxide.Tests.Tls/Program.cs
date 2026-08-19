@@ -22,7 +22,25 @@ internal static class Program
         DecryptFaultTests.Register(runner, ktls);
         TlsPipeTests.Register(runner, ktls);
         MutualTlsTests.Register(runner, ktls);
+        MutualTlsConfigTests.Register(runner);
         SniTests.Register(runner, ktls);
+        SniConfigTests.Register(runner);
+        RotationTests.Register(runner, ktls);
+        RotationValidatingClientTests.Register(runner);
+        PostureTests.Register(runner);
+        FormatTests.Register(runner);
+
+        // Areas reserved for the failing-test review pass; empty until one lands.
+        IdentitySubjectTests.Register(runner);
+        SessionResumptionTests.Register(runner);
+        PrologueReaderTests.Register(runner);
+        TruncationTests.Register(runner);
+        WriterContractTests.Register(runner);
+        SessionLifetimeTests.Register(runner);
+        AnchorSourceTests.Register(runner);
+        RotationIntegrityTests.Register(runner);
+        AlpnNegotiationTests.Register(runner);
+        ContextBuildTests.Register(runner);
 
         return runner.Summary();
     }

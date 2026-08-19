@@ -13,20 +13,38 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-NGTCP2_REF=${NGTCP2_REF:-master}
-PICOTLS_REF=${PICOTLS_REF:-master}
+# PINNED, and they have to stay pinned. These are security-critical dependencies compiled into a
+# binary that ships in a nupkg, and the header ngtcp2's error constants are hand-copied from lives
+# in this tree - so "master" meant the bundle could not be reproduced, two builds from one repo
+# state could differ, and a constant could silently start meaning something else. It did: CLOSING
+# and INTERNAL were both wrong, and were caught by a test that asks the library rather than by the
+# build. These are the commits the shipped .so was built from.
+NGTCP2_REF=${NGTCP2_REF:-7f7e24b1deb1dc94985c2d6345ca68cc387b4709}
+PICOTLS_REF=${PICOTLS_REF:-f07f1c8c68b237f1468bc1f1fe1b68aba3ff23b4}
 WORK=${WORK:-/tmp/ioxide-quic-native}
 OUT=src/protocols/ioxide.ngtcp2/runtimes/linux-x64/native
 
 rm -rf "$WORK" && mkdir -p "$WORK" "$OUT"
 cd "$WORK"
 
-echo "==> cloning picotls ($PICOTLS_REF) + ngtcp2 ($NGTCP2_REF)"
-git clone --depth 1 --branch "$PICOTLS_REF" --recurse-submodules --shallow-submodules \
-    https://github.com/h2o/picotls >/dev/null 2>&1 || \
-    git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/h2o/picotls
-git clone --depth 1 --branch "$NGTCP2_REF" https://github.com/ngtcp2/ngtcp2 >/dev/null 2>&1 || \
-    git clone --depth 1 https://github.com/ngtcp2/ngtcp2
+echo "==> fetching picotls ($PICOTLS_REF) + ngtcp2 ($NGTCP2_REF)"
+
+# Fetch the exact ref rather than cloning a branch: --branch takes tags and branches, and these are
+# commits. Falling back to a plain clone - as this used to - would quietly build something else.
+fetch_at() {   # url, ref, dir
+    mkdir -p "$3"
+    git -C "$3" init -q
+    git -C "$3" remote add origin "$1" 2>/dev/null || true
+    git -C "$3" fetch -q --depth 1 origin "$2" || {
+        echo "could not fetch $2 from $1" >&2
+        exit 1
+    }
+    git -C "$3" checkout -q FETCH_HEAD
+    git -C "$3" submodule update -q --init --depth 1 --recursive
+}
+
+fetch_at https://github.com/h2o/picotls "$PICOTLS_REF" picotls
+fetch_at https://github.com/ngtcp2/ngtcp2 "$NGTCP2_REF" ngtcp2
 
 echo "==> building picotls (static, PIC)"
 cmake -S picotls -B picotls/build -DCMAKE_BUILD_TYPE=Release \

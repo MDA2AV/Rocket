@@ -16,7 +16,12 @@ public sealed partial class Http3Connection
     private readonly List<TaskCompletionSource> _capacityWaiters = [];
 
     /// <summary>True once the connection can no longer make progress; a parked writer gives up.</summary>
-    internal bool IsBroken => _fatal;
+    // Includes the connection going away, not just an h3 protocol error. A streamed response
+    // parks on this when the peer stops reading - and _fatal alone is never set by a teardown, so
+    // after the connection died CanQueueSend was permanently false, IsBroken permanently false, and
+    // the writer re-added a capacity waiter nothing would ever release. One leaked handler task,
+    // writer, staging buffer and connection graph per abandoned download.
+    internal bool IsBroken => _fatal || _peerGone;
 
     /// <summary>
     /// Serve this connection with each response body produced through a writer rather than

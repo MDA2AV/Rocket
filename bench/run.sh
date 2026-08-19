@@ -84,7 +84,7 @@ play Tls/OpenSsl PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18443 \
 stop_play
 if [ -d /sys/module/tls ]; then
   # The deployable hybrid (kernel TX, OpenSSL RX) - matches the matrix's ktls-tx cell.
-  play Tls/Hybrid PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18443 \
+  play Tls/KtlsTx PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18443 \
     && note "tls-ktls-tx" "${R}r" "$(wrk_h1 https://127.0.0.1:18443/) req/s"
   stop_play
 else

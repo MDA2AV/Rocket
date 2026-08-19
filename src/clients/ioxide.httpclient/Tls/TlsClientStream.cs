@@ -145,10 +145,7 @@ public sealed class TlsClientStream : IDisposable
 
         while (true)
         {
-            int ret = OpenSsl.SSL_connect(_ssl);
-
-            // Read the error before any other OpenSSL call, which would clobber it.
-            int err = ret == 1 ? OpenSsl.SSL_ERROR_NONE : OpenSsl.SSL_get_error(_ssl, ret);
+            int ret = OpenSsl.Connect(_ssl, out int err);
 
             await FlushCiphertextAsync();
 
@@ -203,10 +200,9 @@ public sealed class TlsClientStream : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        int written = SslWrite(buffer, length);
+        int written = SslWrite(buffer, length, out int err);
         if (written <= 0)
         {
-            int err = OpenSsl.SSL_get_error(_ssl, written);
 
             // WANT_READ on a WRITE means TLS 1.3 post-handshake traffic (a KeyUpdate, a session
             // ticket) has to be read before the write can proceed. Deliberately not handled by
@@ -241,13 +237,12 @@ public sealed class TlsClientStream : IDisposable
 
         while (true)
         {
-            int n = SslRead(buffer, length);
+            int n = SslRead(buffer, length, out int err);
             if (n > 0)
             {
                 return n;
             }
 
-            int err = OpenSsl.SSL_get_error(_ssl, n);
             if (err == OpenSsl.SSL_ERROR_ZERO_RETURN)
             {
                 _peerClosed = true;
@@ -318,11 +313,11 @@ public sealed class TlsClientStream : IDisposable
 
     private unsafe nuint PendingCiphertext() => OpenSsl.BIO_ctrl_pending(_wbio);
 
-    private unsafe int SslRead(nint buffer, int length)
-        => OpenSsl.SSL_read(_ssl, (byte*)buffer, length);
+    private unsafe int SslRead(nint buffer, int length, out int error)
+        => OpenSsl.Read(_ssl, (byte*)buffer, length, out error);
 
-    private unsafe int SslWrite(nint buffer, int length)
-        => OpenSsl.SSL_write(_ssl, (byte*)buffer, length);
+    private unsafe int SslWrite(nint buffer, int length, out int error)
+        => OpenSsl.Write(_ssl, (byte*)buffer, length, out error);
 
     private static unsafe string? ReadNegotiatedAlpn(nint ssl)
     {
@@ -346,9 +341,18 @@ public sealed class TlsClientStream : IDisposable
 
         // A best-effort close_notify so the peer can tell a finished stream from a truncated one.
         // It reaches the write BIO but is not flushed: this is teardown, and nothing here awaits.
-        if (!_peerClosed)
+        //
+        // Not on a handshake that never finished, though. There is no session to end, and
+        // SSL_shutdown says so by failing and leaving "shutdown while in init" on the error queue -
+        // which belongs to the reactor, not to this connection, so it becomes the next pooled
+        // connection's fatal error. Every failed handshake disposes exactly here, so this was one
+        // poisoned connection per failure.
+        if (!_peerClosed && OpenSsl.SSL_in_init(_ssl) == 0)
         {
-            OpenSsl.SSL_shutdown(_ssl);
+            if (OpenSsl.SSL_shutdown(_ssl) < 0)
+            {
+                OpenSsl.ERR_clear_error();   // whatever it queued is ours to clean up
+            }
         }
 
         OpenSsl.SSL_free(_ssl);   // frees both BIOs

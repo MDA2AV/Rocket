@@ -14,7 +14,7 @@ using Playground.Shared;
 //  and it is the ceiling on requests in flight to the origin, since HTTP/1.1 carries one exchange
 //  at a time.
 //
-//      dotnet run -c Release --project Playground/Http1/Hello                # an origin to call
+//      dotnet run -c Release --project Playground/Tcp/Raw                     # an origin to call
 //      PLAYGROUND_UPSTREAM_PORT=8080 dotnet run -c Release --project Playground/Clients/Http
 //      curl http://127.0.0.1:8090/
 //

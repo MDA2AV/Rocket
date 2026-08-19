@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using ioxide;
@@ -17,6 +18,50 @@ internal static class QuicEngineTests
 {
     public static void Register(Runner runner)
     {
+        runner.Test("quic: the ngtcp2 error constants match the shipped library", () =>
+        {
+            // These are hand-copied from a header the build script fetches by ref, so a wrong value
+            // does not fail to compile - it makes a branch match a DIFFERENT error. Two were wrong:
+            // CLOSING held TRANSPORT_PARAM's value and INTERNAL held CALLBACK_FAILURE's, so a
+            // transport-parameter violation - which a client triggers with one edited parameter -
+            // was classified as a quiet ending and the peer got no CONNECTION_CLOSE at all. That is
+            // the exact gap the farewell exists to close, reintroduced by a typo.
+            //
+            // ngtcp2_strerror returns the symbolic name for a code, so the shipped library can be
+            // asked rather than trusted. Reflecting over every NGTCP2_ERR_* field means a constant
+            // added later is covered without anyone remembering to extend this test.
+            Type interop = typeof(QuicEngine).Assembly.GetType("ioxide.ngtcp2.Ngtcp2")
+                ?? throw new Exception("could not reflect the ngtcp2 interop type");
+
+            MethodInfo strError =
+                interop.GetMethod("StrError", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static)
+                ?? throw new Exception("could not reflect Ngtcp2.StrError");
+
+            FieldInfo[] codes = interop
+                .GetFields(BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static)
+                .Where(f => f.IsLiteral && f.Name.StartsWith("NGTCP2_ERR_", StringComparison.Ordinal))
+                .ToArray();
+
+            // Vacuity guard: a renamed prefix would otherwise make this pass by checking nothing.
+            Assert.True(codes.Length >= 7, $"expected the interop to declare error codes, found {codes.Length}");
+
+            var wrong = new List<string>();
+            foreach (FieldInfo code in codes)
+            {
+                int value = (int)code.GetRawConstantValue()!;
+                string expected = code.Name["NGTCP2_".Length..];          // NGTCP2_ERR_CLOSING -> ERR_CLOSING
+                string actual = (string)strError.Invoke(null, [value])!;
+
+                if (actual != expected)
+                {
+                    wrong.Add($"{code.Name} = {value}, but the library calls {value} {actual}");
+                }
+            }
+
+            Assert.True(wrong.Count == 0,
+                "constants disagree with the shipped ngtcp2: " + string.Join("; ", wrong));
+        });
+
         runner.Test("quic: full ngtcp2 handshake + encrypted stream echo (loopback)", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
@@ -36,6 +81,81 @@ internal static class QuicEngineTests
             byte[] sent = Encoding.ASCII.GetBytes("hello-quic-echo");
             string echoed = client.RequestEcho(sent, timeoutMs: 5000);
             Assert.Equal("hello-quic-echo", echoed);
+        });
+
+        runner.Test("quic: a handshake that never finishes is dropped", () =>
+        {
+            // The one part of a QUIC server reachable before anything is authenticated. ngtcp2
+            // leaves handshake_timeout at UINT64_MAX and max_idle_timeout disabled, so the only
+            // bound used to be the transport's idle sweep - which is keyed on last-seen and so is
+            // refreshed by any datagram, including ones ngtcp2 discards. A peer sending one packet
+            // under the interval held an ngtcp2 conn, a picotls session and its CID routes forever.
+            //
+            // Asserted on the HANDLER exiting, not on the client failing to reconnect: a dropped
+            // half-open handshake does not stop the client's retransmit from starting a fresh one
+            // that completes perfectly well, so "the client cannot connect afterwards" would be
+            // false even with a working bound. The handler runs from accept, and it returns when
+            // the connection is torn down.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, handshakeTimeoutMs: 1_000);
+
+            var torndown = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: SignalOnExit(torndown));
+
+            using var client = new QuicTestClient("127.0.0.1", udpPort);
+            client.Connect();
+            client.SendFirstFlight();   // the server now holds a handshake that will never finish
+
+            Assert.True(torndown.Task.Wait(TimeSpan.FromSeconds(6)),
+                "the server should have torn down a handshake that stalled past its bound");
+        });
+
+        runner.Test("control: with the bound disabled the same stalled handshake is kept", () =>
+        {
+            // The control that makes the test above mean something: same silence, same client. If
+            // the connection went away here too, that assertion would be proving nothing about the
+            // bound - only that a quiet peer gets dropped by something, somewhere.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, handshakeTimeoutMs: 0);
+
+            var torndown = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: SignalOnExit(torndown));
+
+            using var client = new QuicTestClient("127.0.0.1", udpPort);
+            client.Connect();
+            client.SendFirstFlight();
+
+            Assert.True(!torndown.Task.Wait(TimeSpan.FromSeconds(4)),
+                "with no bound the half-open handshake should still be held");
+        });
+
+        runner.Test("quic: a handler that answers and closes in one cycle still delivers the answer", () =>
+        {
+            // The ordinary shape of a server that answers and says goodbye - an h3 graceful
+            // shutdown is exactly this. The handler is resumed inline from inside the engine cycle,
+            // so its response is COALESCED into the GSO batch rather than sent; teardown then frees
+            // the peer address, after which the flush is a silent no-op. Pre-fix the peer received
+            // only the CONNECTION_CLOSE and the response was dropped on the floor.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: EchoThenCloseHandler);
+
+            using var client = new QuicTestClient("127.0.0.1", udpPort);
+            client.Connect();
+            Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");
+
+            byte[] sent = Encoding.ASCII.GetBytes("answer-then-close");
+            Assert.Equal("answer-then-close", client.RequestEcho(sent, timeoutMs: 5000));
         });
 
         runner.Test("quic: dual-pipe (PipeReader/PipeWriter) stream echo (loopback)", () =>
@@ -94,6 +214,79 @@ internal static class QuicEngineTests
     }
 
     // Server side, the delegate model: await stream events, echo each back on its own stream.
+    /// <summary>
+    /// Echoes, then closes the connection in the SAME engine cycle. The close is what makes this
+    /// different from <see cref="EchoHandler"/>: the response is still sitting in the coalesced GSO
+    /// batch when teardown runs, so it only reaches the wire if teardown flushes that batch before
+    /// the connection stops being sendable.
+    /// </summary>
+    private static async Task EchoThenCloseHandler(Reactor reactor, QuicConnection conn)
+    {
+        try
+        {
+            while (true)
+            {
+                QuicRecvSnapshot snap = await conn.ReadAsync();
+
+                bool answered = false;
+                while (conn.TryGetDelivery(in snap, out QuicRecvRing.Delivery item))
+                {
+                    conn.SendStream(item.StreamId, item.AsSpan(), item.Fin);
+                    conn.ReturnBuffer(in item);
+                    answered = true;
+                }
+
+                if (answered)
+                {
+                    conn.Close(0);   // same cycle as the SendStream above
+                    return;
+                }
+
+                if (snap.IsClosed)
+                {
+                    break;
+                }
+                conn.ResetRead();
+            }
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    }
+
+    /// <summary>
+    /// Drains and discards, and reports when it RETURNS - which happens when the transport tears
+    /// the connection down. The handler starts at accept, so it is already running while the
+    /// handshake is in flight, which is what makes it an observer of a pre-handshake teardown.
+    /// </summary>
+    private static Func<Reactor, QuicConnection, Task> SignalOnExit(TaskCompletionSource torndown)
+        => async (_, conn) =>
+        {
+            try
+            {
+                while (true)
+                {
+                    QuicRecvSnapshot snap = await conn.ReadAsync();
+                    while (conn.TryGetDelivery(in snap, out QuicRecvRing.Delivery item))
+                    {
+                        conn.ReturnBuffer(in item);
+                    }
+
+                    if (snap.IsClosed)
+                    {
+                        break;
+                    }
+                    conn.ResetRead();
+                }
+            }
+            finally
+            {
+                torndown.TrySetResult();
+                conn.DecRef();
+            }
+        };
+
     private static async Task EchoHandler(Reactor reactor, QuicConnection conn)
     {
         try
@@ -153,7 +346,7 @@ internal sealed unsafe class QuicTestClient : IDisposable
         {
             OnStreamData = &OnClientStreamData,
         };
-        _clientEngine = iq_client_engine_new("echo", cbs);
+        _clientEngine = iq_client_engine_new_mtls("echo", null, null, cbs);
         Assert.True(_clientEngine != 0, "client engine init failed");
 
         // Local + remote sockaddr_in (loopback). ngtcp2 needs both for the path.
@@ -165,13 +358,20 @@ internal sealed unsafe class QuicTestClient : IDisposable
         fixed (byte* l = local)
         fixed (byte* r = remote)
         {
+            // See H3TestClient: one connection per socket, so the length only has to be legal.
             _conn = iq_client_connect(_clientEngine, l, 16, r, 16, "localhost", "echo",
-                                      0, NowNs(), (void*)GCHandle.ToIntPtr(GCHandle.Alloc(this)), null);
+                                      16, NowNs(), (void*)GCHandle.ToIntPtr(GCHandle.Alloc(this)), null);
         }
         Assert.True(_conn != 0, "client connect failed");
     }
 
     // Drive the handshake: write client datagrams out, read server datagrams in, until established.
+    /// <summary>
+    /// Sends the client's first flight and stops, leaving the server holding a handshake that will
+    /// never finish - the state a pre-authentication bound exists to reclaim.
+    /// </summary>
+    public void SendFirstFlight() => FlushOut();
+
     public bool CompleteHandshake(int timeoutMs)
     {
         long deadline = Environment.TickCount64 + timeoutMs;
@@ -322,7 +522,10 @@ internal sealed unsafe class QuicTestClient : IDisposable
     }
 
     private const string Lib = "ioxide_ngtcp2";
-    [DllImport(Lib)] private static extern nint iq_client_engine_new([MarshalAs(UnmanagedType.LPUTF8Str)] string alpn, IqCallbacks cbs);
+    [DllImport(Lib)] private static extern nint iq_client_engine_new_mtls(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string alpn,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? certPath,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? keyPath, IqCallbacks cbs);
     [DllImport(Lib)] private static extern void iq_client_engine_free(nint e);
     [DllImport(Lib)] private static extern nint iq_client_connect(nint e, byte* localSa, nuint localLen, byte* remoteSa, nuint remoteLen, [MarshalAs(UnmanagedType.LPUTF8Str)] string serverName, [MarshalAs(UnmanagedType.LPUTF8Str)] string alpn, nuint scidLen, ulong ts, void* user, byte* scidOut);
     [DllImport(Lib)] private static extern long iq_client_open_bidi(nint conn);

@@ -2,7 +2,8 @@
 #
 # These samples are the regression fixtures, so this table is what makes "run any bench on any
 # playground" true - bench/any.sh reads it and needs no per-sample code. A sample missing from
-# here is a sample nobody can benchmark, which is why the file asserts full coverage.
+# here is a sample nobody can benchmark, which is why every sample has a row, including the ones
+# no load generator here can drive.
 #
 # sample              proto   port  path      origin              extra env (space separated, or -)
 #
@@ -13,57 +14,68 @@
 #         h3    HTTP/3 over QUIC                   (h3x)
 #         echo  raw stream echo, no HTTP           (Playground/Clients/Quic drives it)
 #         driver a sample that GENERATES load rather than serving it
-#         none  not a server workload
+#         none  nothing here can drive it - the mutual-TLS samples need a client certificate,
+#               which wrk and h2load cannot present
 #
 # origin: another sample started first and torn down after, for the proxy and client fixtures.
 #         Its port is passed to the sample under test as PLAYGROUND_UPSTREAM_PORT.
+# tcp
+Tcp/Raw                       h1      8080  /           -                   -
+Tcp/Pipe                      h1      8080  /           -                   -
+Tcp/Incremental               h1      8080  /           -                   -
+Tcp/Big                       h1      8080  /           -                   PLAYGROUND_BODY=65536
+Tcp/Hop                       h1      8080  /           -                   -
+Tcp/TaskRun                   h1      8080  /           -                   -
 
-Tcp/Raw                 h1    8080  /         -                   -
-Tcp/Pipe                h1    8080  /         -                   -
-Tcp/Incremental         h1    8080  /         -                   -
-Tcp/Big                 h1    8080  /         -                   PLAYGROUND_BODY=65536
-Tcp/Hop                 h1    8080  /         -                   -
-Tcp/TaskRun             h1    8080  /         -                   -
+# tls over tcp
+Tls/OpenSsl                   h1s     8443  /           -                   -
+Tls/KtlsTx                    h1s     8443  /           -                   -
+Tls/Ktls                      h1s     8443  /           -                   -
+Tls/OpenSslPipes              h1s     8443  /           -                   -
+Tls/KtlsPipes                 h1s     8443  /           -                   -
+Tls/SslStream                 h1s     8443  /           -                   -
+Tls/MultiPort                 h1      8080  /           -                   -
+Tls/Sni                       h1s     8443  /           -                   -
+Tls/MtlsOpenSslPipes          none    -     -           -                   -
+Tls/MtlsKtlsPipes             none    -     -           -                   -
 
-Tls/OpenSsl             h1s   8443  /         -                   -
-Tls/Hybrid              h1s   8443  /         -                   -
-Tls/Ktls                h1s   8443  /         -                   -
-Tls/OpenSslPipes        h1s   8443  /         -                   -
-Tls/KtlsPipes           h1s   8443  /         -                   -
-Tls/SslStream           h1s   8443  /         -                   -
-Tls/Sni                 h1s   8443  /         -                   -
-Tls/MultiPort           h1    8080  /         -                   -
+# http/2
+Http2/Nghttp2Buffered         h2c     8080  /           -                   -
+Http2/ManagedBuffered         h2c     8080  /           -                   -
+Http2/Nghttp2Response         h2c     8080  /           -                   PLAYGROUND_CHUNKS=8 PLAYGROUND_CHUNK_BYTES=1024
+Http2/ManagedStreamedRequest  h2c     8080  /           -                   -
+Http2/ManagedStreamedResponse h2c     8080  /           -                   PLAYGROUND_CHUNKS=8 PLAYGROUND_CHUNK_BYTES=1024
+Http2/ManagedStreamedBoth     h2c     8080  /           -                   -
+Http2/Tls                     h2      8443  /           -                   -
+Http2/SslStream               h2      8443  /           -                   -
+Http2/Sni                     h2      8443  /           -                   -
+Http2/Rotate                  h2      8443  /           -                   PLAYGROUND_ROTATE_SECONDS=0
 
-Http2/Nghttp2           h2c   8080  /         -                   -
-Http2/Buffered           h2c   8080  /         -                   -
-Http2/Tls               h2    8443  /         -                   -
-Http2/SslStream         h2    8443  /         -                   -
-Http2/Tls        h2    8443  /         -                   -
+# http/3
+Http3/Nghttp3Request          h3      8443  /           -                   -
+Http3/Nghttp3Buffered         h3      8443  /           -                   -
+Http3/Nghttp3Response         h3      8443  /           -                   PLAYGROUND_CHUNKS=8 PLAYGROUND_CHUNK_BYTES=1024
+Http3/ManagedBuffered         h3      8443  /           -                   -
+Http3/ManagedStreamedBoth     h3      8443  /           -                   PLAYGROUND_CHUNKS=8 PLAYGROUND_CHUNK_BYTES=1024
+Http3/Sni                     h3      8443  /           -                   -
+Http3/Rotate                  h3      8443  /           -                   PLAYGROUND_ROTATE_SECONDS=0
+Http3/MutualTls               none    -     -           -                   -
 
-Http3/Nghttp3Request           h3    8443  /         -                   -
-Http3/Nghttp3Buffered          h3    8443  /         -                   -
-Http3/Buffered           h3    8443  /         -                   -
-Http3/Nghttp3Response          h3    8443  /         -                   PLAYGROUND_CHUNKS=8 PLAYGROUND_CHUNK_BYTES=1024
-Http3/Sni               h3    8443  /         -                   -
-Http3/StreamedBoth   h3    8443  /         -                   PLAYGROUND_CHUNKS=8 PLAYGROUND_CHUNK_BYTES=1024
+# quic, below http
+Quic/Alpn                     echo    8443  /           -                   -
+Quic/Pipe                     echo    8443  /           -                   -
+Quic/Raw                      echo    8443  /           -                   -
 
-Quic/Alpn               echo  8443  /         -                   -
-Quic/Pipe               echo  8443  /         -                   -
-Quic/Raw                echo  8443  /         -                   -
+# upstream clients and static files
+Clients/File                  h1      8080  /f.bin      -                   PLAYGROUND_DIR=/tmp/ioxide-bench-assets
+Clients/Pg                    h1      8080  /           -                   -
+Clients/Redis                 h1      8080  /           -                   -
+Clients/Http                  h1      8090  /           Tcp/Raw             -
+Clients/Https                 h1      8080  /           Tls/OpenSsl         PLAYGROUND_UPSTREAM_CA=/tmp/ioxide-playground-quic/quic.crt
+Clients/Quic                  driver  -     -           -                   -
 
-Clients/File            h1    8080  /f.bin    -                   PLAYGROUND_DIR=/tmp/ioxide-bench-assets
-Clients/Pg              h1    8080  /         -                   -
-Clients/Redis           h1    8080  /         -                   -
-Clients/Http            h1    8090  /         Tcp/Raw             -
-Clients/Https           h1    8080  /         Tls/OpenSsl         PLAYGROUND_UPSTREAM_CA=/tmp/ioxide-playground-quic/quic.crt
-Clients/Quic            driver -    -         -                   -
-
-Proxy/H1ToH1            h1s   8443  /         Tls/OpenSsl         -
-Proxy/H1ToH2            h1s   8443  /         Http2/Tls           -
-Proxy/H1ToH3            h1s   8443  /         Http3/Nghttp3Request       -
-Proxy/H2ToH1            h2    8443  /         Tls/OpenSsl         -
-Proxy/H2ToH2            h2    8443  /         Http2/Tls           -
-Proxy/H2ToH3            h2    8443  /         Http3/Nghttp3Request       -
-Proxy/H3ToH1            h3    8443  /         Tls/OpenSsl         -
-Proxy/H3ToH2            h3    8443  /         Http2/Tls           -
-Proxy/H3ToH3            h3    8443  /         Http3/Nghttp3Request       -
+# proxies, and ioxide under ASP.NET
+Proxy/H1ToH1                  h1s     8443  /           Tls/OpenSsl         -
+Proxy/H2ToH1                  h2      8443  /           Tls/OpenSsl         -
+Proxy/H3ToH1                  h3      8443  /           Tls/OpenSsl         -
+AspNet                        h1      8080  /plaintext  -                   TRANSPORT=ioxide
