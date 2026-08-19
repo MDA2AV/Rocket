@@ -145,6 +145,7 @@ public sealed unsafe class QuicEngine : IDisposable
             OnStreamReset        = &QuicEngineConnection.CbStreamReset,
             OnStreamStopSending  = &QuicEngineConnection.CbStreamStopSending,
             OnAckedStreamData    = &QuicEngineConnection.CbAckedStreamData,
+            OnPathChange         = &QuicEngineConnection.CbPathChange,
         };
 
         byte[] alpnWire = AlpnWire(alpn);

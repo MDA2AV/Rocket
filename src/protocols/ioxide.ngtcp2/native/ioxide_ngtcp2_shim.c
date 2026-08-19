@@ -53,6 +53,11 @@ typedef struct iq_callbacks {
      * ngtcp2 retains POINTERS into the app's buffers for retransmission until this fires - the
      * caller of iq_conn_write must keep stream bytes alive until then. May be NULL. */
     void (*on_acked_stream_data)(void *user, int64_t stream_id, uint64_t offset, uint64_t datalen);
+    /* ngtcp2 VALIDATED a new peer address and adopted it - the connection migrated. Fires only
+     * after PATH_CHALLENGE/PATH_RESPONSE succeeded, never merely because a datagram arrived from
+     * somewhere new, because adopting an unvalidated address turns this server into an
+     * amplification reflector for whoever spoofed it. May be NULL. */
+    void (*on_path_change)(void *user, const void *remote_sa, size_t remote_salen);
 } iq_callbacks;
 
 /* ---- objects ---------------------------------------------------------------------------- */
@@ -1395,10 +1400,47 @@ void iq_conn_free(iq_conn *c)
 int iq_conn_read(iq_conn *c, const void *remote_sa, size_t remote_salen,
                  const uint8_t *pkt, size_t pktlen, uint8_t ecn, uint64_t ts)
 {
-    (void)remote_sa; (void)remote_salen;   /* milestone: no migration; path is fixed at accept */
-
     ngtcp2_pkt_info pi = { .ecn = (uint8_t)(ecn & 0x3) };
-    return ngtcp2_conn_read_pkt(c->conn, &c->path, &pi, pkt, pktlen, ts);
+
+    /* The path this datagram actually arrived on, not the one it arrived on at accept. Handing
+     * ngtcp2 a stale path is what made migration impossible: it cannot validate a change it is
+     * never told about, and it answers whatever address it was given. Everything below this line
+     * is ngtcp2's decision, not ours - it issues PATH_CHALLENGE, waits for the PATH_RESPONSE, and
+     * only then adopts. We are removing a lie, not implementing migration. */
+    ngtcp2_path path = c->path;
+    if (remote_sa != NULL && remote_salen > 0 && remote_salen <= sizeof(ngtcp2_sockaddr_union)) {
+        path.remote.addr    = (ngtcp2_sockaddr *)remote_sa;
+        path.remote.addrlen = (ngtcp2_socklen)remote_salen;
+    }
+
+    int rv = ngtcp2_conn_read_pkt(c->conn, &path, &pi, pkt, pktlen, ts);
+    if (rv != 0) {
+        return rv;
+    }
+
+    /* Did it adopt one? get_path2 reports the path in force, which changes only after validation.
+     * Comparing against what we hold is cheaper than tracking a flag through ngtcp2's state. */
+    const ngtcp2_path *now = ngtcp2_conn_get_path2(c->conn);
+    if (now == NULL || now->remote.addrlen == 0) {
+        return 0;
+    }
+
+    if (now->remote.addrlen != c->path.remote.addrlen ||
+        memcmp(now->remote.addr, &c->remote_addr, now->remote.addrlen) != 0) {
+        if (now->remote.addrlen > sizeof(c->remote_addr)) {
+            return 0;   /* cannot hold it; keep answering the address we know */
+        }
+
+        memcpy(&c->remote_addr, now->remote.addr, now->remote.addrlen);
+        c->path.remote.addr    = &c->remote_addr.sa;
+        c->path.remote.addrlen = now->remote.addrlen;
+
+        if (c->cbs.on_path_change) {
+            c->cbs.on_path_change(c->user, &c->remote_addr, now->remote.addrlen);
+        }
+    }
+
+    return 0;
 }
 
 /* Produce at most one UDP datagram into dest. With stream_id >= 0, tries to include data from

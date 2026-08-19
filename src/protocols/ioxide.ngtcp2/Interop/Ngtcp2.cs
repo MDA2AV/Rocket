@@ -27,6 +27,10 @@ internal static unsafe class Ngtcp2
         public delegate* unmanaged<void*, long, ulong, void>            OnStreamReset;
         public delegate* unmanaged<void*, long, ulong, void>            OnStreamStopSending;
         public delegate* unmanaged<void*, long, ulong, ulong, void>     OnAckedStreamData;
+
+        /// <summary>ngtcp2 validated and adopted a new peer address - the connection migrated.
+        /// Fires only after PATH_CHALLENGE/PATH_RESPONSE, never on arrival alone.</summary>
+        public delegate* unmanaged<void*, void*, nuint, void>           OnPathChange;
     }
 
 

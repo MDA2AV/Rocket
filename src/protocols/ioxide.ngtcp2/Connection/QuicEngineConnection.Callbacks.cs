@@ -118,6 +118,25 @@ public unsafe partial class QuicEngineConnection
         catch (Exception e) { c.OnCallbackFault(e, nameof(CbHandshakeCompleted)); }
     }
 
+    /// <summary>
+    /// ngtcp2 validated a new peer address and adopted it. Everything that decides WHETHER to
+    /// migrate happened before this call - PATH_CHALLENGE went out, the PATH_RESPONSE came back,
+    /// and only then did the path change. What is left for us is the half ngtcp2 cannot do: it
+    /// does not own the socket, so the transport must be told where to send from now on.
+    /// </summary>
+    [UnmanagedCallersOnly]
+    internal static void CbPathChange(void* user, void* remoteAddr, nuint len)
+    {
+        QuicEngineConnection? c = From(user);
+        if (c is null)
+        {
+            return;
+        }
+
+        try { c.UpdatePeerAddress((nint)remoteAddr, (int)len); }
+        catch (Exception e) { c.OnCallbackFault(e, nameof(CbPathChange)); }
+    }
+
     [UnmanagedCallersOnly]
     internal static void CbNewCid(void* user, byte* cid, nuint len)
     {

@@ -44,6 +44,24 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
     /// </summary>
     public abstract void OnDatagram(ReadOnlySpan<byte> payload, byte tos);
 
+    /// <summary>
+    /// The same delivery, plus the address it actually came FROM. An engine that supports
+    /// connection migration needs this: a peer that changed network sends on the same connection
+    /// id from a new address, and the transport is the only layer that can see the difference.
+    /// </summary>
+    /// <remarks>
+    /// Virtual rather than abstract, forwarding to the two-argument form, so a binding that does
+    /// not care about paths - and every existing subclass - keeps working untouched. The address
+    /// points into the recv slot and is valid only for the duration of the call; anything keeping
+    /// it must copy.
+    ///
+    /// Being told an address is NOT permission to answer it. Adopting a peer address because a
+    /// datagram claimed it turns this server into an amplification reflector for whoever spoofed
+    /// it, so an engine must validate the path first - which is what QUIC's PATH_CHALLENGE is for.
+    /// </remarks>
+    public virtual void OnDatagram(ReadOnlySpan<byte> payload, byte tos, nint peerAddr, int peerAddrLen)
+        => OnDatagram(payload, tos);
+
     /// <summary>Next engine deadline in <see cref="Environment.TickCount64"/> ms; long.MaxValue = none.</summary>
     public abstract long GetNextTimeout(long nowMs);
 
