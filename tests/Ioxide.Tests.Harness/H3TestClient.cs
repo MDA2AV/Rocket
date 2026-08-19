@@ -155,23 +155,13 @@ public sealed unsafe class H3TestClient : IDisposable
 
     public (int Status, string Body) Request(string method, string path, byte[]? body, (string Name, string Value)[]? extraHeaders, int timeoutMs)
     {
-        // Client H3 conn + its control/QPACK uni streams.
-        var h3Cbs = new Ih3Callbacks
-        {
-            OnBeginHeaders = &OnH3BeginHeaders,
-            OnHeader       = &OnH3Header,
-            OnEndHeaders   = &OnH3EndHeaders,
-            OnData         = &OnH3Data,
-            OnEndStream    = &OnH3EndStream,
-        };
-        _h3 = ih3_client_new(h3Cbs, (void*)GCHandle.ToIntPtr(_self));
-        Assert.True(_h3 != 0, "h3 client conn init failed");
+        EnsureH3Session();
 
-        long ctrl = iq_conn_open_uni(_conn);
-        long qenc = iq_conn_open_uni(_conn);
-        long qdec = iq_conn_open_uni(_conn);
-        Assert.True(ctrl >= 0 && qenc >= 0 && qdec >= 0, "failed to open client uni streams");
-        Assert.True(ih3_bind_streams(_h3, ctrl, qenc, qdec) == 0, "bind streams failed");
+        // Per request: a fresh bidi stream and fresh response state. The H3 SESSION is not per
+        // request - see EnsureH3Session.
+        _status = -1;
+        _body.Clear();
+        _done = false;
 
         _requestSid = iq_client_open_bidi(_conn);
         Assert.True(_requestSid >= 0, "failed to open request stream");
@@ -215,6 +205,43 @@ public sealed unsafe class H3TestClient : IDisposable
 
         // Status 0 = never answered, which is what a refused connection looks like from here.
         return (_status, Encoding.UTF8.GetString(_body.ToArray()));
+    }
+
+    /// <summary>
+    /// Stand up the HTTP/3 session once per connection: the client conn and its control, QPACK
+    /// encoder and QPACK decoder streams.
+    ///
+    /// Once, not per request. HTTP/3 permits exactly one control stream per peer, and RFC 9114
+    /// 6.2.1 requires a second one to be treated as a connection error of type
+    /// H3_STREAM_CREATION_ERROR. Doing this per request opened a fresh control and QPACK pair every
+    /// time, so from the second request onward this client was speaking invalid HTTP/3 - and a
+    /// correct server answered by killing the connection. It still looked green, because the
+    /// requests were already in flight and kept being served off state the server had torn down,
+    /// which is precisely the sort of thing a test client must not do.
+    /// </summary>
+    private void EnsureH3Session()
+    {
+        if (_h3 != 0)
+        {
+            return;
+        }
+
+        var h3Cbs = new Ih3Callbacks
+        {
+            OnBeginHeaders = &OnH3BeginHeaders,
+            OnHeader       = &OnH3Header,
+            OnEndHeaders   = &OnH3EndHeaders,
+            OnData         = &OnH3Data,
+            OnEndStream    = &OnH3EndStream,
+        };
+        _h3 = ih3_client_new(h3Cbs, (void*)GCHandle.ToIntPtr(_self));
+        Assert.True(_h3 != 0, "h3 client conn init failed");
+
+        long ctrl = iq_conn_open_uni(_conn);
+        long qenc = iq_conn_open_uni(_conn);
+        long qdec = iq_conn_open_uni(_conn);
+        Assert.True(ctrl >= 0 && qenc >= 0 && qdec >= 0, "failed to open client uni streams");
+        Assert.True(ih3_bind_streams(_h3, ctrl, qenc, qdec) == 0, "bind streams failed");
     }
 
     // Pump the client H3 engine's egress (prefaces, the request) into the QUIC engine per stream.
