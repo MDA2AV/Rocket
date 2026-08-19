@@ -591,6 +591,17 @@ public sealed class TlsService
     /// exactly one owner and one release path.</summary>
     private static void Configure(nint ctx, TlsOptions options, TlsCertificate certificate, string what, GCHandle alpnHandle)
     {
+        // Before any key is read. OpenSSL's default passphrase callback is PEM_def_callback, which
+        // reads the TERMINAL - so an encrypted key makes Start, or ReplaceCertificates on a
+        // rotation thread while the server is still answering, block on a prompt rather than fail.
+        // TlsOptions has no passphrase, so the only correct answer is that none is available, which
+        // turns a hang into the ordinary refusal every other unusable key already gets.
+        unsafe
+        {
+            delegate* unmanaged<nint, int, int, nint, int> refuse = &NoPassphrase;
+            OpenSsl.SSL_CTX_set_default_passwd_cb(ctx, (nint)refuse);
+        }
+
 
         // OpenSSL copies a context's options onto each SSL as it is created and never re-reads
         // them, so this holds for every connection whether or not it asked for a name. TLS 1.3 has
@@ -759,6 +770,14 @@ public sealed class TlsService
     /// Runs on the reactor thread. The lookup allocates nothing: the name is compared as UTF-8
     /// bytes already in native memory, against a table built when the service started.
     /// </remarks>
+    /// <summary>
+    /// "There is no passphrase." Zero written bytes makes OpenSSL fail the key load with an
+    /// ordinary error rather than prompting on the terminal, which is what it does when no
+    /// callback is installed at all.
+    /// </summary>
+    [UnmanagedCallersOnly]
+    private static int NoPassphrase(nint buf, int size, int rwflag, nint userdata) => 0;
+
     [UnmanagedCallersOnly]
     private static unsafe int ServerNameCallback(nint ssl, nint alert, nint arg)
     {

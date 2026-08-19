@@ -77,6 +77,14 @@ internal static unsafe partial class OpenSsl
     /// </summary>
     [LibraryImport(Ssl)] public static partial long SSL_CTX_callback_ctrl(nint ctx, int cmd, nint fp);
 
+    /// <summary>
+    /// Install the callback OpenSSL asks for a private key's passphrase. Passing none is NOT "no
+    /// password": the default is PEM_def_callback, which READS THE TERMINAL - so a server started
+    /// from a tty with an encrypted key blocks on a prompt instead of failing, and a rotation
+    /// thread would block while still serving.
+    /// </summary>
+    [LibraryImport(Ssl)] public static partial void SSL_CTX_set_default_passwd_cb(nint ctx, nint cb);
+
     /// <summary>The name the client asked for, or null when it sent no SNI extension.</summary>
     [LibraryImport(Ssl)] public static partial nint SSL_get_servername(nint ssl, int type);
 
