@@ -313,7 +313,14 @@ public static class TestServer
     /// kernel has the full set to load-balance across. Without that, a test racing ahead could open
     /// every connection before the later shards bound and see a false "no distribution".
     /// </summary>
-    public static int StartSharded(int reactorCount, Func<int, Reactor, TcpConnection, Task> handle)
+    /// <param name="onStart">
+    /// Run on each reactor's own thread before that shard reports ready, and handed the shard
+    /// index so a caller can keep the per-reactor object it creates. A TlsService belongs to ONE
+    /// reactor, so a test that wants to rotate certificates the way a real server must - every
+    /// reactor separately - has no other way to hold all N of them.
+    /// </param>
+    public static int StartSharded(int reactorCount, Func<int, Reactor, TcpConnection, Task> handle,
+        Action<int, Reactor>? onStart = null)
     {
         int port = ReserveFreePort();
         var config = new ServerConfig
@@ -338,7 +345,14 @@ public static class TestServer
             var reactor = new Reactor(shard, config)
             {
                 TcpHandle = (r, conn) => handle(shard, r, conn),
-                OnStart = _ => ready.Signal(),
+                OnStart = r =>
+                {
+                    // Before the signal, so a shard that is "ready" is one whose service exists.
+                    // A throw here is caught by RunGuarded and surfaced by WaitForListen, rather
+                    // than leaving the countdown to time out with nothing to say.
+                    onStart?.Invoke(shard, r);
+                    ready.Signal();
+                },
             };
 
             var thread = new Thread(RunGuarded(reactor, port))
