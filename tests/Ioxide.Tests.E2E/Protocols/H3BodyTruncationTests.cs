@@ -246,7 +246,7 @@ internal sealed unsafe class RawH3Client : IDisposable
     public void Connect()
     {
         _self = GCHandle.Alloc(this);
-        var callbacks = new IqCallbacks { OnStreamData = &OnStreamData };
+        var callbacks = new IqCallbacks { StructSize = (nuint)sizeof(IqCallbacks), OnStreamData = &OnStreamData };
         _engine = iq_client_engine_new_mtls("h3", null, null, callbacks);
         Assert.True(_engine != 0, "client engine init failed");
 
@@ -477,6 +477,7 @@ internal sealed unsafe class RawH3Client : IDisposable
     [StructLayout(LayoutKind.Sequential)]
     private struct IqCallbacks
     {
+        public nuint StructSize;
         public delegate* unmanaged<void*, long, byte*, nuint, int, void> OnStreamData;
         public delegate* unmanaged<void*, long, ulong, void>            OnStreamClose;
         public delegate* unmanaged<void*, void>                         OnHandshakeCompleted;
@@ -485,6 +486,7 @@ internal sealed unsafe class RawH3Client : IDisposable
         public delegate* unmanaged<void*, long, ulong, void>            OnStreamReset;
         public delegate* unmanaged<void*, long, ulong, void>            OnStreamStopSending;
         public delegate* unmanaged<void*, long, ulong, ulong, void>     OnAckedStreamData;
+        public delegate* unmanaged<void*, void*, nuint, void>           OnPathChange;
     }
 
     private const string Lib = "ioxide_ngtcp2";

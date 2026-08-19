@@ -118,6 +118,38 @@ public unsafe partial class QuicEngineConnection
         catch (Exception e) { c.OnCallbackFault(e, nameof(CbHandshakeCompleted)); }
     }
 
+    /// <summary>
+    /// ngtcp2 moved this connection to a new peer address, and the transport must follow - it owns
+    /// the socket, which is the half ngtcp2 cannot do for itself.
+    ///
+    /// It is worth being exact about what this does NOT say. The address is not validated when
+    /// this fires: ngtcp2 adopts the current path on the first non-probing 1-RTT packet from a new
+    /// address and validates afterwards. Safety comes from the packet having decrypted under 1-RTT
+    /// keys - which an off-path attacker cannot forge - and from ngtcp2's own anti-amplification
+    /// limit, which caps what it will send on a path that has not validated yet.
+    /// </summary>
+    [UnmanagedCallersOnly]
+    internal static void CbPathChange(void* user, void* remoteAddr, nuint len)
+    {
+        QuicEngineConnection? c = From(user);
+        if (c is null)
+        {
+            return;
+        }
+
+        try
+        {
+            // Flush FIRST. Anything already coalesced in the GSO batch was built for the address
+            // in force when it was queued, and this call is what changes that address - sending
+            // the batch afterwards would deliver those datagrams to a different peer address than
+            // ngtcp2 addressed them to. Egress.cs states the batch is single-destination "by
+            // construction"; that holds only because this flush keeps it true.
+            c.FlushBatchBeforePathChange();
+            c.UpdatePeerAddress((nint)remoteAddr, (int)len);
+        }
+        catch (Exception e) { c.OnCallbackFault(e, nameof(CbPathChange)); }
+    }
+
     [UnmanagedCallersOnly]
     internal static void CbNewCid(void* user, byte* cid, nuint len)
     {

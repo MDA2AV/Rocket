@@ -137,6 +137,7 @@ public sealed unsafe class QuicEngine : IDisposable
 
         var callbacks = new Ngtcp2.Callbacks
         {
+            StructSize = (nuint)sizeof(Ngtcp2.Callbacks),
             OnStreamData         = &QuicEngineConnection.CbStreamData,
             OnStreamClose        = &QuicEngineConnection.CbStreamClose,
             OnHandshakeCompleted = &QuicEngineConnection.CbHandshakeCompleted,
@@ -145,6 +146,7 @@ public sealed unsafe class QuicEngine : IDisposable
             OnStreamReset        = &QuicEngineConnection.CbStreamReset,
             OnStreamStopSending  = &QuicEngineConnection.CbStreamStopSending,
             OnAckedStreamData    = &QuicEngineConnection.CbAckedStreamData,
+            OnPathChange         = &QuicEngineConnection.CbPathChange,
         };
 
         byte[] alpnWire = AlpnWire(alpn);

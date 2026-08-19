@@ -263,7 +263,7 @@ internal sealed unsafe class TeardownWireClient : IDisposable
         _udp.Client.ReceiveTimeout = 100;
         _udp.Connect(new IPEndPoint(IPAddress.Loopback, serverPort));   // fixes the local port
 
-        var cbs = new IqCallbacks { OnStreamData = &OnClientStreamData };
+        var cbs = new IqCallbacks { StructSize = (nuint)sizeof(IqCallbacks), OnStreamData = &OnClientStreamData };
         _engine = iq_client_engine_new_mtls("echo", null, null, cbs);
         Assert.True(_engine != 0, "client engine init failed");
 
@@ -459,6 +459,7 @@ internal sealed unsafe class TeardownWireClient : IDisposable
     [StructLayout(LayoutKind.Sequential)]
     private struct IqCallbacks
     {
+        public nuint StructSize;
         public delegate* unmanaged<void*, long, byte*, nuint, int, void> OnStreamData;
         public delegate* unmanaged<void*, long, ulong, void>            OnStreamClose;
         public delegate* unmanaged<void*, void>                         OnHandshakeCompleted;
@@ -467,6 +468,7 @@ internal sealed unsafe class TeardownWireClient : IDisposable
         public delegate* unmanaged<void*, long, ulong, void>            OnStreamReset;
         public delegate* unmanaged<void*, long, ulong, void>            OnStreamStopSending;
         public delegate* unmanaged<void*, long, ulong, ulong, void>     OnAckedStreamData;
+        public delegate* unmanaged<void*, void*, nuint, void>           OnPathChange;
     }
 
     private const string Lib = "ioxide_ngtcp2";

@@ -30,6 +30,7 @@ public sealed unsafe class QuicClientEngine : IDisposable
         // too (without them, send-retention would never be freed).
         var callbacks = new Ngtcp2.Callbacks
         {
+            StructSize = (nuint)sizeof(Ngtcp2.Callbacks),
             OnStreamData         = &QuicEngineConnection.CbStreamData,
             OnStreamClose        = &QuicEngineConnection.CbStreamClose,
             OnHandshakeCompleted = &QuicEngineConnection.CbHandshakeCompleted,

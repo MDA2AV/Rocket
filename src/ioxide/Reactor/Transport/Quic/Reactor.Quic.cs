@@ -94,7 +94,7 @@ public sealed unsafe partial class Reactor
         if (_quicConns.TryGetValue(dcid, out QuicConnection? conn))
         {
             conn.LastSeenMs = Environment.TickCount64;
-            conn.OnDatagram(datagram.Payload, datagram.Tos);
+            conn.OnDatagram(datagram.Payload, datagram.Tos, datagram.PeerAddr, datagram.PeerAddrLen);
             QuicArmTimer(conn);   // reads/handler sends (inline above) moved the engine deadline
             return;
         }
@@ -141,7 +141,7 @@ public sealed unsafe partial class Reactor
             freshQuicConnection.DecRef();   // no handler configured: the transport stays the only owner
         }
 
-        freshQuicConnection.OnDatagram(datagram.Payload, datagram.Tos);
+        freshQuicConnection.OnDatagram(datagram.Payload, datagram.Tos, datagram.PeerAddr, datagram.PeerAddrLen);
         QuicArmTimer(freshQuicConnection);
     }
 
