@@ -31,6 +31,10 @@
        "dotnet run" against its own project directory; see Playground/README.md.
 
        Grouped to match the folders on disk, so the IDE tree and the repository agree. -->
+  <Folder Name="/fuzz/">
+    <Project Path="fuzz/Ioxide.Fuzz/Ioxide.Fuzz.csproj" />
+  </Folder>
+
   <Folder Name="/apps/playground/">
     <Project Path="Playground/Shared/Playground.Shared.csproj" />
     <Project Path="Playground/AspNet/Playground.AspNet.csproj" />
