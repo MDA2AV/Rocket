@@ -8,7 +8,11 @@ public unsafe partial class QuicEngineConnection
     // One sendmsg per engine cycle instead of one per datagram: ngtcp2 emits runs of equal-size
     // (MTU-full) datagrams under load, which is exactly the UDP_SEGMENT shape. A shorter datagram
     // may only END a batch (GSO semantics: equal segments, the last may be short). All datagrams
-    // in a batch are this connection's, so the destination is single by construction.
+    // in a batch are this connection's, and the batch is flushed whenever the peer address moves
+    // (FlushBatchBeforePathChange), so the destination is single for the life of a batch. That
+    // qualifier matters since migration landed: a connection can have more than one live path
+    // while one is being validated, and ngtcp2 addresses a PATH_RESPONSE to the path its
+    // challenge arrived on rather than to the current one.
 
     private readonly byte[] _gsoBuf = new byte[63 * 1024];   // < 65507, the UDP payload ceiling
     private int  _gsoLen;
@@ -88,6 +92,12 @@ public unsafe partial class QuicEngineConnection
             _gsoClosed = true;
         }
     }
+
+    /// <summary>
+    /// Send what is queued before the peer address moves. The batch is addressed at send time, not
+    /// at queue time, so a path change with datagrams still coalesced would readdress them.
+    /// </summary>
+    internal void FlushBatchBeforePathChange() => FlushGso();
 
     private void FlushGso()
     {

@@ -151,6 +151,7 @@ internal static class QuicMigrationTests
         {
             var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
             socket.Bind(new IPEndPoint(IPAddress.Loopback, 0));   // a fresh source port
+            socket.ReceiveTimeout = 50;                           // never inherit "block forever"
             return socket;
         }
 
@@ -161,6 +162,11 @@ internal static class QuicMigrationTests
 
             while (_running)
             {
+                // Read the field ONCE per pass and set the timeout on the socket actually used.
+                // Setting it on a stale capture while receiving through the volatile field left a
+                // freshly swapped socket at its default of 0 - block forever - so the pump wedged
+                // and only Dispose woke it. A background thread outliving its test is how one
+                // suite starts perturbing another.
                 Socket upstream = _upstream;
                 upstream.ReceiveTimeout = 50;
 
@@ -171,7 +177,7 @@ internal static class QuicMigrationTests
                     int n = _front.ReceiveFrom(buffer, ref from);
                     _client = from;
 
-                    _upstream.SendTo(buffer, 0, n, SocketFlags.None, _server);
+                    upstream.SendTo(buffer, 0, n, SocketFlags.None, _server);
                     _relayed++;
                     if (SwappedAt > 0)
                     {
@@ -190,7 +196,7 @@ internal static class QuicMigrationTests
                 try
                 {
                     EndPoint from = new IPEndPoint(IPAddress.Any, 0);
-                    int n = _upstream.ReceiveFrom(buffer, ref from);
+                    int n = upstream.ReceiveFrom(buffer, ref from);
                     if (_client is not null)
                     {
                         _front.SendTo(buffer, 0, n, SocketFlags.None, _client);

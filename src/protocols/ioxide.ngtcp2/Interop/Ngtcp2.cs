@@ -19,6 +19,11 @@ internal static unsafe class Ngtcp2
     [StructLayout(LayoutKind.Sequential)]
     internal struct Callbacks
     {
+        /// <summary>sizeof(iq_callbacks) as THIS side compiled it. The shim refuses a table it
+        /// does not recognise, because the struct is passed by value and mirrored by hand - a
+        /// member added on one side only is otherwise a silent read past the caller's buffer.</summary>
+        public nuint StructSize;
+
         public delegate* unmanaged<void*, long, byte*, nuint, int, void> OnStreamData;
         public delegate* unmanaged<void*, long, ulong, void>            OnStreamClose;
         public delegate* unmanaged<void*, void>                         OnHandshakeCompleted;
@@ -28,8 +33,10 @@ internal static unsafe class Ngtcp2
         public delegate* unmanaged<void*, long, ulong, void>            OnStreamStopSending;
         public delegate* unmanaged<void*, long, ulong, ulong, void>     OnAckedStreamData;
 
-        /// <summary>ngtcp2 validated and adopted a new peer address - the connection migrated.
-        /// Fires only after PATH_CHALLENGE/PATH_RESPONSE, never on arrival alone.</summary>
+        /// <summary>ngtcp2 moved this connection to a new peer address. NOT a statement that the
+        /// address was validated first - adoption happens on the first non-probing 1-RTT packet
+        /// from it, and validation follows. The protection is ngtcp2's 3x anti-amplification limit
+        /// on an unvalidated path, plus the packet having decrypted under 1-RTT keys.</summary>
         public delegate* unmanaged<void*, void*, nuint, void>           OnPathChange;
     }
 

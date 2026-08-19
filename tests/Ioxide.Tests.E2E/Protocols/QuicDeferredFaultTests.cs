@@ -284,7 +284,7 @@ internal sealed unsafe class QuicFaultClient : IDisposable
 
     public void Connect()
     {
-        var cbs = new IqCallbacks { OnStreamData = &OnClientStreamData };
+        var cbs = new IqCallbacks { StructSize = (nuint)sizeof(IqCallbacks), OnStreamData = &OnClientStreamData };
         _clientEngine = iq_client_engine_new_mtls("echo", null, null, cbs);
         Assert.True(_clientEngine != 0, "client engine init failed");
 
@@ -538,6 +538,7 @@ internal sealed unsafe class QuicFaultClient : IDisposable
     [StructLayout(LayoutKind.Sequential)]
     private struct IqCallbacks
     {
+        public nuint StructSize;
         public delegate* unmanaged<void*, long, byte*, nuint, int, void> OnStreamData;
         public delegate* unmanaged<void*, long, ulong, void>            OnStreamClose;
         public delegate* unmanaged<void*, void>                         OnHandshakeCompleted;
@@ -546,6 +547,7 @@ internal sealed unsafe class QuicFaultClient : IDisposable
         public delegate* unmanaged<void*, long, ulong, void>            OnStreamReset;
         public delegate* unmanaged<void*, long, ulong, void>            OnStreamStopSending;
         public delegate* unmanaged<void*, long, ulong, ulong, void>     OnAckedStreamData;
+        public delegate* unmanaged<void*, void*, nuint, void>           OnPathChange;
     }
 
     private const string Lib = "ioxide_ngtcp2";

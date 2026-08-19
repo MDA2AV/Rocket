@@ -72,6 +72,7 @@ public sealed unsafe class H3TestClient : IDisposable
 
         var quicCbs = new IqCallbacks
         {
+            StructSize = (nuint)sizeof(IqCallbacks),
             OnStreamData = &OnQuicStreamData,
         };
         _clientEngine = _certPath is null
@@ -446,6 +447,7 @@ public sealed unsafe class H3TestClient : IDisposable
     [StructLayout(LayoutKind.Sequential)]
     private struct IqCallbacks
     {
+        public nuint StructSize;
         public delegate* unmanaged<void*, long, byte*, nuint, int, void> OnStreamData;
         public delegate* unmanaged<void*, long, ulong, void>            OnStreamClose;
         public delegate* unmanaged<void*, void>                         OnHandshakeCompleted;
@@ -454,6 +456,7 @@ public sealed unsafe class H3TestClient : IDisposable
         public delegate* unmanaged<void*, long, ulong, void>            OnStreamReset;
         public delegate* unmanaged<void*, long, ulong, void>            OnStreamStopSending;
         public delegate* unmanaged<void*, long, ulong, ulong, void>     OnAckedStreamData;
+        public delegate* unmanaged<void*, void*, nuint, void>           OnPathChange;
     }
 
     [StructLayout(LayoutKind.Sequential)]

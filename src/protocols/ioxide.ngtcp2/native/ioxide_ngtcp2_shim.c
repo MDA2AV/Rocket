@@ -40,6 +40,12 @@
 /* ---- callback table into C# ------------------------------------------------------------- */
 
 typedef struct iq_callbacks {
+    /* Bytes the CALLER compiled against. This struct is passed BY VALUE and is mirrored by hand in
+     * several managed declarations, so a member added on one side and not the others makes the
+     * callee read past what the caller wrote - silently, because nothing on either side can see the
+     * mismatch. Checked at engine creation instead of being discovered as a garbage pointer. */
+    size_t struct_size;
+
     void (*on_stream_data)(void *user, int64_t stream_id, const uint8_t *data, size_t datalen, int fin);
     void (*on_stream_close)(void *user, int64_t stream_id, uint64_t app_error_code);
     void (*on_handshake_completed)(void *user);
@@ -53,10 +59,13 @@ typedef struct iq_callbacks {
      * ngtcp2 retains POINTERS into the app's buffers for retransmission until this fires - the
      * caller of iq_conn_write must keep stream bytes alive until then. May be NULL. */
     void (*on_acked_stream_data)(void *user, int64_t stream_id, uint64_t offset, uint64_t datalen);
-    /* ngtcp2 VALIDATED a new peer address and adopted it - the connection migrated. Fires only
-     * after PATH_CHALLENGE/PATH_RESPONSE succeeded, never merely because a datagram arrived from
-     * somewhere new, because adopting an unvalidated address turns this server into an
-     * amplification reflector for whoever spoofed it. May be NULL. */
+    /* ngtcp2 moved this connection to a new peer address - the connection's path moved. What this does NOT mean is that the new
+     * address was validated first: ngtcp2 adopts the current path on the first non-probing 1-RTT
+     * packet from a new address (conn_recv_non_probing_pkt_on_new_path) and starts validating
+     * afterwards. What makes that safe is not ordering but ngtcp2's own anti-amplification limit -
+     * it will not send more than 3x what it has received on a path until that path validates - and
+     * the fact that the packet had to decrypt under 1-RTT keys, which an off-path attacker cannot
+     * forge. May be NULL. */
     void (*on_path_change)(void *user, const void *remote_sa, size_t remote_salen);
 } iq_callbacks;
 
@@ -137,6 +146,11 @@ typedef struct iq_conn {
     ngtcp2_crypto_picotls_ctx   cptls;
     ngtcp2_sockaddr_union       local_addr;
     ngtcp2_sockaddr_union       remote_addr;
+    /* The address last REPORTED to the caller. c->remote_addr is rewritten by ngtcp2 on every
+     * write (the path argument to writev_stream is an OUT parameter), so it cannot double as the
+     * record of what the caller believes - the two must be compared, not conflated. */
+    ngtcp2_sockaddr_union       reported_addr;
+    ngtcp2_socklen              reported_addrlen;
     ngtcp2_path                 path;
     ngtcp2_ccerr                last_error;
     void                       *user;
@@ -1111,6 +1125,13 @@ iq_engine *iq_engine_new_mtls(const char *cert_pem_path, const char *key_pem_pat
                               const char *client_ca_pem_path, const char *client_ca_pem,
                               int require_client_cert, iq_callbacks cbs)
 {
+    if (cbs.struct_size != sizeof(iq_callbacks)) {
+        fprintf(stderr, "[ioxide.ngtcp2] callback table is %zu bytes, this build expects %zu - "
+                        "a managed mirror of iq_callbacks is out of date\n",
+                cbs.struct_size, sizeof(iq_callbacks));
+        return NULL;
+    }
+
     /* Bounded here and not merely where the CID is minted: ngtcp2_cid.data is a fixed
      * NGTCP2_MAX_CIDLEN array, so accepting a longer length would store an overflow in the engine
      * and hand every accept a stack smash. A zero length leaves the caller nothing to route on. */
@@ -1301,6 +1322,11 @@ iq_conn *iq_accept(iq_engine *e,
     c->path.remote.addr    = &c->remote_addr.sa;
     c->path.remote.addrlen = (ngtcp2_socklen)remote_salen;
 
+    /* What the caller already believes, so the first sync is a no-op. Left zeroed, every new
+     * connection would report a path change it had not had. */
+    memcpy(&c->reported_addr, remote_sa, remote_salen);
+    c->reported_addrlen = (ngtcp2_socklen)remote_salen;
+
     ngtcp2_callbacks callbacks = {0};
     callbacks.recv_client_initial       = ngtcp2_crypto_recv_client_initial_cb;
     callbacks.recv_crypto_data          = ngtcp2_crypto_recv_crypto_data_cb;
@@ -1337,6 +1363,13 @@ iq_conn *iq_accept(iq_engine *e,
     params.initial_max_data                    = 1024 * 1024;
     params.initial_max_streams_bidi            = 1024;
     params.initial_max_streams_uni             = 100;
+    /* The budget for connection ids the CLIENT issues us, and a migration spends one: a client
+     * that moves is required to use a fresh CID, and ngtcp2 pops one from this pool to do it.
+     * ngtcp2's default is RFC 9000's minimum of 2, which during a validation window is current +
+     * fallback + nothing spare - so a second migration inside that window finds the pool empty,
+     * ngtcp2 swallows it ("DCID is not available. Just continue."), the path never moves and the
+     * connection blackholes with no error anywhere. */
+    params.active_connection_id_limit          = 8;
     params.original_dcid                       = hd.dcid;
     params.original_dcid_present               = 1;
 
@@ -1395,6 +1428,43 @@ void iq_conn_free(iq_conn *c)
     free(c);
 }
 
+
+/* Tell the caller if the path in force has moved since we last said so.
+ *
+ * ngtcp2 changes conn->dcid.current in four places, and only three are inside read_pkt. The fourth
+ * is conn_on_path_validation_failed, reached from conn_write_path_challenge - i.e. from INSIDE a
+ * write - and it restores the previous, validated path when a probe times out. Watching only the
+ * read path meant that recovery was invisible: the caller stayed pinned to an address that had
+ * just failed validation, permanently, because ngtcp2 also rewrites our remote_addr on every write
+ * so the next read compared equal and never fired again. A connection that would have survived
+ * died at the idle sweep instead.
+ *
+ * ngtcp2 fills the path we hand to writev_stream with the destination it chose for THAT datagram,
+ * which for a PATH_RESPONSE or a PATH_CHALLENGE probe is not the current path at all. Calling this
+ * before the datagram is handed back is what lets the caller send it where ngtcp2 meant it to go. */
+static void iq_sync_path(iq_conn *c)
+{
+    if (c->path.remote.addrlen == 0) {
+        return;
+    }
+
+    if (c->path.remote.addrlen == c->reported_addrlen &&
+        ngtcp2_sockaddr_eq(&c->reported_addr.sa, c->path.remote.addr)) {
+        return;
+    }
+
+    if (c->path.remote.addrlen > sizeof(c->reported_addr)) {
+        return;
+    }
+
+    memcpy(&c->reported_addr, c->path.remote.addr, c->path.remote.addrlen);
+    c->reported_addrlen = c->path.remote.addrlen;
+
+    if (c->cbs.on_path_change) {
+        c->cbs.on_path_change(c->user, &c->reported_addr, c->reported_addrlen);
+    }
+}
+
 /* Feed one UDP datagram (the transport already split GRO trains). Returns 0, or a negative
  * ngtcp2 error - NGTCP2_ERR_DRAINING / NGTCP2_ERR_DROP_CONN mean "stop using this conn". */
 int iq_conn_read(iq_conn *c, const void *remote_sa, size_t remote_salen,
@@ -1408,39 +1478,33 @@ int iq_conn_read(iq_conn *c, const void *remote_sa, size_t remote_salen,
      * is ngtcp2's decision, not ours - it issues PATH_CHALLENGE, waits for the PATH_RESPONSE, and
      * only then adopts. We are removing a lie, not implementing migration. */
     ngtcp2_path path = c->path;
-    if (remote_sa != NULL && remote_salen > 0 && remote_salen <= sizeof(ngtcp2_sockaddr_union)) {
+    /* A lower bound as well as an upper one: below sizeof(ngtcp2_sockaddr) the family field is not
+     * even fully present, and ngtcp2_sockaddr_eq would read past what the caller vouched for -
+     * an unexpected family reaches ngtcp2_unreachable() and aborts the process. Unreachable
+     * through a Linux recvmsg on an AF_INET/AF_INET6 socket, but this value is now on the wire
+     * path rather than discarded. */
+    if (remote_sa != NULL && remote_salen >= sizeof(ngtcp2_sockaddr) &&
+        remote_salen <= sizeof(ngtcp2_sockaddr_union)) {
         path.remote.addr    = (ngtcp2_sockaddr *)remote_sa;
         path.remote.addrlen = (ngtcp2_socklen)remote_salen;
     }
 
     int rv = ngtcp2_conn_read_pkt(c->conn, &path, &pi, pkt, pktlen, ts);
-    if (rv != 0) {
-        return rv;
-    }
 
-    /* Did it adopt one? get_path2 reports the path in force, which changes only after validation.
-     * Comparing against what we hold is cheaper than tracking a flag through ngtcp2's state. */
+    /* Before the error check on purpose: read_pkt can adopt a new path and then fail on a later
+     * coalesced packet in the same datagram. Returning early there left the caller sending the
+     * CONNECTION_CLOSE to the address the peer had just left, which is the silent death this whole
+     * change exists to remove. */
     const ngtcp2_path *now = ngtcp2_conn_get_path2(c->conn);
-    if (now == NULL || now->remote.addrlen == 0) {
-        return 0;
-    }
-
-    if (now->remote.addrlen != c->path.remote.addrlen ||
-        memcmp(now->remote.addr, &c->remote_addr, now->remote.addrlen) != 0) {
-        if (now->remote.addrlen > sizeof(c->remote_addr)) {
-            return 0;   /* cannot hold it; keep answering the address we know */
-        }
-
+    if (now != NULL && now->remote.addrlen > 0 &&
+        now->remote.addrlen <= sizeof(c->remote_addr)) {
         memcpy(&c->remote_addr, now->remote.addr, now->remote.addrlen);
         c->path.remote.addr    = &c->remote_addr.sa;
         c->path.remote.addrlen = now->remote.addrlen;
-
-        if (c->cbs.on_path_change) {
-            c->cbs.on_path_change(c->user, &c->remote_addr, now->remote.addrlen);
-        }
     }
+    iq_sync_path(c);
 
-    return 0;
+    return rv;
 }
 
 /* Produce at most one UDP datagram into dest. With stream_id >= 0, tries to include data from
@@ -1464,6 +1528,18 @@ ngtcp2_ssize iq_conn_write(iq_conn *c, uint8_t *dest, size_t destlen,
         data != NULL ? &vec : NULL, data != NULL ? 1 : 0, ts);
 
     *pconsumed = consumed;
+
+    /* writev_stream's path argument is an OUT parameter: ngtcp2 has just written the destination
+     * it chose for THIS datagram into c->path. For ordinary traffic that is the current path; for
+     * a PATH_RESPONSE it is the address the challenge arrived from, and for a probe it is the
+     * address being validated. Reporting it here is what stops those going to the wrong peer -
+     * RFC 9000 8.2.2 requires a PATH_RESPONSE on the path its challenge came in on. */
+    /* writev_stream's path argument is an OUT parameter: ngtcp2 has just written the destination
+     * it chose for THIS datagram into c->path. For ordinary traffic that is the current path; for
+     * a PATH_RESPONSE it is the address the challenge arrived from, and for a probe it is the
+     * address being validated. Reporting it here is what stops those going to the wrong peer -
+     * RFC 9000 8.2.2 requires a PATH_RESPONSE on the path its challenge came in on. */
+    iq_sync_path(c);
     return n;
 }
 
@@ -1497,7 +1573,9 @@ uint64_t iq_conn_expiry(iq_conn *c)
 
 int iq_conn_handle_expiry(iq_conn *c, uint64_t ts)
 {
-    return ngtcp2_conn_handle_expiry(c->conn, ts);
+    int rv = ngtcp2_conn_handle_expiry(c->conn, ts);
+    iq_sync_path(c);
+    return rv;
 }
 
 int iq_conn_is_established(iq_conn *c)
@@ -1632,6 +1710,14 @@ void iq_client_engine_record_server_certificate(iq_client_engine *e)
 iq_client_engine *iq_client_engine_new_mtls(const char *alpn, const char *cert_pem_path,
                                             const char *key_pem_path, iq_callbacks cbs)
 {
+    if (cbs.struct_size != sizeof(iq_callbacks)) {
+        fprintf(stderr, "[ioxide.ngtcp2] callback table is %zu bytes, this build expects %zu - "
+                        "a managed mirror of iq_callbacks is out of date\n",
+                cbs.struct_size, sizeof(iq_callbacks));
+        return NULL;
+    }
+
+
     iq_client_engine *e = calloc(1, sizeof(*e));
     if (e == NULL) {
         return NULL;
@@ -1719,6 +1805,11 @@ iq_conn *iq_client_connect(iq_client_engine *e,
     c->path.local.addrlen  = (ngtcp2_socklen)local_salen;
     c->path.remote.addr    = &c->remote_addr.sa;
     c->path.remote.addrlen = (ngtcp2_socklen)remote_salen;
+
+    /* What the caller already believes, so the first sync is a no-op. Left zeroed, every new
+     * connection would report a path change it had not had. */
+    memcpy(&c->reported_addr, remote_sa, remote_salen);
+    c->reported_addrlen = (ngtcp2_socklen)remote_salen;
 
     ngtcp2_callbacks callbacks = {0};
     callbacks.client_initial            = ngtcp2_crypto_client_initial_cb;

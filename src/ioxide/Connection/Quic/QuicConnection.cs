@@ -55,9 +55,11 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
     /// points into the recv slot and is valid only for the duration of the call; anything keeping
     /// it must copy.
     ///
-    /// Being told an address is NOT permission to answer it. Adopting a peer address because a
-    /// datagram claimed it turns this server into an amplification reflector for whoever spoofed
-    /// it, so an engine must validate the path first - which is what QUIC's PATH_CHALLENGE is for.
+    /// Being told an address is NOT permission to answer it freely. An engine that adopts a peer
+    /// address on the strength of a datagram claiming it becomes an amplification reflector for
+    /// whoever spoofed it, so an engine must bound what it sends on a path until that path has
+    /// been validated - which is what QUIC's PATH_CHALLENGE and the 3x anti-amplification limit
+    /// are for. Adoption and validation are not the same event and do not happen in that order.
     /// </remarks>
     public virtual void OnDatagram(ReadOnlySpan<byte> payload, byte tos, nint peerAddr, int peerAddrLen)
         => OnDatagram(payload, tos);
@@ -144,6 +146,15 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
     /// <summary>Adopt a validated peer migration (copies the sockaddr out of the datagram).</summary>
     public unsafe void UpdatePeerAddress(nint addr, int addrLen)
     {
+        // Same guard Send() carries, and for the same reason: QuicRemoveConnection frees this
+        // block and zeroes the field, so a late call must not write through it. A null destination
+        // here would be an access violation rather than an exception, which no catch upstream
+        // could contain.
+        if (PeerAddr == 0 || addr == 0 || addrLen <= 0 || addrLen > Reactor.UdpNameCap)
+        {
+            return;
+        }
+
         Buffer.MemoryCopy((void*)addr, (void*)PeerAddr, Reactor.UdpNameCap, addrLen);
         PeerAddrLen = addrLen;
     }

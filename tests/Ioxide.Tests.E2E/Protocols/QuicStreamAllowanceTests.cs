@@ -396,6 +396,7 @@ internal sealed unsafe class CreditProbeClient : IDisposable
     {
         var cbs = new IqCallbacks
         {
+            StructSize = (nuint)sizeof(IqCallbacks),
             OnStreamData = &OnStreamData,
             OnStreamClose = &OnStreamClose,
         };
@@ -609,6 +610,7 @@ internal sealed unsafe class CreditProbeClient : IDisposable
     [StructLayout(LayoutKind.Sequential)]
     private struct IqCallbacks
     {
+        public nuint StructSize;
         public delegate* unmanaged<void*, long, byte*, nuint, int, void> OnStreamData;
         public delegate* unmanaged<void*, long, ulong, void>            OnStreamClose;
         public delegate* unmanaged<void*, void>                         OnHandshakeCompleted;
@@ -617,6 +619,7 @@ internal sealed unsafe class CreditProbeClient : IDisposable
         public delegate* unmanaged<void*, long, ulong, void>            OnStreamReset;
         public delegate* unmanaged<void*, long, ulong, void>            OnStreamStopSending;
         public delegate* unmanaged<void*, long, ulong, ulong, void>     OnAckedStreamData;
+        public delegate* unmanaged<void*, void*, nuint, void>           OnPathChange;
     }
 
     private const string Lib = "ioxide_ngtcp2";
