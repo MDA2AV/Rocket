@@ -307,7 +307,16 @@ public sealed unsafe partial class Reactor
             catch (Exception e)
             {
                 Console.Error.WriteLine($"[r{_id}] quic timer faulted, dropping the connection: {e}");
+
+                // Paired with OnEvicted, exactly as QuicSweep and TeardownQuic pair them. Removing
+                // without evicting looks like it frees the connection and does not: OnEvicted is
+                // the only caller of the engine binding's Destroy, which frees the retained send
+                // chunks, calls iq_conn_free (ngtcp2_conn_del and the picotls session) and releases
+                // the GCHandle. Worse, removal is what makes the leak permanent - the connection is
+                // out of _quicConnSet and every CID route, so neither the idle sweep nor teardown
+                // can ever reach it again, and the GCHandle keeps the managed object rooted too.
                 QuicRemoveConnection(conn);
+                conn.OnEvicted(QuicEvictReason.TimerFault);
             }
         }
         _quicNextTimeoutMs = next;
