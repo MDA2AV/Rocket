@@ -27,6 +27,7 @@ public static unsafe partial class Native {
     [DllImport("libc")] public static extern int getsockname(int fd, void* addr, uint* len);
     [DllImport("libc")] public static extern int listen(int fd, int backlog);
     [DllImport("libc")] public static extern int setsockopt(int fd, int level, int optname, void* optval, uint optlen);
+    [DllImport("libc")] public static extern int getsockopt(int fd, int level, int optname, void* optval, uint* optlen);
 
     public static ushort Htons(ushort x) => (ushort)((x << 8) | (x >> 8));
 

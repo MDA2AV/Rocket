@@ -18,11 +18,9 @@ public delegate void UdpDatagramHandler(Reactor reactor, in UdpDatagram datagram
 /// </summary>
 public sealed unsafe partial class Reactor
 {
-    // Receive/send buffer requested on every UDP socket. QUIC bursts (many connections per peer
-    // socket, GSO trains) overflow the ~212 KB default while the reactor drains a batch, so ask for
-    // more; the kernel clamps to net.core.rmem_max/wmem_max, making this best-effort headroom rather
-    // than a hard requirement.
-    private const int UdpSocketBufferBytes = 8 * 1024 * 1024;
+    // One warning per process, however many reactors and ports there are: the clamp below is a
+    // property of the machine, so N reactors reporting it N times is noise, not information.
+    private static int _udpBufferClampReported;
 
     /// <summary>
     /// Per-datagram handler, invoked inline on the reactor thread. Like the TCP <see cref="Handle"/>,
@@ -105,7 +103,7 @@ public sealed unsafe partial class Reactor
         for (int i = 0; i < ports; i++)
         {
             ushort port = udpPorts[i];
-            _udpFds[i]     = OpenUdpSocket(port, _config.DualStack, _udp.Gro);
+            _udpFds[i]     = OpenUdpSocket(port, _config.DualStack, _udp.Gro, _udp.SocketBufferBytes);
             _udpFdPorts[i] = port;
             ArmUdpRecv(i);   // one multishot per socket, all sharing the ring
         }
@@ -123,7 +121,7 @@ public sealed unsafe partial class Reactor
             InitUdpBufRing();   // no UDP/QUIC in config, so startup skipped it
         }
 
-        int fd = OpenUdpSocket(0, _config.DualStack, _udp.Gro);   // port 0: the kernel picks
+        int fd = OpenUdpSocket(0, _config.DualStack, _udp.Gro, _udp.SocketBufferBytes);   // port 0: the kernel picks
 
         // Append. Indices stay stable (recv completions carry theirs in user_data), so growing the
         // tables cannot disturb the multishot recvs already armed on the existing sockets.
@@ -201,6 +199,50 @@ public sealed unsafe partial class Reactor
         _udpRecvTemplate->msg_controllen = UdpCtrlCap;
     }
 
+    /// <summary>
+    /// Say so, once, when the kernel granted materially less buffer than was asked for.
+    ///
+    /// SO_RCVBUF does not fail when it cannot honour a request - it clamps to net.core.rmem_max and
+    /// reports success. On a stock Linux box that ceiling is 212,992 bytes, so a server asking for
+    /// 8 MiB quietly runs with about a fortieth of it and the only symptom is datagrams dropped
+    /// under load, which looks like a bug anywhere but here. Reading the value back makes it visible.
+    ///
+    /// It deliberately does NOT tell the operator to raise the cap. Measured here, granting the full
+    /// 8 MiB cost about 45% of h3 throughput at saturation on unmodified main: the drops stopped and
+    /// a deep standing queue took their place, so the reactor worked through stale datagrams while
+    /// peers timed out and retransmitted. A small buffer drops early and keeps the queue short,
+    /// which congestion control is built to read. Which is better depends on the deployment, so this
+    /// reports the fact and leaves the judgement.
+    ///
+    /// getsockopt reports DOUBLE what was granted - the kernel's own bookkeeping overhead is
+    /// included - so the comparison halves it.
+    /// </summary>
+    private static void ReportBufferClamp(int fd, int requested)
+    {
+        int reported = 0;
+        uint size = sizeof(int);
+        if (getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &reported, &size) < 0)
+        {
+            return;
+        }
+
+        int granted = reported / 2;
+        if (granted >= requested / 2)
+        {
+            return;   // near enough; a small shortfall is not worth a startup warning
+        }
+
+        if (Interlocked.Exchange(ref _udpBufferClampReported, 1) != 0)
+        {
+            return;
+        }
+
+        Console.Error.WriteLine(
+            $"[ioxide] udp: asked for {requested / 1024} KiB of socket buffer, the kernel granted "
+            + $"{granted / 1024} KiB (capped by net.core.rmem_max). Expect datagrams to be dropped "
+            + "under load; raising the cap trades those drops for queueing delay, so measure it.");
+    }
+
     private static int RoundUpPow2(int n)
     {
         int p = 1;
@@ -221,8 +263,16 @@ public sealed unsafe partial class Reactor
         Volatile.Write(ref *(ushort*)(_udpBufRing + 14), _udpBufRingTail);
     }
 
-    private static int OpenUdpSocket(ushort port, bool dualStack, bool gro)
+    private static int OpenUdpSocket(ushort port, bool dualStack, bool gro, int socketBufferBytes)
     {
+        // Refused rather than clamped: a zero or negative request would leave the socket on the
+        // kernel minimum, which looks identical to the clamp above and would be read as one.
+        if (socketBufferBytes <= 0)
+        {
+            throw new InvalidOperationException(
+                $"UdpOptions.SocketBufferBytes must be positive, got {socketBufferBytes}.");
+        }
+
         int fd = socket(dualStack ? AF_INET6 : AF_INET, SOCK_DGRAM, 0);
         if (fd < 0)
         {
@@ -237,9 +287,10 @@ public sealed unsafe partial class Reactor
             setsockopt(fd, SOL_UDP, UDP_GRO, &one, sizeof(int));
         }
 
-        int buf = UdpSocketBufferBytes;
+        int buf = socketBufferBytes;
         setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buf, sizeof(int));
         setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buf, sizeof(int));
+        ReportBufferClamp(fd, socketBufferBytes);
 
         if (dualStack)
         {
