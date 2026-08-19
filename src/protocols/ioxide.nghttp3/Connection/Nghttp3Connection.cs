@@ -45,6 +45,56 @@ public sealed partial class Nghttp3Connection : IDisposable
     // RFC 9114 H3_NO_ERROR - the application error code a graceful close carries.
     private const ulong H3NoError = 0x100;
 
+    // RFC 9114 H3_INTERNAL_ERROR: what a failure that cannot name itself closes with.
+    private const ulong H3InternalError = 0x102;
+
+    // What the peer must be told, or null when there is nothing to tell it. Deliberately NOT
+    // _protocolFailed: that flag also means "stop looping", and one site sets it on a perfectly
+    // clean streamed response purely to unpark waiters - closing on it would send an error code to
+    // every client that received a streamed body successfully.
+    //
+    // A connection that dies without a code leaves the client waiting on a request that will never
+    // be answered, and no idle bound rescues it: the shim sets no max_idle_timeout, and the
+    // transport's 60 s sweep is refreshed by ANY inbound datagram, including ones ngtcp2 discards.
+    private ulong? _peerCode;
+
+    /// <summary>
+    /// A failure nghttp3 reported, and the h3 code it means. The mapping is nghttp3's own
+    /// (<c>nghttp3_err_infer_quic_app_error_code</c>) rather than a table kept here: it owns which
+    /// of its errors are H3_FRAME_ERROR, H3_MESSAGE_ERROR or QPACK_DECOMPRESSION_FAILED, and
+    /// anything it does not recognise becomes H3_INTERNAL_ERROR.
+    /// </summary>
+    private void FailProtocol(int libError)
+    {
+        // First failure wins - later ones are usually consequences of it, and the peer can only be
+        // told once.
+        _peerCode ??= Nghttp3.ih3_app_error_code(libError);
+        _protocolFailed = true;
+    }
+
+    /// <summary>
+    /// A failure of ours rather than of the protocol - a control stream that would not open, a
+    /// callback that threw. H3_INTERNAL_ERROR is the honest code for it.
+    /// </summary>
+    private void FailInternal()
+    {
+        _peerCode ??= H3InternalError;
+        _protocolFailed = true;
+    }
+
+    /// <summary>
+    /// Tell the peer why, if there is a why. Called from every run loop's finally, where the
+    /// connection is being let go: without it the transport keeps the connection registered and
+    /// routable, and the client's request never completes.
+    /// </summary>
+    private void CloseWithPeerCode()
+    {
+        if (_peerCode is ulong code)
+        {
+            _quicConnection.Close(code);
+        }
+    }
+
     private readonly Dictionary<long, Nghttp3Request> _requests = new();
     private readonly List<long> _readyStreamIds = [];
     private readonly byte[] _egress = new byte[16 * 1024];
@@ -101,7 +151,7 @@ public sealed partial class Nghttp3Connection : IDisposable
         if (shutdownResult != 0)
         {
             Console.Error.WriteLine($"[ioxide.nghttp3] shutdown failed: {Nghttp3.StrError(shutdownResult)}");
-            _protocolFailed = true;
+            FailProtocol(shutdownResult);
             return;
         }
         PumpEgress();   // the GOAWAY leaves now, ahead of any in-flight responses

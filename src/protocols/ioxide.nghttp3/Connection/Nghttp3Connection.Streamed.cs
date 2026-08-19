@@ -60,7 +60,7 @@ public sealed partial class Nghttp3Connection
 
                 if (_nghttp3Handle == 0 && !_protocolFailed && !TrySetup())
                 {
-                    _protocolFailed = true;
+                    FailInternal();
                 }
 
                 while (_quicConnection.TryGetDelivery(in snapshot, out QuicRecvRing.Delivery item))
@@ -97,6 +97,9 @@ public sealed partial class Nghttp3Connection
             _sinks.Clear();
 
             // Unpark anything still waiting on a pass; IsBroken makes them return rather than loop.
+            // Deliberately the bare flag and NOT FailInternal(): this runs on a response that
+            // completed perfectly well, and giving it a peer code would close every successful
+            // streamed connection with an error.
             _protocolFailed = true;
             ReleasePassWaiters();
 
@@ -110,6 +113,11 @@ public sealed partial class Nghttp3Connection
             {
                 pooled.Release();   // the native blocks die with the connection, not the stream
             }
+
+            // Before letting go, because letting go is all the transport sees: DecRef neither
+            // closes nor unregisters, so a connection dropped without a code stays routable until
+            // the idle sweep while the client waits on a request that will never be answered.
+            CloseWithPeerCode();
 
             _quicConnection.DecRef();
             Dispose();
@@ -283,7 +291,7 @@ public sealed partial class Nghttp3Connection
         if (result != 0)
         {
             Console.Error.WriteLine($"[ioxide.nghttp3] submit_response_stream failed: {Nghttp3.StrError(result)}");
-            _protocolFailed = true;
+            FailProtocol(result);
         }
     }
 
