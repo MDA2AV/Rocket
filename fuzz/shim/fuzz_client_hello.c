@@ -22,9 +22,18 @@
 
 #include "iq_count_host_names.inc"
 
+/* How many inputs got far enough to be judged rather than rejected at a length check. A sweep
+ * where this stays near zero is not fuzzing the parser, it is fuzzing its front door - which is
+ * the usual way a hand-rolled fuzzer flatters itself. */
+static unsigned long long g_reached;
+
 static void check(const uint8_t *data, size_t len)
 {
     int n = iq_count_host_names(data, len);
+
+    if (n >= 0) {
+        g_reached++;
+    }
 
     if (n >= 0 && (size_t)n > len / 3u + 1u) {
         fprintf(stderr, "count %d is impossible for %zu bytes: an entry costs at least 3\n", n, len);
@@ -76,6 +85,9 @@ static size_t skeleton(uint8_t *out, size_t cap)
 }
 
 /* xorshift64*, so a failing run is reproducible from its seed alone. */
+/* 4 handshake header + 2 legacy_version + 32 random: read past, never read INTO. */
+#define INERT_END 38u
+
 static uint64_t rng_state = 0x9E3779B97F4A7C15ull;
 static uint64_t rng(void)
 {
@@ -128,11 +140,17 @@ int main(int argc, char **argv)
         size_t len = base;
         memcpy(work, buf, len);
 
-        /* Mutate the LENGTH fields hardest - they are what the parser trusts. Then truncate,
-         * because a length that outruns a shortened buffer is the classic way in. */
+        /* Mutate the LENGTH fields hardest - they are what the parser trusts. Bytes 6..37 are the
+         * ClientHello random, which the parser skips over without reading, so a uniform mutation
+         * wastes ~48% of its edits on a field that cannot change the outcome. Most edits therefore
+         * land at or after the first length prefix; a few stay uniform so the fixed header is not
+         * left entirely unprobed. */
         int edits = (int)(rng() % 6u) + 1;
         for (int e = 0; e < edits; e++) {
-            work[rng() % len] = (uint8_t)rng();
+            size_t at = (rng() % 5u == 0 || len <= INERT_END)
+                ? rng() % len
+                : INERT_END + rng() % (len - INERT_END);
+            work[at] = (uint8_t)rng();
         }
         if (rng() % 3u == 0) {
             len = (size_t)(rng() % (base + 1));
@@ -142,6 +160,8 @@ int main(int argc, char **argv)
     }
 
     printf("ok: no crash, no impossible count\n");
+    printf("    %llu of %ld inputs parsed far enough to be counted (%.1f%%)\n",
+           g_reached, iterations, iterations ? 100.0 * (double)g_reached / (double)iterations : 0.0);
     return 0;
 }
 

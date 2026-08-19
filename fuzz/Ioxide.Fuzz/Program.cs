@@ -80,12 +80,12 @@ static void FuzzVarint(Rng rng, int _)
 
     if (Varint.TryRead(buf[..len], out long value, out int consumed))
     {
-        Check(consumed > 0 && consumed <= len, $"varint consumed {consumed} of {len}");
-        Check(value >= 0, $"varint decoded a negative value: {value}");
+        if (consumed <= 0 || consumed > len) Fail($"varint consumed {consumed} of {len}");
+        if (value < 0) Fail($"varint decoded a negative value: {value}");
     }
     else
     {
-        Check(consumed == 0, $"a failed varint read reported consuming {consumed}");
+        if (consumed != 0) Fail($"a failed varint read reported consuming {consumed}");
     }
 }
 
@@ -100,8 +100,8 @@ static void FuzzQpackInt(Rng rng, int _)
 
     if (Qpack.TryReadInt(buf[..len], prefixBits, out long value, out int consumed))
     {
-        Check(consumed > 0 && consumed <= len, $"qpack int consumed {consumed} of {len}");
-        Check(value >= 0, $"qpack int decoded a negative value: {value}");
+        if (consumed <= 0 || consumed > len) Fail($"qpack int consumed {consumed} of {len}");
+        if (value < 0) Fail($"qpack int decoded a negative value: {value}");
     }
 }
 
@@ -160,13 +160,10 @@ static int WellFormed(Rng rng, Span<byte> buf)
     return o;
 }
 
-static void Check(bool condition, string what)
-{
-    if (!condition)
-    {
-        throw new InvalidOperationException(what);
-    }
-}
+// Called only when something is actually wrong. The message used to be built by the caller on
+// every iteration, which meant the fuzzer spent most of its time interpolating strings nobody read
+// - millions a second, and enough allocation churn to make the run itself the thing under test.
+static void Fail(string what) => throw new InvalidOperationException(what);
 
 // xorshift64*, so a failing run is reproducible from the seed printed at the top of it.
 internal sealed class Rng(ulong seed)
