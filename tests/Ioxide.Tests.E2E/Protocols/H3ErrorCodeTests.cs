@@ -35,6 +35,7 @@ internal static class H3ErrorCodeTests
     private const ulong H3NoError                = 0x0100;
     private const ulong H3GeneralProtocolError   = 0x0101;
     private const ulong H3ClosedCriticalStream   = 0x0104;
+    private const ulong H3FrameUnexpected        = 0x0105;
     private const ulong H3FrameError             = 0x0106;
     private const ulong H3ExcessiveLoad          = 0x0107;
     private const ulong QpackDecompressionFailed = 0x0200;
@@ -73,16 +74,24 @@ internal static class H3ErrorCodeTests
                 "the response (a HEADERS frame, fin) should have gone out on the request stream");
         });
 
-        runner.Test("http3/codes: DATA before HEADERS closes with H3_FRAME_ERROR", () =>
+        runner.Test("http3/codes: DATA before HEADERS closes with H3_FRAME_UNEXPECTED", () =>
         {
+            // Named by the RFC rather than inferred: 9114 section 4.1 says receipt of an invalid
+            // SEQUENCE of frames is H3_FRAME_UNEXPECTED and calls out "a DATA frame before any
+            // HEADERS frame" as the example. The distinction in section 8.1 is why the frame is
+            // wrong, not how badly - UNEXPECTED is a frame not permitted in this state or on this
+            // stream, ERROR is one whose layout or size is invalid. This frame is well formed; it
+            // is merely too early, and a peer debugging its own framing is told two different
+            // things by the two codes. This test pinned 0x0106 until the difference was noticed.
             var quic = new RecordingQuic();
             Task run = StartPure(quic, out Served served, closeTransport: false,
                 (0, new byte[] { 0x00, 0x03, 0x61, 0x62, 0x63 }, false));   // DATA(len 3) as the first frame
 
             Assert.True(run.IsCompleted, "a fatal protocol error must end the run loop");
             Assert.Equal(0, served.Count);
-            AssertClosedWith(quic, H3FrameError, "H3_FRAME_ERROR");
+            AssertClosedWith(quic, H3FrameUnexpected, "H3_FRAME_UNEXPECTED");
         });
+
 
         runner.Test("http3/codes: an empty HEADERS frame closes with H3_FRAME_ERROR", () =>
         {
@@ -95,15 +104,18 @@ internal static class H3ErrorCodeTests
             AssertClosedWith(quic, H3FrameError, "H3_FRAME_ERROR");
         });
 
-        runner.Test("http3/codes: SETTINGS on a request stream closes with H3_FRAME_ERROR", () =>
+        runner.Test("http3/codes: SETTINGS on a request stream closes with H3_FRAME_UNEXPECTED", () =>
         {
+            // The other half of the rule above. SETTINGS is a perfectly legal frame - on the
+            // CONTROL stream. Arriving on a request stream it is not malformed, it is not permitted
+            // here, which RFC 9114 section 8.1 gives a different code for. This pinned 0x0106 too.
             var quic = new RecordingQuic();
             Task run = StartPure(quic, out Served served, closeTransport: false,
                 (0, SettingsOnRequestStream, false));
 
             Assert.True(run.IsCompleted, "a fatal protocol error must end the run loop");
             Assert.Equal(0, served.Count);
-            AssertClosedWith(quic, H3FrameError, "H3_FRAME_ERROR");
+            AssertClosedWith(quic, H3FrameUnexpected, "H3_FRAME_UNEXPECTED");
         });
 
         runner.Test("http3/codes: a stream ending mid-frame closes with H3_FRAME_ERROR", () =>
@@ -266,7 +278,7 @@ internal static class H3ErrorCodeTests
             Assert.Equal(0, served);
         });
 
-        runner.Pending("h3/codes: nghttp3 - a protocol error tells the peer why", () =>
+        runner.Test("h3/codes: nghttp3 - a protocol error tells the peer why", () =>
         {
             var quic = new RecordingQuic();
             Assert.True(quic.EnqueueStreamData(0, SettingsOnRequestStream, false), "the recv ring rejected the item");
@@ -279,9 +291,7 @@ internal static class H3ErrorCodeTests
                 + (quic.ClosedWith is null
                     ? "Close was never called - the connection sits registered until the idle sweep"
                     : $"it closed with 0x{quic.ClosedWith:x}"));
-        }, "the defect the pure-C# stack just fixed, still live here: PushToEngine sets _protocolFailed "
-         + "and the run loop exits without ever calling QuicConnection.Close, so no code reaches the "
-         + "peer and the connection stays routable until the transport's 60 s idle sweep");
+        });
     }
 
     // --- helpers ---------------------------------------------------------------------------------

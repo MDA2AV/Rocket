@@ -32,7 +32,7 @@ public sealed partial class Nghttp3Connection
         {
             Nghttp3Connection connection = From(user);
             connection._callbackFault ??= e;
-            connection._protocolFailed = true;
+            connection.FailInternal();
             Console.Error.WriteLine($"[ioxide.nghttp3] callback faulted, failing the connection: {e}");
         }
         catch

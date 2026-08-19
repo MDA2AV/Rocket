@@ -18,7 +18,7 @@ public sealed partial class Nghttp3Connection
 
                 if (_nghttp3Handle == 0 && !_protocolFailed && !TrySetup())
                 {
-                    _protocolFailed = true;
+                    FailInternal();
                 }
 
                 while (_quicConnection.TryGetDelivery(in snapshot, out QuicRecvRing.Delivery item))
@@ -46,6 +46,11 @@ public sealed partial class Nghttp3Connection
         }
         finally
         {
+            // Before letting go, because letting go is all the transport sees: DecRef neither
+            // closes nor unregisters, so a connection dropped without a code stays routable until
+            // the idle sweep while the client waits on a request that will never be answered.
+            CloseWithPeerCode();
+
             _quicConnection.DecRef();
             Dispose();
         }
@@ -61,7 +66,7 @@ public sealed partial class Nghttp3Connection
 
                 if (_nghttp3Handle == 0 && !_protocolFailed && !TrySetup())
                 {
-                    _protocolFailed = true;
+                    FailInternal();
                 }
 
                 while (_quicConnection.TryGetDelivery(in snapshot, out QuicRecvRing.Delivery item))
@@ -89,6 +94,11 @@ public sealed partial class Nghttp3Connection
         }
         finally
         {
+            // Before letting go, because letting go is all the transport sees: DecRef neither
+            // closes nor unregisters, so a connection dropped without a code stays routable until
+            // the idle sweep while the client waits on a request that will never be answered.
+            CloseWithPeerCode();
+
             _quicConnection.DecRef();
             Dispose();
         }

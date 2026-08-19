@@ -26,7 +26,7 @@ public sealed partial class Nghttp3Connection
         if (submitResult != 0)
         {
             Console.Error.WriteLine($"[ioxide.nghttp3] submit_response failed: {Nghttp3.StrError(submitResult)}");
-            _protocolFailed = true;
+            FailProtocol(submitResult);
         }
     }
 
@@ -56,7 +56,7 @@ public sealed partial class Nghttp3Connection
                 if (producedBytes < 0)
                 {
                     Console.Error.WriteLine($"[ioxide.nghttp3] writev failed: {Nghttp3.StrError((int)producedBytes)}");
-                    _protocolFailed = true;
+                    FailProtocol((int)producedBytes);
                     return producedAnything;
                 }
                 if (producedBytes > 0)

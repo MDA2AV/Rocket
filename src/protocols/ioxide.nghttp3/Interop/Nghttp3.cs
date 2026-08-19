@@ -76,6 +76,11 @@ internal static unsafe class Nghttp3
     /// block). Unknown/already-closed ids (e.g. uni streams) are tolerated and return 0.</summary>
     [DllImport(Lib)] internal static extern int  ih3_close_stream(nint connection, long streamId, ulong appError);
 
+    /// <summary>The h3 application error code a library error means. nghttp3 owns this mapping -
+    /// which of its errors are H3_FRAME_ERROR, H3_MESSAGE_ERROR, QPACK_DECOMPRESSION_FAILED - so a
+    /// connection that must tell its peer why it died asks rather than keeping a table.</summary>
+    [DllImport(Lib)] internal static extern ulong ih3_app_error_code(int libError);
+
     // --- client side (ioxide.httpclient) ------------------------------------------------------
 
     /// <summary>Create the client-side nghttp3 connection; same event surface as the server one,

@@ -23,6 +23,10 @@ public sealed partial class Http3Connection
     // RFC 9114 section 8.1. The code a protocol error closes the connection with; the peer is
     // entitled to know WHY it was dropped, and until now it was told nothing at all.
     private const ulong H3GeneralProtocolError = 0x0101;
+    // RFC 9114 8.1 draws the line by WHY the frame is wrong, and the two are not interchangeable:
+    // UNEXPECTED is a frame that is not permitted in this state or on this stream, ERROR is one
+    // whose layout or size is invalid. A peer debugging its own framing is told different things.
+    private const ulong H3FrameUnexpected = 0x0105;
     private const ulong H3FrameError = 0x0106;
     private const ulong H3ExcessiveLoad = 0x0107;
     private const ulong QpackDecompressionFailed = 0x0200;
@@ -301,7 +305,7 @@ public sealed partial class Http3Connection
                     {
                         if (!rs.HeadersDone)
                         {
-                            Fatal("DATA before HEADERS", H3FrameError);
+                            Fatal("DATA before HEADERS", H3FrameUnexpected);
                             return;
                         }
                         rs.State = len == 0 ? ParseState.FrameHeader : ParseState.DataPayload;
@@ -326,7 +330,7 @@ public sealed partial class Http3Connection
                     }
                     else if (type is 0x3 or 0x4 or 0x5 or 0x7 or 0xD)
                     {
-                        Fatal($"frame 0x{type:x} unexpected on a request stream", H3FrameError);
+                        Fatal($"frame 0x{type:x} unexpected on a request stream", H3FrameUnexpected);
                         return;
                     }
                     else

@@ -517,6 +517,16 @@ int ih3_shutdown_stream_write(ih3_conn *c, int64_t stream_id)
     return 0;
 }
 
+/* The h3 application error code a library error means, straight from nghttp3 rather than from a
+ * table of our own: it owns the NGHTTP3_ERR_* -> RFC 9114 mapping and knows which of its errors are
+ * H3_FRAME_ERROR, H3_MESSAGE_ERROR, QPACK_DECOMPRESSION_FAILED and so on. Anything it does not
+ * recognise becomes H3_INTERNAL_ERROR, which is the right answer for "we failed and cannot say
+ * why". */
+uint64_t ih3_app_error_code(int liberr)
+{
+    return nghttp3_err_infer_quic_app_error_code(liberr);
+}
+
 int ih3_close_stream(ih3_conn *c, int64_t stream_id, uint64_t app_error)
 {
     int rv = nghttp3_conn_close_stream(c->conn, stream_id, app_error);
