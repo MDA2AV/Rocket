@@ -85,6 +85,10 @@ var config = new ServerConfig
         LocalCidLength = 8,
         // From here the host table is live and closed to further additions.
         ConnectionFactory = engine.CreateFactory(),
+        // Where a moved client's packets go when several reactors share the port. Forward costs
+        // nothing until a client actually changes address; KernelFilter has the kernel route by
+        // connection id instead, which costs a little on every packet. See /how-ioxide-does-h3.
+        Routing = QuicRouting.Forward,
     },
 };
 

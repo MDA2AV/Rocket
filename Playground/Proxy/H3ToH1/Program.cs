@@ -75,6 +75,10 @@ var config = new ServerConfig
         LocalCidLength    = 8,                                       // CID bytes this endpoint mints (must match the engine)
         IdleTimeoutMs     = 60_000,                                  // transport idle backstop; 0 disables sweep eviction
         ConnectionFactory = engine.CreateFactory(),                  // adopts new connections into the engine
+        // Where a moved client's packets go when several reactors share the port. Forward costs
+        // nothing until a client actually changes address; KernelFilter has the kernel route by
+        // connection id instead, which costs a little on every packet. See /how-ioxide-does-h3.
+        Routing = QuicRouting.Forward,
     },
 };
 

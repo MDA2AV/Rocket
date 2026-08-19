@@ -72,6 +72,10 @@ var config = new ServerConfig
         Port              = quicPort,            // every reactor binds it via SO_REUSEPORT
         LocalCidLength    = 8,                   // short headers carry no CID length on the wire
         ConnectionFactory = engine.CreateFactory(),
+        // Where a moved client's packets go when several reactors share the port. Forward costs
+        // nothing until a client actually changes address; KernelFilter has the kernel route by
+        // connection id instead, which costs a little on every packet. See /how-ioxide-does-h3.
+        Routing = QuicRouting.Forward,
         IdleTimeoutMs     = 60_000,              // transport backstop; 0 disables the sweep
     },
 };
