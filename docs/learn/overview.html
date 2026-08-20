@@ -30,7 +30,6 @@
     <a href="clients.html">Custom clients</a>
     <div class="group lead">Internals</div>
     <a href="architecture.html">Architecture</a>
-    <a href="quic-h3.html">QUIC &amp; HTTP/3</a>
     <a href="../how-ioxide-does-h3.html">How ioxide does HTTP/3</a>
     <div class="group sub">Packages</div>
     <a href="dev-core.html" class="pkg">ioxide <span class="muted">core</span></a>
@@ -125,7 +124,7 @@ foreach (var t in threads) t.Join();</code></pre>
       <li><code>ioxide.http2</code> - HTTP/2, pure C#. h2c with prior
       knowledge, or h2 over TLS chosen by <a href="tls.html">ALPN</a>.</li>
       <li><code>ioxide.nghttp3</code> / <code>ioxide.http3</code> - HTTP/3, over
-      <a href="quic-h3.html">QUIC</a> from <code>ioxide.ngtcp2</code>.</li>
+      <a href="../how-ioxide-does-h3.html">QUIC</a> from <code>ioxide.ngtcp2</code>.</li>
       <li><a href="tls.html">TLS</a> - OpenSSL on the ring, kernel TLS as an opt-in, plus a
       portable SslStream path. In the core package; no reference to add.</li>
     </ul>

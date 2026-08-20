@@ -8,6 +8,29 @@
   <link rel="stylesheet" href="assets/style.css">
   <link rel="stylesheet" href="assets/highlight-dark.min.css">
   <script src="assets/highlight.min.js"></script>
+  <style>
+    /* Layer-map diagram, built from the site's own tokens. Scoped .qh3- to stay out of the cascade. */
+    .qh3-map { display: flex; flex-direction: column; gap: 6px; margin: 1.2rem 0 1.6rem;
+               font-size: .85rem; }
+    .qh3-row { display: grid; grid-template-columns: 130px 1fr; gap: 6px; align-items: stretch; }
+    .qh3-tag { display: flex; align-items: center; justify-content: flex-end; padding-right: .9rem;
+               color: var(--text-dim); font-size: .72rem; text-transform: uppercase;
+               letter-spacing: .08em; text-align: right; }
+    .qh3-box { background: var(--bg-card); border: 1px solid var(--line); border-radius: 6px;
+               padding: .55rem .9rem; }
+    .qh3-box b { color: var(--text); font-weight: 600; }
+    .qh3-box span { color: var(--text-dim); }
+    .qh3-box code { font-size: .78rem; }
+    .qh3-hot { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+    .qh3-down { display: grid; grid-template-columns: 130px 1fr; gap: 6px; }
+    .qh3-down div { color: var(--accent-soft); text-align: center; line-height: 1; font-size: .8rem; }
+    .qh3-rules td:first-child { white-space: nowrap; color: var(--accent-soft); }
+    @media (max-width: 640px) {
+      .qh3-row, .qh3-down { grid-template-columns: 1fr; }
+      .qh3-tag { justify-content: flex-start; padding: 0; }
+      .qh3-down div:first-child { display: none; }
+    }
+  </style>
 </head>
 <body>
 
@@ -31,7 +54,6 @@
     <a href="learn/clients.html">Custom clients</a>
     <div class="group lead">Internals</div>
     <a href="learn/architecture.html">Architecture</a>
-    <a href="learn/quic-h3.html">QUIC &amp; HTTP/3</a>
     <a href="how-ioxide-does-h3.html" class="here">How ioxide does HTTP/3</a>
     <div class="group sub">Packages</div>
     <a href="learn/dev-core.html" class="pkg">ioxide <span class="muted">core</span></a>
@@ -46,9 +68,9 @@
     <p class="lead">Everything an HTTP/3 deployment actually has to decide, in one place: which
     pieces do what, how TLS is terminated on QUIC, how a server picks a certificate by name and
     replaces one without dropping traffic, how client certificates are checked, what happens when a
-    client changes address mid-connection, and how a fleet of reactors keeps serving it. For the
-    packet-level walk through the transport, see
-    <a href="learn/quic-h3.html">QUIC &amp; HTTP/3</a>.</p>
+    client changes address mid-connection, how a fleet of reactors keeps serving it - and then the
+    packet-level walk through the transport itself, from a datagram arriving to a response going
+    out.</p>
 
     <h2>The pieces</h2>
     <p>Three layers, each with one job.</p>
@@ -165,7 +187,7 @@ var quic = new QuicOptions { Port = 8443, ConnectionFactory = engine.CreateFacto
     ordering, is what makes that safe. The connection is reported to the application through
     <code>UpdatePeerAddress</code>, and the streams on it never notice.</p>
 
-    <h2>Keeping a moved client on its own reactor</h2>
+    <h2 id="routing">Keeping a moved client on its own reactor</h2>
     <p>A single-reactor server handles the above and is done. A real one runs a reactor per core,
     all bound to the same UDP port through <code>SO_REUSEPORT</code>, and there the kernel decides
     which reactor gets each datagram by hashing the <em>sender's address</em>. Change the address and
@@ -238,9 +260,315 @@ var quic = new QuicOptions { Port = 8443, ConnectionFactory = engine.CreateFacto
     automatically an improvement: it trades early drops, which congestion control is built to read,
     for a deep standing queue. Measure it on the deployment.</p>
 
-    <p class="next">Continue with <a href="learn/quic-h3.html">QUIC &amp; HTTP/3</a> for the
-    packet-level path through the transport, or <a href="learn/tls.html">TLS</a> for the TCP-side
-    stack this one deliberately shares nothing with.</p>
+    <h2>Why QUIC can't reuse the TCP plumbing</h2>
+    <p>The TCP side is built around one fact: <em>one connection = one fd</em>. The reactor's
+    connection table is keyed by fd, recv completions arrive per-fd, and the kernel does the
+    demultiplexing. QUIC inverts all of it:</p>
+    <ul>
+      <li><b>One UDP socket carries every connection.</b> There is nothing per-connection at the
+      kernel level - the reactor must demultiplex datagrams itself, by the Destination Connection
+      ID (DCID) in each packet's cleartext prefix.</li>
+      <li><b>Encryption is part of the transport.</b> TLS 1.3 runs <em>inside</em> QUIC (handshake
+      messages ride CRYPTO frames), and every packet is sealed with keys the handshake derives.
+      Bytes coming off the wire are useless until an engine decrypts them.</li>
+      <li><b>Streams, not a byte pipe.</b> One connection multiplexes many independent streams;
+      what pops out of the engine is <code>(streamId, bytes, fin)</code> events, not a single
+      ordered sequence.</li>
+    </ul>
+    <p>So QUIC gets its own demux in the reactor, its own connection type, and an engine that owns
+    all the cryptography - while reusing the UDP layer (multishot <code>recvmsg</code> + GRO) and
+    the io_uring send path underneath.</p>
+
+    <h2>The layer map</h2>
+    <div class="qh3-map">
+      <div class="qh3-row"><div class="qh3-tag">kernel</div>
+        <div class="qh3-box"><b>io_uring UDP</b> <span>- multishot recvmsg, GRO coalescing in,
+        GSO segmentation out. One socket per reactor via SO_REUSEPORT.</span>
+        <br><code>Reactor/Transport/Udp/*</code></div></div>
+      <div class="qh3-down"><div></div><div>&darr;</div></div>
+      <div class="qh3-row"><div class="qh3-tag">core &middot; demux</div>
+        <div class="qh3-box qh3-hot"><b>QuicDispatch</b> <span>- splits GRO trains per segment,
+        parses the DCID (RFC 8999), routes to a live connection or adopts a new one via the
+        factory.</span><br><code>Reactor/Transport/Quic/Reactor.Quic.cs</code></div></div>
+      <div class="qh3-down"><div></div><div>&darr;</div></div>
+      <div class="qh3-row"><div class="qh3-tag">ioxide.ngtcp2</div>
+        <div class="qh3-box qh3-hot"><b>QuicEngineConnection</b> <span>- feeds datagrams to ngtcp2
+        (decrypt, ACK, flow control), copies decrypted stream events into the recv queue, pumps
+        egress back out with GSO batching. picotls does the TLS 1.3 handshake.</span>
+        <br><code>src/ioxide.ngtcp2/*</code> + <code>libioxide_ngtcp2.so</code></div></div>
+      <div class="qh3-down"><div></div><div>&darr;</div></div>
+      <div class="qh3-row"><div class="qh3-tag">core &middot; read surface</div>
+        <div class="qh3-box"><b>QuicConnection</b> <span>- the handler-facing API:
+        <code>ReadAsync</code> over an SPSC ring of stream items, <code>SendStream</code>,
+        the two-owner refcount. Mirrors TcpConnection's pattern, shares no code with it.</span>
+        <br><code>Connection/Quic/*</code></div></div>
+      <div class="qh3-down"><div></div><div>&darr;</div></div>
+      <div class="qh3-row"><div class="qh3-tag">handler</div>
+        <div class="qh3-box"><b>Reactor.QuicHandle</b> <span>- your delegate, launched once per
+        adopted connection; the QUIC twin of <code>TcpHandle</code>.</span></div></div>
+      <div class="qh3-down"><div></div><div>&darr;</div></div>
+      <div class="qh3-row"><div class="qh3-tag">ioxide.nghttp3</div>
+        <div class="qh3-box"><b>Nghttp3Connection</b> <span>- nghttp3 rides the read surface: assembles
+        requests (QPACK, framing), runs your <code>req =&gt; resp</code> callback, drains response
+        frames back through SendStream.</span>
+        <br><code>src/ioxide.nghttp3/*</code> + <code>libioxide_nghttp3.so</code></div></div>
+    </div>
+
+    <p>Wiring it up, shown with every QUIC/h3 knob at its default
+    (<code>Playground/Http3/Nghttp3Buffered</code> is the same as an editable reference):</p>
+<pre><code class="language-csharp">var engine = new QuicEngine(
+    certPath, keyPath,
+    cidLength: 8,                      // connection-id length this endpoint mints
+    alpn: ["h3"],                      // pin the protocol; null accepts whatever the client offers
+    maxSendRetentionBytes: 16L &lt;&lt; 20); // send-retention high-water: bounds memory so a response
+                                       // larger than the window streams instead of buffering whole
+
+var config = new ServerConfig
+{
+    ReactorCount   = Environment.ProcessorCount,  // io_uring rings/threads - one per core
+    RingEntries    = 8192,                         // SQ/CQ depth per ring
+    DualStack      = false,                         // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                    // bytes per shared recv buffer
+    RecvSlots      = 4096,                          // shared recv buffer-ring depth
+    Incremental    = null,                          // per-connection recv rings (6.12+)
+    Tcp = null,                        // QUIC-only: no TCP listener at all
+    Udp = new UdpOptions
+    {
+        RecvSlots = 16,                // multishot recv slots per reactor
+        Gro = true,                    // UDP_GRO: coalesce received datagrams into one recv
+    },
+    Quic = new QuicOptions
+    {
+        Port = 8443,                   // UDP port, bound automatically on every reactor
+        LocalCidLength = 8,            // must match the engine's cidLength
+        IdleTimeoutMs = 60_000,        // close a connection idle this long
+        ConnectionFactory = engine.CreateFactory(),
+    },
+};
+
+var h3Options = new Nghttp3Options    // the HTTP/3 layer's own knobs, passed to Nghttp3Connection
+{
+    QpackDynamicTableCapacity = 0,     // 0 = headers stay literal (never blocks on a table update)
+    QpackBlockedStreams = 0,           // raise both together to trade bytes for the dynamic table
+};
+
+reactor.TcpHandle  = Handlers.Raw;
+reactor.QuicHandle = (r, conn) => new Nghttp3Connection(conn, h3Options).RunBufferedAsync(
+    static req => Nghttp3Response.Text($"hello {Encoding.ASCII.GetString(req.Path.Span)}"));</code></pre>
+
+    <h2>Ingress: the life of a datagram</h2>
+    <p>A client datagram lands as a multishot <code>recvmsg</code> completion on the reactor
+    thread, and everything below happens inline in that dispatch - same as the TCP side, there is
+    no handoff to another thread anywhere in the path.</p>
+    <ol>
+      <li><b>GRO split.</b> The kernel may hand us a <em>train</em> - several datagrams from the
+      same peer socket coalesced into one buffer. Connections share client sockets, so one train
+      can interleave packets of <em>different</em> connections. <code>QuicDispatch</code> splits
+      the train and routes each segment independently.</li>
+      <li><b>DCID demux.</b> The first bytes of a QUIC packet are cleartext and version-independent
+      (RFC 8999). Long headers carry an explicit DCID length; short headers carry exactly the
+      <code>LocalCidLength</code> bytes this endpoint mints. The DCID is looked up in the reactor's
+      <code>_quicConns</code> dictionary.</li>
+      <li><b>Adopt or route.</b> A known DCID goes straight to its connection. An unknown
+      <em>long-header</em> packet is a new handshake: the factory runs <code>iq_accept</code>
+      (validates the Initial, creates the ngtcp2 conn, mints our SCID), the reactor snapshots the
+      peer address, registers the CIDs, inits the two-owner refcount, and launches your
+      <code>QuicHandle</code> fault-observed. An unknown <em>short-header</em> packet is either
+      stale traffic from a dead connection or a live one whose client changed address - see
+      <a href="#routing">Keeping a moved client on its own reactor</a> above.</li>
+      <li><b>Engine read.</b> <code>OnDatagram</code> feeds the payload to
+      <code>iq_conn_read</code>. ngtcp2 decrypts, handles ACKs and flow control, and fires
+      callbacks mid-call - the important one being <em>stream data</em>.</li>
+      <li><b>Copy and enqueue.</b> ngtcp2's decrypted spans die when <code>iq_conn_read</code>
+      returns, so <code>OnStreamData</code> copies each event into a pooled buffer and enqueues a
+      <code>(StreamId, bytes, Fin)</code> item on the connection's SPSC recv ring. Stream lifecycle
+      (closed / reset / stop-sending) rides the same ring as <code>Kind</code>-tagged items, so the
+      handler sees everything in order.</li>
+      <li><b>Fire once.</b> Only after <code>iq_conn_read</code> has fully unwound does the engine
+      fire the read signal - the same inline-resume IVTS as TCP. The handler resumes synchronously
+      on the reactor thread, drains the ring, sends responses. By the time the loop re-enters the
+      kernel, those responses are already staged.</li>
+    </ol>
+
+    <div class="note"><b>Why "fire once, after the read unwinds"?</b> The handler resumes
+    <em>inline</em> when the signal fires. If <code>OnStreamData</code> fired it directly, the
+    handler would run - and call <code>SendStream</code>, re-entering ngtcp2 - while ngtcp2 is
+    still executing <code>iq_conn_read</code> above it on the same stack. Deferring the wake to
+    after the engine call makes reentrancy impossible by construction.</div>
+
+    <h2>The read surface</h2>
+    <p>The handler-facing API deliberately mirrors <code>TcpConnection</code> - the arm flag, the
+    sticky pending bit that closes the lost-wakeup race, the generation token - but it is a
+    separate implementation. The two transports share a <em>pattern</em>, not a base class: TCP's
+    items are buffer-ring slots with bids; QUIC's are pooled copies tagged with stream ids. The
+    write sides have nothing in common at all.</p>
+<pre><code class="language-csharp">// A raw QUIC handler: one per connection, streams demuxed by the item's StreamId.
+reactor.QuicHandle = async (r, conn) =>
+{
+    try
+    {
+        while (true)
+        {
+            QuicRecvSnapshot snap = await conn.ReadAsync();
+
+            while (conn.TryGetDelivery(in snap, out QuicRecvRing.Delivery item))
+            {
+                if (item.Kind == QuicStreamEvent.Data)
+                    conn.SendStream(item.StreamId, item.AsSpan(), item.Fin);  // echo
+                conn.ReturnBuffer(in item);   // pooled buffer back to the pool
+            }
+
+            if (snap.IsClosed) break;
+            conn.ResetRead();
+        }
+    }
+    finally { conn.DecRef(); }   // release the handler's ref
+};</code></pre>
+    <p>Lifecycle is the same two-owner refcount as TCP: the transport holds one reference, the
+    handler holds the other, and teardown (freeing the peer-address block, unrouting CIDs) only
+    runs when both are gone - so an evicted connection can never be freed under a live handler.
+    All teardown funnels through <code>QuicRemoveConnection</code>, whether the engine closed
+    (error, idle) or the sweep evicted.</p>
+
+    <h2>Egress: SendStream and the retention contract</h2>
+    <p>There is no <code>IBufferWriter</code>, no write slab, and no <code>FlushAsync</code> on the
+    QUIC side - deliberately. TCP hands you a raw byte pipe and you await the send for
+    backpressure. In QUIC the engine owns framing, pacing, congestion control and retransmission;
+    <code>SendStream(streamId, bytes, fin)</code> hands bytes over and returns. Awaiting a flush
+    would await nothing meaningful.</p>
+    <p>Two hard rules shape the implementation:</p>
+    <ul>
+      <li><b>ngtcp2 does not copy.</b> Stream data passed to the engine is retained <em>by
+      pointer</em> for retransmission until the peer acknowledges it. So <code>SendStream</code>
+      copies your span into native chunks owned by the connection (<code>OutStream</code> chains),
+      the engine is fed pointers into those, and the <code>acked_stream_data_offset</code>
+      callback frees chunks as the ack watermark advances. Stream close purges the rest.</li>
+      <li><b>Never drop what the engine deferred.</b> When the congestion window is full,
+      <code>iq_conn_write</code> takes nothing - and the layer above (nghttp3) has already
+      accounted those bytes as written and will never re-emit them. The unsent tail stays in the
+      chunk chain and is replayed on every flush (each inbound ACK, each timer) until it fits.</li>
+      <li><b>Retention is a backpressure high-water, not a hard cap.</b> Retained bytes
+      (sent-but-unacked plus unsent) are bounded by <code>QuicEngine</code>'s
+      <code>maxSendRetentionBytes</code> (default 16&nbsp;MiB). A producer feeding a response checks
+      <code>CanQueueSend</code> and pauses there; as acks drain retention below the mark, the
+      ack/timer egress path fires <code>OnSendCapacityAvailable</code> to resume it - the read loop
+      never sees a download's acks, so that callback is the resume. This is what lets a response of
+      any size stream out in bounded memory rather than buffering whole. The cap only <em>closes</em>
+      the connection as a backstop, at twice the high-water, when a producer ignores backpressure and
+      keeps pushing - or when a peer simply stops acking.</li>
+    </ul>
+    <div class="note"><b>War story.</b> Both rules exist because their violations shipped first.
+    Passing <code>fixed</code> spans of reused buffers to ngtcp2 was harmless for a while - only
+    because a timer bug meant retransmission never ran. The day the timer was fixed, every loss
+    retransmitted STREAM frames out of recycled memory: segfaults in
+    <code>ngtcp2_pkt_encode_stream_frame</code> on a good day, silently corrupted frames on the
+    wire on a bad one.</div>
+    <p>On the wire side, datagrams produced during one engine cycle are batched into a single
+    <code>UDP_SEGMENT</code> (GSO) send - one syscall for up to a 63&nbsp;KB run of equal-size
+    datagrams instead of one per packet.</p>
+
+    <h2>The native engines and their shims</h2>
+    <p>Neither ngtcp2 nor nghttp3 is P/Invoked directly. Both APIs are built on large versioned
+    structs and callback tables whose layout shifts between releases - marshaling those from C#
+    would break silently on every upstream bump. Instead each package bundles a small C shim that
+    owns every struct layout (compiled against the exact vendored headers) and exposes a flat,
+    stable ABI:</p>
+    <ul>
+      <li><code>libioxide_ngtcp2.so</code> (~1.2&nbsp;MB) - ngtcp2 + its picotls crypto backend +
+      picotls, statically linked; the only system dependency is <code>libcrypto.so.3</code>.
+      Exports <code>iq_*</code>: engine/accept/read/write, uni-stream open, ALPN, expiry.
+      Built by <code>scripts/build-ngtcp2-native.sh</code>.</li>
+      <li><code>libioxide_nghttp3.so</code> (~244&nbsp;KB) - nghttp3, statically linked, zero external
+      dependencies (it does no I/O and no crypto). Exports <code>ih3_*</code>: conn create/bind,
+      read_stream, submit_response, writev, shutdown/close. Built by
+      <code>scripts/build-nghttp3-native.sh</code>.</li>
+    </ul>
+    <p>Both <code>.so</code> files are committed and packed into the NuGet
+    <code>runtimes/linux-x64/native/</code>, so consumers install nothing.</p>
+
+    <h2>TLS 1.3 and ALPN</h2>
+    <p>QUIC folds TLS into the transport (RFC 9001): handshake messages travel in CRYPTO frames,
+    and TLS's job shrinks to the handshake plus key derivation - packet protection itself is
+    QUIC's own AEAD, applied by ngtcp2. In this stack picotls runs that handshake; the managed
+    side never touches TLS at all. That's why <code>QuicConnection</code> has no handshake or
+    crypto surface, and why the cert/key go into <code>QuicEngine</code>'s constructor.</p>
+    <p>ALPN is enforced in the shim's client-hello hook: <code>new QuicEngine(cert, key,
+    alpn: ["h3"])</code> installs an allowlist - a client offering none of the listed protocols
+    fails the handshake with <code>no_application_protocol</code>, per the RFC. With no allowlist
+    the server accepts whatever the client offers first. The chosen token is surfaced as
+    <code>QuicConnection.NegotiatedProtocol</code> after the handshake.</p>
+
+    <h2>The HTTP/3 layer</h2>
+    <p><code>ioxide.nghttp3</code> references only the core - not <code>ioxide.ngtcp2</code>. It needs
+    nothing but the abstract read/write surface, so it would ride any future engine (quicly, etc.)
+    unchanged. One <code>Nghttp3Connection</code> wraps one <code>QuicConnection</code>:</p>
+<pre><code class="language-csharp">reactor.QuicHandle = (r, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+    static req => Nghttp3Response.Text($"hello {Encoding.ASCII.GetString(req.Path.Span)} via {Encoding.ASCII.GetString(req.Method.Span)}"));</code></pre>
+    <p>Inside <code>RunAsync</code>:</p>
+    <ol>
+      <li><b>Lazy setup.</b> On the first wake (which is by definition post-handshake), it opens
+      the three server unidirectional streams H3 requires - control + QPACK encoder/decoder -
+      binds them into nghttp3, and the SETTINGS preface rides out on that same drain.</li>
+      <li><b>Assembly.</b> Every recv item is fed to <code>nghttp3_conn_read_stream</code>;
+      nghttp3 demuxes uni-stream types itself and fires header/data/end callbacks, which
+      accumulate into an <code>Nghttp3Request</code> (method, path, headers, body - all post-QPACK
+      bytes as <code>ReadOnlyMemory&lt;byte&gt;</code>; the library never decodes to strings, and the
+      memories are valid until the handler returns).</li>
+      <li><b>Dispatch.</b> Completed requests run your callback on the reactor thread; the
+      <code>Nghttp3Response</code> (status, headers, body) is submitted back to nghttp3, whose output
+      frames are drained through <code>SendStream</code> - response bodies are copied into shim
+      memory that lives until the stream closes, because nghttp3 holds references too.</li>
+      <li><b>Lifecycle mirroring.</b> The <code>Kind</code>-tagged items keep nghttp3's view of
+      every stream in sync with QUIC's: reset &rarr; <code>shutdown_stream_read</code>,
+      stop-sending &rarr; <code>shutdown_stream_write</code>, closed &rarr;
+      <code>close_stream</code>. A cancelled request is torn down on both sides instead of
+      half-ignored.</li>
+    </ol>
+    <p>QPACK runs with a zero-size dynamic table (the nghttp3 default we keep): static-table-only
+    compression, no encoder/decoder state to corrupt, still ~87% header savings in practice.</p>
+
+    <h2>Timers</h2>
+    <p>QUIC is timer-hungry - loss detection and PTO probes need millisecond deadlines, and the
+    reactor's 250&nbsp;ms ticker is far too coarse: a retransmit that waits 250&nbsp;ms per loss
+    turns load spikes into self-sustaining storms. So deadlines are split:</p>
+    <ul>
+      <li><b>Loss/PTO timers</b> - <code>QuicFireDueTimers</code> runs at the top of every loop
+      pass: one cheap comparison against the earliest deadline across live connections, and a full
+      sweep only when it's due. Under load the loop spins on completions, so timers fire at
+      completion-batch granularity (~RTT). Dispatch re-arms the minimum after every datagram.</li>
+      <li><b>Idle eviction</b> - stays on the 250&nbsp;ms ticker, which doubles as the wake floor
+      when the reactor is otherwise asleep. Abandoned connections (a killed benchmark client) are
+      reaped by ngtcp2's idle timeout and unrouted through the same teardown funnel.</li>
+    </ul>
+
+    <h2>Rules learned the hard way</h2>
+    <p>Each of these is load-bearing; every one of them shipped broken first and was found by a
+    benchmark, a packet capture, or a core dump.</p>
+    <div class="vs"><table class="qh3-rules">
+      <tr><th>Rule</th><th>Or else</th></tr>
+      <tr><td>Demux GRO trains per segment</td><td>Trains interleave datagrams of different
+      connections (they share the client's 4-tuple); routing a whole train by its first DCID feeds
+      other connections' packets to the wrong engine, which silently drops them.</td></tr>
+      <tr><td>Retain stream bytes until acked</td><td>ngtcp2 keeps pointers into your buffers for
+      retransmission. Reused buffers become corrupted retransmitted frames - or a segfault inside
+      the packet encoder.</td></tr>
+      <tr><td>Fire the read signal after <code>iq_conn_read</code> unwinds</td><td>The handler
+      resumes inline and re-enters ngtcp2 mid-callback, on the same stack.</td></tr>
+      <tr><td>Never discard engine-deferred bytes</td><td>nghttp3 already accounted them as
+      written; the stream starves forever and the connection live-locks around it.</td></tr>
+      <tr><td><code>initial_max_streams</code> is a window, not a cap</td><td>Extend it as streams
+      close (<code>ngtcp2_conn_extend_max_streams_*</code>) or every connection stalls for good
+      after its first 100 requests.</td></tr>
+      <tr><td>An engine expiry can already be in the past</td><td>Unsigned <code>expiry - now</code>
+      underflows and schedules the retransmit timer ~584 years out, permanently killing that
+      connection's loss recovery.</td></tr>
+      <tr><td>Free H3 response bodies only at stream close</td><td>nghttp3 holds references into
+      the body for output it already accepted; freeing on stop-sending is a use-after-free.</td></tr>
+    </table></div>
+
+    <p class="next">Continue with <a href="learn/architecture.html">Architecture</a> for the reactor
+    model these layers ride on, or <a href="learn/tls.html">TLS</a> for the TCP-side stack this one
+    deliberately shares nothing with.</p>
   </main>
 </div>
 
