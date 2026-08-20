@@ -1,7 +1,7 @@
 # ioxide
 
 [![nuget](https://img.shields.io/nuget/v/ioxide?label=nuget&color=blue)](https://www.nuget.org/packages/ioxide/)
-[![HTTP Arena](https://img.shields.io/endpoint?url=https://www.http-arena.com/badge/ioxide/h1.json)](https://www.http-arena.com/#sort=rps:-1&type=engine)
+[![HTTP Arena](https://img.shields.io/endpoint?url=https://www.http-arena.com/badge/genhttp-11-ioxide/h1.json)](https://www.http-arena.com/#sort=rps:-1)
 [![net](https://img.shields.io/badge/.NET-10%20%7C%2011-blue)](https://dotnet.microsoft.com/)
 [![linux](https://img.shields.io/badge/linux-6.1%2B-blue)](https://kernel.org/)
 
