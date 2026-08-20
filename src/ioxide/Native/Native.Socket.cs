@@ -22,11 +22,13 @@ public static unsafe partial class Native {
 
     [DllImport("libc")] public static extern int socket(int domain, int type, int proto);
     [DllImport("libc")] public static extern int bind(int fd, void* addr, uint len);
+    [DllImport("libc")] public static extern int connect(int fd, void* addr, uint len);
     /// Read a socket's local address - the only way to learn the port the kernel picked for a
     /// bind to port 0 (QUIC client sockets take an ephemeral port).
     [DllImport("libc")] public static extern int getsockname(int fd, void* addr, uint* len);
     [DllImport("libc")] public static extern int listen(int fd, int backlog);
     [DllImport("libc")] public static extern int setsockopt(int fd, int level, int optname, void* optval, uint optlen);
+    [DllImport("libc")] public static extern int getsockopt(int fd, int level, int optname, void* optval, uint* optlen);
 
     public static ushort Htons(ushort x) => (ushort)((x << 8) | (x >> 8));
 

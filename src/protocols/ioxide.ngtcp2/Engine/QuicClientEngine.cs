@@ -23,6 +23,8 @@ public sealed unsafe class QuicClientEngine : IDisposable
 
     public QuicClientEngine(string alpn = "h3")
     {
+        Ngtcp2.RequireAbi();
+
         Alpn = alpn;
 
         // The same callback table the server engine registers: the shim now routes both directions

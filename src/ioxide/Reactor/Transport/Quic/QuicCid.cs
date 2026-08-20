@@ -18,6 +18,12 @@ public readonly struct QuicCid : IEquatable<QuicCid>
 
     public int Length => _len;
 
+    /// <summary>
+    /// The first byte, which is where a server-minted id carries its owning reactor. Zero for an
+    /// empty id. <c>_a</c> is the little-endian read of bytes 0-7, so its low byte is byte 0.
+    /// </summary>
+    public byte FirstByte => (byte)(_a & 0xFF);
+
     public QuicCid(ReadOnlySpan<byte> bytes)
     {
         if (bytes.Length > MaxLength)

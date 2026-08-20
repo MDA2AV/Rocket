@@ -201,6 +201,10 @@ public unsafe partial class QuicEngineConnection : QuicConnection
     // Adopt the connection: validate the client's first datagram and create the ngtcp2 conn. Runs
     // inside the factory, before the transport records the route; returns false to reject. reactor
     // and socketFd are captured here because engine callbacks can fire during iq_accept.
+    //
+    // The reactor's shard identity goes across too: it is stamped into the connection id the
+    // server mints, which is what lets the kernel steer this connection's later datagrams back to
+    // THIS reactor even after the client changes address. See Reactor.Udp.Steering.cs.
     internal bool TryAccept(nint enginePtr, Reactor reactor, in UdpDatagram datagram, Span<byte> scidOut, out int scidLen)
     {
         _reactor  = reactor;
@@ -222,7 +226,8 @@ public unsafe partial class QuicEngineConnection : QuicConnection
                 loc, (nuint)local.Length,
                 (void*)datagram.PeerAddr, (nuint)datagram.PeerAddrLen,
                 pkt, (nuint)datagram.Payload.Length,
-                NowNs(), (void*)GCHandle.ToIntPtr(_self), scid);
+                NowNs(), (void*)GCHandle.ToIntPtr(_self),
+                (uint)reactor.ShardIndex, (uint)reactor.ShardCount, scid);
         }
 
         if (_conn == 0)

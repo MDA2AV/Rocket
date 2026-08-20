@@ -155,23 +155,12 @@ public sealed unsafe class H3TestClient : IDisposable
 
     public (int Status, string Body) Request(string method, string path, byte[]? body, (string Name, string Value)[]? extraHeaders, int timeoutMs)
     {
-        // Client H3 conn + its control/QPACK uni streams.
-        var h3Cbs = new Ih3Callbacks
-        {
-            OnBeginHeaders = &OnH3BeginHeaders,
-            OnHeader       = &OnH3Header,
-            OnEndHeaders   = &OnH3EndHeaders,
-            OnData         = &OnH3Data,
-            OnEndStream    = &OnH3EndStream,
-        };
-        _h3 = ih3_client_new(h3Cbs, (void*)GCHandle.ToIntPtr(_self));
-        Assert.True(_h3 != 0, "h3 client conn init failed");
+        EnsureH3Session();
 
-        long ctrl = iq_conn_open_uni(_conn);
-        long qenc = iq_conn_open_uni(_conn);
-        long qdec = iq_conn_open_uni(_conn);
-        Assert.True(ctrl >= 0 && qenc >= 0 && qdec >= 0, "failed to open client uni streams");
-        Assert.True(ih3_bind_streams(_h3, ctrl, qenc, qdec) == 0, "bind streams failed");
+        // Per request: a fresh bidi stream and response state. The session is not - see above.
+        _status = -1;
+        _body.Clear();
+        _done = false;
 
         _requestSid = iq_client_open_bidi(_conn);
         Assert.True(_requestSid >= 0, "failed to open request stream");
@@ -217,6 +206,37 @@ public sealed unsafe class H3TestClient : IDisposable
         return (_status, Encoding.UTF8.GetString(_body.ToArray()));
     }
 
+    /// <summary>
+    /// The H3 session - client conn plus its control and QPACK streams - stood up once per
+    /// CONNECTION, not per request. HTTP/3 allows one control stream per peer and RFC 9114 6.2.1
+    /// makes a second one a connection error, so doing this per request spoke invalid HTTP/3 from
+    /// the second request on and a correct server killed the connection.
+    /// </summary>
+    private void EnsureH3Session()
+    {
+        if (_h3 != 0)
+        {
+            return;
+        }
+
+        var h3Cbs = new Ih3Callbacks
+        {
+            OnBeginHeaders = &OnH3BeginHeaders,
+            OnHeader       = &OnH3Header,
+            OnEndHeaders   = &OnH3EndHeaders,
+            OnData         = &OnH3Data,
+            OnEndStream    = &OnH3EndStream,
+        };
+        _h3 = ih3_client_new(h3Cbs, (void*)GCHandle.ToIntPtr(_self));
+        Assert.True(_h3 != 0, "h3 client conn init failed");
+
+        long ctrl = iq_conn_open_uni(_conn);
+        long qenc = iq_conn_open_uni(_conn);
+        long qdec = iq_conn_open_uni(_conn);
+        Assert.True(ctrl >= 0 && qenc >= 0 && qdec >= 0, "failed to open client uni streams");
+        Assert.True(ih3_bind_streams(_h3, ctrl, qenc, qdec) == 0, "bind streams failed");
+    }
+
     // Pump the client H3 engine's egress (prefaces, the request) into the QUIC engine per stream.
     private readonly byte[] _h3Buf = new byte[16 * 1024];
 
@@ -242,6 +262,7 @@ public sealed unsafe class H3TestClient : IDisposable
     // The QuicTestClient write loop: feed one stream's bytes into ngtcp2, sending each produced
     // datagram, falling back to the generic flush when the stream can't take more.
     private readonly byte[] _sendScratch = new byte[1452];
+
 
     private void WriteStream(long sid, ReadOnlySpan<byte> data, bool fin)
     {
@@ -328,8 +349,35 @@ public sealed unsafe class H3TestClient : IDisposable
     /// <summary>Whether the peer ended the connection. A refusal test asserts on this.</summary>
     public bool PeerClosed => _peerClosed;
 
+    /// <summary>
+    /// ngtcp2's loss timers. Without them there is NO loss recovery: a lost datagram stays unacked,
+    /// the congestion window fills, writev_stream answers 0, and both ends deadlock silently -
+    /// which looks exactly like a server that hung after a migration.
+    /// </summary>
+    private void FireExpiredTimers()
+    {
+        if (_conn == 0)
+        {
+            return;
+        }
+
+        ulong now = NowNs();
+        if (iq_conn_expiry(_conn) > now)
+        {
+            return;
+        }
+
+        // Nonzero is terminal, as for a read: draining, closing, or a protocol error.
+        if (iq_conn_handle_expiry(_conn, now) != 0)
+        {
+            _peerClosed = true;
+        }
+    }
+
     private void PumpIn()
     {
+        FireExpiredTimers();
+
         try
         {
             IPEndPoint? from = null;
@@ -479,6 +527,8 @@ public sealed unsafe class H3TestClient : IDisposable
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? keyPath, IqCallbacks cbs);
     [DllImport(QuicLib)] private static extern long iq_client_open_bidi(nint conn);
     [DllImport(QuicLib)] private static extern long iq_conn_open_uni(nint conn);
+    [DllImport(QuicLib)] private static extern ulong iq_conn_expiry(nint conn);
+    [DllImport(QuicLib)] private static extern int iq_conn_handle_expiry(nint conn, ulong ts);
     [DllImport(QuicLib)] private static extern nint iq_conn_write(nint conn, byte* dest, nuint destLen, long streamId, byte* data, nuint dataLen, int fin, long* pConsumed, ulong ts);
     [DllImport(QuicLib)] private static extern int  iq_conn_read(nint conn, void* remoteSa, nuint remoteLen, byte* pkt, nuint pktLen, byte ecn, ulong ts);
     [DllImport(QuicLib)] private static extern int  iq_conn_is_established(nint conn);

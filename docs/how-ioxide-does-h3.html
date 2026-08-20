@@ -3,10 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>QUIC &amp; HTTP/3 - ioxide</title>
-  <link rel="stylesheet" href="../assets/style.css">
-  <link rel="stylesheet" href="../assets/highlight-dark.min.css">
-  <script src="../assets/highlight.min.js"></script>
+  <title>How ioxide does HTTP/3 - ioxide</title>
+  <meta name="description" content="How ioxide serves HTTP/3: the QUIC transport and its native engines, TLS on QUIC, serving by SNI, renewing certificates on a running server, mutual TLS, connection migration, and how a fleet of reactors routes a client that changed address.">
+  <link rel="stylesheet" href="assets/style.css">
+  <link rel="stylesheet" href="assets/highlight-dark.min.css">
+  <script src="assets/highlight.min.js"></script>
   <style>
     /* Layer-map diagram, built from the site's own tokens. Scoped .qh3- to stay out of the cascade. */
     .qh3-map { display: flex; flex-direction: column; gap: 6px; margin: 1.2rem 0 1.6rem;
@@ -34,9 +35,9 @@
 <body>
 
 <nav class="top">
-  <a class="brand" href="../"><span>io</span>xide</a>
+  <a class="brand" href="./"><span>io</span>xide</a>
   <div class="links">
-    <a href="../blog/index.html">Blog</a>
+    <a href="blog/index.html">Blog</a>
     <a class="gh" href="https://github.com/MDA2AV/ioxide" aria-label="GitHub"><svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
   </div>
 </nav>
@@ -44,31 +45,220 @@
 <div class="layout">
   <aside class="side">
     <div class="group">Guide</div>
-    <a href="overview.html">Introduction</a>
-    <a href="postgres.html">Postgres</a>
-    <a href="redis.html">Redis</a>
-    <a href="tls.html">TLS</a>
-    <a href="files.html">Static files</a>
-    <a href="multiport.html">Multi-port</a>
-    <a href="clients.html">Custom clients</a>
+    <a href="learn/overview.html">Introduction</a>
+    <a href="learn/postgres.html">Postgres</a>
+    <a href="learn/redis.html">Redis</a>
+    <a href="learn/tls.html">TLS</a>
+    <a href="learn/files.html">Static files</a>
+    <a href="learn/multiport.html">Multi-port</a>
+    <a href="learn/clients.html">Custom clients</a>
     <div class="group lead">Internals</div>
-    <a href="architecture.html">Architecture</a>
-    <a href="quic-h3.html" class="here">QUIC &amp; HTTP/3</a>
+    <a href="learn/architecture.html">Architecture</a>
+    <a href="how-ioxide-does-h3.html" class="here">How ioxide does HTTP/3</a>
     <div class="group sub">Packages</div>
-    <a href="dev-core.html" class="pkg">ioxide <span class="muted">core</span></a>
-    <a href="dev-pg.html" class="pkg">ioxide.pg</a>
-    <a href="dev-redis.html" class="pkg">ioxide.redis</a>
-    <a href="dev-tls.html" class="pkg">ioxide <span class="muted">tls</span></a>
-    <a href="dev-file.html" class="pkg">ioxide.file</a>
+    <a href="learn/dev-core.html" class="pkg">ioxide <span class="muted">core</span></a>
+    <a href="learn/dev-pg.html" class="pkg">ioxide.pg</a>
+    <a href="learn/dev-redis.html" class="pkg">ioxide.redis</a>
+    <a href="learn/dev-tls.html" class="pkg">ioxide <span class="muted">tls</span></a>
+    <a href="learn/dev-file.html" class="pkg">ioxide.file</a>
   </aside>
 
   <main class="doc">
-    <h1>QUIC &amp; HTTP/3</h1>
-    <p class="lead">ioxide serves HTTP/3 through three layers, each with one job: the core's QUIC
-    transport routes UDP datagrams to logical connections, <code>ioxide.ngtcp2</code> runs the
-    protocol engine (ngtcp2 + picotls, bundled native), and <code>ioxide.nghttp3</code> turns decrypted
-    stream bytes into requests and responses (nghttp3, bundled native). This page walks the whole
-    path a request takes, and ends with the invariants that were learned the hard way.</p>
+    <h1>How ioxide does HTTP/3</h1>
+    <p class="lead">Everything an HTTP/3 deployment actually has to decide, in one place: which
+    pieces do what, how TLS is terminated on QUIC, how a server picks a certificate by name and
+    replaces one without dropping traffic, how client certificates are checked, what happens when a
+    client changes address mid-connection, how a fleet of reactors keeps serving it - and then the
+    packet-level walk through the transport itself, from a datagram arriving to a response going
+    out.</p>
+
+    <h2>The pieces</h2>
+    <p>Three layers, each with one job.</p>
+    <table>
+      <tr><th>layer</th><th>what it does</th></tr>
+      <tr><td><code>ioxide</code> core</td><td>Binds the UDP port, receives datagrams on the ring,
+      and routes each one to a logical connection by its destination connection id. Knows nothing
+      about crypto or HTTP.</td></tr>
+      <tr><td><code>ioxide.ngtcp2</code></td><td>The QUIC protocol engine - ngtcp2 for the
+      transport, picotls for TLS 1.3, both bundled as one native library. Owns the handshake,
+      packet protection, loss recovery and flow control.</td></tr>
+      <tr><td><code>ioxide.nghttp3</code></td><td>Turns decrypted stream bytes into requests and
+      responses, including QPACK. There is also <code>ioxide.http3</code>, a pure-C# implementation
+      of the same layer.</td></tr>
+    </table>
+
+    <h2>TLS here is not the TLS you configured for TCP</h2>
+    <p>ioxide terminates TLS twice, through two entirely separate stacks, and this catches people
+    out. Over TCP it is OpenSSL, configured through <code>TlsService</code>. Over QUIC it is
+    picotls, driven by ngtcp2 and configured on <code>QuicEngine</code>. They share no code and no
+    configuration object, deliberately - QUIC does not use TLS records at all, it carries the
+    handshake in its own CRYPTO frames, so the two have almost nothing in common below the
+    certificate.</p>
+
+    <div class="note"><b>What this means in practice.</b> A server offering both HTTP/2 over TCP and
+    HTTP/3 over QUIC configures its certificates <em>twice</em>, once per stack. Rotating one does
+    not rotate the other. The <code>Playground/Http2/Rotate</code> and
+    <code>Playground/Http3/Rotate</code> samples exist as a pair for exactly this reason.</div>
+
+    <h2>Serving several names: SNI</h2>
+    <p>Register each name with its certificate before the engine starts serving. The default
+    certificate given to the constructor answers anything unmatched - including clients that send no
+    SNI at all.</p>
+
+    <pre><code class="language-csharp">using var engine = new QuicEngine(defaultCert, defaultKey, cidLength: 8, alpn: ["h3"]);
+
+engine.AddHost("alpha.test", alphaCert, alphaKey);
+engine.AddHost("beta.test",  betaCert,  betaKey);
+
+var quic = new QuicOptions { Port = 8443, ConnectionFactory = engine.CreateFactory() };</code></pre>
+
+    <p>Certificates are given as PEM <em>paths</em>, because that is how ngtcp2 loads them. The host
+    table is closed by <code>CreateFactory</code>: adding a name afterwards throws, because the
+    handshake reads that table without a lock and a concurrent write would be a data race rather
+    than a late registration. To change what a running server offers, use the next section.</p>
+
+    <h2>Renewing certificates without dropping traffic</h2>
+    <p><code>ReplaceCertificates</code> swaps the whole set atomically on a live engine - the
+    default and every named host together, so the server is never briefly serving a mix of
+    generations.</p>
+
+    <pre><code class="language-csharp">engine.ReplaceCertificates(
+    new QuicCertificate(renewedCert, renewedKey),
+    new Dictionary&lt;string, QuicCertificate&gt;
+    {
+        ["alpha.test"] = new(alphaRenewedCert, alphaRenewedKey),
+        ["beta.test"]  = new(betaRenewedCert,  betaRenewedKey),
+    });</code></pre>
+
+    <p>Three properties worth knowing before you wire this to a renewal hook:</p>
+    <ul>
+      <li><b>The set replaces, it does not merge.</b> A host left out of the dictionary stops being
+      served by name and falls back to the default certificate. Pass the full set every time.</li>
+      <li><b>Connections in flight keep the generation they started with.</b> picotls keeps reading
+      the context for the life of the connection, so a renewal a moment later installs a new
+      generation without disturbing anything already handshaking or established.</li>
+      <li><b>It does not change who may connect.</b> Client trust anchors and whether a client
+      certificate is required belong to the engine, not to this call - so renewing a server
+      certificate can never quietly widen or narrow access.</li>
+    </ul>
+
+    <p>The old contexts are kept rather than freed, because a handshake may be between reading one
+    and using what it found, and picotls does not refcount contexts. They are released when the
+    engine is disposed. Renewing a handful of names a few times a year costs kilobytes.</p>
+
+    <h2>Mutual TLS</h2>
+    <p>Give the engine the trust anchors, and say whether a certificate is mandatory.</p>
+
+    <pre><code class="language-csharp">using var engine = new QuicEngine(
+    certPath, keyPath, cidLength: 8, alpn: ["h3"],
+    clientCaPemPath: "ca.pem",           // or clientCaPem: "-----BEGIN CERTIFICATE-----..."
+    requireClientCertificate: true);</code></pre>
+
+    <p>With <code>requireClientCertificate: false</code> a certificate is requested and verified if
+    offered, but its absence is not fatal - useful when authorisation is decided per route rather
+    than per connection. Anchors are fixed when the engine is built; unlike server certificates they
+    are not replaceable on a running engine.</p>
+
+    <p>Once the handshake completes, the connection carries the peer's identity:</p>
+    <table>
+      <tr><td><code>PeerSubject</code></td><td>The full subject, rendered for humans to read.</td></tr>
+      <tr><td><code>PeerCommonName</code></td><td>The CN taken <em>structurally</em> from the
+      distinguished name.</td></tr>
+    </table>
+
+    <div class="note"><b>Compare <code>PeerCommonName</code>, never a substring of
+    <code>PeerSubject</code>.</b> The rendered form escapes a literal <code>/</code> as
+    <code>\/</code>, which still contains a <code>/</code> - so an organisation named
+    <code>Acme\/CN=admin.internal</code> renders as something a
+    <code>Contains("/CN=admin.internal")</code> check happily accepts, while being an entirely
+    different principal. The structural field exists to make that class of bug impossible.</div>
+
+    <h2>When the client changes address</h2>
+    <p>This is what QUIC's connection ids are for, and it is far more ordinary than "the user
+    switched from wifi to cellular". Home and mobile NATs recycle UDP mappings after fairly short
+    idle periods, so a connection that goes quiet and then speaks again can reappear from a
+    different source port without the client having moved at all.</p>
+
+    <p>ioxide feeds ngtcp2 the address each datagram actually arrived on, and migration is then
+    ngtcp2's decision rather than ours: it probes the new path with <code>PATH_CHALLENGE</code> and
+    waits for the matching <code>PATH_RESPONSE</code>. Until that completes the new path is under an
+    anti-amplification limit, so a forged address cannot be used to make the server flood a
+    third party. Adoption of the new path happens before validation finishes - the limit, not the
+    ordering, is what makes that safe. The connection is reported to the application through
+    <code>UpdatePeerAddress</code>, and the streams on it never notice.</p>
+
+    <h2 id="routing">Keeping a moved client on its own reactor</h2>
+    <p>A single-reactor server handles the above and is done. A real one runs a reactor per core,
+    all bound to the same UDP port through <code>SO_REUSEPORT</code>, and there the kernel decides
+    which reactor gets each datagram by hashing the <em>sender's address</em>. Change the address and
+    the hash picks a different reactor - one that has never heard of this connection.</p>
+
+    <div class="note"><b>The connection cannot move to meet the packet.</b> The
+    <code>ngtcp2_conn</code>, the picotls session, the open streams and their ring-bound buffers are
+    owned by one reactor thread. Handing live state to whichever reactor a datagram happened to land
+    on is the one thing a shared-nothing runtime forbids. So the <em>datagram</em> moves instead.</div>
+
+    <p>ioxide mints its own connection ids, so it writes the owning reactor into them: the first
+    byte is chosen so that <code>cid[0] % ReactorCount</code> is the owner, with the rest left
+    random. The id travels with the connection, so it keeps naming the right reactor whatever the
+    address does. <code>QuicOptions.Routing</code> then decides who acts on that.</p>
+
+    <table>
+      <tr><th></th><th>connections that never migrate</th><th>connections that do</th></tr>
+      <tr><td><code>Forward</code> <span class="muted">(default)</span></td>
+          <td>nothing - the path is never entered</td>
+          <td>about 8.5&nbsp;&micro;s per datagram</td></tr>
+      <tr><td><code>KernelFilter</code></td>
+          <td>free while there is CPU headroom; about -12% throughput at saturation</td>
+          <td>nothing</td></tr>
+    </table>
+
+    <p><b><code>Forward</code></b> leaves the kernel hashing as it always did. A reactor that
+    receives a short-header packet for an id it does not hold reads the owner from that first byte,
+    copies the datagram, and posts it across on the queue reactors already use to hand each other
+    work. The copy is the point rather than an inefficiency: the payload lives in the receiving
+    reactor's provided-buffer ring, which is handed back the instant dispatch returns, so passing a
+    pointer into it would be a use-after-free under load. What crosses a thread is bytes, never
+    reactor state.</p>
+
+    <p><b><code>KernelFilter</code></b> additionally attaches a classic-BPF program to the reuseport
+    group so the kernel reads that byte itself and delivers straight to the owner. It needs reactors
+    to open their UDP sockets in shard order, since the program answers with a position in the
+    reuseport group and that position is bind order - a startup-only rendezvous that does not exist
+    under the default. It also degrades rather than fails: if the kernel refuses the program (an
+    older kernel, a seccomp policy, a restricted container) ioxide says so and forwarding stays
+    underneath. Correctness never depends on the filter; only cost does.</p>
+
+    <p>Which to choose is a question of who pays. <code>Forward</code> charges only the connections
+    that actually migrate, and charges them a cross-thread wake per datagram - measurably a
+    <em>latency</em> cost rather than a CPU one, since CPU per request barely moved even with every
+    datagram forwarded. <code>KernelFilter</code> charges every packet a little kernel work, which is
+    invisible while there is CPU to spare and real once there is not. Unless a large share of your
+    clients migrate, <code>Forward</code> is cheaper in aggregate, which is why it is the default.</p>
+
+    <div class="note"><b>Only short headers are forwarded.</b> A short header means the handshake is
+    finished, so the id is one this server minted and its first byte genuinely names the owner. A
+    long header carries an id the <em>client</em> chose, and routing on a byte the peer controls
+    would let anyone aim traffic at a reactor of their choosing.</div>
+
+    <h2>Watching it work</h2>
+    <table>
+      <tr><td><code>QuicForwardsSent</code></td><td>Datagrams that arrived at the wrong reactor and
+      were handed to their owner. Zero on a server whose clients never move; rising is normal where
+      they do.</td></tr>
+      <tr><td><code>QuicForwardsDropped</code></td><td>Should stay at zero. Rises only when a
+      reactor is not keeping up with what its siblings hand it; the peers retransmit.</td></tr>
+      <tr><td><code>QuicStaleDatagrams</code></td><td>Short headers addressed to <em>this</em>
+      reactor for an id it no longer holds. Ordinary - a migration retires connection ids and
+      packets already in flight still carry the old ones.</td></tr>
+    </table>
+
+    <p>One more thing worth checking on any box serving QUIC seriously: ioxide asks each UDP socket
+    for <code>UdpOptions.SocketBufferBytes</code> (8&nbsp;MiB by default), and Linux silently clamps
+    that to <code>net.core.rmem_max</code> - 212,992 bytes on a stock install - rather than failing.
+    ioxide reads the granted size back and says so once at startup. Raising the cap is not
+    automatically an improvement: it trades early drops, which congestion control is built to read,
+    for a deep standing queue. Measure it on the deployment.</p>
 
     <h2>Why QUIC can't reuse the TCP plumbing</h2>
     <p>The TCP side is built around one fact: <em>one connection = one fd</em>. The reactor's
@@ -183,8 +373,9 @@ reactor.QuicHandle = (r, conn) => new Nghttp3Connection(conn, h3Options).RunBuff
       <em>long-header</em> packet is a new handshake: the factory runs <code>iq_accept</code>
       (validates the Initial, creates the ngtcp2 conn, mints our SCID), the reactor snapshots the
       peer address, registers the CIDs, inits the two-owner refcount, and launches your
-      <code>QuicHandle</code> fault-observed. Unknown short-header packets are dropped - stale
-      traffic from dead connections.</li>
+      <code>QuicHandle</code> fault-observed. An unknown <em>short-header</em> packet is either
+      stale traffic from a dead connection or a live one whose client changed address - see
+      <a href="#routing">Keeping a moved client on its own reactor</a> above.</li>
       <li><b>Engine read.</b> <code>OnDatagram</code> feeds the payload to
       <code>iq_conn_read</code>. ngtcp2 decrypts, handles ACKs and flow control, and fires
       callbacks mid-call - the important one being <em>stream data</em>.</li>
@@ -375,13 +566,13 @@ reactor.QuicHandle = async (r, conn) =>
       the body for output it already accepted; freeing on stop-sending is a use-after-free.</td></tr>
     </table></div>
 
-    <p class="next">Continue with <a href="architecture.html">Architecture</a> for the reactor
-    model these layers ride on, or <a href="dev-core.html">core internals</a> for the TCP-side
-    counterparts.</p>
+    <p class="next">Continue with <a href="learn/architecture.html">Architecture</a> for the reactor
+    model these layers ride on, or <a href="learn/tls.html">TLS</a> for the TCP-side stack this one
+    deliberately shares nothing with.</p>
   </main>
 </div>
 
-<footer>MIT · Linux 6.1+ · .NET 10 · <a href="https://github.com/MDA2AV/ioxide">github.com/MDA2AV/ioxide</a> · <a href="overview.html">docs</a></footer>
+<footer>MIT · Linux 6.1+ · .NET 10 · <a href="https://github.com/MDA2AV/ioxide">github.com/MDA2AV/ioxide</a> · <a href="learn/overview.html">docs</a></footer>
 
 <script>hljs.highlightAll();</script>
 </body>

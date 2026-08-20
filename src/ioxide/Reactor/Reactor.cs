@@ -12,6 +12,16 @@ namespace ioxide;
 public sealed unsafe partial class Reactor
 {
     private readonly int _id;
+
+    /// <summary>
+    /// This reactor's position in the fleet - the <c>id</c> it was constructed with, in
+    /// <c>0 .. ShardCount-1</c>. QUIC stamps it into the connection ids it mints so the kernel can
+    /// steer a connection's datagrams back here after the client changes address.
+    /// </summary>
+    public int ShardIndex => _id;
+
+    /// <summary>How many reactors share this server's ports (<see cref="ServerConfig.ReactorCount"/>).</summary>
+    public int ShardCount => _config.ReactorCount;
     private Ring _ring = null!;   // created on the reactor thread (DEFER_TASKRUN requires same-thread setup+enter)
 
     // TcpConnection table indexed by fd (dense small ints - array beats Dictionary per CQE).

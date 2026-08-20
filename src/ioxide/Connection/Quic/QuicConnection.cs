@@ -143,6 +143,19 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
         Reactor.UdpSendTo(SocketFd, PeerAddr, PeerAddrLen, payload, gsoSegmentSize);
     }
 
+    /// <summary>fd-table index of the socket claiming this peer, or -1. See Reactor.Quic.Pin.cs.</summary>
+    internal int PinSlot = -1;
+
+    /// <summary>What the claim names, so a repeat of the same path does not rebuild it.</summary>
+    internal readonly byte[] PinnedAddr = new byte[Reactor.UdpNameCap];
+    internal int PinnedAddrLen;
+
+    /// <summary>
+    /// Set once the peer address has moved. Only a migrated connection is worth claiming: one still
+    /// where it was accepted is already delivered here by the hash.
+    /// </summary>
+    internal bool PeerAddressMoved;
+
     /// <summary>Adopt a validated peer migration (copies the sockaddr out of the datagram).</summary>
     public unsafe void UpdatePeerAddress(nint addr, int addrLen)
     {
@@ -157,6 +170,10 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
 
         Buffer.MemoryCopy((void*)addr, (void*)PeerAddr, Reactor.UdpNameCap, addrLen);
         PeerAddrLen = addrLen;
+        PeerAddressMoved = true;
+
+        // The address is NOT claimed here: ngtcp2 reports a path repeatedly while validating it,
+        // so claiming per report churns sockets. The sweep does it once the address settles.
     }
 
     // --- read surface: engine enqueues on the reactor thread, the handler awaits from anywhere.

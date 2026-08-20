@@ -24,6 +24,19 @@ public sealed unsafe partial class Reactor
     private readonly HashSet<QuicConnection> _quicConnSet = [];
     private readonly List<QuicConnection> _quicSweepScratch = [];
 
+    private long _quicStaleDatagrams;
+
+    /// <summary>
+    /// Short-header datagrams naming a connection id that is addressed to THIS reactor and which it
+    /// does not have: retired after a migration (ngtcp2 rotates ids when the path changes, so
+    /// packets already in flight still carry the old one), long dead, or hostile.
+    ///
+    /// Ordinary, and not a routing problem - a migration produces a handful every time. Datagrams
+    /// that belong to a DIFFERENT reactor are not counted here; they are forwarded to it, and
+    /// counted by <see cref="QuicForwardsSent"/>.
+    /// </summary>
+    public long QuicStaleDatagrams => Volatile.Read(ref _quicStaleDatagrams);
+
     // No-op unless ServerConfig.Quic is set (the port itself is bound by OpenUdpSockets).
     private void InitQuic()
     {
@@ -32,6 +45,7 @@ public sealed unsafe partial class Reactor
             return;
         }
         _quicOptions = options;
+        QuicJoinFleet();   // so a datagram for another reactor's connection can reach it
         AddTicker(QuicSweep);
     }
 
@@ -101,7 +115,27 @@ public sealed unsafe partial class Reactor
 
         if (!longHeader)
         {
-            return;   // short header for an unknown CID: stale/garbage (stateless reset later)
+            // A short header names a connection that must already exist, so reaching here means
+            // this reactor cannot serve this datagram. There are two very different reasons for
+            // that, and conflating them makes the count useless:
+            //
+            //   the id is not ours   - the datagram reached the WRONG reactor, which is the
+            //                          routing failing and the thing worth alarming on
+            //   the id IS ours       - routing worked and the id is simply gone: retired after a
+            //                          migration (ngtcp2 rotates ids when the path changes, so
+            //                          packets in flight still carry the old one), or stale, or
+            //                          hostile. Ordinary, and not a routing problem
+            //
+            // Telling them apart is only possible because a server-minted id carries its owner,
+            // and the first case is recoverable: hand the datagram to the reactor it names rather
+            // than dropping a live connection's traffic. See Reactor.Quic.Forward.cs.
+            if (QuicTryForward(in datagram, in dcid))
+            {
+                return;
+            }
+
+            _quicStaleDatagrams++;
+            return;
         }
 
         // No factory (or no QuicOptions at all, on a client-only reactor): nothing is accepted here.
@@ -230,6 +264,8 @@ public sealed unsafe partial class Reactor
         // (engine close racing the idle sweep) cannot double-release.
         if (_quicConnSet.Remove(conn))
         {
+            QuicUnpinPeer(conn);   // give the descriptor back before the address it names is freed
+
             // Wake the handler with closed=1 first - it resumes inline, sees IsClosed, and releases
             // its own ref - then invalidate any awaiter that could outlive this life.
             conn.MarkClosed();
@@ -261,7 +297,12 @@ public sealed unsafe partial class Reactor
             {
                 QuicRemoveConnection(conn);
                 conn.OnEvicted(QuicEvictReason.IdleTimeout);
+                continue;
             }
+
+            // Claim a moved connection's new address, so its datagrams stop being forwarded. Here
+            // rather than at the path report, which fires repeatedly while ngtcp2 validates.
+            QuicPinPeer(conn);
         }
     }
 

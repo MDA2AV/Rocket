@@ -30,7 +30,7 @@
     <a href="clients.html">Custom clients</a>
     <div class="group lead">Internals</div>
     <a href="architecture.html" class="here">Architecture</a>
-    <a href="quic-h3.html">QUIC &amp; HTTP/3</a>
+    <a href="../how-ioxide-does-h3.html">How ioxide does HTTP/3</a>
     <div class="group sub">Packages</div>
     <a href="dev-core.html" class="pkg">ioxide <span class="muted">core</span></a>
     <a href="dev-pg.html" class="pkg">ioxide.pg</a>
@@ -182,7 +182,7 @@
       <tr><td><code>Udp.Ports</code></td><td>[]</td><td>raw UDP sockets; datagrams reach <code>Reactor.OnDatagram</code></td></tr>
       <tr><td><code>Udp.RecvSlots</code></td><td>16</td><td>shared UDP provided-buffer ring depth (in-flight datagrams)</td></tr>
       <tr><td><code>Udp.Gro</code></td><td>true</td><td>UDP_GRO: coalesce equal-size datagram bursts into one completion</td></tr>
-      <tr><td><code>Quic</code></td><td>null</td><td>enable the QUIC transport - see <a href="quic-h3.html">QUIC &amp; HTTP/3</a></td></tr>
+      <tr><td><code>Quic</code></td><td>null</td><td>enable the QUIC transport - see <a href="../how-ioxide-does-h3.html">QUIC &amp; HTTP/3</a></td></tr>
     </table>
 
     <div class="next"><a href="dev-core.html">Core internals →</a></div>

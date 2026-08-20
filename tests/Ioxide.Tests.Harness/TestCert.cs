@@ -73,6 +73,33 @@ public static class TestCert
     }
 
     /// <summary>
+    /// Whether a cached spec fixture still has the validity state it was minted for.
+    ///
+    /// These are cached by spec rather than freshness, since most are deliberately invalid. That is
+    /// safe one way only: an EXPIRED certificate stays expired, but a NOT YET VALID one becomes
+    /// valid when its notBefore arrives - so a "not valid yet" fixture starts being served the next
+    /// day and the test reports a product bug that does not exist.
+    /// </summary>
+    private static bool StillMatchesSpec(string certPath, ClientCertSpec spec)
+    {
+        try
+        {
+            using X509Certificate2 cert = X509CertificateLoader.LoadCertificateFromFile(certPath);
+            DateTime now = DateTime.Now;
+
+            bool shouldBeStarted = spec.NotBefore <= TimeSpan.Zero;
+            bool shouldBeUnexpired = spec.NotAfter > TimeSpan.Zero;
+
+            return cert.NotBefore <= now == shouldBeStarted
+                && now < cert.NotAfter == shouldBeUnexpired;
+        }
+        catch
+        {
+            return false;   // truncated or not a certificate at all: mint it again
+        }
+    }
+
+    /// <summary>
     /// A CA, a server certificate and two client certificates - one the CA signed, one a DIFFERENT
     /// CA signed. mTLS cannot be tested without all four: proving a good certificate is let in says
     /// nothing unless a bad one is turned away.
@@ -400,9 +427,9 @@ public static class TestCert
 
         using FileStream guard = Lock(dir, "spec");
 
-        // Deliberately NOT the Fresh() check: half of these are supposed to be outside their
-        // validity window, and re-minting an expired fixture on every run would defeat the test.
-        if (File.Exists(certPath) && File.Exists(keyPath))
+        // Not the Fresh() check - half of these are supposed to be outside their validity window.
+        // StillMatchesSpec checks the weaker thing: that it still means what it was minted to mean.
+        if (File.Exists(certPath) && File.Exists(keyPath) && StillMatchesSpec(certPath, spec))
         {
             return (ca, certPath, keyPath);
         }

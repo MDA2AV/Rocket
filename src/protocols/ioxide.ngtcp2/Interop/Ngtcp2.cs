@@ -90,12 +90,49 @@ internal static unsafe class Ngtcp2
 
     [DllImport(Lib)] internal static extern void iq_engine_free(nint engine);
 
+    /// <summary>The shim's exported-surface revision; checked against <see cref="Abi"/> at engine
+    /// construction so a stale native library fails loudly instead of mis-routing in silence.</summary>
+    [DllImport(Lib)] internal static extern uint iq_abi();
+
+    /// <summary>What this managed binding was written against. Bump both together.</summary>
+    internal const uint Abi = 2;
+
+    /// <summary>
+    /// Refuse to run against a native library this binding was not built for.
+    ///
+    /// Worth an explicit check rather than trusting the package: the shim and this assembly ship
+    /// together, so a mismatch means a stale libioxide_ngtcp2.so has been picked up out of a build
+    /// output - which has silently invalidated whole test runs here before. The failure it prevents
+    /// is not a crash but arguments landing in the wrong parameters, which looks like a logic bug
+    /// somewhere else entirely.
+    /// </summary>
+    internal static void RequireAbi()
+    {
+        uint native;
+        try
+        {
+            native = iq_abi();
+        }
+        catch (EntryPointNotFoundException)
+        {
+            native = 0;   // predates the counter, so certainly too old
+        }
+
+        if (native != Abi)
+        {
+            throw new InvalidOperationException(
+                $"ioxide.ngtcp2: the native library reports ABI {native}, this binding needs {Abi}. " +
+                "A stale libioxide_ngtcp2.so is being loaded - rebuild it with scripts/build-ngtcp2-native.sh.");
+        }
+    }
+
     [DllImport(Lib)] internal static extern nint iq_accept(
         nint engine,
         void* localSa, nuint localSaLen,
         void* remoteSa, nuint remoteSaLen,
         byte* pkt, nuint pktLen,
-        ulong ts, void* user, byte* scidOut);
+        ulong ts, void* user,
+        uint shard, uint shardCount, byte* scidOut);
 
     [DllImport(Lib)] internal static extern void iq_conn_free(nint conn);
 
