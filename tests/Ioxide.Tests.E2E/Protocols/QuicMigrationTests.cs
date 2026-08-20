@@ -72,18 +72,13 @@ internal static class QuicMigrationTests
 
         runner.Test("quic/migration: a fleet serves a client whose packets moved to another reactor", () =>
         {
-            // The multi-reactor case, which every other QUIC test here is blind to: they pin
-            // ReactorCount = 1, where a datagram has nowhere wrong to land. Issue #205.
+            // The multi-reactor case every other QUIC test is blind to - they pin ReactorCount = 1,
+            // where a datagram has nowhere wrong to land. Issue #205.
             //
-            // Note what does NOT prove anything here. "The request still succeeded" is satisfied by
-            // QUIC retransmitting until something gets through, so it passes even against a server
-            // that drops every migrated packet - measured, not assumed. And the handler's reactor
-            // cannot differ before and after, because one connection is served by one handler on
-            // one reactor, so asserting that asserts nothing.
-            //
-            // What is real is whether the datagrams actually arrived somewhere else and were
-            // handed on. So the test drives the address until they do, then asserts the exchange
-            // continues from there.
+            // "The request succeeded" proves nothing: QUIC retransmits until something gets
+            // through, so it passes even against a server that drops every migrated packet
+            // (measured). What is real is whether datagrams arrived elsewhere and were handed on,
+            // so the test drives the address until they do.
             (string certPath, string keyPath) = TestCert.Ensure();
             using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
 
@@ -149,13 +144,9 @@ internal static class QuicMigrationTests
 
         runner.Test("quic/migration: claiming the new address stops the forwarding", () =>
         {
-            // Forwarding alone is correct but permanent: the address does not change back, so every
-            // later datagram keeps landing on the wrong reactor and keeps paying a hop. The owning
-            // reactor claims the new address with a connected socket, which the kernel prefers over
-            // the wildcard binds, and delivery comes straight to it.
-            //
-            // What this asserts is that the forwarding STOPS - not that a claim was made, which
-            // would be satisfied by a claim that never receives anything.
+            // Forwarding alone is permanent: the address does not change back, so every later
+            // datagram pays a hop. The claim ends that. This asserts the forwarding STOPS, not that
+            // a claim was made - a claim that never receives anything would satisfy that.
             (string certPath, string keyPath) = TestCert.Ensure();
             using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
 
@@ -213,11 +204,9 @@ internal static class QuicMigrationTests
 
             Assert.Equal(settled, Forwarded());
 
-            // One claim per address, not one per report. ngtcp2 announces a path several times
-            // while it probes, and rebuilding the claim on each announcement closes a socket with
-            // datagrams already queued on it - losing packets in order to avoid a hop, which is
-            // the wrong trade. There were at most `swaps` distinct addresses, plus one for the
-            // address the connection started on.
+            // One claim per address, not per report: ngtcp2 announces a path several times while
+            // probing, and rebuilding on each closes a socket with datagrams queued on it. At most
+            // `swaps` distinct addresses, plus the one it started on.
             Console.Error.WriteLine($"pins created: {Pins()} across {swaps} address change(s)");
             Assert.True(Pins() <= swaps + 1,
                 $"{Pins()} claims for {swaps} address change(s): the same address is being "
@@ -272,14 +261,10 @@ internal static class QuicMigrationTests
             Assert.Equal(0L, forwarded);
         });
 
-        // The claim every other test here leans on and none of them checks: that the connection
-        // SURVIVED. A client that quietly re-handshakes after its address changes also answers 200
-        // to everything, so status codes cannot tell migration from reconnection - and if it were
-        // reconnecting, the h3 session, the QPACK tables and any application state would be gone
-        // while the tests stayed green.
-        //
-        // So the handler names the connection object serving each request, and the test asserts the
-        // name did not change. One connection, one accept, across an address change.
+        // What every other test here assumes and none checks: that the connection SURVIVED. A
+        // client that quietly re-handshakes also answers 200 to everything, so status codes cannot
+        // tell migration from reconnection. The handler names the connection object serving each
+        // request; the name must not change, and the factory must run once.
         foreach ((string stack, Func<Reactor, QuicConnection, Task> handler) in
                  new (string, Func<Reactor, QuicConnection, Task>)[]
                  {
@@ -325,9 +310,8 @@ internal static class QuicMigrationTests
                 Assert.True(served.StartsWith("conn-"),
                     $"expected the serving connection to name itself, got '{served}'");
 
-                // Keep moving until the datagrams genuinely reach a reactor that does not own the
-                // connection - otherwise the kernel may have re-hashed back to the owner and
-                // nothing about routing was exercised.
+                // Keep moving until the datagrams reach a reactor that does not own the connection -
+                // the kernel may re-hash back to the owner, exercising nothing.
                 int swaps = 0;
                 while (Forwarded() == 0 && swaps < 8)
                 {
@@ -360,11 +344,9 @@ internal static class QuicMigrationTests
 
         runner.Test("control: a fleet whose clients never move claims no addresses", () =>
         {
-            // The cost side of the claim. It is made from the sweep, which visits every connection
-            // every 250 ms, so a guard that only looks at "is this address claimed yet" would claim
-            // one for every connection on the server whether or not it had ever moved - a
-            // descriptor and an armed receive apiece, to change nothing. Only a connection whose
-            // address actually moved is worth claiming.
+            // The cost side. The claim runs from the sweep, which visits every connection every
+            // 250 ms, so a guard asking only "is this claimed yet" would spend a descriptor and an
+            // armed receive on every connection on the server to change nothing.
             (string certPath, string keyPath) = TestCert.Ensure();
             using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
 

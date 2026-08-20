@@ -3,40 +3,21 @@ using static ioxide.Native;
 namespace ioxide;
 
 /// <summary>
-/// The optimisation on top of cross-reactor forwarding: once a migrated client's new address is
-/// known, claim it with a socket of this reactor's own so the kernel delivers there directly and
-/// the forwarding stops.
+/// Ends the cross-reactor forwarding a migrated client would otherwise pay forever: the owning
+/// reactor claims the peer's new address with a socket <c>connect()</c>ed to it, which outranks the
+/// wildcard binds in the kernel's lookup, so the datagrams arrive here directly.
 ///
-/// Forwarding alone is correct but permanent. The kernel picks a socket by hashing the sender's
-/// address, and after a migration that address does not change back - so every one of that
-/// client's datagrams keeps landing on the wrong reactor and keeps paying a hop, for the life of
-/// the connection. See Reactor.Quic.Forward.cs.
+/// <c>connect()</c> on a datagram socket sends nothing - it is a local declaration - and a connected
+/// socket takes no part in reuseport selection, so no other peer moves (measured: eight, none did).
 ///
-/// A datagram socket bound to the same address as the others but <c>connect()</c>ed to one peer is
-/// a MORE SPECIFIC match than a wildcard bind, and the kernel's lookup takes the narrowest match
-/// before it ever reaches the reuseport hash. So the owning reactor opens one of those toward the
-/// peer's new address, and from the next datagram on it arrives here directly.
-///
-/// Three things about that, each verified rather than assumed:
-///
-/// <list type="bullet">
-/// <item><c>connect()</c> on a datagram socket puts nothing on the wire. It is a local declaration
-/// of intent - no handshake, and the peer is never told.</item>
-/// <item>Adding it does NOT re-scatter anybody else. A connected socket does not take part in
-/// reuseport selection, so the group stays the size it was and every other peer keeps landing
-/// exactly where it did. Measured: eight established peers, none moved.</item>
-/// <item>It cannot bootstrap itself. This reactor only learns the new address from a datagram, and
-/// the datagrams are going elsewhere - so forwarding has to deliver the first one. The two are
-/// complements: forwarding makes the pin possible, the pin stops forwarding being forever.</item>
-/// </list>
+/// It cannot bootstrap itself: this reactor only learns the new address from a datagram, and the
+/// datagrams are going elsewhere. Forwarding delivers the first one. See Reactor.Quic.Forward.cs.
 /// </summary>
 public sealed unsafe partial class Reactor
 {
     /// <summary>
-    /// Ceiling on pinned sockets held at once, because each costs a file descriptor and ngtcp2
-    /// adopts a new path BEFORE it finishes validating it - so a forged datagram can reach here.
-    /// Past the ceiling a migrated connection simply keeps forwarding, which is slower and still
-    /// correct. That is the right way round: the cheap failure is the safe one.
+    /// Ceiling on concurrent claims: each costs a descriptor, and ngtcp2 adopts a path before it
+    /// finishes validating it, so a forged datagram can reach here. Past it, forwarding continues.
     /// </summary>
     private const int QuicMaxPinnedPeers = 512;
 
@@ -47,7 +28,7 @@ public sealed unsafe partial class Reactor
     /// <summary>Peers currently claimed by a socket of this reactor's own.</summary>
     public int QuicPinsOpen => Volatile.Read(ref _quicPinsOpen);
 
-    /// <summary>Pins this reactor has opened since it started - one per migration it kept up with.</summary>
+    /// <summary>Claims opened since startup - one per address a connection moved to.</summary>
     public long QuicPinsCreated => Volatile.Read(ref _quicPinsCreated);
 
     /// <summary>
@@ -61,8 +42,7 @@ public sealed unsafe partial class Reactor
     /// </summary>
     internal void QuicPinPeer(QuicConnection conn)
     {
-        // Not under KernelFilter: the kernel is already routing by connection id there, so a claim
-        // would be a descriptor spent on nothing.
+        // Not under KernelFilter - the kernel already routes by connection id there.
         if (_quicOptions is not { PinMigratedPeers: true, Routing: QuicRouting.Forward } options ||
             !conn.PeerAddressMoved ||
             ShardCount <= 1 ||
@@ -73,10 +53,7 @@ public sealed unsafe partial class Reactor
             return;
         }
 
-        // ngtcp2 reports a path more than once while it probes, and each report used to tear the
-        // claim down and build a new one - closing a socket with datagrams already queued on it,
-        // which the peer then had to retransmit. Losing packets to "optimise" delivery is the wrong
-        // way round, so a repeat of the SAME address is left alone.
+        // Already claimed: leave it. Rebuilding would close a socket with datagrams queued on it.
         ReadOnlySpan<byte> current = new((void*)conn.PeerAddr, conn.PeerAddrLen);
         if (conn.PinSlot >= 0 &&
             conn.PinnedAddrLen == conn.PeerAddrLen &&
@@ -85,18 +62,15 @@ public sealed unsafe partial class Reactor
             return;
         }
 
-        // A genuinely new address: the old claim names somewhere the peer no longer is, so it goes.
-        QuicUnpinPeer(conn);
+        QuicUnpinPeer(conn);   // the old claim names somewhere the peer no longer is
 
         if (_quicPinsOpen >= QuicMaxPinnedPeers)
         {
-            return;   // keep forwarding: slower, correct, and bounded
+            return;   // keep forwarding: slower, correct, bounded
         }
 
-        // Never let a failed claim escape. This runs inside ngtcp2's path-change callback, where an
-        // exception is caught and recorded as a connection fault - so a transient bind failure would
-        // kill a connection that is working perfectly well, to skip an optimisation. Not claiming
-        // costs a hop per datagram; faulting costs the connection.
+        // A failed claim must never propagate: this runs from the sweep, where a throw would take
+        // the ticker down. Not claiming only costs a hop.
         int fd;
         try
         {
@@ -105,18 +79,17 @@ public sealed unsafe partial class Reactor
         }
         catch (InvalidOperationException)
         {
-            return;   // the port could not be bound again: forwarding continues, which is correct
+            return;   // could not bind again: forwarding continues
         }
 
         if (fd < 0)
         {
-            return;   // the address is already claimed, or the kernel refused: forwarding continues
+            return;   // already claimed, or the kernel refused: forwarding continues
         }
 
         conn.PinSlot = UdpAdoptSocket(fd, options.Port);
 
-        // Remember WHAT was claimed, so the repeat reports above can be recognised. Without this
-        // the comparison never matches and every report rebuilds a working claim.
+        // What was claimed, so the check above can recognise a repeat.
         current.CopyTo(conn.PinnedAddr);
         conn.PinnedAddrLen = conn.PeerAddrLen;
 
@@ -125,9 +98,8 @@ public sealed unsafe partial class Reactor
     }
 
     /// <summary>
-    /// Drop this connection's claim, if it holds one. Called on teardown and before re-claiming.
-    /// The slot is not reusable yet - it becomes so once the kernel's last completion for it
-    /// arrives, which is what stops a stale completion being read as a new socket's traffic.
+    /// Drop this connection's claim. The slot becomes reusable only once the kernel's last
+    /// completion for it arrives, so a stale completion is never read as a new socket's traffic.
     /// </summary>
     internal void QuicUnpinPeer(QuicConnection conn)
     {
@@ -146,14 +118,13 @@ public sealed unsafe partial class Reactor
         }
 
         int fd = _udpFds[slot];
-        _udpFds[slot] = -1;   // marks it released BEFORE the close, so no re-arm can race the fd away
+        _udpFds[slot] = -1;   // released before the close, so no re-arm can race the fd away
         close(fd);
         _quicPinsOpen--;
     }
 
     /// <summary>
-    /// Put an already-open socket into the fd table and arm it on this ring, reusing a slot left by
-    /// a released pin when one has finished draining. Returns its index.
+    /// Add an open socket to the fd table and arm it, reusing a drained slot when one is free.
     /// </summary>
     private int UdpAdoptSocket(int fd, ushort port)
     {
@@ -166,8 +137,8 @@ public sealed unsafe partial class Reactor
         }
         else
         {
-            // Append. Indices stay stable - recv completions carry theirs in user_data - so growing
-            // the tables cannot disturb the multishots already armed on the existing sockets.
+            // Indices stay stable (completions carry theirs in user_data), so growing the tables
+            // cannot disturb multishots already armed.
             index       = _udpFds.Length;
             _udpFds     = [.. _udpFds, fd];
             _udpFdPorts = [.. _udpFdPorts, port];

@@ -73,17 +73,12 @@ public static class TestCert
     }
 
     /// <summary>
-    /// Whether a cached spec fixture still has the validity state it was created to have.
+    /// Whether a cached spec fixture still has the validity state it was minted for.
     ///
-    /// These fixtures are cached by content rather than by freshness, because most of them are
-    /// deliberately invalid and re-minting would defeat them. That is safe in one direction only:
-    /// an EXPIRED certificate stays expired forever, but one minted to be NOT YET VALID becomes
-    /// valid the moment its notBefore arrives. A "not valid yet is refused" fixture minted with
-    /// notBefore = now + 1 day therefore starts being served the next day, and the test fails
-    /// reporting a product bug that does not exist - which is exactly what happened on the day
-    /// this was written.
-    ///
-    /// So the cached file is reused only while its actual state still matches the intent.
+    /// These are cached by spec rather than freshness, since most are deliberately invalid. That is
+    /// safe one way only: an EXPIRED certificate stays expired, but a NOT YET VALID one becomes
+    /// valid when its notBefore arrives - so a "not valid yet" fixture starts being served the next
+    /// day and the test reports a product bug that does not exist.
     /// </summary>
     private static bool StillMatchesSpec(string certPath, ClientCertSpec spec)
     {
@@ -432,10 +427,8 @@ public static class TestCert
 
         using FileStream guard = Lock(dir, "spec");
 
-        // Deliberately NOT the Fresh() check: half of these are supposed to be outside their
-        // validity window, and re-minting an expired fixture on every run would defeat the test.
-        // What IS checked is that the fixture still means what it was minted to mean - see
-        // StillMatchesSpec.
+        // Not the Fresh() check - half of these are supposed to be outside their validity window.
+        // StillMatchesSpec checks the weaker thing: that it still means what it was minted to mean.
         if (File.Exists(certPath) && File.Exists(keyPath) && StillMatchesSpec(certPath, spec))
         {
             return (ca, certPath, keyPath);

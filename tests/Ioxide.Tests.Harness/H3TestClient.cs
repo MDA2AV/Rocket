@@ -157,8 +157,7 @@ public sealed unsafe class H3TestClient : IDisposable
     {
         EnsureH3Session();
 
-        // Per request: a fresh bidi stream and fresh response state. The H3 SESSION is not per
-        // request - see EnsureH3Session.
+        // Per request: a fresh bidi stream and response state. The session is not - see above.
         _status = -1;
         _body.Clear();
         _done = false;
@@ -208,16 +207,10 @@ public sealed unsafe class H3TestClient : IDisposable
     }
 
     /// <summary>
-    /// Stand up the HTTP/3 session once per connection: the client conn and its control, QPACK
-    /// encoder and QPACK decoder streams.
-    ///
-    /// Once, not per request. HTTP/3 permits exactly one control stream per peer, and RFC 9114
-    /// 6.2.1 requires a second one to be treated as a connection error of type
-    /// H3_STREAM_CREATION_ERROR. Doing this per request opened a fresh control and QPACK pair every
-    /// time, so from the second request onward this client was speaking invalid HTTP/3 - and a
-    /// correct server answered by killing the connection. It still looked green, because the
-    /// requests were already in flight and kept being served off state the server had torn down,
-    /// which is precisely the sort of thing a test client must not do.
+    /// The H3 session - client conn plus its control and QPACK streams - stood up once per
+    /// CONNECTION, not per request. HTTP/3 allows one control stream per peer and RFC 9114 6.2.1
+    /// makes a second one a connection error, so doing this per request spoke invalid HTTP/3 from
+    /// the second request on and a correct server killed the connection.
     /// </summary>
     private void EnsureH3Session()
     {
@@ -357,13 +350,9 @@ public sealed unsafe class H3TestClient : IDisposable
     public bool PeerClosed => _peerClosed;
 
     /// <summary>
-    /// Give ngtcp2 its loss timers. Without this the client has NO loss recovery: a lost datagram
-    /// leaves its packet unacked forever, the congestion window fills, writev_stream starts
-    /// answering 0 with nothing consumed, and the connection deadlocks with both sides silent.
-    ///
-    /// It went unnoticed because nothing here ever lost a packet - each connection served one
-    /// request over loopback and was gone. A connection that lives for several requests across an
-    /// address change does lose them, and then a real server looks like it hung.
+    /// ngtcp2's loss timers. Without them there is NO loss recovery: a lost datagram stays unacked,
+    /// the congestion window fills, writev_stream answers 0, and both ends deadlock silently -
+    /// which looks exactly like a server that hung after a migration.
     /// </summary>
     private void FireExpiredTimers()
     {
@@ -378,8 +367,7 @@ public sealed unsafe class H3TestClient : IDisposable
             return;
         }
 
-        // Nonzero is terminal here exactly as it is for a read: draining, closing, or a protocol
-        // error, none of which a later datagram undoes.
+        // Nonzero is terminal, as for a read: draining, closing, or a protocol error.
         if (iq_conn_handle_expiry(_conn, now) != 0)
         {
             _peerClosed = true;

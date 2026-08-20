@@ -4,38 +4,19 @@ using static ioxide.Native;
 namespace ioxide;
 
 /// <summary>
-/// Connection-id steering for QUIC: a classic-BPF program attached to the QUIC port's
-/// <c>SO_REUSEPORT</c> group so the kernel picks the reactor by reading the connection id out of
-/// the datagram, instead of hashing the sender's address.
+/// <see cref="QuicRouting.KernelFilter"/>: a classic-BPF program on the QUIC port's
+/// <c>SO_REUSEPORT</c> group, so the kernel picks the reactor by reading the connection id out of
+/// the datagram rather than hashing the sender's address - which is what breaks when that address
+/// changes. Every id this server mints carries its owner in the first byte (iq_stamp_shard in the
+/// shim), chosen so <c>cid[0] % ReactorCount</c> is that reactor.
 ///
-/// The default without it is the 4-tuple hash, which is correct only while a client's address
-/// never changes. When it does - a NAT rebind, a phone moving from wifi to cellular, a deliberate
-/// migration - the hash lands the datagram on a reactor that has never heard of that connection,
-/// and a short-header packet for an unknown id is dropped. The connection stays alive and
-/// unreachable on its own reactor until the idle sweep evicts it. Since the state that could serve
-/// it (the ngtcp2 conn, the picotls session, the open streams) is native memory owned by one
-/// reactor thread and documented reactor-thread-only, the fix has to move the DATAGRAM to the
-/// state, never the state to the datagram.
+/// Two consequences. The filter answers with a position in the reuseport group and that position
+/// is BIND ORDER, so reactors must open the QUIC socket in <see cref="ShardIndex"/> order - what
+/// <see cref="QuicSteeringAwaitTurn"/> arranges, at startup only. And it cannot be attached until
+/// every reactor has joined, or an index can point past the end; the last one out attaches it.
 ///
-/// Which is what the connection id is for. Every id this server mints carries its owning reactor
-/// in the first byte (see iq_stamp_shard in the shim), chosen so <c>cid[0] % ReactorCount</c> is
-/// exactly that reactor. The filter below recomputes it and returns it as the index into the
-/// reuseport group. The id travels with the connection, so the routing survives whatever the
-/// address does.
-///
-/// Two things this depends on, both handled here:
-///
-/// <list type="bullet">
-/// <item>The filter answers with a position in the reuseport group, and that position is
-/// <b>bind order</b>. So the reactors have to open the QUIC socket in <c>ShardIndex</c> order,
-/// which is what <see cref="QuicSteeringAwaitTurn"/> arranges. It is a startup-only cost.</item>
-/// <item>The program must not be attached until every reactor has joined the group, or an index
-/// can point past the end of it. The last reactor out attaches it.</item>
-/// </list>
-///
-/// If anything about that does not hold - the kernel refuses the program, a reactor fails to bind,
-/// the fleet never assembles - steering is abandoned and the port keeps the 4-tuple hash. That is
-/// today's behaviour, so the fallback is never worse than not having tried.
+/// Any failure - the kernel refuses the program, a reactor fails to bind, the fleet never
+/// assembles - abandons steering and leaves the 4-tuple hash, with forwarding still underneath.
 /// </summary>
 public sealed unsafe partial class Reactor
 {
@@ -43,22 +24,16 @@ public sealed unsafe partial class Reactor
     private const int SO_ATTACH_REUSEPORT_CBPF = 51;
 
     /// <summary>
-    /// How long a reactor waits for its turn to open the QUIC socket before giving up on ordering.
-    /// Generous, because it only has to cover other reactor threads reaching the same point in
-    /// startup; if it is ever hit, something is wrong with the fleet rather than merely slow.
+    /// How long a reactor waits its turn before giving up on ordering. Generous: it only covers
+    /// other reactors reaching the same point in startup.
     /// </summary>
     private const int QuicSteeringTurnTimeoutMs = 10_000;
 
-    /// <summary>
-    /// The shard byte is one byte, so beyond 256 reactors it cannot encode the owner and steering
-    /// is not attempted. Nothing else changes; the port keeps the 4-tuple hash.
-    /// </summary>
+    /// <summary>Beyond 256 reactors one byte cannot encode the owner, so steering is skipped.</summary>
     private const int QuicSteeringMaxShards = 256;
 
-    // Keyed by the ServerConfig instance the fleet shares, so two servers in one process (which is
-    // the normal shape in the test suites) get independent gates and cannot wait on each other.
-    // ConditionalWeakTable keys on reference identity, not the record's value equality, which is
-    // what we want here - and it holds the gate no longer than the config itself.
+    // Keyed by the shared ServerConfig instance, so two servers in one process get independent
+    // gates. ConditionalWeakTable keys on reference identity, not the record's value equality.
     private static readonly ConditionalWeakTable<ServerConfig, QuicSteeringGate> QuicSteeringGates = new();
 
     private sealed class QuicSteeringGate
@@ -70,10 +45,7 @@ public sealed unsafe partial class Reactor
         public bool Settled;         // attach (or the decision not to) already happened
     }
 
-    /// <summary>
-    /// Whether this reactor should take part in ordered opening. QUIC only - a plain UDP server
-    /// keeps today's startup exactly - and only when there is a fleet to steer across.
-    /// </summary>
+    /// <summary>QUIC only, and only when there is a fleet to steer across.</summary>
     private bool _quicSteeringAttached;
 
     /// <summary>
@@ -102,13 +74,11 @@ public sealed unsafe partial class Reactor
     }
 
     /// <summary>
-    /// Block until it is this reactor's turn to open its sockets, so that group position equals
-    /// <see cref="ShardIndex"/>.
+    /// Block until it is this reactor's turn, so group position equals <see cref="ShardIndex"/>.
     ///
-    /// The timeout is what keeps a misconfigured fleet from becoming a hang: a caller that starts
-    /// fewer reactors than <see cref="ServerConfig.ReactorCount"/> would otherwise leave everyone
-    /// after the missing one waiting forever. On expiry the gate is abandoned ONCE and every
-    /// waiter is released together, so the delay is paid a single time rather than per reactor.
+    /// The timeout stops a misconfigured fleet becoming a hang - starting fewer reactors than
+    /// <see cref="ServerConfig.ReactorCount"/> would strand everyone after the missing one. On
+    /// expiry the gate is abandoned ONCE and all waiters released, so the delay is paid once.
     /// </summary>
     private void QuicSteeringAwaitTurn(QuicSteeringGate gate)
     {
@@ -134,8 +104,7 @@ public sealed unsafe partial class Reactor
     }
 
     /// <summary>
-    /// Hand the turn to the next reactor, and - if this was the last one and every reactor bound
-    /// cleanly - attach the steering program now that the group is complete.
+    /// Hand the turn on, and if this was the last reactor and all bound cleanly, attach the program.
     /// </summary>
     /// <param name="gate">The fleet's gate, or null when steering is not active.</param>
     /// <param name="quicFd">This reactor's QUIC socket, or -1 if opening it failed.</param>
@@ -150,8 +119,7 @@ public sealed unsafe partial class Reactor
         {
             if (quicFd < 0)
             {
-                // This reactor never joined the group, so every later index is off by one.
-                gate.Abandoned = true;
+                gate.Abandoned = true;   // never joined, so every later index is off by one
             }
             else if (gate.QuicFd < 0)
             {
@@ -177,32 +145,29 @@ public sealed unsafe partial class Reactor
     }
 
     /// <summary>
-    /// Attach the steering program to the QUIC reuseport group. Failure is reported and otherwise
-    /// ignored: an older kernel, a seccomp policy or a restricted container can all refuse it, and
-    /// the only consequence is that address changes go back to breaking connections.
+    /// Attach the program to the QUIC reuseport group. Failure is reported and otherwise ignored -
+    /// an old kernel, seccomp or a restricted container can refuse it, and forwarding still works.
     /// </summary>
     private void QuicAttachSteering(int fd, int shards)
     {
         // classic-BPF instruction: { u16 code; u8 jt; u8 jf; u32 k; }
         //
-        //   0  ld len                 A = datagram length
-        //   1  jge #9 ? next : ->8    too short to hold a connection id: fall through on the
-        //                             length itself, which is in bounds and deterministic
-        //   2  ldb [0]                the QUIC first byte
-        //   3  and #0x80              its header-form bit
-        //   4  jeq #0 ? ->7 : next    clear = short header
-        //   5  ldb [6]                long header: first byte / 4 version / 1 dcid len, so DCID
-        //                             starts at 6. A client's Initial id is its own random value,
-        //                             which makes this a hash - and a stable one, so every packet
-        //                             of a handshake still reaches one reactor.
+        //   0  ld len              A = datagram length
+        //   1  jge #9 ? : ->8      too short for a connection id: fall through on the length,
+        //                          which is in bounds and deterministic
+        //   2  ldb [0]             QUIC first byte
+        //   3  and #0x80           header-form bit
+        //   4  jeq #0 ? ->7 :      clear = short header
+        //   5  ldb [6]             long header: 1 first byte + 4 version + 1 dcid len, so DCID is
+        //                          at 6. The client chose that id, so this acts as a stable hash -
+        //                          every packet of a handshake still reaches one reactor.
         //   6  ja ->8
-        //   7  ldb [1]                short header: DCID starts straight after the first byte.
-        //                             This is a connection id WE minted, so the byte is the shard.
-        //   8  mod #shards            the reuseport index
+        //   7  ldb [1]             short header: DCID at 1, an id WE minted, so the byte is ours
+        //   8  mod #shards         the reuseport index
         //   9  ret a
         //
-        // Byte loads, not word loads, because iq_stamp_shard controls exactly one byte. Reading
-        // more would mix in bytes it does not constrain and the two sides would disagree.
+        // Byte loads, not word loads: iq_stamp_shard controls exactly one byte, and reading more
+        // would mix in bytes it does not constrain.
         (ushort code, byte jt, byte jf, uint k)[] program =
         [
             (0x80, 0, 0, 0),               // ld len
@@ -228,7 +193,7 @@ public sealed unsafe partial class Reactor
         }
 
         // struct sock_fprog { unsigned short len; struct sock_filter *filter; } - the pointer is
-        // 8-aligned, so the length sits in the first two bytes of a 16-byte struct.
+        // 8-aligned, so len sits in the first two bytes of 16.
         byte* fprog = stackalloc byte[16];
         new Span<byte>(fprog, 16).Clear();
         *(ushort*)fprog     = (ushort)program.Length;
@@ -237,9 +202,8 @@ public sealed unsafe partial class Reactor
         if (setsockopt(fd, SOL_SOCKET, SO_ATTACH_REUSEPORT_CBPF, fprog, 16) < 0)
         {
             Console.Error.WriteLine(
-                $"[r{_id}] quic: could not attach connection-id steering; the port keeps the "
-                + "4-tuple hash and migrated clients fall back to cross-reactor forwarding, which "
-                + "is correct but costs a hop per datagram");
+                $"[r{_id}] quic: could not attach connection-id steering; falling back to "
+                + "cross-reactor forwarding, which is correct but costs a hop per datagram");
             return;
         }
 

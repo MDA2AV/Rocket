@@ -300,9 +300,8 @@ public sealed unsafe partial class Reactor
                 continue;
             }
 
-            // A connection whose address has moved gets its new one claimed, so its datagrams stop
-            // being forwarded. Done here rather than when the move is reported because a path is
-            // reported many times while ngtcp2 validates it; by the next sweep it has settled.
+            // Claim a moved connection's new address, so its datagrams stop being forwarded. Here
+            // rather than at the path report, which fires repeatedly while ngtcp2 validates.
             QuicPinPeer(conn);
         }
     }

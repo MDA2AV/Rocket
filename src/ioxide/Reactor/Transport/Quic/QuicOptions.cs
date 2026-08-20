@@ -11,16 +11,14 @@ public sealed record QuicOptions
     public int LocalCidLength { get; init; } = 8;
 
     /// <summary>
-    /// How a datagram reaches the reactor that owns its connection when several reactors share the
-    /// port. Defaults to <see cref="QuicRouting.Forward"/>, which costs nothing until a client
-    /// changes address; see <see cref="QuicRouting"/> for the measured trade.
+    /// How a datagram reaches the reactor owning its connection when several share the port.
+    /// See <see cref="QuicRouting"/> for the measured trade.
     /// </summary>
     public QuicRouting Routing { get; init; } = QuicRouting.Forward;
 
     /// <summary>
-    /// Under <see cref="QuicRouting.Forward"/>, claim a migrated client's new address with a socket
-    /// of the owning reactor's own, so the kernel delivers there directly and the forwarding stops
-    /// after the first datagram or two. Costs one file descriptor per migrated connection.
+    /// Under <see cref="QuicRouting.Forward"/>, claim a migrated client's new address so the kernel
+    /// delivers to its owner directly and forwarding stops. One descriptor per migrated connection.
     /// </summary>
     public bool PinMigratedPeers { get; init; } = true;
 

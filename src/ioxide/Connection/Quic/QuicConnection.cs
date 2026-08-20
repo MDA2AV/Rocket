@@ -143,24 +143,16 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
         Reactor.UdpSendTo(SocketFd, PeerAddr, PeerAddrLen, payload, gsoSegmentSize);
     }
 
-    /// <summary>
-    /// Index in the reactor's fd table of the socket claiming this connection's peer address, or -1
-    /// when it holds none. Owned by the reactor; see Reactor.Quic.Pin.cs.
-    /// </summary>
+    /// <summary>fd-table index of the socket claiming this peer, or -1. See Reactor.Quic.Pin.cs.</summary>
     internal int PinSlot = -1;
 
-    /// <summary>
-    /// The address the current claim names, so a repeated report of the SAME path does not tear a
-    /// working claim down and build it again. Owned by the reactor.
-    /// </summary>
+    /// <summary>What the claim names, so a repeat of the same path does not rebuild it.</summary>
     internal readonly byte[] PinnedAddr = new byte[Reactor.UdpNameCap];
     internal int PinnedAddrLen;
 
     /// <summary>
-    /// Set once this connection's peer address has actually moved. Only a connection that migrated
-    /// is worth claiming an address for: one still at the address it was accepted on is already
-    /// being delivered here by the kernel's hash, so a claim would spend a descriptor to change
-    /// nothing. Owned by the reactor.
+    /// Set once the peer address has moved. Only a migrated connection is worth claiming: one still
+    /// where it was accepted is already delivered here by the hash.
     /// </summary>
     internal bool PeerAddressMoved;
 
@@ -180,11 +172,8 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
         PeerAddrLen = addrLen;
         PeerAddressMoved = true;
 
-        // Deliberately NOT claiming the address here. ngtcp2 reports a path repeatedly while it
-        // validates one - alternating between the old path for data and the new one for
-        // PATH_CHALLENGE probes - so a claim made on each report churns sockets between two
-        // addresses and drops datagrams already queued on the one it closes. The reactor's sweep
-        // picks this up once the address has stopped moving. See Reactor.Quic.Pin.cs.
+        // The address is NOT claimed here: ngtcp2 reports a path repeatedly while validating it,
+        // so claiming per report churns sockets. The sweep does it once the address settles.
     }
 
     // --- read surface: engine enqueues on the reactor thread, the handler awaits from anywhere.

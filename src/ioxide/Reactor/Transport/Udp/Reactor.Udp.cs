@@ -58,10 +58,8 @@ public sealed unsafe partial class Reactor
 
     private int[]    _udpFds     = [];
 
-    // Slots whose socket was closed (a released pin) and whose multishot has finished draining, so
-    // the index can be handed out again. A slot is only recycled after the kernel's last completion
-    // for it: reusing one earlier would let a stale completion be read as the new socket's traffic.
-    // See Reactor.Quic.Pin.cs.
+    // Slots from released pins whose multishot has finished draining. Only recycled after the
+    // kernel's last completion, or a stale one would read as the new socket's traffic.
     private readonly Stack<int> _udpFreeSlots = new();
     private ushort[] _udpFdPorts = [];
 
@@ -124,8 +122,8 @@ public sealed unsafe partial class Reactor
 
                 if (_config.Quic is { } configured && port == configured.Port)
                 {
-                    // Also remembered for the life of the reactor: a pinned socket is only ever
-                    // made against the wildcard QUIC socket, never a client's own ephemeral one.
+                    // Kept for the reactor's life: pins are only made against this socket, never
+                    // a client's own ephemeral one.
                     quicFd = _quicServingFd = _udpFds[i];
                 }
             }
@@ -354,11 +352,9 @@ public sealed unsafe partial class Reactor
             }
         }
 
-        // A pinned socket: bound to the same address as its siblings, but naming ONE peer. That
-        // makes it a more specific match than the wildcard binds, so the kernel delivers that
-        // peer's datagrams here without consulting the reuseport hash at all - and, measured,
-        // without disturbing which socket any other peer lands on. Purely local: connect() on a
-        // datagram socket sends nothing.
+        // A pinned socket: same address as its siblings but naming ONE peer, so it outranks the
+        // wildcard binds and the reuseport hash is never consulted for that peer. Measured: no
+        // other peer moves. connect() on a datagram socket sends nothing.
         if (connectTo != 0 && connect(fd, (void*)connectTo, (uint)connectLen) < 0)
         {
             close(fd);
@@ -400,9 +396,8 @@ public sealed unsafe partial class Reactor
 
         if (_udpFds[socketIndex] < 0)
         {
-            // The socket was closed while this was in flight (a pin released). Hand back any buffer
-            // the kernel already selected, and take the terminating completion as the signal that
-            // nothing more will reference this slot.
+            // Closed while this was in flight (a released pin). Hand back any buffer the kernel
+            // selected; the terminating completion means nothing more references this slot.
             if ((flags & IORING_CQE_F_BUFFER) != 0)
             {
                 ReturnUdpBuffer((ushort)(flags >> IORING_CQE_BUFFER_SHIFT));
