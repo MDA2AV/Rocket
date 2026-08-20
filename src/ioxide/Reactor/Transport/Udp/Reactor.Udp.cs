@@ -57,6 +57,12 @@ public sealed unsafe partial class Reactor
     private const int ENOBUFS_UDP = 105;
 
     private int[]    _udpFds     = [];
+
+    // Slots whose socket was closed (a released pin) and whose multishot has finished draining, so
+    // the index can be handed out again. A slot is only recycled after the kernel's last completion
+    // for it: reusing one earlier would let a stale completion be read as the new socket's traffic.
+    // See Reactor.Quic.Pin.cs.
+    private readonly Stack<int> _udpFreeSlots = new();
     private ushort[] _udpFdPorts = [];
 
     // Shared provided-buffer ring for all UDP sockets (one registration, one bgid).
@@ -118,7 +124,9 @@ public sealed unsafe partial class Reactor
 
                 if (_config.Quic is { } configured && port == configured.Port)
                 {
-                    quicFd = _udpFds[i];
+                    // Also remembered for the life of the reactor: a pinned socket is only ever
+                    // made against the wildcard QUIC socket, never a client's own ephemeral one.
+                    quicFd = _quicServingFd = _udpFds[i];
                 }
             }
         }
@@ -284,7 +292,8 @@ public sealed unsafe partial class Reactor
         Volatile.Write(ref *(ushort*)(_udpBufRing + 14), _udpBufRingTail);
     }
 
-    private static int OpenUdpSocket(ushort port, bool dualStack, bool gro, int socketBufferBytes)
+    private static int OpenUdpSocket(ushort port, bool dualStack, bool gro, int socketBufferBytes,
+        nint connectTo = 0, int connectLen = 0)
     {
         // Refused rather than clamped: a zero or negative request would leave the socket on the
         // kernel minimum, which looks identical to the clamp above and would be read as one.
@@ -345,6 +354,17 @@ public sealed unsafe partial class Reactor
             }
         }
 
+        // A pinned socket: bound to the same address as its siblings, but naming ONE peer. That
+        // makes it a more specific match than the wildcard binds, so the kernel delivers that
+        // peer's datagrams here without consulting the reuseport hash at all - and, measured,
+        // without disturbing which socket any other peer lands on. Purely local: connect() on a
+        // datagram socket sends nothing.
+        if (connectTo != 0 && connect(fd, (void*)connectTo, (uint)connectLen) < 0)
+        {
+            close(fd);
+            return -1;
+        }
+
         return fd;
     }
 
@@ -352,6 +372,11 @@ public sealed unsafe partial class Reactor
     // then delivers a CQE per datagram, each selecting a ring buffer, until the multishot terminates.
     private void ArmUdpRecv(int socketIndex)
     {
+        if (_udpFds[socketIndex] < 0)
+        {
+            return;   // slot released; nothing to arm and nothing to re-arm onto
+        }
+
         IoUringSqe* sqe = GetSqeOrFlush();
         Unsafe.InitBlockUnaligned(sqe, 0, 64);
         sqe->opcode    = IORING_OP_RECVMSG;
@@ -372,6 +397,22 @@ public sealed unsafe partial class Reactor
         }
 
         bool more = (flags & IORING_CQE_F_MORE) != 0;
+
+        if (_udpFds[socketIndex] < 0)
+        {
+            // The socket was closed while this was in flight (a pin released). Hand back any buffer
+            // the kernel already selected, and take the terminating completion as the signal that
+            // nothing more will reference this slot.
+            if ((flags & IORING_CQE_F_BUFFER) != 0)
+            {
+                ReturnUdpBuffer((ushort)(flags >> IORING_CQE_BUFFER_SHIFT));
+            }
+            if (!more)
+            {
+                _udpFreeSlots.Push(socketIndex);
+            }
+            return;
+        }
 
         if (res < 0)
         {
@@ -583,7 +624,10 @@ public sealed unsafe partial class Reactor
     {
         foreach (int fd in _udpFds)
         {
-            close(fd);
+            if (fd >= 0)
+            {
+                close(fd);
+            }
         }
     }
 

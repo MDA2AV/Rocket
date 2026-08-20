@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using ioxide;
+using ioxide.http3;
 using ioxide.nghttp3;
 using ioxide.ngtcp2;
 
@@ -146,6 +147,83 @@ internal static class QuicMigrationTests
                 "the server never sent anything to the client's new address, so nothing migrated");
         });
 
+        runner.Test("quic/migration: claiming the new address stops the forwarding", () =>
+        {
+            // Forwarding alone is correct but permanent: the address does not change back, so every
+            // later datagram keeps landing on the wrong reactor and keeps paying a hop. The owning
+            // reactor claims the new address with a connected socket, which the kernel prefers over
+            // the wildcard binds, and delivery comes straight to it.
+            //
+            // What this asserts is that the forwarding STOPS - not that a claim was made, which
+            // would be satisfied by a claim that never receives anything.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+
+            (int serverPort, Reactor[] fleet) = TestServer.StartQuicSharded(4,
+                engine.CreateFactory(),
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                    static _ => Nghttp3Response.Text("migrated-ok")),
+                routing: QuicRouting.Forward);
+
+            long Forwarded()
+            {
+                long n = 0;
+                foreach (Reactor reactor in fleet) { n += reactor.QuicForwardsSent; }
+                return n;
+            }
+
+            long Pins()
+            {
+                long n = 0;
+                foreach (Reactor reactor in fleet) { n += reactor.QuicPinsCreated; }
+                return n;
+            }
+
+            using var forwarder = new UdpForwarder(serverPort);
+            using var client = new H3TestClient("127.0.0.1", forwarder.Port);
+
+            client.Connect();
+            Assert.True(client.CompleteHandshake(10_000), "the handshake through the forwarder did not complete");
+            Assert.Equal(200, client.Request("GET", "/before", null, 10_000).Status);
+
+            // Move until the datagrams genuinely land on another reactor, which is what makes a
+            // claim necessary at all.
+            int swaps = 0;
+            while (Forwarded() == 0 && swaps < 8)
+            {
+                swaps++;
+                forwarder.SwapUpstream();
+                Assert.Equal(200, client.Request("GET", $"/after-{swaps}", null, 15_000).Status);
+            }
+
+            Assert.True(Forwarded() > 0,
+                $"after {swaps} address changes nothing was forwarded, so no claim was needed and "
+                + "this test proved nothing");
+
+            // ngtcp2 only reports the new path once it has probed it, so give the claim a request
+            // to be made in, then measure from there.
+            Assert.Equal(200, client.Request("GET", "/settle", null, 15_000).Status);
+            Assert.True(Pins() > 0, "the new address was never claimed");
+
+            long settled = Forwarded();
+            for (int i = 0; i < 5; i++)
+            {
+                Assert.Equal(200, client.Request("GET", $"/steady-{i}", null, 15_000).Status);
+            }
+
+            Assert.Equal(settled, Forwarded());
+
+            // One claim per address, not one per report. ngtcp2 announces a path several times
+            // while it probes, and rebuilding the claim on each announcement closes a socket with
+            // datagrams already queued on it - losing packets in order to avoid a hop, which is
+            // the wrong trade. There were at most `swaps` distinct addresses, plus one for the
+            // address the connection started on.
+            Console.Error.WriteLine($"pins created: {Pins()} across {swaps} address change(s)");
+            Assert.True(Pins() <= swaps + 1,
+                $"{Pins()} claims for {swaps} address change(s): the same address is being "
+                + "re-claimed on every path report");
+        });
+
         runner.Test("quic/migration: kernel steering delivers a migrated client without any forwarding", () =>
         {
             // The other half of QuicRouting. Under Forward the datagrams arrive at the wrong
@@ -192,6 +270,130 @@ internal static class QuicMigrationTests
             foreach (Reactor reactor in fleet) { forwarded += reactor.QuicForwardsSent; }
 
             Assert.Equal(0L, forwarded);
+        });
+
+        // The claim every other test here leans on and none of them checks: that the connection
+        // SURVIVED. A client that quietly re-handshakes after its address changes also answers 200
+        // to everything, so status codes cannot tell migration from reconnection - and if it were
+        // reconnecting, the h3 session, the QPACK tables and any application state would be gone
+        // while the tests stayed green.
+        //
+        // So the handler names the connection object serving each request, and the test asserts the
+        // name did not change. One connection, one accept, across an address change.
+        foreach ((string stack, Func<Reactor, QuicConnection, Task> handler) in
+                 new (string, Func<Reactor, QuicConnection, Task>)[]
+                 {
+                     ("nghttp3", static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                         _ => Nghttp3Response.Text($"conn-{conn.GetHashCode():x8}"))),
+                     ("pure-c#", static (_, conn) => new Http3Connection(conn).RunAsync(
+                         _ => Http3Response.Text($"conn-{conn.GetHashCode():x8}"))),
+                 })
+        {
+            string name = stack;
+            Func<Reactor, QuicConnection, Task> h3 = handler;
+
+            runner.Test($"quic/migration: {name} - the SAME connection serves after the address changes", () =>
+            {
+                (string certPath, string keyPath) = TestCert.Ensure();
+                using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+
+                int accepts = 0;
+                (int serverPort, Reactor[] fleet) = TestServer.StartQuicSharded(4,
+                    engine.CreateFactory(),
+                    quicHandle: (r, conn) =>
+                    {
+                        Interlocked.Increment(ref accepts);
+                        return h3(r, conn);
+                    },
+                    routing: QuicRouting.Forward);
+
+                long Forwarded()
+                {
+                    long n = 0;
+                    foreach (Reactor reactor in fleet) { n += reactor.QuicForwardsSent; }
+                    return n;
+                }
+
+                using var forwarder = new UdpForwarder(serverPort);
+                using var client = new H3TestClient("127.0.0.1", forwarder.Port);
+
+                client.Connect();
+                Assert.True(client.CompleteHandshake(10_000), "the handshake through the forwarder did not complete");
+
+                (int beforeStatus, string served) = client.Request("GET", "/before", null, 10_000);
+                Assert.Equal(200, beforeStatus);
+                Assert.True(served.StartsWith("conn-"),
+                    $"expected the serving connection to name itself, got '{served}'");
+
+                // Keep moving until the datagrams genuinely reach a reactor that does not own the
+                // connection - otherwise the kernel may have re-hashed back to the owner and
+                // nothing about routing was exercised.
+                int swaps = 0;
+                while (Forwarded() == 0 && swaps < 8)
+                {
+                    swaps++;
+                    forwarder.SwapUpstream();
+
+                    (int afterStatus, string afterServed) = client.Request("GET", $"/after-{swaps}", null, 15_000);
+
+                    Assert.Equal(200, afterStatus);
+                    Assert.Equal(served, afterServed);
+                }
+
+                Assert.True(Forwarded() > 0,
+                    $"after {swaps} address changes nothing was ever forwarded, so the connection "
+                    + "never actually moved between reactors and this proves nothing");
+
+                // And it is still the same connection several requests later, on the new address.
+                for (int i = 0; i < 3; i++)
+                {
+                    (int status, string owner) = client.Request("GET", $"/settled-{i}", null, 15_000);
+                    Assert.Equal(200, status);
+                    Assert.Equal(served, owner);
+                }
+
+                // The discriminator against a client that re-handshaked: a reconnect would run the
+                // factory again. Migration must not.
+                Assert.Equal(1, Volatile.Read(ref accepts));
+            });
+        }
+
+        runner.Test("control: a fleet whose clients never move claims no addresses", () =>
+        {
+            // The cost side of the claim. It is made from the sweep, which visits every connection
+            // every 250 ms, so a guard that only looks at "is this address claimed yet" would claim
+            // one for every connection on the server whether or not it had ever moved - a
+            // descriptor and an armed receive apiece, to change nothing. Only a connection whose
+            // address actually moved is worth claiming.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+
+            (int serverPort, Reactor[] fleet) = TestServer.StartQuicSharded(4,
+                engine.CreateFactory(),
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                    static _ => Nghttp3Response.Text("ok")),
+                routing: QuicRouting.Forward);
+
+            using var client = new H3TestClient("127.0.0.1", serverPort);
+            client.Connect();
+            Assert.True(client.CompleteHandshake(10_000), "handshake did not complete");
+
+            // Long enough to cross several sweeps, which is when a claim would be made.
+            for (int i = 0; i < 6; i++)
+            {
+                Assert.Equal(200, client.Request("GET", $"/r{i}", null, 15_000).Status);
+            }
+
+            long pins = 0;
+            long forwards = 0;
+            foreach (Reactor reactor in fleet)
+            {
+                pins += reactor.QuicPinsCreated;
+                forwards += reactor.QuicForwardsSent;
+            }
+
+            Assert.Equal(0L, pins);
+            Assert.Equal(0L, forwards);
         });
 
         runner.Test("control: the same exchange through a forwarder that never swaps", () =>

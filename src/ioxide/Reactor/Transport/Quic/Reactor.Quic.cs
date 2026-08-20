@@ -264,6 +264,8 @@ public sealed unsafe partial class Reactor
         // (engine close racing the idle sweep) cannot double-release.
         if (_quicConnSet.Remove(conn))
         {
+            QuicUnpinPeer(conn);   // give the descriptor back before the address it names is freed
+
             // Wake the handler with closed=1 first - it resumes inline, sees IsClosed, and releases
             // its own ref - then invalidate any awaiter that could outlive this life.
             conn.MarkClosed();
@@ -295,7 +297,13 @@ public sealed unsafe partial class Reactor
             {
                 QuicRemoveConnection(conn);
                 conn.OnEvicted(QuicEvictReason.IdleTimeout);
+                continue;
             }
+
+            // A connection whose address has moved gets its new one claimed, so its datagrams stop
+            // being forwarded. Done here rather than when the move is reported because a path is
+            // reported many times while ngtcp2 validates it; by the next sweep it has settled.
+            QuicPinPeer(conn);
         }
     }
 

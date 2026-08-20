@@ -17,6 +17,13 @@ public sealed record QuicOptions
     /// </summary>
     public QuicRouting Routing { get; init; } = QuicRouting.Forward;
 
+    /// <summary>
+    /// Under <see cref="QuicRouting.Forward"/>, claim a migrated client's new address with a socket
+    /// of the owning reactor's own, so the kernel delivers there directly and the forwarding stops
+    /// after the first datagram or two. Costs one file descriptor per migrated connection.
+    /// </summary>
+    public bool PinMigratedPeers { get; init; } = true;
+
     public QuicConnectionFactory? ConnectionFactory { get; init; }
 
     /// <summary>
