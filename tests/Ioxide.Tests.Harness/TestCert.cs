@@ -73,6 +73,38 @@ public static class TestCert
     }
 
     /// <summary>
+    /// Whether a cached spec fixture still has the validity state it was created to have.
+    ///
+    /// These fixtures are cached by content rather than by freshness, because most of them are
+    /// deliberately invalid and re-minting would defeat them. That is safe in one direction only:
+    /// an EXPIRED certificate stays expired forever, but one minted to be NOT YET VALID becomes
+    /// valid the moment its notBefore arrives. A "not valid yet is refused" fixture minted with
+    /// notBefore = now + 1 day therefore starts being served the next day, and the test fails
+    /// reporting a product bug that does not exist - which is exactly what happened on the day
+    /// this was written.
+    ///
+    /// So the cached file is reused only while its actual state still matches the intent.
+    /// </summary>
+    private static bool StillMatchesSpec(string certPath, ClientCertSpec spec)
+    {
+        try
+        {
+            using X509Certificate2 cert = X509CertificateLoader.LoadCertificateFromFile(certPath);
+            DateTime now = DateTime.Now;
+
+            bool shouldBeStarted = spec.NotBefore <= TimeSpan.Zero;
+            bool shouldBeUnexpired = spec.NotAfter > TimeSpan.Zero;
+
+            return cert.NotBefore <= now == shouldBeStarted
+                && now < cert.NotAfter == shouldBeUnexpired;
+        }
+        catch
+        {
+            return false;   // truncated or not a certificate at all: mint it again
+        }
+    }
+
+    /// <summary>
     /// A CA, a server certificate and two client certificates - one the CA signed, one a DIFFERENT
     /// CA signed. mTLS cannot be tested without all four: proving a good certificate is let in says
     /// nothing unless a bad one is turned away.
@@ -402,7 +434,9 @@ public static class TestCert
 
         // Deliberately NOT the Fresh() check: half of these are supposed to be outside their
         // validity window, and re-minting an expired fixture on every run would defeat the test.
-        if (File.Exists(certPath) && File.Exists(keyPath))
+        // What IS checked is that the fixture still means what it was minted to mean - see
+        // StillMatchesSpec.
+        if (File.Exists(certPath) && File.Exists(keyPath) && StillMatchesSpec(certPath, spec))
         {
             return (ca, certPath, keyPath);
         }
