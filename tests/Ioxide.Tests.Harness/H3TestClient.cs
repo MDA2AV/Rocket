@@ -270,6 +270,7 @@ public sealed unsafe class H3TestClient : IDisposable
     // datagram, falling back to the generic flush when the stream can't take more.
     private readonly byte[] _sendScratch = new byte[1452];
 
+
     private void WriteStream(long sid, ReadOnlySpan<byte> data, bool fin)
     {
         // Never drop: the shim's ih3_writev already told nghttp3 these bytes are written
@@ -355,8 +356,40 @@ public sealed unsafe class H3TestClient : IDisposable
     /// <summary>Whether the peer ended the connection. A refusal test asserts on this.</summary>
     public bool PeerClosed => _peerClosed;
 
+    /// <summary>
+    /// Give ngtcp2 its loss timers. Without this the client has NO loss recovery: a lost datagram
+    /// leaves its packet unacked forever, the congestion window fills, writev_stream starts
+    /// answering 0 with nothing consumed, and the connection deadlocks with both sides silent.
+    ///
+    /// It went unnoticed because nothing here ever lost a packet - each connection served one
+    /// request over loopback and was gone. A connection that lives for several requests across an
+    /// address change does lose them, and then a real server looks like it hung.
+    /// </summary>
+    private void FireExpiredTimers()
+    {
+        if (_conn == 0)
+        {
+            return;
+        }
+
+        ulong now = NowNs();
+        if (iq_conn_expiry(_conn) > now)
+        {
+            return;
+        }
+
+        // Nonzero is terminal here exactly as it is for a read: draining, closing, or a protocol
+        // error, none of which a later datagram undoes.
+        if (iq_conn_handle_expiry(_conn, now) != 0)
+        {
+            _peerClosed = true;
+        }
+    }
+
     private void PumpIn()
     {
+        FireExpiredTimers();
+
         try
         {
             IPEndPoint? from = null;
@@ -506,6 +539,8 @@ public sealed unsafe class H3TestClient : IDisposable
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? keyPath, IqCallbacks cbs);
     [DllImport(QuicLib)] private static extern long iq_client_open_bidi(nint conn);
     [DllImport(QuicLib)] private static extern long iq_conn_open_uni(nint conn);
+    [DllImport(QuicLib)] private static extern ulong iq_conn_expiry(nint conn);
+    [DllImport(QuicLib)] private static extern int iq_conn_handle_expiry(nint conn, ulong ts);
     [DllImport(QuicLib)] private static extern nint iq_conn_write(nint conn, byte* dest, nuint destLen, long streamId, byte* data, nuint dataLen, int fin, long* pConsumed, ulong ts);
     [DllImport(QuicLib)] private static extern int  iq_conn_read(nint conn, void* remoteSa, nuint remoteLen, byte* pkt, nuint pktLen, byte ecn, ulong ts);
     [DllImport(QuicLib)] private static extern int  iq_conn_is_established(nint conn);
