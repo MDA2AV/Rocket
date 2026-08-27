@@ -94,6 +94,12 @@ public sealed unsafe partial class Reactor
             NativeMemory.Free(_timerTs);
             _timerTs = null;
         }
+        if (_opTimespecs != null)
+        {
+            NativeMemory.Free(_opTimespecs);
+            _opTimespecs = null;
+            _opTimespecCapacity = 0;
+        }
         _ring.Dispose();
 
         // Shared provided-buffer ring (incremental mode allocates per connection instead). Freed after

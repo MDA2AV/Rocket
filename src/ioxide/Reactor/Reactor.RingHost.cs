@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
 using static ioxide.Native;
 
@@ -14,6 +15,12 @@ public sealed unsafe partial class Reactor : IRingHost
 {
     // In-flight client ops: slot → completion. Reactor-thread-only; grows on demand.
     private IRingCompletion?[] _opTargets = new IRingCompletion?[1024];
+
+    // One timespec per op slot, for IORING_OP_TIMEOUT. The kernel reads it while the op is in
+    // flight, so it has to outlive the submission; hanging it off the slot makes its lifetime
+    // exactly the operation's, with no allocation per wait.
+    private __kernel_timespec* _opTimespecs;
+    private int _opTimespecCapacity;
     private int[] _opFree = null!;
     private int   _opFreeTop;
 
@@ -83,6 +90,16 @@ public sealed unsafe partial class Reactor : IRingHost
         SubmitClientOp(IORING_OP_WRITE, fd, buffer, length, offset, completion);
     }
 
+    /// <summary>
+    /// Completes after <paramref name="nanoseconds"/>, on this reactor. The duration rides in the
+    /// offset field so this reuses the same slot, remote-marshalling and completion routing as
+    /// every other client op.
+    /// </summary>
+    public void SubmitTimeout(long nanoseconds, IRingCompletion completion)
+    {
+        SubmitClientOp(IORING_OP_TIMEOUT, fd: -1, buffer: 0, length: 0, offset: nanoseconds, completion);
+    }
+
     private void SubmitClientOp(byte opcode, int fd, nint buffer, int length, long offset, IRingCompletion completion)
     {
         // Off-reactor callers hand over and wake, like every other producer.
@@ -103,6 +120,26 @@ public sealed unsafe partial class Reactor : IRingHost
         IoUringSqe* sqe = GetSqeOrFlush();
         Unsafe.InitBlockUnaligned(sqe, 0, 64);
 
+        if (opcode == IORING_OP_TIMEOUT)
+        {
+            // No fd and no buffer: addr points at the deadline, and len=1 says it is one
+            // timespec. off stays 0 so this is purely time-based rather than also waiting
+            // on a number of completions.
+            EnsureTimespecCapacity();
+            __kernel_timespec* ts = _opTimespecs + slot;
+            long ns = offset < 1 ? 1 : offset;
+            ts->tv_sec  = ns / 1_000_000_000L;
+            ts->tv_nsec = ns % 1_000_000_000L;
+
+            sqe->opcode    = IORING_OP_TIMEOUT;
+            sqe->fd        = -1;
+            sqe->addr      = (ulong)ts;
+            sqe->len       = 1;
+            sqe->off       = 0;
+            sqe->user_data = Tag(KindClient, 0, slot);
+            return;
+        }
+
         sqe->opcode    = opcode;
         sqe->fd        = fd;
         sqe->addr      = (ulong)buffer;
@@ -117,6 +154,21 @@ public sealed unsafe partial class Reactor : IRingHost
         {
             SubmitClientOpCore(op.Opcode, op.Fd, op.Buffer, op.Length, op.Offset, op.Completion);
         }
+    }
+
+    // Grown to match _opTargets, so a slot always has a timespec behind it.
+    private void EnsureTimespecCapacity()
+    {
+        if (_opTimespecCapacity >= _opTargets.Length)
+        {
+            return;
+        }
+
+        nuint bytes = (nuint)(_opTargets.Length * sizeof(__kernel_timespec));
+        _opTimespecs = _opTimespecs == null
+            ? (__kernel_timespec*)NativeMemory.Alloc(bytes)
+            : (__kernel_timespec*)NativeMemory.Realloc(_opTimespecs, bytes);
+        _opTimespecCapacity = _opTargets.Length;
     }
 
     private int AllocOpSlot(IRingCompletion completion)

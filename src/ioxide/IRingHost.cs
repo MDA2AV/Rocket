@@ -36,6 +36,16 @@ public interface IRingHost
     /// Write <paramref name="length"/> bytes from <paramref name="buffer"/> at <paramref name="offset"/>.
     /// </summary>
     void SubmitWrite(int fd, nint buffer, int length, long offset, IRingCompletion completion);
+
+    /// <summary>
+    /// Completes after <paramref name="nanoseconds"/> have elapsed, on this reactor's thread,
+    /// with no file descriptor involved. The kernel holds the deadline on the ring, so a wait
+    /// costs one SQE and one CQE and no syscall of its own.
+    ///
+    /// Expiry is reported the way io_uring reports it: <c>Complete</c> receives <c>-ETIME</c>
+    /// (-62), which is success for a timeout rather than a failure.
+    /// </summary>
+    void SubmitTimeout(long nanoseconds, IRingCompletion completion);
 }
 
 /// <summary>
