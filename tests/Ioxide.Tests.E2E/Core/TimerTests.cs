@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using ioxide;
+using ioxide.timer;
 using ioxide.utils;
 
 namespace Ioxide.Tests;

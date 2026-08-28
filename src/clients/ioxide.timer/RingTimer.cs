@@ -1,4 +1,6 @@
-namespace ioxide;
+using ioxide;
+
+namespace ioxide.timer;
 
 /// <summary>
 /// A wait that runs on the host's ring, the way a <see cref="RingSocket"/>'s reads do - the
