@@ -97,10 +97,11 @@ public sealed unsafe partial class Reactor : IRingHost
     /// </summary>
     public void SubmitTimeout(long nanoseconds, IRingCompletion completion)
     {
-        // The duration rides in the offset field of the queued record, which a timeout
-        // otherwise leaves unused.
-        if (HandedOff(IORING_OP_TIMEOUT, fd: -1, buffer: 0, length: 0, nanoseconds, completion))
+        if (Environment.CurrentManagedThreadId != _reactorThreadId && _reactorThreadId != 0)
         {
+            // The duration rides in the offset field of the queued record, which a timeout
+            // otherwise leaves unused.
+            HandOff(IORING_OP_TIMEOUT, fd: -1, buffer: 0, length: 0, nanoseconds, completion);
             return;
         }
 
@@ -128,8 +129,10 @@ public sealed unsafe partial class Reactor : IRingHost
 
     private void SubmitClientOp(byte opcode, int fd, nint buffer, int length, long offset, IRingCompletion completion)
     {
-        if (HandedOff(opcode, fd, buffer, length, offset, completion))
+        // Off-reactor callers hand over and wake, like every other producer.
+        if (Environment.CurrentManagedThreadId != _reactorThreadId && _reactorThreadId != 0)
         {
+            HandOff(opcode, fd, buffer, length, offset, completion);
             return;
         }
 
@@ -138,22 +141,15 @@ public sealed unsafe partial class Reactor : IRingHost
 
     /// <summary>
     /// The SQ has one issuer, so a caller on any other thread queues the op and wakes the reactor
-    /// to submit it. True when that happened and the caller is done.
-    ///
-    /// Every submission shares this. What they cannot share is the submission itself: the fd ops
-    /// put a buffer and a length in the SQE, a timeout puts a deadline belonging to its own slot,
-    /// and that slot is not known until the reactor thread allocates it.
+    /// to submit it on its own. Shared by every submission, and kept out of them: the thread test
+    /// is two comparisons and stays where it is, while this - an enqueue and a wake - is the cold
+    /// half and is marked so it does not get inlined back into a path that never runs it.
     /// </summary>
-    private bool HandedOff(byte opcode, int fd, nint buffer, int length, long offset, IRingCompletion completion)
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void HandOff(byte opcode, int fd, nint buffer, int length, long offset, IRingCompletion completion)
     {
-        if (Environment.CurrentManagedThreadId == _reactorThreadId || _reactorThreadId == 0)
-        {
-            return false;
-        }
-
         _remoteOps.Enqueue(new RemoteOp(opcode, fd, buffer, length, offset, completion));
         WakeFdWrite();
-        return true;
     }
 
     private void SubmitClientOpCore(byte opcode, int fd, nint buffer, int length, long offset, IRingCompletion completion)
