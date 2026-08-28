@@ -91,13 +91,48 @@ public sealed unsafe partial class Reactor : IRingHost
     }
 
     /// <summary>
-    /// Completes after <paramref name="nanoseconds"/>, on this reactor. The duration rides in the
-    /// offset field so this reuses the same slot, remote-marshalling and completion routing as
-    /// every other client op.
+    /// Completes after <paramref name="nanoseconds"/>, on this reactor. Shares the slot table and
+    /// completion routing with the fd ops, but not their submission: a timeout carries a deadline
+    /// where they carry a buffer, so it fills its own SQE rather than putting a branch in theirs.
     /// </summary>
     public void SubmitTimeout(long nanoseconds, IRingCompletion completion)
     {
-        SubmitClientOp(IORING_OP_TIMEOUT, fd: -1, buffer: 0, length: 0, offset: nanoseconds, completion);
+        // Off-reactor callers hand over and wake, like every other producer. The duration rides
+        // in the offset field of the queued record, which is otherwise unused for a timeout.
+        if (Environment.CurrentManagedThreadId != _reactorThreadId && _reactorThreadId != 0)
+        {
+            _remoteOps.Enqueue(new RemoteOp(IORING_OP_TIMEOUT, -1, 0, 0, nanoseconds, completion));
+            WakeFdWrite();
+            return;
+        }
+
+        SubmitTimeoutCore(nanoseconds, completion);
+    }
+
+    private void SubmitTimeoutCore(long nanoseconds, IRingCompletion completion)
+    {
+        int slot = AllocOpSlot(completion);
+        EnsureTimespecCapacity();
+
+        // The kernel reads this while the op is in flight, so it lives with the slot and is
+        // still there when the CQE arrives.
+        __kernel_timespec* ts = _opTimespecs + slot;
+        long ns = nanoseconds < 1 ? 1 : nanoseconds;
+        ts->tv_sec  = ns / 1_000_000_000L;
+        ts->tv_nsec = ns % 1_000_000_000L;
+
+        IoUringSqe* sqe = GetSqeOrFlush();
+        Unsafe.InitBlockUnaligned(sqe, 0, 64);
+
+        // No fd and no buffer: addr points at the deadline and len=1 says it is one timespec.
+        // off stays 0, so this is purely time-based rather than also waiting on a number of
+        // completions.
+        sqe->opcode    = IORING_OP_TIMEOUT;
+        sqe->fd        = -1;
+        sqe->addr      = (ulong)ts;
+        sqe->len       = 1;
+        sqe->off       = 0;
+        sqe->user_data = Tag(KindClient, 0, slot);
     }
 
     private void SubmitClientOp(byte opcode, int fd, nint buffer, int length, long offset, IRingCompletion completion)
@@ -120,26 +155,6 @@ public sealed unsafe partial class Reactor : IRingHost
         IoUringSqe* sqe = GetSqeOrFlush();
         Unsafe.InitBlockUnaligned(sqe, 0, 64);
 
-        if (opcode == IORING_OP_TIMEOUT)
-        {
-            // No fd and no buffer: addr points at the deadline, and len=1 says it is one
-            // timespec. off stays 0 so this is purely time-based rather than also waiting
-            // on a number of completions.
-            EnsureTimespecCapacity();
-            __kernel_timespec* ts = _opTimespecs + slot;
-            long ns = offset < 1 ? 1 : offset;
-            ts->tv_sec  = ns / 1_000_000_000L;
-            ts->tv_nsec = ns % 1_000_000_000L;
-
-            sqe->opcode    = IORING_OP_TIMEOUT;
-            sqe->fd        = -1;
-            sqe->addr      = (ulong)ts;
-            sqe->len       = 1;
-            sqe->off       = 0;
-            sqe->user_data = Tag(KindClient, 0, slot);
-            return;
-        }
-
         sqe->opcode    = opcode;
         sqe->fd        = fd;
         sqe->addr      = (ulong)buffer;
@@ -152,7 +167,16 @@ public sealed unsafe partial class Reactor : IRingHost
     {
         while (_remoteOps.TryDequeue(out RemoteOp op))
         {
-            SubmitClientOpCore(op.Opcode, op.Fd, op.Buffer, op.Length, op.Offset, op.Completion);
+            // The only place the two submissions have to be told apart, and it is off the hot
+            // path: this runs once per cross-thread handover, not once per op.
+            if (op.Opcode == IORING_OP_TIMEOUT)
+            {
+                SubmitTimeoutCore(op.Offset, op.Completion);
+            }
+            else
+            {
+                SubmitClientOpCore(op.Opcode, op.Fd, op.Buffer, op.Length, op.Offset, op.Completion);
+            }
         }
     }
 
