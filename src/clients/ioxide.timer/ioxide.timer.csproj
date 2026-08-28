@@ -5,17 +5,17 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <RootNamespace>ioxide.http2</RootNamespace>
+    <RootNamespace>ioxide.timer</RootNamespace>
 
-    <PackageId>ioxide.http2</PackageId>
+    <PackageId>ioxide.timer</PackageId>
     <Version>0.7.211</Version>
     <Authors>MDA2AV</Authors>
-    <Description>Pure-C# HTTP/2 for the ioxide io_uring runtime: framing, HPACK (static and dynamic tables, Huffman) and flow control, with zero native code. Serves h2c with prior knowledge and h2 over TLS by ALPN, buffered or streamed in either direction.</Description>
+    <Description>Deadlines for the ioxide io_uring runtime: waits submitted to the reactor's own ring with IORING_OP_TIMEOUT, completing inline on the reactor that owns the caller, with no timer thread and nothing allocated per wait.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://mda2av.github.io/ioxide/</PackageProjectUrl>
     <RepositoryUrl>https://github.com/MDA2AV/ioxide</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <PackageTags>io_uring;http2;h2;h2c;hpack;managed;linux;ioxide</PackageTags>
+    <PackageTags>io_uring;timer;timeout;delay;linux;ioxide</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 

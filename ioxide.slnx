@@ -15,6 +15,7 @@
   <Folder Name="/clients/">
     <Project Path="src/clients/ioxide.httpclient/ioxide.httpclient.csproj" />
     <Project Path="src/clients/ioxide.file/ioxide.file.csproj" />
+    <Project Path="src/clients/ioxide.timer/ioxide.timer.csproj" />
     <Project Path="src/clients/ioxide.pg/ioxide.pg.csproj" />
     <Project Path="src/clients/ioxide.redis/ioxide.redis.csproj" />
   </Folder>

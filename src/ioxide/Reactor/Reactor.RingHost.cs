@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
 using static ioxide.Native;
 
@@ -14,6 +15,12 @@ public sealed unsafe partial class Reactor : IRingHost
 {
     // In-flight client ops: slot → completion. Reactor-thread-only; grows on demand.
     private IRingCompletion?[] _opTargets = new IRingCompletion?[1024];
+
+    // One timespec per op slot, for IORING_OP_TIMEOUT. The kernel reads it while the op is in
+    // flight, so it has to outlive the submission; hanging it off the slot makes its lifetime
+    // exactly the operation's, with no allocation per wait.
+    private __kernel_timespec* _opTimespecs;
+    private int _opTimespecCapacity;
     private int[] _opFree = null!;
     private int   _opFreeTop;
 
@@ -83,31 +90,89 @@ public sealed unsafe partial class Reactor : IRingHost
         SubmitClientOp(IORING_OP_WRITE, fd, buffer, length, offset, completion);
     }
 
+    /// <summary>
+    /// Completes after <paramref name="nanoseconds"/>, on this reactor. Shares the slot table and
+    /// completion routing with the fd ops, but not their submission: a timeout carries a deadline
+    /// where they carry a buffer, so it fills its own SQE rather than putting a branch in theirs.
+    /// </summary>
+    public void SubmitTimeout(long nanoseconds, IRingCompletion completion)
+    {
+        if (Environment.CurrentManagedThreadId != _reactorThreadId && _reactorThreadId != 0)
+        {
+            // The duration rides in the offset field of the queued record, which a timeout
+            // otherwise leaves unused.
+            HandOff(IORING_OP_TIMEOUT, fd: -1, buffer: 0, length: 0, nanoseconds, completion);
+            return;
+        }
+
+        SubmitTimeoutCore(nanoseconds, completion);
+    }
+
+    private void SubmitTimeoutCore(long nanoseconds, IRingCompletion completion)
+    {
+        int slot = AllocOpSlot(completion);
+        EnsureTimespecCapacity();
+
+        // The kernel reads this while the op is in flight, so it lives with the slot and is
+        // still there when the CQE arrives. That is also why the deadline cannot be resolved
+        // before the slot is: the address the SQE carries is this slot's.
+        __kernel_timespec* ts = _opTimespecs + slot;
+        long ns = nanoseconds < 1 ? 1 : nanoseconds;
+        ts->tv_sec  = ns / 1_000_000_000L;
+        ts->tv_nsec = ns % 1_000_000_000L;
+
+        // No fd and no buffer: addr points at the deadline and len=1 says it is one timespec.
+        // off stays 0, so this is purely time-based rather than also waiting on a number of
+        // completions.
+        Emit(IORING_OP_TIMEOUT, fd: -1, addr: (ulong)ts, len: 1, off: 0, slot);
+    }
+
     private void SubmitClientOp(byte opcode, int fd, nint buffer, int length, long offset, IRingCompletion completion)
     {
         // Off-reactor callers hand over and wake, like every other producer.
         if (Environment.CurrentManagedThreadId != _reactorThreadId && _reactorThreadId != 0)
         {
-            _remoteOps.Enqueue(new RemoteOp(opcode, fd, buffer, length, offset, completion));
-            WakeFdWrite();
+            HandOff(opcode, fd, buffer, length, offset, completion);
             return;
         }
 
         SubmitClientOpCore(opcode, fd, buffer, length, offset, completion);
     }
 
+    /// <summary>
+    /// The SQ has one issuer, so a caller on any other thread queues the op and wakes the reactor
+    /// to submit it on its own. Shared by every submission, and kept out of them: the thread test
+    /// is two comparisons and stays where it is, while this - an enqueue and a wake - is the cold
+    /// half and is marked so it does not get inlined back into a path that never runs it.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void HandOff(byte opcode, int fd, nint buffer, int length, long offset, IRingCompletion completion)
+    {
+        _remoteOps.Enqueue(new RemoteOp(opcode, fd, buffer, length, offset, completion));
+        WakeFdWrite();
+    }
+
     private void SubmitClientOpCore(byte opcode, int fd, nint buffer, int length, long offset, IRingCompletion completion)
     {
         int slot = AllocOpSlot(completion);
+        Emit(opcode, fd, (ulong)buffer, (uint)length, (ulong)offset, slot);
+    }
 
+    /// <summary>
+    /// Writes one SQE and tags it for the client dispatch. Every client op ends here, whatever
+    /// its fields mean: a buffer and a length for the fd ops, a deadline and a count of one for
+    /// a timeout. The callers differ in what they put in the fields, not in how they submit.
+    /// </summary>
+    private void Emit(byte opcode, int fd, ulong addr, uint len, ulong off, int slot)
+    {
         IoUringSqe* sqe = GetSqeOrFlush();
         Unsafe.InitBlockUnaligned(sqe, 0, 64);
 
         sqe->opcode    = opcode;
         sqe->fd        = fd;
-        sqe->addr      = (ulong)buffer;
-        sqe->len       = (uint)length;
-        sqe->off       = (ulong)offset;
+        sqe->addr      = addr;
+        sqe->len       = len;
+        sqe->off       = off;
         sqe->user_data = Tag(KindClient, 0, slot);
     }
 
@@ -115,8 +180,32 @@ public sealed unsafe partial class Reactor : IRingHost
     {
         while (_remoteOps.TryDequeue(out RemoteOp op))
         {
-            SubmitClientOpCore(op.Opcode, op.Fd, op.Buffer, op.Length, op.Offset, op.Completion);
+            // The only place the two submissions have to be told apart, and it is off the hot
+            // path: this runs once per cross-thread handover, not once per op.
+            if (op.Opcode == IORING_OP_TIMEOUT)
+            {
+                SubmitTimeoutCore(op.Offset, op.Completion);
+            }
+            else
+            {
+                SubmitClientOpCore(op.Opcode, op.Fd, op.Buffer, op.Length, op.Offset, op.Completion);
+            }
         }
+    }
+
+    // Grown to match _opTargets, so a slot always has a timespec behind it.
+    private void EnsureTimespecCapacity()
+    {
+        if (_opTimespecCapacity >= _opTargets.Length)
+        {
+            return;
+        }
+
+        nuint bytes = (nuint)(_opTargets.Length * sizeof(__kernel_timespec));
+        _opTimespecs = _opTimespecs == null
+            ? (__kernel_timespec*)NativeMemory.Alloc(bytes)
+            : (__kernel_timespec*)NativeMemory.Realloc(_opTimespecs, bytes);
+        _opTimespecCapacity = _opTargets.Length;
     }
 
     private int AllocOpSlot(IRingCompletion completion)
