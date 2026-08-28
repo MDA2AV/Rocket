@@ -115,24 +115,17 @@ public sealed unsafe partial class Reactor : IRingHost
         EnsureTimespecCapacity();
 
         // The kernel reads this while the op is in flight, so it lives with the slot and is
-        // still there when the CQE arrives.
+        // still there when the CQE arrives. That is also why the deadline cannot be resolved
+        // before the slot is: the address the SQE carries is this slot's.
         __kernel_timespec* ts = _opTimespecs + slot;
         long ns = nanoseconds < 1 ? 1 : nanoseconds;
         ts->tv_sec  = ns / 1_000_000_000L;
         ts->tv_nsec = ns % 1_000_000_000L;
 
-        IoUringSqe* sqe = GetSqeOrFlush();
-        Unsafe.InitBlockUnaligned(sqe, 0, 64);
-
         // No fd and no buffer: addr points at the deadline and len=1 says it is one timespec.
         // off stays 0, so this is purely time-based rather than also waiting on a number of
         // completions.
-        sqe->opcode    = IORING_OP_TIMEOUT;
-        sqe->fd        = -1;
-        sqe->addr      = (ulong)ts;
-        sqe->len       = 1;
-        sqe->off       = 0;
-        sqe->user_data = Tag(KindClient, 0, slot);
+        Emit(IORING_OP_TIMEOUT, fd: -1, addr: (ulong)ts, len: 1, off: 0, slot);
     }
 
     private void SubmitClientOp(byte opcode, int fd, nint buffer, int length, long offset, IRingCompletion completion)
@@ -151,15 +144,24 @@ public sealed unsafe partial class Reactor : IRingHost
     private void SubmitClientOpCore(byte opcode, int fd, nint buffer, int length, long offset, IRingCompletion completion)
     {
         int slot = AllocOpSlot(completion);
+        Emit(opcode, fd, (ulong)buffer, (uint)length, (ulong)offset, slot);
+    }
 
+    /// <summary>
+    /// Writes one SQE and tags it for the client dispatch. Every client op ends here, whatever
+    /// its fields mean: a buffer and a length for the fd ops, a deadline and a count of one for
+    /// a timeout. The callers differ in what they put in the fields, not in how they submit.
+    /// </summary>
+    private void Emit(byte opcode, int fd, ulong addr, uint len, ulong off, int slot)
+    {
         IoUringSqe* sqe = GetSqeOrFlush();
         Unsafe.InitBlockUnaligned(sqe, 0, 64);
 
         sqe->opcode    = opcode;
         sqe->fd        = fd;
-        sqe->addr      = (ulong)buffer;
-        sqe->len       = (uint)length;
-        sqe->off       = (ulong)offset;
+        sqe->addr      = addr;
+        sqe->len       = len;
+        sqe->off       = off;
         sqe->user_data = Tag(KindClient, 0, slot);
     }
 
