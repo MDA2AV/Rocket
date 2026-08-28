@@ -118,6 +118,9 @@ jobs:
       - name: Pack ioxide.redis
         run: dotnet pack src/clients/ioxide.redis/ioxide.redis.csproj --configuration Release --no-build --output ./artifacts
 
+      - name: Pack ioxide.timer
+        run: dotnet pack src/clients/ioxide.timer/ioxide.timer.csproj --configuration Release --no-build --output ./artifacts
+
       - name: Pack ioxide.Kestrel
         run: dotnet pack src/serving/ioxide.Kestrel/ioxide.Kestrel.csproj --configuration Release --no-build --output ./artifacts
 
