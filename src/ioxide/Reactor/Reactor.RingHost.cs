@@ -97,12 +97,10 @@ public sealed unsafe partial class Reactor : IRingHost
     /// </summary>
     public void SubmitTimeout(long nanoseconds, IRingCompletion completion)
     {
-        // Off-reactor callers hand over and wake, like every other producer. The duration rides
-        // in the offset field of the queued record, which is otherwise unused for a timeout.
-        if (Environment.CurrentManagedThreadId != _reactorThreadId && _reactorThreadId != 0)
+        // The duration rides in the offset field of the queued record, which a timeout
+        // otherwise leaves unused.
+        if (HandedOff(IORING_OP_TIMEOUT, fd: -1, buffer: 0, length: 0, nanoseconds, completion))
         {
-            _remoteOps.Enqueue(new RemoteOp(IORING_OP_TIMEOUT, -1, 0, 0, nanoseconds, completion));
-            WakeFdWrite();
             return;
         }
 
@@ -130,15 +128,32 @@ public sealed unsafe partial class Reactor : IRingHost
 
     private void SubmitClientOp(byte opcode, int fd, nint buffer, int length, long offset, IRingCompletion completion)
     {
-        // Off-reactor callers hand over and wake, like every other producer.
-        if (Environment.CurrentManagedThreadId != _reactorThreadId && _reactorThreadId != 0)
+        if (HandedOff(opcode, fd, buffer, length, offset, completion))
         {
-            _remoteOps.Enqueue(new RemoteOp(opcode, fd, buffer, length, offset, completion));
-            WakeFdWrite();
             return;
         }
 
         SubmitClientOpCore(opcode, fd, buffer, length, offset, completion);
+    }
+
+    /// <summary>
+    /// The SQ has one issuer, so a caller on any other thread queues the op and wakes the reactor
+    /// to submit it. True when that happened and the caller is done.
+    ///
+    /// Every submission shares this. What they cannot share is the submission itself: the fd ops
+    /// put a buffer and a length in the SQE, a timeout puts a deadline belonging to its own slot,
+    /// and that slot is not known until the reactor thread allocates it.
+    /// </summary>
+    private bool HandedOff(byte opcode, int fd, nint buffer, int length, long offset, IRingCompletion completion)
+    {
+        if (Environment.CurrentManagedThreadId == _reactorThreadId || _reactorThreadId == 0)
+        {
+            return false;
+        }
+
+        _remoteOps.Enqueue(new RemoteOp(opcode, fd, buffer, length, offset, completion));
+        WakeFdWrite();
+        return true;
     }
 
     private void SubmitClientOpCore(byte opcode, int fd, nint buffer, int length, long offset, IRingCompletion completion)
