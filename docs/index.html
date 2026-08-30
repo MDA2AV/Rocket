@@ -50,6 +50,7 @@
   <input type="radio" name="mode-tabs" id="tab-h3">
   <input type="radio" name="mode-tabs" id="tab-h3cs">
   <input type="radio" name="mode-tabs" id="tab-h3stream">
+  <input type="radio" name="mode-tabs" id="tab-h3ngboth">
   <input type="radio" name="mode-tabs" id="tab-h3csstream">
   <input type="radio" name="mode-tabs" id="tab-h3mtls">
   <input type="radio" name="mode-tabs" id="tab-h3buf">
@@ -138,6 +139,7 @@
       <label for="tab-h3buf">h3 &middot; buffered (nghttp3)</label>
       <label for="tab-h3">h3 &middot; request streamed (nghttp3)</label>
       <label for="tab-h3stream">h3 &middot; response streamed (nghttp3)</label>
+      <label for="tab-h3ngboth">h3 &middot; request + response streamed (nghttp3)</label>
     </details>
 
     <details class="ex-sect">
@@ -2534,6 +2536,172 @@ foreach (Thread thread in threads)
     thread.Join();
 }</code></pre>
     <p class="ex-foot">The response body produced OVER TIME instead of handed over whole - each flush becomes a DATA frame. That is what <code>/feed</code> demonstrates: an endless response has no final byte, so a buffered API cannot express it at all. <code>Nghttp3ResponseWriter</code> is an <code>IBufferWriter&lt;byte&gt;</code>, so a serializer or a framework's response sink writes into it unchanged, and <code>FlushAsync</code> returning only once nghttp3 has taken the chunk is what stops a producer outrunning a peer that has stopped reading. nghttp3 PULLS body bytes rather than accepting pushes, which is why this carries a resume and a drain the pure-C# writer does not need.</p>
+  </div>
+  <div class="pane pane-h3ngboth">
+    <div class="pane-head">
+      <h3>HTTP/3 &middot; request + response streamed (nghttp3)</h3>
+      <span class="pane-pkg">ioxide + ioxide.ngtcp2 + ioxide.nghttp3</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+// dotnet add package ioxide.ngtcp2
+// dotnet add package ioxide.nghttp3
+//   curl --http3-only -k https://127.0.0.1:8443/
+//   curl --http3-only -k --data-binary @big.bin https://127.0.0.1:8443/echo
+
+using System.Text;
+using ioxide;
+using ioxide.nghttp3;
+using ioxide.ngtcp2;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort quicPort = 8443;
+int    reactors = Environment.ProcessorCount;
+
+
+// Chunks written per response on &quot;/&quot;, and the size of each. Their product is never held at once.
+int chunkCount = 64;
+int chunkBytes = 16 * 1024;
+
+
+// Multishot recv slots per reactor. QPACK capacity 4096 advertises a decode-side dynamic table;
+// 0 is static-only, nghttp3&#x27;s default.
+int  udpRecvSlots  = 16;
+long qpackCapacity = 0;
+
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+const string certPath = &quot;cert.pem&quot;;   // any PEM pair
+const string keyPath  = &quot;key.pem&quot;;
+
+// The last argument bounds what one connection may retain unacknowledged, which is what keeps a
+// streamed response streaming instead of quietly buffering whole. See Playground/Http3/Nghttp3Buffered
+// for the full QUIC/h3 knob set.
+using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: [&quot;h3&quot;], maxSendRetentionBytes: 16L &lt;&lt; 20);
+
+var config = new ServerConfig
+{
+    ReactorCount = reactors,
+    Tcp = null,                                        // QUIC only: no TCP listener is bound
+    Udp = new UdpOptions { RecvSlots = udpRecvSlots },
+    Quic = new QuicOptions
+    {
+        Port = quicPort,
+        LocalCidLength = 8,
+        ConnectionFactory = engine.CreateFactory(),
+        // Where a moved client&#x27;s packets go when several reactors share the port. Forward costs
+        // nothing until a client actually changes address; KernelFilter has the kernel route by
+        // connection id instead, which costs a little on every packet. See /how-ioxide-does-h3.
+        Routing = QuicRouting.Forward,
+    },
+};
+
+var h3Options = new Nghttp3Options
+{
+    QpackDynamicTableCapacity = qpackCapacity,                // 0 (default) = headers stay literal
+    QpackBlockedStreams       = qpackCapacity &gt; 0 ? 100 : 0,  // raise both together for the dynamic table
+};
+
+byte[] chunk = Encoding.ASCII.GetBytes(new string(&#x27;x&#x27;, chunkBytes - 1) + &quot;\n&quot;);
+
+var threads = new Thread[config.ReactorCount];
+
+for (int i = 0; i &lt; threads.Length; i++)
+{
+    var reactor = new Reactor(i, config);
+
+    reactor.QuicHandle = (r, conn) =&gt;
+        new Nghttp3Connection(conn, h3Options).RunStreamedResponseAsync(async (request, writer) =&gt;
+        {
+            bool upload = request.Path.Span.SequenceEqual(&quot;/upload&quot;u8);
+            bool echo   = request.Path.Span.SequenceEqual(&quot;/echo&quot;u8);
+
+            if (echo)
+            {
+                // Both directions at once, which is the shape a proxy needs: read a chunk, write
+                // a chunk, and never hold more than one. Neither side can run away from the other
+                // - ReadAsync waits on the peer, FlushAsync waits on nghttp3 - so memory stays
+                // flat however large the exchange is.
+                writer.WriteHeaders(Plain());
+
+                while (true)
+                {
+                    ReadOnlyMemory&lt;byte&gt; part = await request.BodyReader!.ReadAsync();
+                    if (part.IsEmpty)
+                    {
+                        break;   // end of the request body
+                    }
+
+                    part.Span.CopyTo(writer.GetSpan(part.Length));
+                    writer.Advance(part.Length);
+                    await writer.FlushAsync();
+                }
+
+                await writer.CompleteAsync();
+                return;
+            }
+
+            if (upload)
+            {
+                // Read side only: pull the body a chunk at a time rather than waiting for all of
+                // it, so memory is bound by one chunk however large the upload is. Every read
+                // credits the peer&#x27;s flow-control window, which is what throttles a fast sender.
+                long total = 0;
+                while (true)
+                {
+                    ReadOnlyMemory&lt;byte&gt; part = await request.BodyReader!.ReadAsync();
+                    if (part.IsEmpty) break;
+                    total += part.Length;   // a real app would parse or store the chunk here
+                }
+
+                writer.WriteHeaders(Plain());
+
+                byte[] count = Encoding.ASCII.GetBytes($&quot;{total}\n&quot;);
+                count.CopyTo(writer.GetSpan(count.Length));
+                writer.Advance(count.Length);
+                await writer.FlushAsync();
+                await writer.CompleteAsync();
+                return;
+            }
+
+            // Headers first and once: HTTP/3 puts HEADERS before DATA and there is no correcting
+            // it later. No content-length - the length is not known when they go out. A GET
+            // arrives with an already-ended body reader, so there is nothing to drain.
+            writer.WriteHeaders(Plain());
+
+            for (int n = 0; n &lt; chunkCount; n++)
+            {
+                chunk.CopyTo(writer.GetSpan(chunk.Length));
+                writer.Advance(chunk.Length);
+
+                // Returns once nghttp3 has taken the chunk. That await IS the backpressure -
+                // nothing queues up behind a peer that has stopped reading.
+                await writer.FlushAsync();
+            }
+
+            await writer.CompleteAsync();
+        });
+
+    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
+    threads[i].Start();
+}
+
+Console.WriteLine($&quot;[nghttp3-streamed-both] {config.ReactorCount} reactors, h3 on udp :{config.Quic!.Port}, &quot;
+                + $&quot;{chunkCount} x {chunkBytes}-byte chunks per response, cert {certPath}&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}
+
+static Nghttp3Response Plain()
+{
+    var response = new Nghttp3Response { Status = 200 };
+    response.Headers.Add(&quot;content-type&quot;u8.ToArray(), &quot;text/plain&quot;u8.ToArray());
+    return response;
+}</code></pre>
+    <p class="ex-foot">The fourth corner the other three nghttp3 samples leave empty: the request pulled through <code>BodyReader</code> while the response is pushed through the writer, both in one handler. One call arranges it - <code>RunStreamedResponseAsync</code> dispatches at end-of-headers, so the handler is running while the upload is still on the wire. <code>/echo</code> is the shape a proxy needs: read a chunk, write a chunk, never hold more than one, and neither side can outrun the other because <code>ReadAsync</code> waits on the peer and <code>FlushAsync</code> waits on nghttp3. Measured here on a 64 MiB echo: byte-identical out, and the server's RSS moved 51&rarr;57 MB - flat, in the sense that matters. Diff it against <label for="tab-h3csstream" class="ex-jump">the pure-C# twin</label>: same routes, opposite mechanism underneath. nghttp3 owns the framing and <b>pulls</b> body bytes when it has room to emit DATA, so a flush here means <em>nghttp3 has taken the chunk</em>, where the managed writer stages a DATA frame the moment you flush. That twin also serves an endless <code>/feed</code>; this one deliberately does not, because on this stack an endless response never reaches the wire.</p>
   </div>
   <div class="pane pane-h3csstream">
     <div class="pane-head">

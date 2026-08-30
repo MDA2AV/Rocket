@@ -239,6 +239,26 @@ PANES = {
         "<label for=\"tab-h3stream\" class=\"ex-jump\">nghttp3 &middot; streamed</label> carries a "
         "resume and a drain because nghttp3 pulls instead; this measures <b>1.32&times;</b> its "
         "throughput on the same 8&times;1&nbsp;KiB response."),
+    "h3ngboth": (
+        "Http3/Nghttp3StreamedBoth", "HTTP/3 &middot; request + response streamed (nghttp3)",
+        "ioxide + ioxide.ngtcp2 + ioxide.nghttp3",
+        ["curl --http3-only -k https://127.0.0.1:8443/",
+         "curl --http3-only -k --data-binary @big.bin https://127.0.0.1:8443/echo"],
+        "The fourth corner the other three nghttp3 samples leave empty: the request pulled through "
+        "<code>BodyReader</code> while the response is pushed through the writer, both in one "
+        "handler. One call arranges it - <code>RunStreamedResponseAsync</code> dispatches at "
+        "end-of-headers, so the handler is running while the upload is still on the wire. "
+        "<code>/echo</code> is the shape a proxy needs: read a chunk, write a chunk, never hold "
+        "more than one, and neither side can outrun the other because <code>ReadAsync</code> waits "
+        "on the peer and <code>FlushAsync</code> waits on nghttp3. Measured here on a 64 MiB echo: "
+        "byte-identical out, and the server's RSS moved 51&rarr;57 MB - flat, in the sense that "
+        "matters. Diff it against "
+        "<label for=\"tab-h3csstream\" class=\"ex-jump\">the pure-C# twin</label>: same routes, "
+        "opposite mechanism underneath. nghttp3 owns the framing and <b>pulls</b> body bytes when "
+        "it has room to emit DATA, so a flush here means <em>nghttp3 has taken the chunk</em>, "
+        "where the managed writer stages a DATA frame the moment you flush. That twin also serves "
+        "an endless <code>/feed</code>; this one deliberately does not, because on this stack an "
+        "endless response never reaches the wire."),
     "h3buf": (
         "Http3/Nghttp3Buffered", "HTTP/3 &middot; buffered (nghttp3)", "ioxide + ioxide.ngtcp2 + ioxide.nghttp3",
         ["curl --http3-only -k https://127.0.0.1:8443/"],
