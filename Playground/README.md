@@ -100,6 +100,7 @@ reference implementation. QUIC itself is always ngtcp2 + picotls, bundled as one
 | [`Http3.Nghttp3Request`](Http3/Nghttp3Request/Program.cs) | 220 | HTTP/3 on nghttp3 with **streamed** dispatch, and a `SIGTERM` GOAWAY drain. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
 | [`Http3.Nghttp3Buffered`](Http3/Nghttp3Buffered/Program.cs) | 205 | The same server with **buffered** dispatch - one method call is the whole difference. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
 | [`Http3.Nghttp3Response`](Http3/Nghttp3Response/Program.cs) | 120 | The other direction: a response body produced over time. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
+| [`Http3.Nghttp3StreamedBoth`](Http3/Nghttp3StreamedBoth/Program.cs) | 190 | Both directions at once on nghttp3 - `/echo` reads a chunk and writes a chunk. The fourth corner the other three leave empty. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
 | [`Http3.Sni`](Http3/Sni/Program.cs) | 118 | A certificate per host name on QUIC, registered before the engine starts serving. | `ioxide.ngtcp2`, `ioxide.http3` |
 | [`Http3.Rotate`](Http3/Rotate/Program.cs) | 195 | Renewal on QUIC: one shared engine, so a single call covers every reactor - the contrast with `Http2/Rotate`. | `ioxide.ngtcp2`, `ioxide.http3` |
 | [`Http3.MutualTls`](Http3/MutualTls/Program.cs) | 122 | The client proves who it is during the QUIC handshake, and the handler is told which peer it got. | `ioxide.ngtcp2`, `ioxide.http3` |

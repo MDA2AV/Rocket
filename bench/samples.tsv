@@ -55,6 +55,7 @@ Http2/Rotate                  h2      8443  /           -                   PLAY
 Http3/Nghttp3Request          h3      8443  /           -                   -
 Http3/Nghttp3Buffered         h3      8443  /           -                   -
 Http3/Nghttp3Response         h3      8443  /           -                   PLAYGROUND_CHUNKS=8 PLAYGROUND_CHUNK_BYTES=1024
+Http3/Nghttp3StreamedBoth     h3      8443  /           -                   PLAYGROUND_CHUNKS=8 PLAYGROUND_CHUNK_BYTES=1024
 Http3/ManagedBuffered         h3      8443  /           -                   -
 Http3/ManagedStreamedBoth     h3      8443  /           -                   PLAYGROUND_CHUNKS=8 PLAYGROUND_CHUNK_BYTES=1024
 Http3/Sni                     h3      8443  /           -                   -

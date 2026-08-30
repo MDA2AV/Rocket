@@ -82,6 +82,7 @@
     <Project Path="Playground/Http3/ManagedStreamedBoth/Playground.Http3.ManagedStreamedBoth.csproj" />
     <Project Path="Playground/Http3/MutualTls/Playground.Http3.MutualTls.csproj" />
     <Project Path="Playground/Http3/Nghttp3Response/Playground.Http3.Nghttp3Response.csproj" />
+    <Project Path="Playground/Http3/Nghttp3StreamedBoth/Playground.Http3.Nghttp3StreamedBoth.csproj" />
     <Project Path="Playground/Http3/Sni/Playground.Http3.Sni.csproj" />
     <Project Path="Playground/Http3/Rotate/Playground.Http3.Rotate.csproj" />
   </Folder>
