@@ -425,6 +425,23 @@ PANES = {
         "One pool per reactor, opened on the reactor thread, so a query rides the same ring that "
         "accepted the request and resumes the handler inline. The host must be an IPv4 literal - a "
         "DNS lookup would block the reactor."),
+    "timer": (
+        "Clients/Timer", "Timers &middot; a deadline on the ring", "ioxide + ioxide.timer",
+        ["curl http://127.0.0.1:8080/50"],
+        "A wait is one <code>IORING_OP_TIMEOUT</code>: the kernel holds the deadline and the "
+        "completion arrives on the reactor that took the request, with the connection's state "
+        "still warm. Nothing is armed on the side, no syscall of its own is made to arrange it, "
+        "and nothing is allocated per wait - a <code>RingTimer</code> holds ONE "
+        "<code>RingOpSource</code>, so it carries one wait at a time and belongs to one "
+        "connection. Which is the point at scale: 32,000 connections waiting is 32,000 deadlines "
+        "the KERNEL holds, where a timerfd each would be 32,000 descriptors and a "
+        "<code>timerfd_settime</code> per wait. Expiry arrives as <b>-ETIME</b>, io_uring's normal "
+        "report for a timeout rather than a failure, which is why the check is "
+        "<code>RingTimer.Expired</code> and not <code>result &gt;= 0</code>. The "
+        "<code>useTaskDelay</code> knob swaps in <code>Task.Delay</code> - same server, same "
+        "response - so the hop it costs is measurable rather than asserted; "
+        "<label for=\"tab-hop\" class=\"ex-jump\">leaving the reactor</label> is that hop on its "
+        "own."),
     "redis": (
         "Clients/Redis", "Redis", "ioxide + ioxide.redis",
         ["curl http://127.0.0.1:8080/"],
