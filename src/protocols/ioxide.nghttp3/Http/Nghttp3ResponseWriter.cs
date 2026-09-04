@@ -1,4 +1,6 @@
 using System.Buffers;
+
+using ioxide.utils;
 using System.Runtime.InteropServices;
 
 namespace ioxide.nghttp3;
@@ -31,6 +33,10 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
     private unsafe byte* _staging;
     private int _stagingCapacity;
     private int _staged;
+
+    // Presents the staging block as Memory<byte> for GetMemory. Re-pointed on every call, because
+    // EnsureStaging can move the block; nothing may hold a Memory across an Advance.
+    private UnmanagedMemoryManager? _stagingMemory;
 
     // Offered to nghttp3 and not yet known to be written. Kept separate from the staging block so
     // the handler can carry on filling the next chunk while this one is in flight.
@@ -102,11 +108,41 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
         return new Span<byte>(_staging + _staged, _stagingCapacity - _staged);
     }
 
-    /// <inheritdoc />
-    public Memory<byte> GetMemory(int sizeHint = 0)
-        => throw new NotSupportedException(
-            "Nghttp3ResponseWriter hands out native spans; use GetSpan. Memory<byte> would need the "
-          + "chunk to be managed, and nghttp3 holds the pointer across the callback that offers it.");
+    /// <summary>
+    /// The staging block as <see cref="Memory{T}"/>, over the same native bytes GetSpan hands out.
+    /// </summary>
+    /// <remarks>
+    /// This used to throw, on the reasoning that the chunk has to stay native because nghttp3 holds
+    /// the pointer across the callback that offers it. Both halves of that are true and neither
+    /// requires throwing: an UnmanagedMemoryManager presents native memory as Memory&lt;byte&gt;
+    /// without copying or moving it, which is how the connection's own buffers are already exposed.
+    ///
+    /// Throwing made this a non-conforming IBufferWriter, and the callers it broke are not exotic.
+    /// A Stream reads into a Memory&lt;byte&gt; and cannot read into a Span&lt;byte&gt;, so every
+    /// "copy this stream to the response" helper reaches for GetMemory - which is exactly how a
+    /// framework serves a static file. The response had already sent its headers by then, so the
+    /// exception could not even become a 500: the peer got a 200 with an empty body.
+    ///
+    /// One manager per writer, re-pointed per call rather than allocated per chunk.
+    /// </remarks>
+    public unsafe Memory<byte> GetMemory(int sizeHint = 0)
+    {
+        EnsureStaging(sizeHint <= 0 ? 1 : sizeHint);
+
+        byte* at = _staging + _staged;
+        int available = _stagingCapacity - _staged;
+
+        if (_stagingMemory is null)
+        {
+            _stagingMemory = new UnmanagedMemoryManager(at, available);
+        }
+        else
+        {
+            _stagingMemory.Reset(at, available);
+        }
+
+        return _stagingMemory.Memory;
+    }
 
     /// <inheritdoc />
     public void Advance(int count)
@@ -265,6 +301,10 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
     /// <summary>Release both blocks. Called when the stream closes, never before.</summary>
     internal unsafe void Release()
     {
+        // Points into the blocks below; dropping it here keeps a freed pointer from being handed
+        // out as Memory<byte> if the writer is ever touched after release.
+        _stagingMemory = null;
+
         if (_staging != null)
         {
             NativeMemory.Free(_staging);

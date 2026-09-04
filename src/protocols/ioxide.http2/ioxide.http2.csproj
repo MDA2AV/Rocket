@@ -24,4 +24,8 @@
     <ProjectReference Include="../../ioxide/ioxide.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="Ioxide.Tests.Unit" />
+  </ItemGroup>
+
 </Project>

@@ -103,6 +103,7 @@ public sealed partial class Http2Connection : IDisposable
         }
         _ready.Clear();
         _bodyWakes.Clear();
+        _responseWindows.Clear();
 
         if (_inbound.Length > 0)
         {
