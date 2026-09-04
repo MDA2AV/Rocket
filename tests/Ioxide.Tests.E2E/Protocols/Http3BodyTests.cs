@@ -83,12 +83,60 @@ internal static class Http3BodyTests
         {
             AssertServed(Pattern(256 * 1024), chunk: -1);
         });
+
+        runner.Test("h3 body: a buffer held across an await survives the flush that follows", () =>
+        {
+            // The reason GetMemory cannot simply point at the native staging block. A caller holds
+            // the buffer across the await it asked for one to do, and in that window the writer's
+            // own machinery moves that block: a flush swaps staging with the in-flight chunk, and
+            // connection teardown frees it outright without waiting for parked handlers. Whatever
+            // GetMemory returns has to stay writable regardless.
+            byte[] file = Pattern(64 * 1024);
+
+            AssertServedBy(file, async (writer, body) =>
+            {
+                for (int at = 0; at < body.Length; at += 4096)
+                {
+                    int take = Math.Min(4096, body.Length - at);
+
+                    Memory<byte> buffer = writer.GetMemory(take);
+
+                    // Hand the reactor back while holding it - a real read would park here.
+                    await Task.Yield();
+
+                    body.AsSpan(at, take).CopyTo(buffer.Span);
+                    writer.Advance(take);
+
+                    await writer.FlushAsync();
+                }
+
+                await writer.CompleteAsync();
+            });
+        });
     }
 
     /// <param name="chunk">
     /// Bytes staged per flush; 0 stages the whole body and never flushes; -1 copies the body in
     /// through GetMemory, the way a stream-to-response helper does.
     /// </param>
+    private static void AssertServedBy(byte[] file, Func<Nghttp3ResponseWriter, byte[], ValueTask> produce)
+    {
+        (string certPath, string keyPath) = TestCert.Ensure();
+        using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+
+        (_, int udpPort) = TestServer.StartDatagram(
+            onDatagram: null,
+            quicFactory: engine.CreateFactory(),
+            quicHandle: (_, conn) => new Nghttp3Connection(conn).RunStreamedResponseAsync(
+                async (_, writer) =>
+                {
+                    writer.WriteHeaders(new Nghttp3Response { Status = 200 });
+                    await produce(writer, file);
+                }));
+
+        AssertBodyFrom(udpPort, file);
+    }
+
     private static void AssertServed(byte[] file, int chunk)
     {
         (string certPath, string keyPath) = TestCert.Ensure();
@@ -136,6 +184,11 @@ internal static class Http3BodyTests
                     await writer.CompleteAsync();
                 }));
 
+        AssertBodyFrom(udpPort, file);
+    }
+
+    private static void AssertBodyFrom(int udpPort, byte[] file)
+    {
         using var client = new H3TestClient("127.0.0.1", udpPort);
         client.Connect();
         Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");

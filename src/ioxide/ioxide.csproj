@@ -23,10 +23,4 @@
     <None Include="../../README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 
-  <ItemGroup>
-    <!-- The protocol assemblies expose native staging buffers as Memory<byte> through
-         UnmanagedMemoryManager, and re-point one pooled manager rather than allocating per chunk. -->
-    <InternalsVisibleTo Include="ioxide.nghttp3" />
-  </ItemGroup>
-
 </Project>
