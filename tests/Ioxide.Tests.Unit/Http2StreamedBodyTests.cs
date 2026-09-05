@@ -204,6 +204,58 @@ internal static class Http2StreamedBodyTests
 
             client.Close(run);
         });
+
+        runner.Test("h2 body: credit arriving while the pre-park flush is in flight is not lost", () =>
+        {
+            // Before parking on credit the writer flushes what it has staged, because the peer only
+            // sends WINDOW_UPDATE once it has consumed DATA. That flush is an await, so the credit
+            // can arrive while the writer is inside it - before it has registered as a waiter. The
+            // wake-up then has nowhere to be recorded, and the writer parks on a message that has
+            // already been and gone.
+            //
+            // DrainWithCredit cannot see this: it only credits once the flush has been released and
+            // the writer is already registered. So this drains the other way round - credit first,
+            // release second - which puts every WINDOW_UPDATE inside the window that loses it.
+            byte[] file = Pattern(200_000);   // past the 65535-byte initial window, so it must park
+
+            using var client = new StrictClient();
+            Task run = client.Connection.RunAsync(async (_, writer) =>
+            {
+                writer.WriteHeaders(new Http2Response { Status = 200 });
+                await WriteChunked(writer, file);
+            });
+
+            client.ReleaseFlush();
+            client.SendRequests(1);
+
+            var frames = new List<Frame>();
+
+            for (int turn = 0; turn < 4096; turn++)
+            {
+                if (client.PendingFlushes == 0)
+                {
+                    // Nothing left in flight. Either the stream finished, or the writer is parked on
+                    // a wake-up that was dropped - the assertions below say which.
+                    break;
+                }
+
+                // Deliberately small. A window big enough to carry the rest of the file would let
+                // the writer finish without ever parking, which is the case this is not about.
+                client.SendWindowUpdate(1, 8 * 1024);
+                client.SendWindowUpdate(0, 8 * 1024);
+
+                frames.AddRange(Frame.Walk(client.ReleaseFlush()));
+
+                if (frames.Any(f => f is { Type: Frame.Data, EndStream: true } && f.StreamId == 1))
+                {
+                    break;
+                }
+            }
+
+            AssertBody(file, frames, streamId: 1);
+
+            client.Close(run);
+        });
     }
 
     // The IoxideFiles copy loop: stage at most Chunk bytes, drain, repeat - then end the stream.
