@@ -8,7 +8,7 @@
     <RootNamespace>ioxide.http2</RootNamespace>
 
     <PackageId>ioxide.http2</PackageId>
-    <Version>0.7.211</Version>
+    <Version>0.13.218</Version>
     <Authors>MDA2AV</Authors>
     <Description>Pure-C# HTTP/2 for the ioxide io_uring runtime: framing, HPACK (static and dynamic tables, Huffman) and flow control, with zero native code. Serves h2c with prior knowledge and h2 over TLS by ALPN, buffered or streamed in either direction.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
@@ -22,6 +22,10 @@
   <ItemGroup>
     <None Include="../../../README.md" Pack="true" PackagePath="/" />
     <ProjectReference Include="../../ioxide/ioxide.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Ioxide.Tests.Unit" />
   </ItemGroup>
 
 </Project>

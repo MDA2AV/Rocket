@@ -14,6 +14,21 @@ namespace ioxide.http2;
 public sealed partial class Http2Connection
 {
     private readonly Stack<Http2ResponseWriter> _writerPool = new();
+
+    /// <summary>
+    /// The peer's per-stream send window for each RESPONSE in flight.
+    ///
+    /// It cannot live on the PendingRequest, which is where the buffered path keeps it: a request
+    /// that arrived complete - every GET, so every static file - is taken out of <c>_streams</c>
+    /// the moment it becomes ready, which is BEFORE its handler runs. From then on a streamed
+    /// response could find no window at all, and both halves of per-stream flow control went
+    /// silently inert - nothing was charged when sending, and a stream-level WINDOW_UPDATE
+    /// credited nothing. Only the connection window was left, so any response past the peer's
+    /// 65535-byte stream window overran it and was killed with FLOW_CONTROL_ERROR.
+    ///
+    /// Keyed by stream and tied to the response's lifetime, which is what flow control is about.
+    /// </summary>
+    private readonly Dictionary<int, int> _responseWindows = new();
     private readonly Dictionary<int, List<TaskCompletionSource>> _creditWaiters = new();
     private Func<Http2Request, Http2ResponseWriter, ValueTask>? _streamedHandler;
 
@@ -42,6 +57,8 @@ public sealed partial class Http2Connection
         {
             return false;
         }
+
+        _responseWindows[request.StreamId] = _peerInitialStreamWindow;
 
         Http2ResponseWriter writer = RentWriter(request.StreamId);
         _ = ServeStreamedAsync(_streamedHandler, request, writer, pending);
@@ -74,6 +91,7 @@ public sealed partial class Http2Connection
             // that path, so it has to do it here. Without this every response leaks its arena and
             // the connection grows without bound - 20 GB over eight seconds of load, measured.
             _creditWaiters.Remove(writer.StreamId);
+            _responseWindows.Remove(writer.StreamId);
             _streams.Remove(writer.StreamId);
             pending.Dispose();
             _writerPool.Push(writer);
@@ -106,10 +124,16 @@ public sealed partial class Http2Connection
         }
 
         int credit = Math.Min(_peerConnectionWindow, _peerMaxFrameSize);
-        if (_streams.TryGetValue(streamId, out PendingRequest? pending))
+
+        if (_responseWindows.TryGetValue(streamId, out int window))
+        {
+            credit = Math.Min(credit, window);
+        }
+        else if (_streams.TryGetValue(streamId, out PendingRequest? pending))
         {
             credit = Math.Min(credit, pending.SendWindow);
         }
+
         return Math.Max(credit, 0);
     }
 
@@ -127,7 +151,12 @@ public sealed partial class Http2Connection
         }
 
         _peerConnectionWindow -= body.Length;
-        if (_streams.TryGetValue(streamId, out PendingRequest? pending))
+
+        if (_responseWindows.TryGetValue(streamId, out int window))
+        {
+            _responseWindows[streamId] = window - body.Length;
+        }
+        else if (_streams.TryGetValue(streamId, out PendingRequest? pending))
         {
             pending.SendWindow -= body.Length;
         }

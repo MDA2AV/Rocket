@@ -81,7 +81,7 @@ internal static class HpackStatic
     {
         for (int i = 1; i <= Count; i++)
         {
-            if (Entries[i].Name.AsSpan().SequenceEqual(name) && Entries[i].Value.AsSpan().SequenceEqual(value))
+            if (EqualsIgnoreCase(Entries[i].Name, name) && Entries[i].Value.AsSpan().SequenceEqual(value))
             {
                 return i;
             }
@@ -94,11 +94,39 @@ internal static class HpackStatic
     {
         for (int i = 1; i <= Count; i++)
         {
-            if (Entries[i].Name.AsSpan().SequenceEqual(name))
+            if (EqualsIgnoreCase(Entries[i].Name, name))
             {
                 return i;
             }
         }
         return 0;
+    }
+
+    // Table names are lowercase and a field name is case-insensitive, so a caller that kept the
+    // canonical capitalisation - "Content-Type", "Vary" - still resolves to its index instead of
+    // being written out as a literal. The same comparison QPACK makes for the same reason.
+    private static bool EqualsIgnoreCase(byte[] lowercase, ReadOnlySpan<byte> other)
+    {
+        if (lowercase.Length != other.Length)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < lowercase.Length; i++)
+        {
+            byte c = other[i];
+
+            if (c is >= (byte)'A' and <= (byte)'Z')
+            {
+                c |= 0x20;
+            }
+
+            if (c != lowercase[i])
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 }

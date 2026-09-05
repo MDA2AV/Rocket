@@ -1,4 +1,5 @@
 using System.Buffers;
+
 using System.Runtime.InteropServices;
 
 namespace ioxide.nghttp3;
@@ -32,6 +33,19 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
     private int _stagingCapacity;
     private int _staged;
 
+    // Managed backing for GetMemory, copied into the staging block on Advance.
+    //
+    // GetSpan can hand out the native block directly, because a Span cannot cross an await. A
+    // Memory can - and awaiting a read into one is the only reason a caller asks for a Memory at
+    // all. The native block is not stable across that await: a flush swaps it with the in-flight
+    // block, and connection teardown frees every writer's block without waiting for handlers that
+    // are still parked. A read completing afterwards would land in memory that had moved or been
+    // freed. A pooled array cannot be pulled out from under an outstanding Memory - the GC keeps
+    // it alive for as long as the Memory refers to it - and the copy costs one memcpy on a path
+    // that is copying already.
+    private byte[]? _memoryScratch;
+    private bool _memoryOutstanding;
+
     // Offered to nghttp3 and not yet known to be written. Kept separate from the staging block so
     // the handler can carry on filling the next chunk while this one is in flight.
     private unsafe byte* _inFlight;
@@ -64,6 +78,10 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
         _headersSent = false;
         _completed = false;
         _finReported = false;
+
+        // The scratch buffer survives - that is the point of pooling the writer - but a hand-out
+        // from the previous stream must not be mistaken for one from this one.
+        _memoryOutstanding = false;
     }
 
     /// <summary>The stream this response belongs to.</summary>
@@ -102,16 +120,53 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
         return new Span<byte>(_staging + _staged, _stagingCapacity - _staged);
     }
 
-    /// <inheritdoc />
+    /// <summary>
+    /// A buffer to fill, as <see cref="Memory{T}"/>. <see cref="Advance"/> copies what was written
+    /// into the staging block.
+    /// </summary>
+    /// <remarks>
+    /// This used to throw, which made the writer a non-conforming IBufferWriter, and the callers it
+    /// broke are not exotic: a Stream reads into a Memory&lt;byte&gt; and cannot read into a
+    /// Span&lt;byte&gt;, so every "copy this stream to the response" helper reaches for GetMemory -
+    /// which is exactly how a framework serves a static file. Headers were already on the wire by
+    /// then, so the exception could not even become a 500: the peer got a 200 with an empty body.
+    /// </remarks>
     public Memory<byte> GetMemory(int sizeHint = 0)
-        => throw new NotSupportedException(
-            "Nghttp3ResponseWriter hands out native spans; use GetSpan. Memory<byte> would need the "
-          + "chunk to be managed, and nghttp3 holds the pointer across the callback that offers it.");
+    {
+        int want = sizeHint <= 0 ? 1 : sizeHint;
+
+        if (_memoryScratch is null || _memoryScratch.Length < want)
+        {
+            ReleaseScratch();
+            _memoryScratch = ArrayPool<byte>.Shared.Rent(want);
+        }
+
+        _memoryOutstanding = true;
+        return _memoryScratch;
+    }
 
     /// <inheritdoc />
-    public void Advance(int count)
+    public unsafe void Advance(int count)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(count);
+
+        if (_memoryOutstanding)
+        {
+            _memoryOutstanding = false;
+
+            // Released while the caller was awaiting a read into it: the connection is gone and
+            // there is nowhere to put these bytes, so drop them rather than resurrect the block.
+            if (_memoryScratch is null || count == 0)
+            {
+                return;
+            }
+
+            EnsureStaging(count);
+            _memoryScratch.AsSpan(0, count).CopyTo(new Span<byte>(_staging + _staged, count));
+            _staged += count;
+            return;
+        }
+
         if (_staged + count > _stagingCapacity)
         {
             throw new InvalidOperationException("Advanced past the end of the span handed out by GetSpan.");
@@ -238,6 +293,18 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
         _staged = 0;
     }
 
+    // Hand the scratch back, unless a caller may still be writing into it: a handler parked in a
+    // read holds this array, and giving it to another renter while that read lands would corrupt
+    // both. Dropping the reference is enough - the GC frees it once the read is done with it.
+    private void ReleaseScratch()
+    {
+        if (_memoryScratch is not null && !_memoryOutstanding)
+        {
+            ArrayPool<byte>.Shared.Return(_memoryScratch);
+        }
+        _memoryScratch = null;
+    }
+
     private unsafe void EnsureStaging(int sizeHint)
     {
         int needed = _staged + sizeHint;
@@ -265,6 +332,8 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
     /// <summary>Release both blocks. Called when the stream closes, never before.</summary>
     internal unsafe void Release()
     {
+        ReleaseScratch();
+
         if (_staging != null)
         {
             NativeMemory.Free(_staging);

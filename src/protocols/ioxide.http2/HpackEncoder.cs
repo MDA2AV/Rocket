@@ -41,7 +41,7 @@ internal static class HpackEncoder
             // 0000 0000: new name follows as a literal.
             destination[0] = 0x00;
             written = 1;
-            written += WriteLiteral(destination[written..], name);
+            written += WriteLiteralName(destination[written..], name);
         }
 
         written += WriteLiteral(destination[written..], value);
@@ -83,5 +83,28 @@ internal static class HpackEncoder
         int written = WriteInteger(destination, (uint)value.Length, 7, 0x00);
         value.CopyTo(destination[written..]);
         return written + value.Length;
+    }
+
+    /// <summary>
+    /// A literal field NAME, lowercased on the way out.
+    ///
+    /// RFC 9113 8.2.1 makes an uppercase letter in a field name malformed, and a peer is entitled
+    /// to treat the whole message as a stream error - which is what a strict client does, leaving
+    /// a response that looks like a clean 200 carrying no body at all. Callers hold headers in
+    /// whatever case their own API uses ("Vary", "Content-Type"), and HTTP field names are
+    /// case-insensitive everywhere else, so the conversion belongs here rather than in every
+    /// caller. QPACK has always done this for HTTP/3; this is the same rule for HTTP/2.
+    /// </summary>
+    private static int WriteLiteralName(Span<byte> destination, ReadOnlySpan<byte> name)
+    {
+        int written = WriteInteger(destination, (uint)name.Length, 7, 0x00);
+
+        for (int i = 0; i < name.Length; i++)
+        {
+            byte c = name[i];
+            destination[written + i] = c is >= (byte)'A' and <= (byte)'Z' ? (byte)(c | 0x20) : c;
+        }
+
+        return written + name.Length;
     }
 }

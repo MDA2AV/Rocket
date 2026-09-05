@@ -408,6 +408,16 @@ public sealed partial class Http2Connection
                     // Applies retroactively to every open stream, per RFC 9113 section 6.9.2.
                     int delta = (int)value - _peerInitialStreamWindow;
                     _peerInitialStreamWindow = (int)value;
+
+                    // A response already writing is credited (or debited) the same as a request
+                    // still arriving: the setting retunes every open stream, not only new ones.
+                    if (_responseWindows.Count > 0)
+                    {
+                        foreach (int streamId in _responseWindows.Keys.ToArray())
+                        {
+                            _responseWindows[streamId] += delta;
+                        }
+                    }
                     foreach (PendingRequest stream in _streams.Values)
                     {
                         stream.SendWindow += delta;
@@ -446,6 +456,10 @@ public sealed partial class Http2Connection
         if (header.StreamId == 0)
         {
             _peerConnectionWindow += increment;
+        }
+        else if (_responseWindows.TryGetValue(header.StreamId, out int window))
+        {
+            _responseWindows[header.StreamId] = window + increment;
         }
         else if (_streams.TryGetValue(header.StreamId, out PendingRequest? pending))
         {

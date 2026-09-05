@@ -155,6 +155,17 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
                 {
                     return;
                 }
+
+                // Everything staged so far has to REACH the peer before waiting on it to open the
+                // window. WINDOW_UPDATE is what a peer sends once it has consumed DATA, so parking
+                // with those bytes still in the connection's buffer waits for a message that the
+                // wait itself prevents - and any body larger than the initial 65535-byte window
+                // deadlocks until the client times out. The flush is unconditional because inside a
+                // pass the pass flush would otherwise carry them, and this stream is about to stop
+                // making progress rather than return to it.
+                _sinceRealFlush = 0;
+                await _connection.FlushOutboundAsync();
+
                 await _connection.WaitForSendCreditAsync(_streamId);
                 continue;
             }
