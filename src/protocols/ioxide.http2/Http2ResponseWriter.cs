@@ -156,6 +156,13 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
                     return;
                 }
 
+                // Take the wait BEFORE flushing. The flush below is an await, and the WINDOW_UPDATE
+                // it exists to provoke can arrive while this writer is still inside it - at which
+                // point a release has no waiter to find, is dropped, and the writer then parks on a
+                // message that has already been and gone. Registering first means that credit
+                // completes this task instead, and the await below returns at once.
+                Task credited = _connection.WaitForSendCreditAsync(_streamId);
+
                 // Everything staged so far has to REACH the peer before waiting on it to open the
                 // window. WINDOW_UPDATE is what a peer sends once it has consumed DATA, so parking
                 // with those bytes still in the connection's buffer waits for a message that the
@@ -166,7 +173,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
                 _sinceRealFlush = 0;
                 await _connection.FlushOutboundAsync();
 
-                await _connection.WaitForSendCreditAsync(_streamId);
+                await credited;
                 continue;
             }
 
